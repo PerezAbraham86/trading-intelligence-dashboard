@@ -1,4 +1,4 @@
-import type { Config } from 'tailwindcss'
+import type { Config } from 'tailwindcss';
 
 const config: Config = {
   content: [
@@ -9,30 +9,26 @@ const config: Config = {
     extend: {
       colors: {
         dark: {
-          50: '#f9fafb',
-          100: '#f3f4f6',
-          200: '#e5e7eb',
-          300: '#d1d5db',
-          400: '#9ca3af',
-          500: '#6b7280',
-          600: '#4b5563',
-          700: '#374151',
-          800: '#1f2937',
           900: '#0a0e27',
-          950: '#030812',
+          800: '#141829',
+          700: '#1a1f3a',
+          600: '#252d4a',
+          500: '#3a4558',
         },
-      },
-      fontFamily: {
-        sans: ['Segoe UI', 'Tahoma', 'Geneva', 'Verdana', 'sans-serif'],
-        mono: ['Fira Code', 'monospace'],
+        trading: {
+          bull: '#10b981',
+          bear: '#ef4444',
+          neutral: '#f59e0b',
+          bullLight: '#d1fae5',
+          bearLight: '#fee2e2',
+        },
       },
       animation: {
         pulse: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
-        bounce: 'bounce 1s infinite',
       },
     },
   },
   plugins: [],
-}
+};
 
-export default config
+export default config;
