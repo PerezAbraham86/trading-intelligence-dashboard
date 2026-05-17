@@ -1,50 +1,123 @@
 'use client'
 
 import { motion } from 'framer-motion'
-import { AlertTriangle, AlertCircle } from 'lucide-react'
+import { AlertTriangle, Info } from 'lucide-react'
 
-export default function WarningsPanel() {
-  const warnings = [
-    { type: 'alert', title: 'FOMC Meeting', message: 'Fed decision in 2 hours', severity: 'high' },
-    { type: 'alert', title: 'Chop Zone', message: 'Volatility ranging 42%', severity: 'medium' },
-    { type: 'caution', title: 'Macro Risk', message: 'Mixed signals from macro', severity: 'low' },
-    { type: 'caution', title: 'Gap Risk', message: 'Previous session gap at 4485', severity: 'medium' },
-  ]
+type TradingSignal = {
+  signal?: string
+  confidence?: number
+  bullScore?: number
+  bearScore?: number
+  netBias?: number
+  warnings?: string[]
+  session?: string
+  fredMacro?: string
+}
+
+type WarningsPanelProps = {
+  signal?: TradingSignal
+}
+
+type WarningItem = {
+  title: string
+  subtitle: string
+  severity: 'danger' | 'warning' | 'info'
+}
+
+function getSeverityClass(severity: WarningItem['severity']) {
+  if (severity === 'danger') {
+    return 'border-red-500/50 bg-red-500/15 text-red-300'
+  }
+
+  if (severity === 'warning') {
+    return 'border-yellow-500/50 bg-yellow-500/15 text-yellow-300'
+  }
+
+  return 'border-blue-500/50 bg-blue-500/15 text-blue-300'
+}
+
+export default function WarningsPanel({ signal }: WarningsPanelProps) {
+  const confidence = Number(signal?.confidence ?? 0)
+  const netBias = Number(signal?.netBias ?? 0)
+  const customWarnings = Array.isArray(signal?.warnings) ? signal?.warnings : []
+
+  const warnings: WarningItem[] = []
+
+  if (customWarnings.length > 0) {
+    customWarnings.forEach((warning) => {
+      warnings.push({
+        title: warning,
+        subtitle: 'Received from TradingView alert',
+        severity: 'warning',
+      })
+    })
+  }
+
+  if (confidence > 0 && confidence < 50) {
+    warnings.push({
+      title: 'Low Confidence Signal',
+      subtitle: `Current confidence is ${confidence}%`,
+      severity: 'warning',
+    })
+  }
+
+  if (Math.abs(netBias) <= 10) {
+    warnings.push({
+      title: 'Weak Net Bias',
+      subtitle: `Net bias is only ${netBias}`,
+      severity: 'info',
+    })
+  }
+
+  if (!signal?.fredMacro || signal.fredMacro.toLowerCase().includes('neutral')) {
+    warnings.push({
+      title: 'Macro Neutral',
+      subtitle: 'No strong macro confirmation received',
+      severity: 'info',
+    })
+  }
+
+  if (warnings.length === 0) {
+    warnings.push({
+      title: 'No Active Warnings',
+      subtitle: 'Latest alert has no warning flags',
+      severity: 'info',
+    })
+  }
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 20 }}
+      initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.5, delay: 0.3 }}
-      className="bg-gradient-to-br from-dark-800 to-dark-900 border border-dark-700 rounded-lg p-6 shadow-2xl"
+      transition={{ duration: 0.35 }}
+      className="rounded-xl border border-dark-700 bg-dark-800/70 p-6 shadow-lg"
     >
-      <h3 className="text-lg font-bold mb-4">Warnings & Alerts</h3>
-      <div className="space-y-2">
-        {warnings.map((warning, idx) => (
-          <motion.div
-            key={idx}
-            initial={{ opacity: 0, y: 5 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.4 + idx * 0.1 }}
-            className={`p-3 rounded-lg border flex items-start gap-3 ${
-              warning.severity === 'high'
-                ? 'bg-trading-bear/10 border-trading-bear/30'
-                : warning.severity === 'medium'
-                ? 'bg-yellow-500/10 border-yellow-500/30'
-                : 'bg-blue-500/10 border-blue-500/30'
-            }`}
-          >
-            {warning.severity === 'high' ? (
-              <AlertTriangle size={16} className="text-trading-bear mt-1 flex-shrink-0" />
-            ) : (
-              <AlertCircle size={16} className="text-yellow-500 mt-1 flex-shrink-0" />
-            )}
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-bold text-gray-200">{warning.title}</p>
-              <p className="text-xs text-gray-400 truncate">{warning.message}</p>
-            </div>
-          </motion.div>
-        ))}
+      <h2 className="mb-5 text-xl font-bold text-white">Warnings & Alerts</h2>
+
+      <div className="space-y-3">
+        {warnings.map((warning, index) => {
+          const Icon = warning.severity === 'danger' ? AlertTriangle : Info
+
+          return (
+            <motion.div
+              key={`${warning.title}-${index}`}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.04 * index }}
+              className={`rounded-lg border p-4 ${getSeverityClass(
+                warning.severity,
+              )}`}
+            >
+              <div className="flex items-start gap-3">
+                <Icon size={15} className="mt-0.5 shrink-0" />
+                <div>
+                  <p className="text-sm font-bold">{warning.title}</p>
+                  <p className="text-xs opacity-80">{warning.subtitle}</p>
+                </div>
+              </div>
+            </motion.div>
+          )
+        })}
       </div>
     </motion.div>
   )
