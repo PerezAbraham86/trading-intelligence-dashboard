@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import SignalCard from '@/components/SignalCard'
 import CandlestickChart from '@/components/CandlestickChart'
 import PressureGauges from '@/components/PressureGauges'
@@ -8,15 +8,22 @@ import FactorConfirmationTable from '@/components/FactorConfirmationTable'
 import GhostCandleProjection from '@/components/GhostCandleProjection'
 import WarningsPanel from '@/components/WarningsPanel'
 import RecentSignalsTable from '@/components/RecentSignalsTable'
+import ConnectionStatusBadge from '@/components/ConnectionStatusBadge'
 import { motion } from 'framer-motion'
+import { useApiPolling } from '@/hooks/useApiPolling'
 
 export default function Dashboard() {
-  const [isLoading] = useState(false)
+  const [isClient, setIsClient] = useState(false)
+  const { latestSignal, recentSignals, connectionStatus, lastUpdateTime } = useApiPolling()
 
-  // Later FastAPI connection:
-  // const res = await fetch("https://YOUR-FASTAPI-URL.com/api/latest-signal");
-  // const json = await res.json();
-  // setData(json);
+  // Ensure we're on the client side before rendering
+  useEffect(() => {
+    setIsClient(true)
+  }, [])
+
+  if (!isClient) {
+    return null
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-dark-900 via-dark-800 to-dark-900 p-6">
@@ -29,14 +36,11 @@ export default function Dashboard() {
       >
         <div className="flex items-center justify-between mb-2">
           <h1 className="text-4xl font-bold gradient-text">
-            TRADING DASHBOARD PAGE LOADED
+            TRADING DASHBOARD
           </h1>
-          <div className="flex items-center gap-2">
-            <div className="w-3 h-3 bg-trading-bull rounded-full animate-pulse-custom"></div>
-            <span className="text-sm text-gray-400">Live</span>
-          </div>
+          <ConnectionStatusBadge status={connectionStatus} lastUpdateTime={lastUpdateTime} />
         </div>
-        <p className="text-gray-400 text-sm">Real-time trading signals and analysis • ES1! • 5-minute timeframe</p>
+        <p className="text-gray-400 text-sm">Real-time trading signals and analysis • {latestSignal.symbol} • {latestSignal.timeframe} timeframe</p>
       </motion.div>
 
       {/* Main Grid */}
@@ -44,7 +48,7 @@ export default function Dashboard() {
         {/* Left Column */}
         <div className="lg:col-span-2 space-y-6">
           {/* Signal Card */}
-          <SignalCard />
+          <SignalCard signal={latestSignal} />
 
           {/* Chart */}
           <CandlestickChart />
@@ -56,21 +60,21 @@ export default function Dashboard() {
           <PressureGauges />
 
           {/* Warnings Panel */}
-          <WarningsPanel />
+          <WarningsPanel signal={latestSignal} />
         </div>
       </div>
 
       {/* Second Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
         {/* Factors Table */}
-        <FactorConfirmationTable />
+        <FactorConfirmationTable signal={latestSignal} />
 
         {/* Ghost Candle Projections */}
         <GhostCandleProjection />
       </div>
 
       {/* Recent Signals */}
-      <RecentSignalsTable />
+      <RecentSignalsTable signals={recentSignals} />
 
       {/* Footer */}
       <motion.div
@@ -79,8 +83,10 @@ export default function Dashboard() {
         transition={{ duration: 0.5, delay: 0.6 }}
         className="mt-8 text-center text-xs text-gray-500 border-t border-dark-700 pt-4"
       >
-        <p>Trading Intelligence Dashboard • Mock Data Mode • Ready for FastAPI Backend Integration</p>
+        <p>Trading Intelligence Dashboard • Live API Polling Mode • Connected to {API_BASE_URL}</p>
       </motion.div>
     </div>
   )
 }
+
+const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
