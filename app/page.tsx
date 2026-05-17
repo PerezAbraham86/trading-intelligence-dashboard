@@ -17,7 +17,6 @@ export default function Dashboard() {
 
   const {
     latestSignal,
-    recentSignals,
     connectionStatus,
     lastUpdateTime,
     apiBaseUrl,
@@ -40,7 +39,7 @@ export default function Dashboard() {
         transition={{ duration: 0.5 }}
         className="mb-8"
       >
-        <div className="flex items-center justify-between mb-2">
+        <div className="mb-2 flex items-center justify-between">
           <h1 className="text-4xl font-bold gradient-text">
             TRADING DASHBOARD
           </h1>
@@ -51,16 +50,16 @@ export default function Dashboard() {
           />
         </div>
 
-        <p className="text-gray-400 text-sm">
+        <p className="text-sm text-gray-400">
           Real-time trading signals and analysis • {latestSignal.symbol} •{' '}
           {latestSignal.timeframe} timeframe
         </p>
       </motion.div>
 
       {/* Main Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+      <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
         {/* Left Column */}
-        <div className="lg:col-span-2 space-y-6">
+        <div className="space-y-6 lg:col-span-2">
           <SignalCard signal={latestSignal} />
 
           <CandlestickChart />
@@ -70,25 +69,25 @@ export default function Dashboard() {
         <div className="space-y-6">
           <PressureGauges />
 
-          <WarningsPanel signal={latestSignal} />
+          <WarningsPanel />
         </div>
       </div>
 
       {/* Second Row */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-        <FactorConfirmationTable signal={latestSignal} />
+      <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <FactorConfirmationTable />
 
         <GhostCandleProjection />
       </div>
 
-      <RecentSignalsTable signals={recentSignals} />
+      <RecentSignalsTable />
 
       {/* Footer */}
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         transition={{ duration: 0.5, delay: 0.6 }}
-        className="mt-8 text-center text-xs text-gray-500 border-t border-dark-700 pt-4"
+        className="mt-8 border-t border-dark-700 pt-4 text-center text-xs text-gray-500"
       >
         <p>
           Trading Intelligence Dashboard • Live API Polling Mode • Connected to{' '}
