@@ -21,7 +21,6 @@ type SignalCardProps = {
 export default function SignalCard({ signal }: SignalCardProps) {
   const isBuy = signal.signal === 'BUY'
   const isSell = signal.signal === 'SELL'
-  const isNeutral = signal.signal === 'NEUTRAL'
 
   const signalColor = isBuy
     ? 'text-emerald-400'
@@ -48,8 +47,11 @@ export default function SignalCard({ signal }: SignalCardProps) {
         <div>
           <h2 className="text-2xl font-bold text-white">{signal.symbol}</h2>
           <p className="text-sm text-gray-400">{signal.timeframe} Timeframe</p>
+
           {typeof signal.price === 'number' && signal.price > 0 ? (
-            <p className="mt-1 text-xs text-gray-500">Price: {signal.price}</p>
+            <p className="mt-1 text-xs text-gray-500">
+              Price: {signal.price}
+            </p>
           ) : null}
         </div>
 
