@@ -68,7 +68,7 @@ export default function Dashboard() {
 
         {/* Right Column */}
         <div className="space-y-6">
-          <PressureGauges signal={latestSignal} />
+          <PressureGauges />
 
           <WarningsPanel signal={latestSignal} />
         </div>
