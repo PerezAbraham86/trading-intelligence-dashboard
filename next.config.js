@@ -1,9 +1,11 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  reactStrictMode: true,
-  swcMinify: true,
-  compress: true,
-  poweredByHeader: false,
-};
+  typescript: {
+    ignoreBuildErrors: false,
+  },
+  webpack: (config, { isServer }) => {
+    return config
+  },
+}
 
-module.exports = nextConfig;
+module.exports = nextConfig
