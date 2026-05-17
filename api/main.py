@@ -33,16 +33,27 @@ app.add_middleware(
 # Environment variables
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
+
 # Pydantic models
 class TradingSignal(BaseModel):
+    eventType: str = "TRADE_SIGNAL"
+    status: str = "Open"
+
     symbol: str
     timeframe: str
-    signal: str  # BUY or SELL
+    signal: str
+
     confidence: int
     bullScore: int
     bearScore: int
     netBias: int
+
     price: float
+    entry: Optional[float] = None
+    current: Optional[float] = None
+    pnl: Optional[float] = 0.0
+    percent: Optional[float] = 0.0
+
     smc: str
     alphax: str
     ghost: str
@@ -52,20 +63,32 @@ class TradingSignal(BaseModel):
     fredMacro: str
     finraShortVolume: str
     cot: str
+
     warnings: List[str]
     createdAt: Optional[str] = None
 
 
 class TradingSignalWithOptionalSecret(BaseModel):
     secret: Optional[str] = None
+
+    eventType: Optional[str] = "TRADE_SIGNAL"
+    status: Optional[str] = "Open"
+
     symbol: str
     timeframe: str
-    signal: str  # BUY or SELL
+    signal: str
+
     confidence: int
     bullScore: int
     bearScore: int
     netBias: int
+
     price: float
+    entry: Optional[float] = None
+    current: Optional[float] = None
+    pnl: Optional[float] = 0.0
+    percent: Optional[float] = 0.0
+
     smc: str
     alphax: str
     ghost: str
@@ -75,6 +98,7 @@ class TradingSignalWithOptionalSecret(BaseModel):
     fredMacro: str
     finraShortVolume: str
     cot: str
+
     warnings: List[str]
 
 
@@ -92,16 +116,23 @@ class WebhookResponse(BaseModel):
 latest_signal: Optional[TradingSignal] = None
 recent_signals: List[TradingSignal] = []
 
+
 # Default waiting signal
 DEFAULT_WAITING_SIGNAL = TradingSignal(
+    eventType="WAITING",
+    status="Waiting",
     symbol="WAITING",
-    timeframe="1d",
+    timeframe="Waiting",
     signal="NEUTRAL",
     confidence=0,
     bullScore=50,
     bearScore=50,
     netBias=0,
     price=0.0,
+    entry=0.0,
+    current=0.0,
+    pnl=0.0,
+    percent=0.0,
     smc="Awaiting signal",
     alphax="Awaiting signal",
     ghost="Awaiting signal",
@@ -118,7 +149,7 @@ DEFAULT_WAITING_SIGNAL = TradingSignal(
 
 @app.get("/", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint"""
+    """Health check endpoint."""
     return {
         "status": "ok",
         "service": "Trading Intelligence API"
@@ -129,13 +160,17 @@ async def health_check():
 async def receive_tradingview_webhook(signal_data: TradingSignalWithOptionalSecret):
     """
     Receive TradingView webhook alerts.
-    
-    Validates optional secret if WEBHOOK_SECRET is set.
-    Stores the latest signal and appends to recent signals list.
-    Keeps only the latest 50 signals.
+
+    LIVE_UPDATE:
+    - Updates the main dashboard only.
+    - Does NOT add a row to Recent Signals.
+
+    TRADE_SIGNAL:
+    - Updates the main dashboard.
+    - Adds a row to Recent Signals.
     """
     global latest_signal, recent_signals
-    
+
     # Validate secret if configured
     if WEBHOOK_SECRET:
         if not signal_data.secret or signal_data.secret != WEBHOOK_SECRET:
@@ -143,9 +178,13 @@ async def receive_tradingview_webhook(signal_data: TradingSignalWithOptionalSecr
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or missing webhook secret"
             )
-    
-    # Create signal object with timestamp
+
+    event_type = signal_data.eventType or "TRADE_SIGNAL"
+    created_at = datetime.now(timezone.utc).isoformat()
+
     signal = TradingSignal(
+        eventType=event_type,
+        status=signal_data.status or ("Open" if event_type == "TRADE_SIGNAL" else "Live"),
         symbol=signal_data.symbol,
         timeframe=signal_data.timeframe,
         signal=signal_data.signal,
@@ -154,6 +193,10 @@ async def receive_tradingview_webhook(signal_data: TradingSignalWithOptionalSecr
         bearScore=signal_data.bearScore,
         netBias=signal_data.netBias,
         price=signal_data.price,
+        entry=signal_data.entry if signal_data.entry is not None else signal_data.price,
+        current=signal_data.current if signal_data.current is not None else signal_data.price,
+        pnl=signal_data.pnl if signal_data.pnl is not None else 0.0,
+        percent=signal_data.percent if signal_data.percent is not None else 0.0,
         smc=signal_data.smc,
         alphax=signal_data.alphax,
         ghost=signal_data.ghost,
@@ -164,20 +207,22 @@ async def receive_tradingview_webhook(signal_data: TradingSignalWithOptionalSecr
         finraShortVolume=signal_data.finraShortVolume,
         cot=signal_data.cot,
         warnings=signal_data.warnings,
-        createdAt=datetime.now(timezone.utc).isoformat()
+        createdAt=created_at
     )
-    
-    # Store latest signal
+
+    # Always update the main dashboard/latest signal
     latest_signal = signal
-    
-    # Append to recent signals and keep only latest 50
-    recent_signals.insert(0, signal)
-    if len(recent_signals) > 50:
-        recent_signals = recent_signals[:50]
-    
+
+    # Only true BUY/SELL trade signals go into Recent Signals
+    if event_type == "TRADE_SIGNAL":
+        recent_signals.insert(0, signal)
+
+        if len(recent_signals) > 50:
+            recent_signals = recent_signals[:50]
+
     return {
         "ok": True,
-        "message": "signal received"
+        "message": f"{event_type} received"
     }
 
 
@@ -186,10 +231,11 @@ async def get_latest_signal():
     """Get the latest trading signal. Returns default waiting signal if none exists."""
     if latest_signal is None:
         return DEFAULT_WAITING_SIGNAL
+
     return latest_signal
 
 
 @app.get("/api/recent-signals", response_model=List[TradingSignal])
 async def get_recent_signals():
-    """Get list of up to 50 most recent trading signals."""
+    """Get list of up to 50 most recent trade signals only."""
     return recent_signals
