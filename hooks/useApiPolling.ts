@@ -1,142 +1,206 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
+'use client'
 
-export type ConnectionStatus = 'connected' | 'waiting' | 'error'
+import { useCallback, useEffect, useState } from 'react'
 
-export interface LatestSignal {
+const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
+
+export type ConnectionStatus = 'Connected' | 'Waiting' | 'Error'
+
+export type TradingSignal = {
   symbol: string
   timeframe: string
-  signal: 'BUY' | 'SELL' | 'NEUTRAL'
+  signal: 'BUY' | 'SELL' | 'NEUTRAL' | string
   confidence: number
   bullScore: number
   bearScore: number
-  netBias: string
+  netBias: number
   price: number
-  warnings?: string[]
+  smc: string
+  alphax: string
+  ghost: string
+  openInterest: string
+  footprint: string
+  session: string
+  fredMacro: string
+  finraShortVolume: string
+  cot: string
+  warnings: string[]
+  createdAt?: string
+
+  // Optional dashboard fields for existing components
+  bullPressure?: number
+  bearPressure?: number
+  ghostConfidence?: number
+  chopRisk?: number
+  macroRisk?: number
 }
 
-export interface Factor {
-  name: string
-  smc?: number
-  alphax?: number
-  ghost?: number
-  openInterest?: number
-  footprint?: number
-  session?: number
-  fredMacro?: number
-  finraShortVolume?: number
-  cot?: number
-}
-
-export interface RecentSignal {
-  id: number
+export type RecentSignal = {
   symbol: string
-  type: 'BUY' | 'SELL'
-  entry: number
-  current: number
-  pnl: number
-  pnlPct: number
-  status: 'open' | 'closed'
+  timeframe?: string
+  signal?: string
+  type?: string
+  confidence?: number
+  bullScore?: number
+  bearScore?: number
+  netBias?: number
+  price?: number
+  createdAt?: string
+  entry?: number
+  current?: number
+  pnl?: number
+  percent?: number
+  status?: string
 }
 
-const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
-const POLL_INTERVAL = 3000 // 3 seconds
-
-// Mock data as fallback
-const MOCK_LATEST_SIGNAL: LatestSignal = {
-  symbol: 'ES1!',
-  timeframe: '5m',
-  signal: 'BUY',
-  confidence: 82,
-  bullScore: 78,
-  bearScore: 22,
-  netBias: '+56',
-  price: 4570.50,
-  warnings: ['FOMC Meeting in 2 hours', 'Chop Zone at 42%']
+const fallbackSignal: TradingSignal = {
+  symbol: 'WAITING',
+  timeframe: '1d',
+  signal: 'NEUTRAL',
+  confidence: 0,
+  bullScore: 50,
+  bearScore: 50,
+  netBias: 0,
+  price: 0,
+  smc: 'Awaiting signal',
+  alphax: 'Awaiting signal',
+  ghost: 'Awaiting signal',
+  openInterest: 'Awaiting signal',
+  footprint: 'Awaiting signal',
+  session: 'Market awaiting alert',
+  fredMacro: 'Neutral',
+  finraShortVolume: 'Awaiting signal',
+  cot: 'Awaiting signal',
+  warnings: ['No signal received yet'],
+  createdAt: new Date().toISOString(),
+  bullPressure: 50,
+  bearPressure: 50,
+  ghostConfidence: 0,
+  chopRisk: 0,
+  macroRisk: 0,
 }
 
-const MOCK_RECENT_SIGNALS: RecentSignal[] = [
-  { id: 1, symbol: 'ES1!', type: 'BUY', entry: 4570, current: 4585, pnl: 15, pnlPct: 0.33, status: 'open' },
-  { id: 2, symbol: 'ES1!', type: 'SELL', entry: 4555, current: 4570, pnl: -15, pnlPct: -0.33, status: 'open' },
-  { id: 3, symbol: 'ES1!', type: 'BUY', entry: 4540, current: 4550, pnl: 10, pnlPct: 0.22, status: 'closed' },
-  { id: 4, symbol: 'ES1!', type: 'BUY', entry: 4520, current: 4535, pnl: 15, pnlPct: 0.36, status: 'closed' },
-  { id: 5, symbol: 'ES1!', type: 'SELL', entry: 4510, current: 4500, pnl: 10, pnlPct: 0.22, status: 'closed' },
-]
+function normalizeSignal(raw: Partial<TradingSignal>): TradingSignal {
+  const bullScore = Number(raw.bullScore ?? fallbackSignal.bullScore)
+  const bearScore = Number(raw.bearScore ?? fallbackSignal.bearScore)
+  const confidence = Number(raw.confidence ?? fallbackSignal.confidence)
+
+  return {
+    ...fallbackSignal,
+    ...raw,
+    symbol: raw.symbol ?? fallbackSignal.symbol,
+    timeframe: raw.timeframe ?? fallbackSignal.timeframe,
+    signal: raw.signal ?? fallbackSignal.signal,
+    confidence,
+    bullScore,
+    bearScore,
+    netBias: Number(raw.netBias ?? bullScore - bearScore),
+    price: Number(raw.price ?? fallbackSignal.price),
+    warnings: Array.isArray(raw.warnings) ? raw.warnings : fallbackSignal.warnings,
+
+    // These keep your existing dashboard gauges working.
+    bullPressure: Number(raw.bullPressure ?? bullScore),
+    bearPressure: Number(raw.bearPressure ?? bearScore),
+    ghostConfidence: Number(raw.ghostConfidence ?? confidence),
+    chopRisk: Number(raw.chopRisk ?? 0),
+    macroRisk: Number(raw.macroRisk ?? 0),
+  }
+}
+
+function normalizeRecentSignals(raw: unknown): RecentSignal[] {
+  if (!Array.isArray(raw)) return []
+
+  return raw.map((item: any, index: number) => {
+    const signal = item.signal ?? item.type ?? 'NEUTRAL'
+    const price = Number(item.price ?? item.current ?? 0)
+
+    return {
+      symbol: item.symbol ?? 'WAITING',
+      timeframe: item.timeframe ?? '1d',
+      signal,
+      type: signal,
+      confidence: Number(item.confidence ?? 0),
+      bullScore: Number(item.bullScore ?? 50),
+      bearScore: Number(item.bearScore ?? 50),
+      netBias: Number(item.netBias ?? 0),
+      price,
+      createdAt: item.createdAt ?? new Date().toISOString(),
+
+      // Optional values for your existing table
+      entry: Number(item.entry ?? price),
+      current: Number(item.current ?? price),
+      pnl: Number(item.pnl ?? 0),
+      percent: Number(item.percent ?? 0),
+      status: item.status ?? (index === 0 ? 'Open' : 'Closed'),
+    }
+  })
+}
 
 export function useApiPolling() {
-  const [latestSignal, setLatestSignal] = useState<LatestSignal>(MOCK_LATEST_SIGNAL)
-  const [recentSignals, setRecentSignals] = useState<RecentSignal[]>(MOCK_RECENT_SIGNALS)
-  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('waiting')
-  const [lastUpdateTime, setLastUpdateTime] = useState<Date>(new Date())
-  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const [latestSignal, setLatestSignal] = useState<TradingSignal>(fallbackSignal)
+  const [recentSignals, setRecentSignals] = useState<RecentSignal[]>([])
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('Waiting')
+  const [lastUpdateTime, setLastUpdateTime] = useState<string | null>(null)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
-  const fetchLatestSignal = useCallback(async () => {
+  const fetchDashboardData = useCallback(async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/latest-signal`)
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      const data = await response.json()
-      setLatestSignal(data)
-      setConnectionStatus('connected')
-      setLastUpdateTime(new Date())
-      return data
+      const [latestRes, recentRes] = await Promise.all([
+        fetch(`${API_BASE_URL}/api/latest-signal`, {
+          cache: 'no-store',
+        }),
+        fetch(`${API_BASE_URL}/api/recent-signals`, {
+          cache: 'no-store',
+        }),
+      ])
+
+      if (!latestRes.ok) {
+        throw new Error(`Latest signal request failed: ${latestRes.status}`)
+      }
+
+      if (!recentRes.ok) {
+        throw new Error(`Recent signals request failed: ${recentRes.status}`)
+      }
+
+      const latestJson = await latestRes.json()
+      const recentJson = await recentRes.json()
+
+      setLatestSignal(normalizeSignal(latestJson))
+      setRecentSignals(normalizeRecentSignals(recentJson))
+      setConnectionStatus('Connected')
+      setLastUpdateTime(new Date().toLocaleTimeString())
+      setErrorMessage(null)
     } catch (error) {
-      console.error('Failed to fetch latest signal:', error)
-      setConnectionStatus('error')
-      // Keep using mock data as fallback
-      return null
-    }
-  }, [])
+      console.error('API polling error:', error)
 
-  const fetchRecentSignals = useCallback(async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/recent-signals`)
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      const data = await response.json()
-      setRecentSignals(data)
-      setConnectionStatus('connected')
-      setLastUpdateTime(new Date())
-      return data
-    } catch (error) {
-      console.error('Failed to fetch recent signals:', error)
-      setConnectionStatus('error')
-      // Keep using mock data as fallback
-      return null
-    }
-  }, [])
+      setConnectionStatus('Error')
+      setErrorMessage(error instanceof Error ? error.message : 'Unknown API polling error')
 
-  const startPolling = useCallback(() => {
-    setConnectionStatus('waiting')
-
-    // Initial fetch
-    fetchLatestSignal()
-    fetchRecentSignals()
-
-    // Set up polling interval
-    pollIntervalRef.current = setInterval(() => {
-      fetchLatestSignal()
-      fetchRecentSignals()
-    }, POLL_INTERVAL)
-  }, [fetchLatestSignal, fetchRecentSignals])
-
-  const stopPolling = useCallback(() => {
-    if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current)
-      pollIntervalRef.current = null
+      // Keep fallback only if no real signal has loaded yet.
+      setLatestSignal((prev) => prev ?? fallbackSignal)
     }
   }, [])
 
   useEffect(() => {
-    startPolling()
-    return () => stopPolling()
-  }, [startPolling, stopPolling])
+    setConnectionStatus('Waiting')
+
+    fetchDashboardData()
+
+    const interval = window.setInterval(() => {
+      fetchDashboardData()
+    }, 3000)
+
+    return () => {
+      window.clearInterval(interval)
+    }
+  }, [fetchDashboardData])
 
   return {
     latestSignal,
     recentSignals,
     connectionStatus,
     lastUpdateTime,
-    refetch: async () => {
-      await fetchLatestSignal()
-      await fetchRecentSignals()
-    }
+    errorMessage,
+    apiBaseUrl: API_BASE_URL,
   }
 }
