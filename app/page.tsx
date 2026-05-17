@@ -17,6 +17,7 @@ export default function Dashboard() {
 
   const {
     latestSignal,
+    recentSignals,
     connectionStatus,
     lastUpdateTime,
     apiBaseUrl,
@@ -80,7 +81,7 @@ export default function Dashboard() {
         <GhostCandleProjection />
       </div>
 
-      <RecentSignalsTable />
+      <RecentSignalsTable signals={recentSignals} />
 
       {/* Footer */}
       <motion.div
