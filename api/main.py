@@ -6,17 +6,14 @@ from datetime import datetime, timezone
 import os
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-# Initialize FastAPI app
 app = FastAPI(
     title="Trading Intelligence API",
     description="Backend for receiving TradingView webhook alerts and serving live trading signals",
-    version="1.0.0"
+    version="1.0.0",
 )
 
-# CORS configuration
 origins = [
     "https://trading-intelligence-dashboard.vercel.app",
     "http://localhost:3000",
@@ -30,11 +27,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Environment variables
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
 
-# Pydantic models
+class CandleData(BaseModel):
+    time: int
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: Optional[float] = 0.0
+    symbol: str
+    timeframe: str
+
+
 class TradingSignal(BaseModel):
     eventType: str = "TRADE_SIGNAL"
     status: str = "Open"
@@ -53,6 +59,13 @@ class TradingSignal(BaseModel):
     current: Optional[float] = None
     pnl: Optional[float] = 0.0
     percent: Optional[float] = 0.0
+
+    time: Optional[int] = None
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    close: Optional[float] = None
+    volume: Optional[float] = 0.0
 
     smc: str
     alphax: str
@@ -89,6 +102,13 @@ class TradingSignalWithOptionalSecret(BaseModel):
     pnl: Optional[float] = 0.0
     percent: Optional[float] = 0.0
 
+    time: Optional[int] = None
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    close: Optional[float] = None
+    volume: Optional[float] = 0.0
+
     smc: str
     alphax: str
     ghost: str
@@ -112,12 +132,11 @@ class WebhookResponse(BaseModel):
     message: str
 
 
-# In-memory storage
 latest_signal: Optional[TradingSignal] = None
 recent_signals: List[TradingSignal] = []
+recent_candles: List[CandleData] = []
 
 
-# Default waiting signal
 DEFAULT_WAITING_SIGNAL = TradingSignal(
     eventType="WAITING",
     status="Waiting",
@@ -133,6 +152,12 @@ DEFAULT_WAITING_SIGNAL = TradingSignal(
     current=0.0,
     pnl=0.0,
     percent=0.0,
+    time=None,
+    open=None,
+    high=None,
+    low=None,
+    close=None,
+    volume=0.0,
     smc="Awaiting signal",
     alphax="Awaiting signal",
     ghost="Awaiting signal",
@@ -143,40 +168,27 @@ DEFAULT_WAITING_SIGNAL = TradingSignal(
     finraShortVolume="Awaiting signal",
     cot="Awaiting signal",
     warnings=["No signal received yet"],
-    createdAt=datetime.now(timezone.utc).isoformat()
+    createdAt=datetime.now(timezone.utc).isoformat(),
 )
 
 
 @app.get("/", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint."""
     return {
         "status": "ok",
-        "service": "Trading Intelligence API"
+        "service": "Trading Intelligence API",
     }
 
 
 @app.post("/webhook/tradingview", response_model=WebhookResponse)
 async def receive_tradingview_webhook(signal_data: TradingSignalWithOptionalSecret):
-    """
-    Receive TradingView webhook alerts.
+    global latest_signal, recent_signals, recent_candles
 
-    LIVE_UPDATE:
-    - Updates the main dashboard only.
-    - Does NOT add a row to Recent Signals.
-
-    TRADE_SIGNAL:
-    - Updates the main dashboard.
-    - Adds a row to Recent Signals.
-    """
-    global latest_signal, recent_signals
-
-    # Validate secret if configured
     if WEBHOOK_SECRET:
         if not signal_data.secret or signal_data.secret != WEBHOOK_SECRET:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or missing webhook secret"
+                detail="Invalid or missing webhook secret",
             )
 
     event_type = signal_data.eventType or "TRADE_SIGNAL"
@@ -197,6 +209,12 @@ async def receive_tradingview_webhook(signal_data: TradingSignalWithOptionalSecr
         current=signal_data.current if signal_data.current is not None else signal_data.price,
         pnl=signal_data.pnl if signal_data.pnl is not None else 0.0,
         percent=signal_data.percent if signal_data.percent is not None else 0.0,
+        time=signal_data.time,
+        open=signal_data.open,
+        high=signal_data.high,
+        low=signal_data.low,
+        close=signal_data.close,
+        volume=signal_data.volume if signal_data.volume is not None else 0.0,
         smc=signal_data.smc,
         alphax=signal_data.alphax,
         ghost=signal_data.ghost,
@@ -207,13 +225,42 @@ async def receive_tradingview_webhook(signal_data: TradingSignalWithOptionalSecr
         finraShortVolume=signal_data.finraShortVolume,
         cot=signal_data.cot,
         warnings=signal_data.warnings,
-        createdAt=created_at
+        createdAt=created_at,
     )
 
-    # Always update the main dashboard/latest signal
     latest_signal = signal
 
-    # Only true BUY/SELL trade signals go into Recent Signals
+    if (
+        signal_data.time is not None
+        and signal_data.open is not None
+        and signal_data.high is not None
+        and signal_data.low is not None
+        and signal_data.close is not None
+    ):
+        candle = CandleData(
+            time=signal_data.time,
+            open=signal_data.open,
+            high=signal_data.high,
+            low=signal_data.low,
+            close=signal_data.close,
+            volume=signal_data.volume if signal_data.volume is not None else 0.0,
+            symbol=signal_data.symbol,
+            timeframe=signal_data.timeframe,
+        )
+
+        # Replace candle if same timestamp already exists
+        existing_index = next(
+            (i for i, item in enumerate(recent_candles) if item.time == candle.time),
+            None,
+        )
+
+        if existing_index is not None:
+            recent_candles[existing_index] = candle
+        else:
+            recent_candles.append(candle)
+
+        recent_candles = recent_candles[-300:]
+
     if event_type == "TRADE_SIGNAL":
         recent_signals.insert(0, signal)
 
@@ -222,13 +269,12 @@ async def receive_tradingview_webhook(signal_data: TradingSignalWithOptionalSecr
 
     return {
         "ok": True,
-        "message": f"{event_type} received"
+        "message": f"{event_type} received",
     }
 
 
 @app.get("/api/latest-signal", response_model=TradingSignal)
 async def get_latest_signal():
-    """Get the latest trading signal. Returns default waiting signal if none exists."""
     if latest_signal is None:
         return DEFAULT_WAITING_SIGNAL
 
@@ -237,5 +283,9 @@ async def get_latest_signal():
 
 @app.get("/api/recent-signals", response_model=List[TradingSignal])
 async def get_recent_signals():
-    """Get list of up to 50 most recent trade signals only."""
     return recent_signals
+
+
+@app.get("/api/recent-candles", response_model=List[CandleData])
+async def get_recent_candles():
+    return recent_candles
