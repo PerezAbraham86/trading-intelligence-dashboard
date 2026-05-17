@@ -68,17 +68,17 @@ export default function Dashboard() {
 
         {/* Right Column */}
         <div className="space-y-6">
-          <PressureGauges />
+          <PressureGauges signal={latestSignal} />
 
-          <WarningsPanel />
+          <WarningsPanel signal={latestSignal} />
         </div>
       </div>
 
       {/* Second Row */}
       <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <FactorConfirmationTable />
+        <FactorConfirmationTable signal={latestSignal} />
 
-        <GhostCandleProjection />
+        <GhostCandleProjection signal={latestSignal} />
       </div>
 
       <RecentSignalsTable signals={recentSignals} />
