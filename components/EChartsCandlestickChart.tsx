@@ -13,6 +13,12 @@ type Candle = {
 
 type CandleMode = 'Regular' | 'Heikin Ashi'
 
+type EChartsCandlestickChartProps = {
+  heightClass?: string
+  compact?: boolean
+  chartTitle?: string
+}
+
 const sampleCandles: Candle[] = [
   { time: '5/20 09:00', open: 76450, close: 76680, low: 76380, high: 76750 },
   { time: '5/20 10:00', open: 76680, close: 76520, low: 76420, high: 76720 },
@@ -71,13 +77,17 @@ function convertToHeikinAshi(candles: Candle[]): Candle[] {
   return haCandles
 }
 
-export default function EChartsCandlestickChart() {
+export default function EChartsCandlestickChart({
+  heightClass = 'h-[650px]',
+  compact = false,
+  chartTitle,
+}: EChartsCandlestickChartProps) {
   const chartRef = useRef<HTMLDivElement | null>(null)
   const chartInstance = useRef<echarts.ECharts | null>(null)
 
   const [symbol, setSymbol] = useState('SPY')
-  const [timeframe, setTimeframe] = useState('5m')
-  const [candleMode, setCandleMode] = useState<CandleMode>('Regular')
+  const [timeframe, setTimeframe] = useState('1m')
+  const [candleMode, setCandleMode] = useState<CandleMode>('Heikin Ashi')
 
   useEffect(() => {
     if (!chartRef.current) return
@@ -95,7 +105,6 @@ export default function EChartsCandlestickChart() {
 
     const times = activeCandles.map((c) => c.time)
 
-    // ECharts candlestick format: [open, close, low, high]
     const candleData = activeCandles.map((c) => [
       c.open,
       c.close,
@@ -108,10 +117,10 @@ export default function EChartsCandlestickChart() {
       animation: false,
 
       grid: {
-        left: 10,
-        right: 70,
-        top: 30,
-        bottom: 35,
+        left: compact ? 4 : 10,
+        right: compact ? 48 : 70,
+        top: compact ? 12 : 30,
+        bottom: compact ? 20 : 35,
         containLabel: true,
       },
 
@@ -130,30 +139,6 @@ export default function EChartsCandlestickChart() {
           color: '#e5e7eb',
           fontSize: 12,
         },
-        formatter: (params: any) => {
-          const item = Array.isArray(params) ? params[0] : params
-
-          if (!item || !item.data) return ''
-
-          const data = item.data as number[]
-          const open = data[1]
-          const close = data[2]
-          const low = data[3]
-          const high = data[4]
-
-          return `
-            <div style="font-size:12px;">
-              <div style="margin-bottom:4px;color:#e5e7eb;font-weight:700;">
-                ${item.axisValue}
-              </div>
-              <div style="color:#94a3b8;">${symbol} • ${timeframe} • ${candleMode}</div>
-              <div style="margin-top:6px;color:#e5e7eb;">O&nbsp;&nbsp;${open}</div>
-              <div style="color:#e5e7eb;">H&nbsp;&nbsp;${high}</div>
-              <div style="color:#e5e7eb;">L&nbsp;&nbsp;${low}</div>
-              <div style="color:#e5e7eb;">C&nbsp;&nbsp;${close}</div>
-            </div>
-          `
-        },
       },
 
       xAxis: {
@@ -167,7 +152,7 @@ export default function EChartsCandlestickChart() {
         },
         axisLabel: {
           color: '#94a3b8',
-          fontSize: 11,
+          fontSize: compact ? 8 : 11,
         },
         splitLine: {
           show: false,
@@ -185,7 +170,7 @@ export default function EChartsCandlestickChart() {
         },
         axisLabel: {
           color: '#94a3b8',
-          fontSize: 11,
+          fontSize: compact ? 8 : 11,
         },
         splitLine: {
           lineStyle: {
@@ -217,7 +202,7 @@ export default function EChartsCandlestickChart() {
             borderColor: '#26a69a',
             borderColor0: '#ff4d5e',
           },
-          barWidth: '58%',
+          barWidth: compact ? '48%' : '58%',
         },
       ],
     }
@@ -233,7 +218,7 @@ export default function EChartsCandlestickChart() {
     return () => {
       window.removeEventListener('resize', resize)
     }
-  }, [symbol, timeframe, candleMode])
+  }, [symbol, timeframe, candleMode, compact])
 
   useEffect(() => {
     return () => {
@@ -243,12 +228,18 @@ export default function EChartsCandlestickChart() {
   }, [])
 
   return (
-    <div className="flex h-[650px] w-full flex-col overflow-hidden rounded-2xl border border-dark-700 bg-[#0f1115]">
+    <div className={`flex ${heightClass} w-full flex-col overflow-hidden rounded-2xl border border-dark-700 bg-[#0f1115]`}>
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-dark-700 px-4 py-3">
         <div className="flex flex-wrap items-center gap-3">
           <div className="rounded-full bg-orange-500 px-2 py-1 text-xs font-bold text-white">
             ₿
           </div>
+
+          {chartTitle && (
+            <span className="text-xs font-semibold text-gray-300">
+              {chartTitle}
+            </span>
+          )}
 
           <select
             value={symbol}
@@ -286,9 +277,11 @@ export default function EChartsCandlestickChart() {
           </select>
         </div>
 
-        <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-          Chart Engine v2
-        </div>
+        {!compact && (
+          <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
+            Chart Engine v2
+          </div>
+        )}
       </div>
 
       <div ref={chartRef} className="h-full w-full flex-1" />
