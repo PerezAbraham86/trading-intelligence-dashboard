@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import SignalCard from '@/components/SignalCard'
-import CandlestickChart from '@/components/CandlestickChart'
+import EChartsCandlestickChart from '@/components/EChartsCandlestickChart'
 import PressureGauges from '@/components/PressureGauges'
 import FactorConfirmationTable from '@/components/FactorConfirmationTable'
 import GhostCandleProjection from '@/components/GhostCandleProjection'
@@ -64,7 +64,7 @@ export default function Dashboard() {
         <div className="space-y-6 lg:col-span-2">
           <SignalCard signal={latestSignal} />
 
-          <CandlestickChart />
+          <EChartsCandlestickChart />
         </div>
 
         {/* Right Column */}
