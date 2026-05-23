@@ -9,6 +9,7 @@ import GhostCandleProjection from '@/components/GhostCandleProjection'
 import WarningsPanel from '@/components/WarningsPanel'
 import RecentSignalsTable from '@/components/RecentSignalsTable'
 import ConnectionStatusBadge from '@/components/ConnectionStatusBadge'
+import MarketSentimentGauge from '@/components/MarketSentimentGauge'
 import { motion } from 'framer-motion'
 import { useApiPolling } from '@/hooks/useApiPolling'
 
@@ -68,6 +69,8 @@ export default function Dashboard() {
 
         {/* Right Column */}
         <div className="space-y-6">
+          <MarketSentimentGauge />
+
           <PressureGauges signal={latestSignal} />
 
           <WarningsPanel signal={latestSignal} />
