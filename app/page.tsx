@@ -65,6 +65,21 @@ export default function Dashboard() {
           <SignalCard signal={latestSignal} />
 
           <EChartsCandlestickChart />
+
+          {/* Two Smaller Charts */}
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <EChartsCandlestickChart
+              heightClass="h-[230px]"
+              compact
+              chartTitle="Mini Chart 1"
+            />
+
+            <EChartsCandlestickChart
+              heightClass="h-[230px]"
+              compact
+              chartTitle="Mini Chart 2"
+            />
+          </div>
         </div>
 
         {/* Right Column */}
