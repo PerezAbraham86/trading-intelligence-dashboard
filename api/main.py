@@ -41,6 +41,24 @@ class CandleData(BaseModel):
     timeframe: str
 
 
+class SentimentData(BaseModel):
+    eventType: str = "SENTIMENT_UPDATE"
+    symbol: str
+    timeframe: str
+    sentiment: float
+    sentimentStatus: str
+    bearCount: int
+    neutralCount: int
+    bullCount: int
+    bearPct: float
+    neutralPct: float
+    bullPct: float
+    activeCount: int
+    price: Optional[float] = 0.0
+    time: Optional[int] = None
+    createdAt: Optional[str] = None
+
+
 class TradingSignal(BaseModel):
     eventType: str = "TRADE_SIGNAL"
     status: str = "Open"
@@ -81,45 +99,55 @@ class TradingSignal(BaseModel):
     createdAt: Optional[str] = None
 
 
-class TradingSignalWithOptionalSecret(BaseModel):
+class WebhookPayload(BaseModel):
     secret: Optional[str] = None
 
+    # Shared
     eventType: Optional[str] = "TRADE_SIGNAL"
-    status: Optional[str] = "Open"
-
     symbol: str
     timeframe: str
-    signal: str
+    price: Optional[float] = 0.0
+    time: Optional[int] = None
 
-    confidence: int
-    bullScore: int
-    bearScore: int
-    netBias: int
-
-    price: float
+    # Trading signal fields
+    status: Optional[str] = "Open"
+    signal: Optional[str] = None
+    confidence: Optional[int] = None
+    bullScore: Optional[int] = None
+    bearScore: Optional[int] = None
+    netBias: Optional[int] = None
     entry: Optional[float] = None
     current: Optional[float] = None
     pnl: Optional[float] = 0.0
     percent: Optional[float] = 0.0
 
-    time: Optional[int] = None
     open: Optional[float] = None
     high: Optional[float] = None
     low: Optional[float] = None
     close: Optional[float] = None
     volume: Optional[float] = 0.0
 
-    smc: str
-    alphax: str
-    ghost: str
-    openInterest: str
-    footprint: str
-    session: str
-    fredMacro: str
-    finraShortVolume: str
-    cot: str
+    smc: Optional[str] = None
+    alphax: Optional[str] = None
+    ghost: Optional[str] = None
+    openInterest: Optional[str] = None
+    footprint: Optional[str] = None
+    session: Optional[str] = None
+    fredMacro: Optional[str] = None
+    finraShortVolume: Optional[str] = None
+    cot: Optional[str] = None
+    warnings: Optional[List[str]] = []
 
-    warnings: List[str]
+    # Sentiment fields
+    sentiment: Optional[float] = None
+    sentimentStatus: Optional[str] = None
+    bearCount: Optional[int] = None
+    neutralCount: Optional[int] = None
+    bullCount: Optional[int] = None
+    bearPct: Optional[float] = None
+    neutralPct: Optional[float] = None
+    bullPct: Optional[float] = None
+    activeCount: Optional[int] = None
 
 
 class HealthResponse(BaseModel):
@@ -135,6 +163,7 @@ class WebhookResponse(BaseModel):
 latest_signal: Optional[TradingSignal] = None
 recent_signals: List[TradingSignal] = []
 recent_candles: List[CandleData] = []
+latest_sentiment: Optional[SentimentData] = None
 
 
 DEFAULT_WAITING_SIGNAL = TradingSignal(
@@ -172,6 +201,25 @@ DEFAULT_WAITING_SIGNAL = TradingSignal(
 )
 
 
+DEFAULT_SENTIMENT = SentimentData(
+    eventType="SENTIMENT_UPDATE",
+    symbol="WAITING",
+    timeframe="Waiting",
+    sentiment=50.0,
+    sentimentStatus="Waiting",
+    bearCount=0,
+    neutralCount=0,
+    bullCount=0,
+    bearPct=0.0,
+    neutralPct=0.0,
+    bullPct=0.0,
+    activeCount=0,
+    price=0.0,
+    time=None,
+    createdAt=datetime.now(timezone.utc).isoformat(),
+)
+
+
 @app.get("/", response_model=HealthResponse)
 async def health_check():
     return {
@@ -181,74 +229,107 @@ async def health_check():
 
 
 @app.post("/webhook/tradingview", response_model=WebhookResponse)
-async def receive_tradingview_webhook(signal_data: TradingSignalWithOptionalSecret):
-    global latest_signal, recent_signals, recent_candles
+async def receive_tradingview_webhook(payload: WebhookPayload):
+    global latest_signal, recent_signals, recent_candles, latest_sentiment
 
     if WEBHOOK_SECRET:
-        if not signal_data.secret or signal_data.secret != WEBHOOK_SECRET:
+        if not payload.secret or payload.secret != WEBHOOK_SECRET:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or missing webhook secret",
             )
 
-    event_type = signal_data.eventType or "TRADE_SIGNAL"
+    event_type = payload.eventType or "TRADE_SIGNAL"
     created_at = datetime.now(timezone.utc).isoformat()
 
+    # ─────────────────────────────────────────────
+    # SENTIMENT UPDATE
+    # Separate Market Sentiment gauge alert
+    # ─────────────────────────────────────────────
+    if event_type == "SENTIMENT_UPDATE":
+        sentiment = SentimentData(
+            eventType="SENTIMENT_UPDATE",
+            symbol=payload.symbol,
+            timeframe=payload.timeframe,
+            sentiment=payload.sentiment if payload.sentiment is not None else 50.0,
+            sentimentStatus=payload.sentimentStatus or "Waiting",
+            bearCount=payload.bearCount if payload.bearCount is not None else 0,
+            neutralCount=payload.neutralCount if payload.neutralCount is not None else 0,
+            bullCount=payload.bullCount if payload.bullCount is not None else 0,
+            bearPct=payload.bearPct if payload.bearPct is not None else 0.0,
+            neutralPct=payload.neutralPct if payload.neutralPct is not None else 0.0,
+            bullPct=payload.bullPct if payload.bullPct is not None else 0.0,
+            activeCount=payload.activeCount if payload.activeCount is not None else 0,
+            price=payload.price if payload.price is not None else 0.0,
+            time=payload.time,
+            createdAt=created_at,
+        )
+
+        latest_sentiment = sentiment
+
+        return {
+            "ok": True,
+            "message": "SENTIMENT_UPDATE received",
+        }
+
+    # ─────────────────────────────────────────────
+    # TRADING SIGNAL / LIVE UPDATE
+    # SMC + AlphaX + Ghost alert
+    # ─────────────────────────────────────────────
     signal = TradingSignal(
         eventType=event_type,
-        status=signal_data.status or ("Open" if event_type == "TRADE_SIGNAL" else "Live"),
-        symbol=signal_data.symbol,
-        timeframe=signal_data.timeframe,
-        signal=signal_data.signal,
-        confidence=signal_data.confidence,
-        bullScore=signal_data.bullScore,
-        bearScore=signal_data.bearScore,
-        netBias=signal_data.netBias,
-        price=signal_data.price,
-        entry=signal_data.entry if signal_data.entry is not None else signal_data.price,
-        current=signal_data.current if signal_data.current is not None else signal_data.price,
-        pnl=signal_data.pnl if signal_data.pnl is not None else 0.0,
-        percent=signal_data.percent if signal_data.percent is not None else 0.0,
-        time=signal_data.time,
-        open=signal_data.open,
-        high=signal_data.high,
-        low=signal_data.low,
-        close=signal_data.close,
-        volume=signal_data.volume if signal_data.volume is not None else 0.0,
-        smc=signal_data.smc,
-        alphax=signal_data.alphax,
-        ghost=signal_data.ghost,
-        openInterest=signal_data.openInterest,
-        footprint=signal_data.footprint,
-        session=signal_data.session,
-        fredMacro=signal_data.fredMacro,
-        finraShortVolume=signal_data.finraShortVolume,
-        cot=signal_data.cot,
-        warnings=signal_data.warnings,
+        status=payload.status or ("Open" if event_type == "TRADE_SIGNAL" else "Live"),
+        symbol=payload.symbol,
+        timeframe=payload.timeframe,
+        signal=payload.signal or "NEUTRAL",
+        confidence=payload.confidence if payload.confidence is not None else 0,
+        bullScore=payload.bullScore if payload.bullScore is not None else 50,
+        bearScore=payload.bearScore if payload.bearScore is not None else 50,
+        netBias=payload.netBias if payload.netBias is not None else 0,
+        price=payload.price if payload.price is not None else 0.0,
+        entry=payload.entry if payload.entry is not None else payload.price,
+        current=payload.current if payload.current is not None else payload.price,
+        pnl=payload.pnl if payload.pnl is not None else 0.0,
+        percent=payload.percent if payload.percent is not None else 0.0,
+        time=payload.time,
+        open=payload.open,
+        high=payload.high,
+        low=payload.low,
+        close=payload.close,
+        volume=payload.volume if payload.volume is not None else 0.0,
+        smc=payload.smc or "Awaiting signal",
+        alphax=payload.alphax or "Awaiting signal",
+        ghost=payload.ghost or "Awaiting signal",
+        openInterest=payload.openInterest or "Awaiting signal",
+        footprint=payload.footprint or "Awaiting signal",
+        session=payload.session or "Live Market",
+        fredMacro=payload.fredMacro or "Neutral",
+        finraShortVolume=payload.finraShortVolume or "Awaiting signal",
+        cot=payload.cot or "Awaiting signal",
+        warnings=payload.warnings or [],
         createdAt=created_at,
     )
 
     latest_signal = signal
 
     if (
-        signal_data.time is not None
-        and signal_data.open is not None
-        and signal_data.high is not None
-        and signal_data.low is not None
-        and signal_data.close is not None
+        payload.time is not None
+        and payload.open is not None
+        and payload.high is not None
+        and payload.low is not None
+        and payload.close is not None
     ):
         candle = CandleData(
-            time=signal_data.time,
-            open=signal_data.open,
-            high=signal_data.high,
-            low=signal_data.low,
-            close=signal_data.close,
-            volume=signal_data.volume if signal_data.volume is not None else 0.0,
-            symbol=signal_data.symbol,
-            timeframe=signal_data.timeframe,
+            time=payload.time,
+            open=payload.open,
+            high=payload.high,
+            low=payload.low,
+            close=payload.close,
+            volume=payload.volume if payload.volume is not None else 0.0,
+            symbol=payload.symbol,
+            timeframe=payload.timeframe,
         )
 
-        # Replace candle if same timestamp already exists
         existing_index = next(
             (i for i, item in enumerate(recent_candles) if item.time == candle.time),
             None,
@@ -289,3 +370,11 @@ async def get_recent_signals():
 @app.get("/api/recent-candles", response_model=List[CandleData])
 async def get_recent_candles():
     return recent_candles
+
+
+@app.get("/api/latest-sentiment", response_model=SentimentData)
+async def get_latest_sentiment():
+    if latest_sentiment is None:
+        return DEFAULT_SENTIMENT
+
+    return latest_sentiment
