@@ -38,7 +38,7 @@ const sampleCandles: Candle[] = [
   { time: '5/21 06:00', open: 76060, close: 76580, low: 76020, high: 76690 },
 ]
 
-const timeframeOptions = ['5m', '15m', '1h', '4h', '1D']
+const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1D']
 const candleModeOptions: CandleMode[] = ['Regular', 'Heikin Ashi']
 
 function convertToHeikinAshi(candles: Candle[]): Candle[] {
