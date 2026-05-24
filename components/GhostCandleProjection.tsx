@@ -251,7 +251,7 @@ function formatReaction(value?: string) {
   if (!value) return ''
 
   return value
-    .replaceAll('_', ' ')
+    .replace(/_/g, ' ')
     .replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
 
