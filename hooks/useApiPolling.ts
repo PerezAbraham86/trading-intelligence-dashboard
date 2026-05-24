@@ -18,11 +18,19 @@ export type TradingSignal = {
 
   // Candle / chart fields
   time?: number | string
+  timestamp?: number | string
   open?: number
   high?: number
   low?: number
   close?: number
   volume?: number
+
+  // Optional trade/table fields
+  entry?: number
+  current?: number
+  pnl?: number
+  percent?: number
+  status?: string
 
   // Overlay payload strings or JSON strings
   smc: string
@@ -61,6 +69,7 @@ export type RecentSignal = {
 
   // Candle / chart fields
   time?: number | string
+  timestamp?: number | string
   open?: number
   high?: number
   low?: number
@@ -73,6 +82,7 @@ export type RecentSignal = {
   ghost?: string
   chartOverlays?: string
 
+  // Table fields
   entry?: number
   current?: number
   pnl?: number
@@ -91,16 +101,24 @@ const fallbackSignal: TradingSignal = {
   price: 0,
 
   time: Date.now(),
+  timestamp: Date.now(),
   open: 0,
   high: 0,
   low: 0,
   close: 0,
   volume: 0,
 
+  entry: 0,
+  current: 0,
+  pnl: 0,
+  percent: 0,
+  status: 'Waiting',
+
   smc: 'Awaiting signal',
   alphax: 'Awaiting signal',
   ghost: 'Awaiting signal',
   chartOverlays: '',
+
   openInterest: 'Awaiting signal',
   footprint: 'Awaiting signal',
   session: 'Market awaiting alert',
@@ -109,6 +127,7 @@ const fallbackSignal: TradingSignal = {
   cot: 'Awaiting signal',
   warnings: ['No signal received yet'],
   createdAt: new Date().toISOString(),
+
   bullPressure: 50,
   bearPressure: 50,
   ghostConfidence: 0,
@@ -136,16 +155,19 @@ function toOptionalNumber(value: unknown): number | undefined {
   return parsed
 }
 
-function normalizeSignal(raw: Partial<TradingSignal>): TradingSignal {
+function normalizeSignal(rawInput: Partial<TradingSignal> | any): TradingSignal {
+  const raw = rawInput ?? {}
+
   const bullScore = toNumber(raw.bullScore, fallbackSignal.bullScore)
   const bearScore = toNumber(raw.bearScore, fallbackSignal.bearScore)
   const confidence = toNumber(raw.confidence, fallbackSignal.confidence)
 
   const close =
     toOptionalNumber(raw.close) ??
-    toOptionalNumber(raw.price) ??
     toOptionalNumber(raw.current) ??
-    fallbackSignal.close
+    toOptionalNumber(raw.price) ??
+    fallbackSignal.close ??
+    0
 
   const price = toNumber(raw.price ?? close, fallbackSignal.price)
 
@@ -163,12 +185,20 @@ function normalizeSignal(raw: Partial<TradingSignal>): TradingSignal {
     netBias: toNumber(raw.netBias, bullScore - bearScore),
     price,
 
-    time: raw.time ?? raw.createdAt ?? fallbackSignal.time,
+    time: raw.time ?? raw.timestamp ?? raw.createdAt ?? fallbackSignal.time,
+    timestamp: raw.timestamp ?? raw.time ?? raw.createdAt ?? fallbackSignal.timestamp,
+
     open: toNumber(raw.open, price),
     high: toNumber(raw.high, price),
     low: toNumber(raw.low, price),
     close: toNumber(close, price),
     volume: toNumber(raw.volume, 0),
+
+    entry: toNumber(raw.entry, price),
+    current: toNumber(raw.current ?? close, price),
+    pnl: toNumber(raw.pnl, 0),
+    percent: toNumber(raw.percent, 0),
+    status: raw.status ?? fallbackSignal.status,
 
     smc: raw.smc ?? fallbackSignal.smc,
     alphax: raw.alphax ?? fallbackSignal.alphax,
@@ -184,7 +214,6 @@ function normalizeSignal(raw: Partial<TradingSignal>): TradingSignal {
 
     warnings: Array.isArray(raw.warnings) ? raw.warnings : fallbackSignal.warnings,
 
-    // These keep your existing dashboard gauges working.
     bullPressure: toNumber(raw.bullPressure, bullScore),
     bearPressure: toNumber(raw.bearPressure, bearScore),
     ghostConfidence: toNumber(raw.ghostConfidence, confidence),
@@ -223,6 +252,7 @@ function normalizeRecentSignals(raw: unknown): RecentSignal[] {
 
       // Candle / chart fields preserved for EChartsCandlestickChart
       time: item.time ?? item.timestamp ?? item.createdAt ?? new Date().toISOString(),
+      timestamp: item.timestamp ?? item.time ?? item.createdAt ?? new Date().toISOString(),
       open: toOptionalNumber(item.open),
       high: toOptionalNumber(item.high),
       low: toOptionalNumber(item.low),
@@ -285,7 +315,6 @@ export function useApiPolling() {
       setConnectionStatus('Error')
       setErrorMessage(error instanceof Error ? error.message : 'Unknown API polling error')
 
-      // Keep fallback only if no real signal has loaded yet.
       setLatestSignal((prev) => prev ?? fallbackSignal)
     }
   }, [])
