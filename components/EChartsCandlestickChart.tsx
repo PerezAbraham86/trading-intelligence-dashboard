@@ -21,6 +21,7 @@ type GhostCandle = {
   high: number
   confidence: number
   direction: 'bullish' | 'bearish' | 'neutral'
+  source?: 'python' | 'chart'
 }
 
 type CandleMode = 'Regular' | 'Heikin Ashi'
@@ -119,6 +120,9 @@ type EngineState = ChartOverlayPayload & {
   alphaProfileMeta?: any
   alphaFvgs?: SmcZone[]
   alphaSweeps?: LiquidityEvent[]
+  ghostCandles?: any[]
+  ghostProjections?: any[]
+  projections?: any[]
   alphaBullPressure?: number
   alphaBearPressure?: number
   signal?: string
@@ -170,6 +174,7 @@ const MAX_FULL_SCORE_MARKERS = 12
 const GHOST_CANDLE_RESERVED_SLOTS = 14
 const GHOST_CANDLE_COUNT = 3
 const RIGHT_PROFILE_SLOT_COUNT = 56
+const SHOW_LIVE_PRICE_LINE = true
 
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
 
@@ -1282,10 +1287,138 @@ function buildGhostCandlesFromChart(candles: Candle[], ghostSlots: string[]): Gh
   })
 }
 
+
+function toFiniteNumber(value: any): number | null {
+  const numberValue = Number(value)
+  return Number.isFinite(numberValue) ? numberValue : null
+}
+
+function normalizeGhostDirection(value: any, open: number, close: number): 'bullish' | 'bearish' | 'neutral' {
+  const text = String(value ?? '').toLowerCase()
+
+  if (text.includes('up') || text.includes('bull') || text.includes('buy') || text === '1') return 'bullish'
+  if (text.includes('down') || text.includes('bear') || text.includes('sell') || text === '-1') return 'bearish'
+
+  if (close > open) return 'bullish'
+  if (close < open) return 'bearish'
+
+  return 'neutral'
+}
+
+function buildGhostCandlesFromEngine(engineState: EngineState | null, ghostSlots: string[]): GhostCandle[] {
+  if (!engineState || ghostSlots.length === 0) return []
+
+  const rawGhosts = Array.isArray(engineState.ghostCandles)
+    ? engineState.ghostCandles
+    : Array.isArray(engineState.ghostProjections)
+      ? engineState.ghostProjections
+      : Array.isArray(engineState.projections)
+        ? engineState.projections
+        : []
+
+  if (rawGhosts.length === 0) return []
+
+  return rawGhosts
+    .slice(0, Math.min(GHOST_CANDLE_COUNT, ghostSlots.length))
+    .map((ghost: any, index: number) => {
+      const open =
+        toFiniteNumber(ghost.open) ??
+        toFiniteNumber(ghost.o) ??
+        toFiniteNumber(ghost.ghostOpen) ??
+        toFiniteNumber(ghost.projectedOpen)
+
+      const high =
+        toFiniteNumber(ghost.high) ??
+        toFiniteNumber(ghost.h) ??
+        toFiniteNumber(ghost.ghostHigh) ??
+        toFiniteNumber(ghost.projectedHigh)
+
+      const low =
+        toFiniteNumber(ghost.low) ??
+        toFiniteNumber(ghost.l) ??
+        toFiniteNumber(ghost.ghostLow) ??
+        toFiniteNumber(ghost.projectedLow)
+
+      const close =
+        toFiniteNumber(ghost.close) ??
+        toFiniteNumber(ghost.c) ??
+        toFiniteNumber(ghost.ghostClose) ??
+        toFiniteNumber(ghost.projectedClose)
+
+      if (open === null || high === null || low === null || close === null) return null
+
+      const confidenceRaw =
+        toFiniteNumber(ghost.confidence) ??
+        toFiniteNumber(ghost.percent) ??
+        toFiniteNumber(ghost.probability) ??
+        toFiniteNumber(ghost.score) ??
+        0
+
+      const confidence = Math.round(clampNumber(confidenceRaw, 0, 100))
+      const direction = normalizeGhostDirection(ghost.direction ?? ghost.dir ?? ghost.signal, open, close)
+
+      return {
+        slot: ghostSlots[index],
+        label: String(ghost.label ?? `Python Ghost #${index + 1}`),
+        open,
+        high,
+        low,
+        close,
+        confidence,
+        direction,
+        source: 'python' as const,
+      }
+    })
+    .filter((ghost): ghost is GhostCandle => Boolean(ghost))
+}
+
+function buildGhostCandles(engineState: EngineState | null, candles: Candle[], ghostSlots: string[]): GhostCandle[] {
+  const pythonGhosts = buildGhostCandlesFromEngine(engineState, ghostSlots)
+
+  if (pythonGhosts.length > 0) return pythonGhosts
+
+  return buildGhostCandlesFromChart(candles, ghostSlots).map((ghost) => ({
+    ...ghost,
+    source: 'chart' as const,
+  }))
+}
+
+function buildGhostLiveMarker(latestClose: number | null, ghostGapSlots: string[], compact: boolean): any[] {
+  if (latestClose === null || compact || ghostGapSlots.length === 0) return []
+
+  return [
+    {
+      coord: [ghostGapSlots[0], latestClose],
+      symbol: 'circle',
+      symbolSize: 10,
+      itemStyle: {
+        color: '#22d3ee',
+        borderColor: '#ffffff',
+        borderWidth: 2,
+        shadowBlur: 12,
+        shadowColor: '#22d3ee',
+      },
+      label: {
+        show: true,
+        formatter: `LIVE ${Number(latestClose).toFixed(2)}`,
+        color: '#22d3ee',
+        fontSize: 10,
+        fontWeight: 900,
+        position: 'right',
+        backgroundColor: 'rgba(15, 17, 21, 0.95)',
+        borderColor: '#22d3ee',
+        borderWidth: 1,
+        borderRadius: 4,
+        padding: [4, 7],
+      },
+    },
+  ]
+}
+
 function buildGhostCandleSeries(ghostCandles: GhostCandle[], compact: boolean): any[] {
   if (!Array.isArray(ghostCandles) || ghostCandles.length === 0 || compact) return []
 
-  const data = ghostCandles.map((ghost) => ({
+  const data = ghostCandles.map((ghost, index) => ({
     value: [
       ghost.slot,
       ghost.open,
@@ -1295,17 +1428,19 @@ function buildGhostCandleSeries(ghostCandles: GhostCandle[], compact: boolean): 
       ghost.label,
       ghost.confidence,
       ghost.direction,
+      index + 1,
+      ghost.source ?? 'chart',
     ],
     ghost,
   }))
 
   return [
     {
-      name: 'Python Ghost Candles',
+      name: 'Ghost Candle Projection',
       type: 'custom',
       coordinateSystem: 'cartesian2d',
       silent: true,
-      z: 12,
+      z: 20,
       data,
       renderItem: (_params: any, api: any) => {
         const slot = api.value(0)
@@ -1315,6 +1450,8 @@ function buildGhostCandleSeries(ghostCandles: GhostCandle[], compact: boolean): 
         const high = Number(api.value(4))
         const confidence = Number(api.value(6))
         const direction = String(api.value(7))
+        const ghostNumber = Number(api.value(8))
+        const ghostSource = String(api.value(9) ?? 'chart')
 
         const xPoint = api.coord([slot, close])
         const highPoint = api.coord([slot, high])
@@ -1323,14 +1460,20 @@ function buildGhostCandleSeries(ghostCandles: GhostCandle[], compact: boolean): 
         const closePoint = api.coord([slot, close])
         const slotSize = api.size([1, 0])?.[0] ?? 12
 
-        const candleWidth = Math.max(4, slotSize * 0.46)
+        const candleWidth = Math.max(7, slotSize * 0.74)
         const bodyX = xPoint[0] - candleWidth / 2
         const bodyY = Math.min(openPoint[1], closePoint[1])
-        const bodyHeight = Math.max(2, Math.abs(openPoint[1] - closePoint[1]))
+        const bodyHeight = Math.max(4, Math.abs(openPoint[1] - closePoint[1]))
         const bull = direction === 'bullish'
-        const color = bull ? 'rgba(8, 153, 129, 0.42)' : 'rgba(242, 54, 69, 0.42)'
-        const borderColor = bull ? 'rgba(38, 166, 154, 0.95)' : 'rgba(255, 77, 94, 0.95)'
-        const wickColor = bull ? 'rgba(38, 166, 154, 0.72)' : 'rgba(255, 77, 94, 0.72)'
+
+        const bodyColor = bull ? 'rgba(8, 153, 129, 0.74)' : 'rgba(242, 54, 69, 0.74)'
+        const borderColor = bull ? 'rgba(38, 255, 180, 1)' : 'rgba(255, 82, 112, 1)'
+        const wickColor = bull ? 'rgba(38, 255, 180, 0.96)' : 'rgba(255, 82, 112, 0.96)'
+        const badgeColor = bull ? 'rgba(8, 153, 129, 0.95)' : 'rgba(242, 54, 69, 0.95)'
+
+        const labelText = `${ghostSource === 'python' ? 'PY' : 'G'}${ghostNumber} ${confidence}%`
+        const labelX = xPoint[0] + candleWidth * 0.85
+        const labelY = bull ? highPoint[1] - 20 : lowPoint[1] + 20
 
         return {
           type: 'group',
@@ -1345,8 +1488,10 @@ function buildGhostCandleSeries(ghostCandles: GhostCandle[], compact: boolean): 
               },
               style: {
                 stroke: wickColor,
-                lineWidth: 1.5,
-                lineDash: [3, 3],
+                lineWidth: 2.2,
+                lineDash: [5, 3],
+                shadowBlur: 8,
+                shadowColor: wickColor,
               },
             },
             {
@@ -1356,22 +1501,44 @@ function buildGhostCandleSeries(ghostCandles: GhostCandle[], compact: boolean): 
                 y: bodyY,
                 width: candleWidth,
                 height: bodyHeight,
+                r: 2,
               },
               style: {
-                fill: color,
+                fill: bodyColor,
                 stroke: borderColor,
-                lineWidth: 1.2,
+                lineWidth: 1.8,
+                shadowBlur: 10,
+                shadowColor: borderColor,
               },
             },
             {
               type: 'text',
               style: {
-                text: `${confidence}%`,
-                x: xPoint[0] + candleWidth * 0.72,
-                y: bull ? highPoint[1] - 10 : lowPoint[1] + 14,
-                fill: borderColor,
-                font: '700 9px sans-serif',
+                text: labelText,
+                x: labelX,
+                y: labelY,
+                fill: '#ffffff',
+                backgroundColor: badgeColor,
+                borderColor,
+                borderWidth: 1,
+                borderRadius: 4,
+                padding: [3, 6],
+                font: '800 10px sans-serif',
                 align: 'left',
+                verticalAlign: 'middle',
+                shadowBlur: 6,
+                shadowColor: 'rgba(0,0,0,0.7)',
+              },
+            },
+            {
+              type: 'text',
+              style: {
+                text: `${ghostSource === 'python' ? 'PY ' : ''}${bull ? 'UP' : 'DOWN'}`,
+                x: xPoint[0],
+                y: bull ? highPoint[1] - 38 : lowPoint[1] + 38,
+                fill: borderColor,
+                font: '800 9px sans-serif',
+                align: 'center',
                 verticalAlign: 'middle',
               },
             },
@@ -1787,7 +1954,7 @@ export default function EChartsCandlestickChart({
       : []
 
     const ghostCandles = enableAdvancedOverlays && showGhost
-      ? buildGhostCandlesFromChart(activeCandles, ghostGapSlots)
+      ? buildGhostCandles(engineState, activeCandles, ghostGapSlots)
       : []
 
     const xAxisData = [...candleTimes, ...ghostGapSlots, ...profileSlots]
@@ -1820,8 +1987,74 @@ export default function EChartsCandlestickChart({
             ? buildDlmConfluenceMarkPoints(activeDlmConfluenceMarkers, compact)
             : []),
           ...(effectiveShowScores ? buildScoreMarkPoints(activeScoreMarkers, compact) : []),
+          ...buildGhostLiveMarker(
+            activeCandles.length > 0 ? activeCandles[activeCandles.length - 1].close : null,
+            ghostGapSlots,
+            compact
+          ),
         ]
       : []
+
+    const latestClose = activeCandles.length > 0 ? activeCandles[activeCandles.length - 1].close : null
+
+    const livePriceLineData =
+      SHOW_LIVE_PRICE_LINE && latestClose !== null
+        ? [
+            {
+              yAxis: latestClose,
+              name: 'Live Price',
+              symbol: 'none',
+              lineStyle: {
+                color: 'rgba(34, 211, 238, 0.95)',
+                width: 2.4,
+                type: 'solid',
+              },
+              label: {
+                show: !compact,
+                formatter: `⬤ LIVE ${Number(latestClose).toFixed(2)}`,
+                color: '#22d3ee',
+                fontSize: 10,
+                fontWeight: 900,
+                position: 'end',
+                backgroundColor: 'rgba(15, 17, 21, 0.92)',
+                borderColor: '#22d3ee',
+                borderWidth: 1,
+                borderRadius: 4,
+                padding: [3, 6],
+              },
+            },
+          ]
+        : []
+
+    const ghostZoneMarkArea =
+      enableAdvancedOverlays && showGhost && ghostGapSlots.length > 0 && !compact
+        ? [
+            [
+              {
+                xAxis: ghostGapSlots[0],
+                itemStyle: {
+                  color: 'rgba(34, 211, 238, 0.045)',
+                },
+                label: {
+                  show: true,
+                  formatter: 'GHOST ZONE',
+                  color: 'rgba(34, 211, 238, 0.90)',
+                  fontSize: 10,
+                  fontWeight: 900,
+                  position: 'insideTop',
+                  backgroundColor: 'rgba(15, 17, 21, 0.70)',
+                  borderColor: 'rgba(34, 211, 238, 0.45)',
+                  borderWidth: 1,
+                  borderRadius: 4,
+                  padding: [3, 6],
+                },
+              },
+              {
+                xAxis: ghostGapSlots[Math.min(GHOST_CANDLE_COUNT + 1, ghostGapSlots.length - 1)],
+              },
+            ],
+          ]
+        : []
 
     const option: any = {
       backgroundColor: '#0f1115',
@@ -1961,16 +2194,18 @@ export default function EChartsCandlestickChart({
 
           markArea: {
             silent: true,
-            data:
-              enableAdvancedOverlays && effectiveShowZones
+            data: [
+              ...(enableAdvancedOverlays && effectiveShowZones
                 ? buildZoneMarkAreas(activeZones, compact, smcDisplayMode)
-                : [],
+                : []),
+              ...ghostZoneMarkArea,
+            ],
           },
 
           markLine: {
             silent: true,
             symbol: 'none',
-            data: markLineData,
+            data: [...markLineData, ...livePriceLineData],
           },
 
           markPoint: {
@@ -2027,6 +2262,7 @@ export default function EChartsCandlestickChart({
     usingLiveCandles,
     historicalCandlesFromAlpaca,
     engineAvailable,
+    engineState,
   ])
 
   useEffect(() => {
@@ -2213,7 +2449,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3U' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3W' : 'Chart Engine v2'}
             </div>
           </div>
         )}
