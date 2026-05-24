@@ -194,12 +194,25 @@ const esSampleCandles: Candle[] = [
   { time: '5/21 00:00', open: 5966.75, close: 5974.25, low: 5962.25, high: 5978.0 },
 ]
 
-function getSampleCandlesForSymbol(symbol: string): Candle[] {
-  const normalized = symbol.toUpperCase()
+function getCanonicalSymbol(symbol: string): string {
+  const normalized = String(symbol ?? '').toUpperCase().replace(/^.*:/, '')
 
-  if (normalized.includes('BTC')) return btcSampleCandles
-  if (normalized.includes('ETH')) return ethSampleCandles
-  if (normalized.includes('ES')) return esSampleCandles
+  if (normalized.includes('MES')) return 'MES'
+  if (normalized.includes('ES')) return 'ES'
+  if (normalized.includes('BTC')) return 'BTC'
+  if (normalized.includes('ETH')) return 'ETH'
+  if (normalized.includes('SPY')) return 'SPY'
+
+  return normalized
+}
+
+function getSampleCandlesForSymbol(symbol: string): Candle[] {
+  const canonical = getCanonicalSymbol(symbol)
+
+  if (canonical === 'BTC') return btcSampleCandles
+  if (canonical === 'ETH') return ethSampleCandles
+  if (canonical === 'MES') return esSampleCandles
+  if (canonical === 'ES') return esSampleCandles
 
   return spySampleCandles
 }
@@ -655,17 +668,20 @@ function buildCandlesFromSignals(
     return []
   }
 
-  const normalizedSymbol = selectedSymbol.toUpperCase()
-  const normalizedTimeframe = selectedTimeframe.toLowerCase()
+  const normalizedSymbol = String(selectedSymbol ?? '').toUpperCase()
+  const normalizedTimeframe = String(selectedTimeframe ?? '').toLowerCase()
+  const canonicalSelectedSymbol = getCanonicalSymbol(normalizedSymbol)
 
   const filtered = signals.filter((signal) => {
     const signalSymbol = String(signal.symbol ?? '').toUpperCase()
     const signalTimeframe = String(signal.timeframe ?? '').toLowerCase()
+    const canonicalSignalSymbol = getCanonicalSymbol(signalSymbol)
 
     const symbolMatch =
       signalSymbol === normalizedSymbol ||
       signalSymbol.includes(normalizedSymbol) ||
-      normalizedSymbol.includes(signalSymbol)
+      normalizedSymbol.includes(signalSymbol) ||
+      canonicalSignalSymbol === canonicalSelectedSymbol
 
     const timeframeMatch =
       !signalTimeframe ||
@@ -674,7 +690,7 @@ function buildCandlesFromSignals(
     return symbolMatch && timeframeMatch
   })
 
-  const source = filtered.length > 0 ? filtered : signals
+  const source = filtered
 
   const candles = source
     .map((signal, index) => {
@@ -1218,7 +1234,7 @@ export default function EChartsCandlestickChart({
   const chartRef = useRef<HTMLDivElement | null>(null)
   const chartInstance = useRef<echarts.ECharts | null>(null)
 
-  const [symbol, setSymbol] = useState('SPY')
+  const [symbol, setSymbol] = useState('MES1!')
   const [timeframe, setTimeframe] = useState('1m')
   const [candleMode, setCandleMode] = useState<CandleMode>('Heikin Ashi')
   const [showSmc, setShowSmc] = useState(true)
@@ -1523,10 +1539,11 @@ export default function EChartsCandlestickChart({
             onChange={(e) => setSymbol(e.target.value)}
             className="rounded-md border border-dark-700 bg-[#151922] px-3 py-1.5 text-sm text-gray-100 outline-none"
           >
+            <option value="MES1!">MES1!</option>
+            <option value="ES1!">ES1!</option>
             <option value="BTCUSD">BTCUSD</option>
             <option value="ETHUSD">ETHUSD</option>
             <option value="SPY">SPY</option>
-            <option value="ES1!">ES1!</option>
           </select>
 
           <select
