@@ -237,6 +237,9 @@ export default function Dashboard() {
 
           <EChartsCandlestickChart
             enableAdvancedOverlays
+            defaultSymbol={selectedSymbol}
+            defaultTimeframe={selectedTimeframe}
+            defaultCandleMode="Heikin Ashi"
             latestSignal={augmentedLatestSignal}
             recentSignals={recentSignals}
             recentCandles={recentCandles}
@@ -249,6 +252,10 @@ export default function Dashboard() {
               compact
               chartTitle="Mini Chart 1"
               enableAdvancedOverlays={false}
+              defaultSymbol="SPY"
+              defaultTimeframe="1m"
+              defaultCandleMode="Heikin Ashi"
+              allowCompactHistory
               latestSignal={augmentedLatestSignal}
               recentSignals={recentSignals}
               recentCandles={recentCandles}
@@ -259,6 +266,10 @@ export default function Dashboard() {
               compact
               chartTitle="Mini Chart 2"
               enableAdvancedOverlays={false}
+              defaultSymbol="ES1!"
+              defaultTimeframe="1m"
+              defaultCandleMode="Heikin Ashi"
+              allowCompactHistory
               latestSignal={augmentedLatestSignal}
               recentSignals={recentSignals}
               recentCandles={recentCandles}
