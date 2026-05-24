@@ -72,6 +72,22 @@ type DlmConfluenceMarker = {
   pressurePct?: number
 }
 
+type ScoreMarker = {
+  time: string
+  price: number
+  label: string
+  direction: 'bullish' | 'bearish' | 'neutral'
+  kind:
+    | 'setup_score'
+    | 'institutional_score'
+    | 'execution_quality'
+    | 'trend_phase'
+    | 'htf_bias'
+    | 'session'
+  score?: number
+  grade?: 'A' | 'B' | 'C'
+}
+
 type EChartsCandlestickChartProps = {
   heightClass?: string
   compact?: boolean
@@ -87,6 +103,9 @@ const LIGHT_RED = '#ff4d5e'
 const YELLOW = '#facc15'
 const PURPLE = '#a855f7'
 const CYAN = '#22d3ee'
+const ORANGE = '#fb923c'
+const PINK = '#f472b6'
+const GRAY = '#94a3b8'
 
 const sampleCandles: Candle[] = [
   { time: '5/20 09:00', open: 76450, close: 76680, low: 76380, high: 76750 },
@@ -344,6 +363,63 @@ const sampleDlmConfluenceMarkers: DlmConfluenceMarker[] = [
   },
 ]
 
+const sampleScoreMarkers: ScoreMarker[] = [
+  {
+    time: '5/20 13:00',
+    price: 76840,
+    label: 'Setup Score',
+    direction: 'bullish',
+    kind: 'setup_score',
+    score: 6,
+    grade: 'A',
+  },
+  {
+    time: '5/20 17:00',
+    price: 77610,
+    label: 'Inst Score',
+    direction: 'bullish',
+    kind: 'institutional_score',
+    score: 12,
+    grade: 'A',
+  },
+  {
+    time: '5/20 21:00',
+    price: 77240,
+    label: 'Exec Q',
+    direction: 'bearish',
+    kind: 'execution_quality',
+    score: 8,
+    grade: 'B',
+  },
+  {
+    time: '5/20 23:00',
+    price: 76710,
+    label: 'Trend Phase',
+    direction: 'bearish',
+    kind: 'trend_phase',
+    score: 7,
+    grade: 'B',
+  },
+  {
+    time: '5/21 03:00',
+    price: 75590,
+    label: 'HTF Bias',
+    direction: 'bullish',
+    kind: 'htf_bias',
+    score: 5,
+    grade: 'B',
+  },
+  {
+    time: '5/21 05:00',
+    price: 76310,
+    label: 'NY AM',
+    direction: 'neutral',
+    kind: 'session',
+    score: 1,
+    grade: 'C',
+  },
+]
+
 const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1D']
 const candleModeOptions: CandleMode[] = ['Regular', 'Heikin Ashi']
 
@@ -402,6 +478,17 @@ function getDlmConfluenceColor(marker: DlmConfluenceMarker) {
   if (marker.direction === 'bullish') return GREEN
   if (marker.direction === 'bearish') return RED
   return CYAN
+}
+
+function getScoreColor(marker: ScoreMarker) {
+  if (marker.kind === 'institutional_score') return ORANGE
+  if (marker.kind === 'execution_quality') return PINK
+  if (marker.kind === 'trend_phase') return PURPLE
+  if (marker.kind === 'htf_bias') return CYAN
+  if (marker.kind === 'session') return GRAY
+  if (marker.direction === 'bullish') return GREEN
+  if (marker.direction === 'bearish') return RED
+  return YELLOW
 }
 
 function getZoneStyle(zone: SmcZone, compact: boolean) {
@@ -745,6 +832,56 @@ function buildDlmConfluenceMarkPoints(
   })
 }
 
+function buildScoreMarkPoints(markers: ScoreMarker[], compact: boolean) {
+  return markers.map((marker) => {
+    const color = getScoreColor(marker)
+    const scoreText = typeof marker.score === 'number' ? ` ${marker.score}` : ''
+    const gradeText = marker.grade ? ` ${marker.grade}` : ''
+    const label = `${marker.label}${scoreText}${gradeText}`
+    const isTopLabel = marker.direction === 'bearish' || marker.kind === 'session'
+
+    return {
+      name: marker.label,
+      coord: [marker.time, marker.price],
+      value: label,
+      symbol:
+        marker.kind === 'institutional_score'
+          ? 'rect'
+          : marker.kind === 'execution_quality'
+            ? 'diamond'
+            : marker.kind === 'trend_phase'
+              ? 'roundRect'
+              : 'circle',
+      symbolSize:
+        compact
+          ? 20
+          : marker.kind === 'institutional_score'
+            ? 30
+            : marker.kind === 'trend_phase'
+              ? 28
+              : 24,
+      itemStyle: {
+        color: 'rgba(15, 17, 21, 0.96)',
+        borderColor: color,
+        borderWidth: 2,
+      },
+      label: {
+        show: !compact,
+        formatter: label,
+        color,
+        fontSize: 10,
+        fontWeight: 800,
+        position: isTopLabel ? 'top' : 'bottom',
+        backgroundColor: 'rgba(15, 17, 21, 0.90)',
+        borderColor: color,
+        borderWidth: 1,
+        borderRadius: 4,
+        padding: [3, 6],
+      },
+    }
+  })
+}
+
 export default function EChartsCandlestickChart({
   heightClass = 'h-[650px]',
   compact = false,
@@ -761,6 +898,7 @@ export default function EChartsCandlestickChart({
   const [showDlm, setShowDlm] = useState(true)
   const [showZones, setShowZones] = useState(true)
   const [showLiquidity, setShowLiquidity] = useState(true)
+  const [showScores, setShowScores] = useState(true)
 
   useEffect(() => {
     if (!chartRef.current) return
@@ -937,6 +1075,9 @@ export default function EChartsCandlestickChart({
                         compact
                       )
                     : []),
+                  ...(showScores
+                    ? buildScoreMarkPoints(sampleScoreMarkers, compact)
+                    : []),
                 ]
               : [],
           },
@@ -964,6 +1105,7 @@ export default function EChartsCandlestickChart({
     showDlm,
     showZones,
     showLiquidity,
+    showScores,
     enableAdvancedOverlays,
   ])
 
@@ -1074,13 +1216,25 @@ export default function EChartsCandlestickChart({
               >
                 AlphaX DLM
               </button>
+
+              <button
+                type="button"
+                onClick={() => setShowScores((value) => !value)}
+                className={`rounded-md border px-3 py-1.5 text-sm font-semibold ${
+                  showScores
+                    ? 'border-orange-500/50 bg-orange-500/10 text-orange-300'
+                    : 'border-dark-700 bg-[#151922] text-gray-400'
+                }`}
+              >
+                Scores
+              </button>
             </>
           )}
         </div>
 
         {!compact && (
           <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-            {enableAdvancedOverlays ? 'Chart Engine v3D' : 'Chart Engine v2'}
+            {enableAdvancedOverlays ? 'Chart Engine v3E' : 'Chart Engine v2'}
           </div>
         )}
       </div>
