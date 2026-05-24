@@ -33,7 +33,7 @@ type PythonEngineState = {
 type ChartSelection = {
   symbol: string
   timeframe: string
-  candleMode: 'Candles' | 'Heikin Ashi'
+  candleMode: 'Regular' | 'Heikin Ashi'
 }
 
 function normalizeSymbol(value: unknown) {
