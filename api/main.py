@@ -39,6 +39,7 @@ class CandleData(BaseModel):
     volume: Optional[float] = 0.0
     symbol: str
     timeframe: str
+    createdAt: Optional[str] = None
 
 
 class SentimentData(BaseModel):
@@ -88,6 +89,7 @@ class TradingSignal(BaseModel):
     smc: str
     alphax: str
     ghost: str
+    chartOverlays: Optional[str] = None
     openInterest: str
     footprint: str
     session: str
@@ -130,6 +132,7 @@ class WebhookPayload(BaseModel):
     smc: Optional[str] = None
     alphax: Optional[str] = None
     ghost: Optional[str] = None
+    chartOverlays: Optional[str] = None
     openInterest: Optional[str] = None
     footprint: Optional[str] = None
     session: Optional[str] = None
@@ -190,6 +193,7 @@ DEFAULT_WAITING_SIGNAL = TradingSignal(
     smc="Awaiting signal",
     alphax="Awaiting signal",
     ghost="Awaiting signal",
+    chartOverlays=None,
     openInterest="Awaiting signal",
     footprint="Awaiting signal",
     session="Market awaiting alert",
@@ -220,6 +224,75 @@ DEFAULT_SENTIMENT = SentimentData(
 )
 
 
+def normalize_symbol(symbol: str) -> str:
+    """
+    Keeps matching stable for TradingView formats like:
+    BTCUSD, BINANCE:BTCUSD, CME_MINI:MES1!, MES1!
+    """
+    return (symbol or "").replace(" ", "").upper()
+
+
+def normalize_timeframe(timeframe: str) -> str:
+    return str(timeframe or "").replace(" ", "").lower()
+
+
+def upsert_recent_signal(signal: TradingSignal, max_items: int = 300) -> None:
+    """
+    Store all live updates and trade signals in recent_signals.
+
+    Previous version only inserted eventType == TRADE_SIGNAL.
+    That caused /api/recent-signals to return [] during LIVE_UPDATE alerts,
+    even though /api/latest-signal was updating correctly.
+    """
+    global recent_signals
+
+    signal_symbol = normalize_symbol(signal.symbol)
+    signal_timeframe = normalize_timeframe(signal.timeframe)
+
+    existing_index = next(
+        (
+            i
+            for i, item in enumerate(recent_signals)
+            if item.time == signal.time
+            and normalize_symbol(item.symbol) == signal_symbol
+            and normalize_timeframe(item.timeframe) == signal_timeframe
+        ),
+        None,
+    )
+
+    if existing_index is not None:
+        recent_signals[existing_index] = signal
+    else:
+        recent_signals.insert(0, signal)
+
+    recent_signals = recent_signals[:max_items]
+
+
+def upsert_recent_candle(candle: CandleData, max_items: int = 300) -> None:
+    global recent_candles
+
+    candle_symbol = normalize_symbol(candle.symbol)
+    candle_timeframe = normalize_timeframe(candle.timeframe)
+
+    existing_index = next(
+        (
+            i
+            for i, item in enumerate(recent_candles)
+            if item.time == candle.time
+            and normalize_symbol(item.symbol) == candle_symbol
+            and normalize_timeframe(item.timeframe) == candle_timeframe
+        ),
+        None,
+    )
+
+    if existing_index is not None:
+        recent_candles[existing_index] = candle
+    else:
+        recent_candles.insert(0, candle)
+
+    recent_candles = recent_candles[:max_items]
+
+
 @app.get("/", response_model=HealthResponse)
 async def health_check():
     return {
@@ -230,7 +303,7 @@ async def health_check():
 
 @app.post("/webhook/tradingview", response_model=WebhookResponse)
 async def receive_tradingview_webhook(payload: WebhookPayload):
-    global latest_signal, recent_signals, recent_candles, latest_sentiment
+    global latest_signal, latest_sentiment
 
     if WEBHOOK_SECRET:
         if not payload.secret or payload.secret != WEBHOOK_SECRET:
@@ -300,6 +373,7 @@ async def receive_tradingview_webhook(payload: WebhookPayload):
         smc=payload.smc or "Awaiting signal",
         alphax=payload.alphax or "Awaiting signal",
         ghost=payload.ghost or "Awaiting signal",
+        chartOverlays=payload.chartOverlays,
         openInterest=payload.openInterest or "Awaiting signal",
         footprint=payload.footprint or "Awaiting signal",
         session=payload.session or "Live Market",
@@ -312,6 +386,11 @@ async def receive_tradingview_webhook(payload: WebhookPayload):
 
     latest_signal = signal
 
+    # Store all TRADE_SIGNAL and LIVE_UPDATE events in /api/recent-signals.
+    # This is what the frontend chart currently uses to build live candles.
+    upsert_recent_signal(signal)
+
+    # Also keep a clean candle-only history in /api/recent-candles.
     if (
         payload.time is not None
         and payload.open is not None
@@ -328,25 +407,10 @@ async def receive_tradingview_webhook(payload: WebhookPayload):
             volume=payload.volume if payload.volume is not None else 0.0,
             symbol=payload.symbol,
             timeframe=payload.timeframe,
+            createdAt=created_at,
         )
 
-        existing_index = next(
-            (i for i, item in enumerate(recent_candles) if item.time == candle.time),
-            None,
-        )
-
-        if existing_index is not None:
-            recent_candles[existing_index] = candle
-        else:
-            recent_candles.append(candle)
-
-        recent_candles = recent_candles[-300:]
-
-    if event_type == "TRADE_SIGNAL":
-        recent_signals.insert(0, signal)
-
-        if len(recent_signals) > 50:
-            recent_signals = recent_signals[:50]
+        upsert_recent_candle(candle)
 
     return {
         "ok": True,
