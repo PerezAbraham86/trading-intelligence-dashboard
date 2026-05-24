@@ -1238,6 +1238,18 @@ function clampNumber(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value))
 }
 
+function getGhostSlot(index: number, ghostSlots: string[]): string {
+  // Space projected candles across the reserved ghost zone.
+  // This prevents PY1/PY2/PY3 and their confidence badges from stacking too tightly.
+  if (!ghostSlots.length) return `__ghost_gap_${index + 1}`
+
+  const preferredIndexes = [1, 4, 7, 10, 12]
+  const preferredIndex = preferredIndexes[index] ?? index * 3 + 1
+  const safeIndex = Math.max(0, Math.min(ghostSlots.length - 1, preferredIndex))
+
+  return ghostSlots[safeIndex]
+}
+
 function buildGhostCandlesFromChart(candles: Candle[], ghostSlots: string[]): GhostCandle[] {
   if (candles.length < 3 || ghostSlots.length === 0) return []
 
@@ -1360,7 +1372,7 @@ function buildGhostCandlesFromEngine(engineState: EngineState | null, ghostSlots
       const direction = normalizeGhostDirection(ghost.direction ?? ghost.dir ?? ghost.signal, open, close)
 
       normalizedGhosts.push({
-        slot: ghostSlots[index],
+        slot: getGhostSlot(index, ghostSlots),
         label: String(ghost.label ?? `Python Ghost #${index + 1}`),
         open,
         high,
@@ -1403,7 +1415,7 @@ function buildGhostLiveMarker(latestClose: number | null, ghostGapSlots: string[
       },
       label: {
         show: true,
-        formatter: `LIVE ${Number(latestClose).toFixed(2)}`,
+        formatter: `⬤ LIVE ${Number(latestClose).toFixed(2)}`,
         color: '#22d3ee',
         fontSize: 10,
         fontWeight: 900,
@@ -1463,7 +1475,7 @@ function buildGhostCandleSeries(ghostCandles: GhostCandle[], compact: boolean): 
         const closePoint = api.coord([slot, close])
         const slotSize = api.size([1, 0])?.[0] ?? 12
 
-        const candleWidth = Math.max(7, slotSize * 0.74)
+        const candleWidth = Math.max(9, slotSize * 0.82)
         const bodyX = xPoint[0] - candleWidth / 2
         const bodyY = Math.min(openPoint[1], closePoint[1])
         const bodyHeight = Math.max(4, Math.abs(openPoint[1] - closePoint[1]))
@@ -1479,7 +1491,8 @@ function buildGhostCandleSeries(ghostCandles: GhostCandle[], compact: boolean): 
         // Keep the confidence badge locked directly above/below its own ghost candle.
         // Previous version shifted labelX right, making the percentage look one candle ahead.
         const labelX = xPoint[0]
-        const labelY = bull ? highPoint[1] - 22 : lowPoint[1] + 22
+        const labelYOffset = 22 + (Math.max(ghostNumber, 1) - 1) * 16
+        const labelY = bull ? highPoint[1] - labelYOffset : lowPoint[1] + labelYOffset
 
         return {
           type: 'group',
@@ -1494,7 +1507,7 @@ function buildGhostCandleSeries(ghostCandles: GhostCandle[], compact: boolean): 
               },
               style: {
                 stroke: wickColor,
-                lineWidth: 2.2,
+                lineWidth: 2.6,
                 lineDash: [5, 3],
                 shadowBlur: 8,
                 shadowColor: wickColor,
@@ -1512,7 +1525,7 @@ function buildGhostCandleSeries(ghostCandles: GhostCandle[], compact: boolean): 
               style: {
                 fill: bodyColor,
                 stroke: borderColor,
-                lineWidth: 1.8,
+                lineWidth: 2.2,
                 shadowBlur: 10,
                 shadowColor: borderColor,
               },
@@ -1529,7 +1542,7 @@ function buildGhostCandleSeries(ghostCandles: GhostCandle[], compact: boolean): 
                 borderWidth: 1,
                 borderRadius: 4,
                 padding: [3, 6],
-                font: '800 10px sans-serif',
+                font: '900 10px sans-serif',
                 align: 'center',
                 verticalAlign: 'middle',
                 shadowBlur: 6,
@@ -2039,7 +2052,7 @@ export default function EChartsCandlestickChart({
               {
                 xAxis: ghostGapSlots[0],
                 itemStyle: {
-                  color: 'rgba(34, 211, 238, 0.045)',
+                  color: 'rgba(34, 211, 238, 0.035)',
                 },
                 label: {
                   show: true,
@@ -2056,7 +2069,7 @@ export default function EChartsCandlestickChart({
                 },
               },
               {
-                xAxis: ghostGapSlots[Math.min(GHOST_CANDLE_COUNT + 1, ghostGapSlots.length - 1)],
+                xAxis: ghostGapSlots[Math.min(GHOST_CANDLE_RESERVED_SLOTS - 1, ghostGapSlots.length - 1)],
               },
             ],
           ]
@@ -2455,7 +2468,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3W' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3Y' : 'Chart Engine v2'}
             </div>
           </div>
         )}
