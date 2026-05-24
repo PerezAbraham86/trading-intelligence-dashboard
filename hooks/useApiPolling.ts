@@ -276,7 +276,7 @@ function normalizeRecentCandles(raw: unknown): CandleData[] {
   if (!Array.isArray(raw)) return []
 
   return raw
-    .map((item: any) => {
+    .map((item: any): CandleData | null => {
       const open = toOptionalNumber(item.open)
       const high = toOptionalNumber(item.high)
       const low = toOptionalNumber(item.low)
@@ -300,7 +300,7 @@ function normalizeRecentCandles(raw: unknown): CandleData[] {
         volume: toNumber(item.volume, 0),
         symbol: item.symbol ?? 'UNKNOWN',
         timeframe: item.timeframe ?? '1',
-        createdAt: item.createdAt,
+        createdAt: item.createdAt ?? new Date().toISOString(),
       }
     })
     .filter((item): item is CandleData => item !== null)
@@ -345,8 +345,20 @@ export function useApiPolling() {
       const candlesJson = await candlesRes.json()
 
       setLatestSignal(normalizeSignal(latestJson))
-      setRecentSignals(normalizeRecentSignals(recentJson))
-      setRecentCandles(normalizeRecentCandles(candlesJson))
+
+      const nextRecentSignals = normalizeRecentSignals(recentJson)
+      const nextRecentCandles = normalizeRecentCandles(candlesJson)
+
+      // Sticky history:
+      // Do not erase valid rows if Render briefly returns [] while waking/restarting.
+      setRecentSignals((prev) =>
+        nextRecentSignals.length > 0 ? nextRecentSignals : prev
+      )
+
+      setRecentCandles((prev) =>
+        nextRecentCandles.length > 0 ? nextRecentCandles : prev
+      )
+
       setConnectionStatus('Connected')
       setLastUpdateTime(new Date().toLocaleTimeString())
       setErrorMessage(null)
