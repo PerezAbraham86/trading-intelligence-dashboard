@@ -1475,8 +1475,11 @@ function buildGhostCandleSeries(ghostCandles: GhostCandle[], compact: boolean): 
         const badgeColor = bull ? 'rgba(8, 153, 129, 0.95)' : 'rgba(242, 54, 69, 0.95)'
 
         const labelText = `${ghostSource === 'python' ? 'PY' : 'G'}${ghostNumber} ${confidence}%`
-        const labelX = xPoint[0] + candleWidth * 0.85
-        const labelY = bull ? highPoint[1] - 20 : lowPoint[1] + 20
+
+        // Keep the confidence badge locked directly above/below its own ghost candle.
+        // Previous version shifted labelX right, making the percentage look one candle ahead.
+        const labelX = xPoint[0]
+        const labelY = bull ? highPoint[1] - 22 : lowPoint[1] + 22
 
         return {
           type: 'group',
@@ -1527,7 +1530,7 @@ function buildGhostCandleSeries(ghostCandles: GhostCandle[], compact: boolean): 
                 borderRadius: 4,
                 padding: [3, 6],
                 font: '800 10px sans-serif',
-                align: 'left',
+                align: 'center',
                 verticalAlign: 'middle',
                 shadowBlur: 6,
                 shadowColor: 'rgba(0,0,0,0.7)',
