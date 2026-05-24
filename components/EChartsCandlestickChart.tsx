@@ -1484,6 +1484,17 @@ export default function EChartsCandlestickChart({
         ? sampleScoreMarkers
         : []
 
+  // v3P overlay visibility gate:
+  // Python engine overlays are valid data, but the toolbar must still decide
+  // what is actually drawn. These filtered arrays also prevent ECharts from
+  // leaving old markPoint/markLine symbols on the chart after toggles are off.
+  const visibleSmcEvents = showSmc ? activeSmcEvents : []
+  const visibleDlmLevels = showDlm ? activeDlmLevels : []
+  const visibleZones = showZones ? activeZones : []
+  const visibleLiquidityEvents = showLiquidity ? activeLiquidityEvents : []
+  const visibleDlmConfluenceMarkers = showDlm ? activeDlmConfluenceMarkers : []
+  const visibleScoreMarkers = showScores ? activeScoreMarkers : []
+
   useEffect(() => {
     if (!chartRef.current) return
 
@@ -1624,10 +1635,9 @@ export default function EChartsCandlestickChart({
 
           markArea: {
             silent: true,
-            data:
-              enableAdvancedOverlays && showZones
-                ? buildZoneMarkAreas(activeZones, compact)
-                : [],
+            data: enableAdvancedOverlays
+              ? buildZoneMarkAreas(visibleZones, compact)
+              : [],
           },
 
           markLine: {
@@ -1635,11 +1645,9 @@ export default function EChartsCandlestickChart({
             symbol: 'none',
             data: enableAdvancedOverlays
               ? [
-                  ...(showSmc ? buildSmcMarkLines(activeSmcEvents) : []),
-                  ...(showDlm ? buildDlmMarkLines(activeDlmLevels, compact) : []),
-                  ...(showLiquidity
-                    ? buildLiquidityMarkLines(activeLiquidityEvents, compact)
-                    : []),
+                  ...buildSmcMarkLines(visibleSmcEvents),
+                  ...buildDlmMarkLines(visibleDlmLevels, compact),
+                  ...buildLiquidityMarkLines(visibleLiquidityEvents, compact),
                 ]
               : [],
           },
@@ -1648,19 +1656,13 @@ export default function EChartsCandlestickChart({
             silent: true,
             data: enableAdvancedOverlays
               ? [
-                  ...(showSmc ? buildSmcMarkPoints(activeSmcEvents, compact) : []),
-                  ...(showLiquidity
-                    ? buildLiquidityMarkPoints(activeLiquidityEvents, compact)
-                    : []),
-                  ...(showDlm
-                    ? buildDlmConfluenceMarkPoints(
-                        activeDlmConfluenceMarkers,
-                        compact
-                      )
-                    : []),
-                  ...(showScores
-                    ? buildScoreMarkPoints(activeScoreMarkers, compact)
-                    : []),
+                  ...buildSmcMarkPoints(visibleSmcEvents, compact),
+                  ...buildLiquidityMarkPoints(visibleLiquidityEvents, compact),
+                  ...buildDlmConfluenceMarkPoints(
+                    visibleDlmConfluenceMarkers,
+                    compact
+                  ),
+                  ...buildScoreMarkPoints(visibleScoreMarkers, compact),
                 ]
               : [],
           },
@@ -1683,9 +1685,14 @@ export default function EChartsCandlestickChart({
       }
     })
 
+    // v3P fix:
+    // Use a full option replacement so ECharts removes old markPoint / markLine
+    // icons immediately when SMC, Zones, Liquidity, AlphaX, or Scores are toggled off.
+    // The current dataZoom range is injected above from zoomStateRef, so the chart
+    // keeps the v3M no-snap-back behavior.
     chartInstance.current.setOption(option, {
-      notMerge: false,
-      replaceMerge: ['series'],
+      notMerge: true,
+      lazyUpdate: false,
     })
 
     const resize = () => {
@@ -1715,6 +1722,12 @@ export default function EChartsCandlestickChart({
     activeLiquidityEvents,
     activeDlmConfluenceMarkers,
     activeScoreMarkers,
+    visibleSmcEvents,
+    visibleDlmLevels,
+    visibleZones,
+    visibleLiquidityEvents,
+    visibleDlmConfluenceMarkers,
+    visibleScoreMarkers,
     usingLiveCandles,
     usingPythonEngine,
     recentCandles,
@@ -1877,7 +1890,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3N' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3P' : 'Chart Engine v2'}
             </div>
           </div>
         )}
