@@ -1,1275 +1,1144 @@
-"""
-api/trading_engine.py
-
-Phase 2 Python engine for the Trading Intelligence Dashboard.
-
-Blueprint source:
-- Your Pine layout:
-  SMC Pro Phase 4 + AlphaX DLM + HA Ghost Candles
-- This Python version keeps the same visual/data layout names so the frontend
-  can render Pine-style objects without needing TradingView alerts.
-
-Phase 1:
-- Heikin Ashi candles
-- internal/swing pivots
-- BOS / CHoCH
-- trend bias
-
-Phase 2:
-- internal/swing order block zones
-- fair value gaps
-- premium/equilibrium/discount zones
-- EQH/EQL liquidity levels
-- liquidity sweeps
-- liquidity pools
-"""
-
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
+import math
 
 
-Direction = Literal["bullish", "bearish", "neutral"]
-Scope = Literal["internal", "swing"]
+# ═══════════════════════════════════════════════════════════════════════════════
+# Trading Intelligence Dashboard Engine
+# Phase 3A:
+# - Python SMC structure / zones / liquidity events
+# - Python AlphaX DLM profile calculations for right-side profile rendering
+#
+# Replace file:
+# api/trading_engine.py
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONFIG — based on your Pine script inputs
-# ─────────────────────────────────────────────────────────────────────────────
-
-DEFAULT_ENGINE_CONFIG: Dict[str, Any] = {
-    # Pine defaults
-    "internal_pivot_len": 5,
-    "swing_pivot_len": 50,
-    "internal_equal_pivot_len": 3,
-    "swing_equal_pivot_len": 3,
-
-    "show_internal_structure": True,
-    "show_swing_structure": True,
-
-    # Order blocks
-    "show_internal_order_blocks": True,
-    "show_swing_order_blocks": False,
-    "internal_order_blocks_size": 5,
-    "swing_order_blocks_size": 5,
-    "order_block_filter": "Atr",
-    "order_block_mitigation": "High/Low",
-
-    # FVG
-    "show_fair_value_gaps": True,
-    "fair_value_gaps_auto_threshold": True,
-    "fair_value_gaps_extend": 1,
-    "max_fair_value_gaps": 8,
-
-    # Equal highs/lows and sweeps
-    "show_equal_highs_lows": True,
-    "equal_highs_lows_threshold": 0.10,
-    "show_internal_sweeps": True,
-    "show_swing_sweeps": True,
-    "sweep_require_close_back": True,
-    "sweep_use_wick_only": True,
-    "sweep_atr_buffer": 0.05,
-
-    # Premium / discount
-    "show_premium_discount_zones": True,
-
-    # Liquidity pools
-    "show_liquidity_pools": True,
-    "liquidity_lookback": 50,
-    "liquidity_cluster_threshold_atr": 0.15,
-
-    # Output limits
-    "max_events": 150,
-    "max_zones": 80,
-    "max_liquidity_events": 120,
-}
+BULLISH = 1
+BEARISH = -1
+NEUTRAL = 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DATA MODELS
+# BASIC HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-@dataclass
-class Candle:
-    time: int | str
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float = 0.0
-    symbol: str = ""
-    timeframe: str = ""
-    createdAt: Optional[str] = None
-
-
-@dataclass
-class HeikinAshiCandle:
-    time: int | str
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float = 0.0
-    symbol: str = ""
-    timeframe: str = ""
-
-
-@dataclass
-class PivotPoint:
-    index: int
-    time: int | str
-    price: float
-    kind: Literal["high", "low"]
-
-
-@dataclass
-class SMCEvent:
-    time: int | str
-    fromTime: int | str
-    price: float
-    tag: Literal["BOS", "CHoCH", "iBOS", "iCHoCH", "HH", "HL", "LH", "LL"]
-    direction: Direction
-    scope: Scope
-    fromIndex: int
-    toIndex: int
-
-
-@dataclass
-class SmcZone:
-    startTime: int | str
-    endTime: int | str
-    top: float
-    bottom: float
-    label: str
-    direction: Direction
-    kind: Literal[
-        "internal_ob",
-        "swing_ob",
-        "fvg",
-        "premium",
-        "equilibrium",
-        "discount",
-    ]
-
-
-@dataclass
-class LiquidityEvent:
-    time: int | str
-    fromTime: Optional[int | str]
-    price: float
-    label: str
-    direction: Direction
-    kind: Literal[
-        "eqh",
-        "eql",
-        "internal_sweep",
-        "swing_sweep",
-        "liquidity_pool",
-        "inducement",
-    ]
-    touches: Optional[int] = None
-
-
-@dataclass
-class StructureState:
-    scope: Scope
-    bias: Direction
-    lastHigh: Optional[float]
-    lastLow: Optional[float]
-    lastHighTime: Optional[int | str]
-    lastLowTime: Optional[int | str]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SAFE PARSING
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _to_float(value: Any, fallback: float = 0.0) -> float:
+def _float(value: Any, fallback: float = 0.0) -> float:
     try:
         if value is None:
             return fallback
-        parsed = float(value)
-        if parsed != parsed:
+        x = float(value)
+        if math.isnan(x) or math.isinf(x):
             return fallback
-        return parsed
+        return x
     except Exception:
         return fallback
 
 
-def _normalize_candle(raw: Any) -> Optional[Candle]:
-    if raw is None:
-        return None
-
-    if isinstance(raw, Candle):
-        return raw
-
-    if not isinstance(raw, dict):
-        return None
-
-    if not all(key in raw for key in ("open", "high", "low", "close")):
-        return None
-
-    return Candle(
-        time=raw.get("time") or raw.get("timestamp") or raw.get("createdAt") or "",
-        open=_to_float(raw.get("open")),
-        high=_to_float(raw.get("high")),
-        low=_to_float(raw.get("low")),
-        close=_to_float(raw.get("close")),
-        volume=_to_float(raw.get("volume"), 0.0),
-        symbol=str(raw.get("symbol") or ""),
-        timeframe=str(raw.get("timeframe") or ""),
-        createdAt=raw.get("createdAt"),
-    )
+def _int(value: Any, fallback: int = 0) -> int:
+    try:
+        if value is None:
+            return fallback
+        return int(float(value))
+    except Exception:
+        return fallback
 
 
-def normalize_candles(raw_candles: List[Any]) -> List[Candle]:
-    candles: List[Candle] = []
+def _epoch_seconds(value: Any) -> float:
+    if value is None:
+        return 0.0
 
-    for raw in raw_candles or []:
-        candle = _normalize_candle(raw)
-        if candle is not None:
-            candles.append(candle)
+    if isinstance(value, (int, float)):
+        n = float(value)
+        return n / 1000.0 if n > 1_000_000_000_000 else n
 
-    def sort_key(c: Candle) -> Any:
-        try:
-            return float(c.time)
-        except Exception:
-            return str(c.time)
+    text = str(value).strip()
+    if not text:
+        return 0.0
 
     try:
-        candles.sort(key=sort_key)
+        n = float(text)
+        return n / 1000.0 if n > 1_000_000_000_000 else n
     except Exception:
         pass
 
-    return candles
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return 0.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BASIC INDICATORS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def calculate_true_range(candles: List[Candle]) -> List[float]:
-    tr_values: List[float] = []
-
-    for i, candle in enumerate(candles):
-        if i == 0:
-            tr_values.append(max(candle.high - candle.low, 0.0))
-            continue
-
-        prev_close = candles[i - 1].close
-        tr = max(
-            candle.high - candle.low,
-            abs(candle.high - prev_close),
-            abs(candle.low - prev_close),
-        )
-        tr_values.append(max(tr, 0.0))
-
-    return tr_values
+def _time_value(candle: Dict[str, Any]) -> Any:
+    return candle.get("time") or candle.get("timestamp") or candle.get("createdAt")
 
 
-def calculate_atr(candles: List[Candle], length: int = 200) -> List[float]:
-    tr_values = calculate_true_range(candles)
-    atr: List[float] = []
+def _sort_candles(candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(candles, key=lambda c: _epoch_seconds(_time_value(c)))
 
-    running_sum = 0.0
 
-    for i, tr in enumerate(tr_values):
-        running_sum += tr
+def _safe_time(candles: List[Dict[str, Any]], index: int) -> Any:
+    if not candles:
+        return None
+    index = max(0, min(index, len(candles) - 1))
+    return _time_value(candles[index])
 
+
+def _safe_price(value: float) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return 0.0
+    return float(value)
+
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
+def _sma(values: List[float], length: int) -> List[float]:
+    out: List[float] = []
+    length = max(1, int(length))
+    total = 0.0
+
+    for i, v in enumerate(values):
+        total += v
         if i >= length:
-            running_sum -= tr_values[i - length]
-            atr.append(running_sum / length)
+            total -= values[i - length]
+        count = min(i + 1, length)
+        out.append(total / count if count else 0.0)
+
+    return out
+
+
+def _ema(values: List[float], length: int) -> List[float]:
+    out: List[float] = []
+    length = max(1, int(length))
+    alpha = 2.0 / (length + 1.0)
+    prev = values[0] if values else 0.0
+
+    for i, v in enumerate(values):
+        prev = v if i == 0 else prev + alpha * (v - prev)
+        out.append(prev)
+
+    return out
+
+
+def _atr(candles: List[Dict[str, Any]], length: int = 14) -> List[float]:
+    trs: List[float] = []
+    prev_close: Optional[float] = None
+
+    for c in candles:
+        h = _float(c.get("high"))
+        l = _float(c.get("low"))
+        close = _float(c.get("close"))
+
+        if prev_close is None:
+            tr = max(h - l, 0.0)
         else:
-            atr.append(running_sum / max(i + 1, 1))
+            tr = max(h - l, abs(h - prev_close), abs(l - prev_close), 0.0)
 
-    return atr
+        trs.append(tr)
+        prev_close = close
 
-
-def calculate_heikin_ashi(candles: List[Candle]) -> List[HeikinAshiCandle]:
-    ha: List[HeikinAshiCandle] = []
-
-    for index, candle in enumerate(candles):
-        ha_close = (candle.open + candle.high + candle.low + candle.close) / 4.0
-
-        if index == 0:
-            ha_open = (candle.open + candle.close) / 2.0
-        else:
-            prev = ha[-1]
-            ha_open = (prev.open + prev.close) / 2.0
-
-        ha_high = max(candle.high, ha_open, ha_close)
-        ha_low = min(candle.low, ha_open, ha_close)
-
-        ha.append(
-            HeikinAshiCandle(
-                time=candle.time,
-                open=ha_open,
-                high=ha_high,
-                low=ha_low,
-                close=ha_close,
-                volume=candle.volume,
-                symbol=candle.symbol,
-                timeframe=candle.timeframe,
-            )
-        )
-
-    return ha
+    return _ema(trs, length)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PIVOTS
-# ─────────────────────────────────────────────────────────────────────────────
+def _normalize_candle(raw: Dict[str, Any]) -> Dict[str, Any]:
+    t = _time_value(raw)
+    return {
+        "time": t,
+        "timestamp": t,
+        "epoch": _epoch_seconds(t),
+        "open": _float(raw.get("open")),
+        "high": _float(raw.get("high")),
+        "low": _float(raw.get("low")),
+        "close": _float(raw.get("close")),
+        "volume": _float(raw.get("volume")),
+        "symbol": raw.get("symbol"),
+        "timeframe": raw.get("timeframe"),
+        "createdAt": raw.get("createdAt"),
+    }
 
-def _is_pivot_high(candles: List[Candle], index: int, length: int) -> bool:
-    if index - length < 0 or index + length >= len(candles):
-        return False
 
-    current = candles[index].high
+def _prepare_candles(candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    clean: List[Dict[str, Any]] = []
 
-    for i in range(index - length, index + length + 1):
-        if i == index:
+    for c in candles or []:
+        if not isinstance(c, dict):
             continue
-        if candles[i].high >= current:
-            return False
 
+        o = _float(c.get("open"), math.nan)
+        h = _float(c.get("high"), math.nan)
+        l = _float(c.get("low"), math.nan)
+        cl = _float(c.get("close"), math.nan)
+
+        if any(math.isnan(x) for x in [o, h, l, cl]):
+            continue
+
+        clean.append(_normalize_candle(c))
+
+    clean = _sort_candles(clean)
+
+    # Deduplicate by epoch second.
+    dedup: Dict[int, Dict[str, Any]] = {}
+    for c in clean:
+        epoch = int(_epoch_seconds(c.get("time")))
+        dedup[epoch] = c
+
+    return sorted(dedup.values(), key=lambda x: _epoch_seconds(x.get("time")))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HEIKIN ASHI
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_heikin_ashi(candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    prev_ha_open: Optional[float] = None
+    prev_ha_close: Optional[float] = None
+
+    for c in candles:
+        o = _float(c.get("open"))
+        h = _float(c.get("high"))
+        l = _float(c.get("low"))
+        close = _float(c.get("close"))
+
+        ha_close = (o + h + l + close) / 4.0
+        ha_open = (o + close) / 2.0 if prev_ha_open is None else (prev_ha_open + prev_ha_close) / 2.0
+        ha_high = max(h, ha_open, ha_close)
+        ha_low = min(l, ha_open, ha_close)
+
+        out.append({
+            **c,
+            "open": ha_open,
+            "high": ha_high,
+            "low": ha_low,
+            "close": ha_close,
+            "sourceOpen": o,
+            "sourceHigh": h,
+            "sourceLow": l,
+            "sourceClose": close,
+        })
+
+        prev_ha_open = ha_open
+        prev_ha_close = ha_close
+
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PIVOTS / SMC STRUCTURE
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class Pivot:
+    index: int
+    time: Any
+    price: float
+    kind: str  # high / low
+    scope: str # internal / swing
+
+
+def _pivot_high(candles: List[Dict[str, Any]], i: int, left: int, right: int) -> bool:
+    price = _float(candles[i].get("high"))
+    start = max(0, i - left)
+    end = min(len(candles) - 1, i + right)
+    for j in range(start, end + 1):
+        if j == i:
+            continue
+        if _float(candles[j].get("high")) >= price:
+            return False
     return True
 
 
-def _is_pivot_low(candles: List[Candle], index: int, length: int) -> bool:
-    if index - length < 0 or index + length >= len(candles):
-        return False
-
-    current = candles[index].low
-
-    for i in range(index - length, index + length + 1):
-        if i == index:
+def _pivot_low(candles: List[Dict[str, Any]], i: int, left: int, right: int) -> bool:
+    price = _float(candles[i].get("low"))
+    start = max(0, i - left)
+    end = min(len(candles) - 1, i + right)
+    for j in range(start, end + 1):
+        if j == i:
             continue
-        if candles[i].low <= current:
+        if _float(candles[j].get("low")) <= price:
             return False
-
     return True
 
 
-def detect_pivots(candles: List[Candle], length: int) -> Tuple[List[PivotPoint], List[PivotPoint]]:
-    highs: List[PivotPoint] = []
-    lows: List[PivotPoint] = []
+def find_pivots(candles: List[Dict[str, Any]], length: int, scope: str) -> List[Pivot]:
+    length = max(2, int(length))
+    left = length
+    right = length
+    pivots: List[Pivot] = []
 
-    if length < 1 or len(candles) < length * 2 + 1:
-        return highs, lows
+    if len(candles) < length * 2 + 3:
+        return pivots
 
-    for index in range(length, len(candles) - length):
-        candle = candles[index]
+    for i in range(left, len(candles) - right):
+        if _pivot_high(candles, i, left, right):
+            pivots.append(Pivot(
+                index=i,
+                time=_safe_time(candles, i),
+                price=_float(candles[i].get("high")),
+                kind="high",
+                scope=scope,
+            ))
 
-        if _is_pivot_high(candles, index, length):
-            highs.append(PivotPoint(index=index, time=candle.time, price=candle.high, kind="high"))
+        if _pivot_low(candles, i, left, right):
+            pivots.append(Pivot(
+                index=i,
+                time=_safe_time(candles, i),
+                price=_float(candles[i].get("low")),
+                kind="low",
+                scope=scope,
+            ))
 
-        if _is_pivot_low(candles, index, length):
-            lows.append(PivotPoint(index=index, time=candle.time, price=candle.low, kind="low"))
-
-    return highs, lows
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# STRUCTURE EVENTS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _event_tag(scope: Scope, event_type: Literal["BOS", "CHoCH"]) -> Literal["BOS", "CHoCH", "iBOS", "iCHoCH"]:
-    if scope == "internal":
-        return "iBOS" if event_type == "BOS" else "iCHoCH"
-    return event_type
+    pivots.sort(key=lambda p: p.index)
+    return pivots
 
 
 def detect_structure_events(
-    candles: List[Candle],
-    pivot_highs: List[PivotPoint],
-    pivot_lows: List[PivotPoint],
-    scope: Scope,
-    max_events: int = 150,
-) -> Tuple[List[SMCEvent], StructureState]:
-    events: List[SMCEvent] = []
+    candles: List[Dict[str, Any]],
+    pivots: List[Pivot],
+    scope: str,
+    max_events: int,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    events: List[Dict[str, Any]] = []
+    order_blocks: List[Dict[str, Any]] = []
 
-    highs_by_index: Dict[int, PivotPoint] = {pivot.index: pivot for pivot in pivot_highs}
-    lows_by_index: Dict[int, PivotPoint] = {pivot.index: pivot for pivot in pivot_lows}
+    last_high: Optional[Pivot] = None
+    last_low: Optional[Pivot] = None
+    crossed_high: set[int] = set()
+    crossed_low: set[int] = set()
+    trend = NEUTRAL
 
-    active_high: Optional[PivotPoint] = None
-    active_low: Optional[PivotPoint] = None
-    crossed_high_indexes: set[int] = set()
-    crossed_low_indexes: set[int] = set()
+    pivot_by_index: Dict[int, List[Pivot]] = {}
+    for p in pivots:
+        pivot_by_index.setdefault(p.index, []).append(p)
 
-    trend_bias = 0
+    for i, c in enumerate(candles):
+        for p in pivot_by_index.get(i, []):
+            if p.kind == "high":
+                last_high = p
+            elif p.kind == "low":
+                last_low = p
 
-    for index, candle in enumerate(candles):
-        if index in highs_by_index:
-            active_high = highs_by_index[index]
+        close = _float(c.get("close"))
 
-        if index in lows_by_index:
-            active_low = lows_by_index[index]
+        if last_high and last_high.index not in crossed_high and close > last_high.price:
+            tag = "CHoCH" if trend == BEARISH else "BOS"
+            direction = "bullish"
+            events.append({
+                "time": _safe_time(candles, i),
+                "fromTime": last_high.time,
+                "price": last_high.price,
+                "tag": "i" + tag if scope == "internal" else tag,
+                "direction": direction,
+                "scope": scope,
+                "kind": "structure",
+                "index": i,
+                "fromIndex": last_high.index,
+            })
+            crossed_high.add(last_high.index)
+            trend = BULLISH
 
-        if (
-            active_high is not None
-            and active_high.index not in crossed_high_indexes
-            and candle.close > active_high.price
-            and index > active_high.index
-        ):
-            event_type: Literal["BOS", "CHoCH"] = "CHoCH" if trend_bias == -1 else "BOS"
-            trend_bias = 1
-            crossed_high_indexes.add(active_high.index)
+            ob = _find_order_block(candles, last_high.index, i, BULLISH, scope)
+            if ob:
+                order_blocks.append(ob)
 
-            events.append(
-                SMCEvent(
-                    time=candle.time,
-                    fromTime=active_high.time,
-                    price=active_high.price,
-                    tag=_event_tag(scope, event_type),
-                    direction="bullish",
-                    scope=scope,
-                    fromIndex=active_high.index,
-                    toIndex=index,
-                )
-            )
-
-        if (
-            active_low is not None
-            and active_low.index not in crossed_low_indexes
-            and candle.close < active_low.price
-            and index > active_low.index
-        ):
-            event_type = "CHoCH" if trend_bias == 1 else "BOS"
-            trend_bias = -1
-            crossed_low_indexes.add(active_low.index)
-
-            events.append(
-                SMCEvent(
-                    time=candle.time,
-                    fromTime=active_low.time,
-                    price=active_low.price,
-                    tag=_event_tag(scope, event_type),
-                    direction="bearish",
-                    scope=scope,
-                    fromIndex=active_low.index,
-                    toIndex=index,
-                )
-            )
-
-    if len(events) > max_events:
-        events = events[-max_events:]
-
-    state = StructureState(
-        scope=scope,
-        bias="bullish" if trend_bias == 1 else "bearish" if trend_bias == -1 else "neutral",
-        lastHigh=active_high.price if active_high else None,
-        lastLow=active_low.price if active_low else None,
-        lastHighTime=active_high.time if active_high else None,
-        lastLowTime=active_low.time if active_low else None,
-    )
-
-    return events, state
-
-
-def build_swing_point_events(
-    pivot_highs: List[PivotPoint],
-    pivot_lows: List[PivotPoint],
-    max_events: int = 80,
-) -> List[SMCEvent]:
-    events: List[SMCEvent] = []
-
-    last_high: Optional[PivotPoint] = None
-    last_low: Optional[PivotPoint] = None
-
-    merged = sorted([*pivot_highs, *pivot_lows], key=lambda p: p.index)
-
-    for pivot in merged:
-        if pivot.kind == "high":
-            tag: Literal["HH", "LH"] = "HH" if last_high is None or pivot.price > last_high.price else "LH"
-            events.append(
-                SMCEvent(
-                    time=pivot.time,
-                    fromTime=last_high.time if last_high else pivot.time,
-                    price=pivot.price,
-                    tag=tag,
-                    direction="bearish",
-                    scope="swing",
-                    fromIndex=last_high.index if last_high else pivot.index,
-                    toIndex=pivot.index,
-                )
-            )
-            last_high = pivot
-
-        if pivot.kind == "low":
-            tag2: Literal["HL", "LL"] = "HL" if last_low is None or pivot.price > last_low.price else "LL"
-            events.append(
-                SMCEvent(
-                    time=pivot.time,
-                    fromTime=last_low.time if last_low else pivot.time,
-                    price=pivot.price,
-                    tag=tag2,
-                    direction="bullish" if tag2 == "HL" else "bearish",
-                    scope="swing",
-                    fromIndex=last_low.index if last_low else pivot.index,
-                    toIndex=pivot.index,
-                )
-            )
-            last_low = pivot
-
-    return events[-max_events:]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ORDER BLOCKS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _parsed_high_low(candle: Candle, atr_value: float, range_method_value: float, use_atr: bool) -> Tuple[float, float]:
-    volatility_measure = atr_value if use_atr else range_method_value
-    high_volatility = (candle.high - candle.low) >= 2.0 * max(volatility_measure, 1e-12)
-
-    parsed_high = candle.low if high_volatility else candle.high
-    parsed_low = candle.high if high_volatility else candle.low
-
-    return parsed_high, parsed_low
-
-
-def build_order_blocks(
-    candles: List[Candle],
-    structure_events: List[SMCEvent],
-    scope: Scope,
-    max_blocks: int,
-    use_atr_filter: bool,
-    atr_values: List[float],
-) -> List[SmcZone]:
-    zones: List[SmcZone] = []
-
-    if not candles:
-        return zones
-
-    tr_values = calculate_true_range(candles)
-    cumulative_tr = 0.0
-    range_method_values: List[float] = []
-
-    for i, tr in enumerate(tr_values):
-        cumulative_tr += tr
-        range_method_values.append(cumulative_tr / max(i + 1, 1))
-
-    for event in structure_events:
-        if event.fromIndex < 0 or event.toIndex <= event.fromIndex:
-            continue
-
-        search = candles[event.fromIndex:event.toIndex + 1]
-        if not search:
-            continue
-
-        parsed_candidates: List[Tuple[int, float, float]] = []
-
-        for local_index, candle in enumerate(search):
-            global_index = event.fromIndex + local_index
-            parsed_high, parsed_low = _parsed_high_low(
-                candle,
-                atr_values[global_index] if global_index < len(atr_values) else 0.0,
-                range_method_values[global_index] if global_index < len(range_method_values) else 0.0,
-                use_atr_filter,
-            )
-            parsed_candidates.append((global_index, parsed_high, parsed_low))
-
-        if event.direction == "bullish":
-            # Pine stores bullish OB from the lowest parsed low between pivot and break.
-            selected = min(parsed_candidates, key=lambda item: item[2])
-            direction: Direction = "bullish"
-            label = "Internal Bullish OB" if scope == "internal" else "Swing Bullish OB"
-        else:
-            # Pine stores bearish OB from the highest parsed high.
-            selected = max(parsed_candidates, key=lambda item: item[1])
+        if last_low and last_low.index not in crossed_low and close < last_low.price:
+            tag = "CHoCH" if trend == BULLISH else "BOS"
             direction = "bearish"
-            label = "Internal Bearish OB" if scope == "internal" else "Swing Bearish OB"
+            events.append({
+                "time": _safe_time(candles, i),
+                "fromTime": last_low.time,
+                "price": last_low.price,
+                "tag": "i" + tag if scope == "internal" else tag,
+                "direction": direction,
+                "scope": scope,
+                "kind": "structure",
+                "index": i,
+                "fromIndex": last_low.index,
+            })
+            crossed_low.add(last_low.index)
+            trend = BEARISH
 
-        selected_index, selected_high, selected_low = selected
+            ob = _find_order_block(candles, last_low.index, i, BEARISH, scope)
+            if ob:
+                order_blocks.append(ob)
 
-        top = max(selected_high, selected_low)
-        bottom = min(selected_high, selected_low)
-
-        zones.append(
-            SmcZone(
-                startTime=candles[selected_index].time,
-                endTime=candles[-1].time,
-                top=top,
-                bottom=bottom,
-                label=label,
-                direction=direction,
-                kind="internal_ob" if scope == "internal" else "swing_ob",
-            )
-        )
-
-    # De-dupe by start/kind/top/bottom while preserving latest.
-    unique: Dict[str, SmcZone] = {}
-    for zone in zones:
-        key = f"{zone.kind}:{zone.startTime}:{round(zone.top, 8)}:{round(zone.bottom, 8)}"
-        unique[key] = zone
-
-    return list(unique.values())[-max_blocks:]
+    return events[-max_events:], order_blocks
 
 
-def filter_mitigated_order_blocks(
-    candles: List[Candle],
-    zones: List[SmcZone],
-    mitigation: str,
-) -> List[SmcZone]:
+def _find_order_block(
+    candles: List[Dict[str, Any]],
+    start_index: int,
+    end_index: int,
+    bias: int,
+    scope: str,
+) -> Optional[Dict[str, Any]]:
     if not candles:
-        return zones
+        return None
 
-    kept: List[SmcZone] = []
+    start = max(0, min(start_index, end_index))
+    end = max(0, min(max(start_index, end_index), len(candles) - 1))
+    window = candles[start:end + 1]
 
-    for zone in zones:
-        try:
-            start_index = next(i for i, candle in enumerate(candles) if candle.time == zone.startTime)
-        except StopIteration:
-            start_index = 0
+    if not window:
+        return None
 
-        mitigated = False
+    chosen_index = start
+    if bias == BULLISH:
+        # Bullish OB = lowest bearish/low candle before bullish break.
+        min_low = float("inf")
+        for offset, c in enumerate(window):
+            o = _float(c.get("open"))
+            cl = _float(c.get("close"))
+            l = _float(c.get("low"))
+            if cl <= o and l < min_low:
+                min_low = l
+                chosen_index = start + offset
+        if min_low == float("inf"):
+            chosen_index = min(range(start, end + 1), key=lambda idx: _float(candles[idx].get("low")))
+    else:
+        # Bearish OB = highest bullish/high candle before bearish break.
+        max_high = float("-inf")
+        for offset, c in enumerate(window):
+            o = _float(c.get("open"))
+            cl = _float(c.get("close"))
+            h = _float(c.get("high"))
+            if cl >= o and h > max_high:
+                max_high = h
+                chosen_index = start + offset
+        if max_high == float("-inf"):
+            chosen_index = max(range(start, end + 1), key=lambda idx: _float(candles[idx].get("high")))
 
-        for candle in candles[start_index + 1:]:
-            bearish_source = candle.close if mitigation == "Close" else candle.high
-            bullish_source = candle.close if mitigation == "Close" else candle.low
+    chosen = candles[chosen_index]
+    direction = "bullish" if bias == BULLISH else "bearish"
 
-            if zone.direction == "bearish" and bearish_source > zone.top:
-                mitigated = True
-                break
-
-            if zone.direction == "bullish" and bullish_source < zone.bottom:
-                mitigated = True
-                break
-
-        if not mitigated:
-            kept.append(zone)
-
-    return kept
+    return {
+        "startTime": _safe_time(candles, chosen_index),
+        "endTime": _safe_time(candles, len(candles) - 1),
+        "top": _float(chosen.get("high")),
+        "bottom": _float(chosen.get("low")),
+        "label": f"{scope.title()} {'Bullish' if bias == BULLISH else 'Bearish'} OB",
+        "direction": direction,
+        "kind": f"{scope}_ob",
+        "index": chosen_index,
+        "scope": scope,
+    }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FVG
-# ─────────────────────────────────────────────────────────────────────────────
-
-def detect_fair_value_gaps(
-    candles: List[Candle],
-    max_fvgs: int = 8,
-    auto_threshold: bool = True,
-) -> List[SmcZone]:
-    zones: List[SmcZone] = []
+def detect_fvgs(candles: List[Dict[str, Any]], max_zones: int) -> List[Dict[str, Any]]:
+    zones: List[Dict[str, Any]] = []
 
     if len(candles) < 3:
         return zones
 
-    # Pine threshold is based on a cum average. For Python, keep a stable threshold
-    # that avoids tiny gaps but still plots most meaningful FVGs.
-    body_percentages: List[float] = []
-
-    for i in range(1, len(candles)):
-        prev = candles[i - 1]
-        if prev.open != 0:
-            body_percentages.append(abs(prev.close - prev.open) / abs(prev.open) * 100.0)
-
-    avg_body_pct = sum(body_percentages) / max(len(body_percentages), 1)
-    threshold = avg_body_pct * 0.25 if auto_threshold else 0.0
+    atr = _atr(candles, 14)
 
     for i in range(2, len(candles)):
-        current = candles[i]
-        prev = candles[i - 1]
-        two_back = candles[i - 2]
+        c = candles[i]
+        c2 = candles[i - 2]
+        current_low = _float(c.get("low"))
+        current_high = _float(c.get("high"))
+        prev2_high = _float(c2.get("high"))
+        prev2_low = _float(c2.get("low"))
+        min_gap = max(atr[i] * 0.05, 0.0)
 
-        prev_delta_pct = abs(prev.close - prev.open) / abs(prev.open) * 100.0 if prev.open != 0 else 0.0
+        if current_low > prev2_high and (current_low - prev2_high) >= min_gap:
+            zones.append({
+                "startTime": _safe_time(candles, i - 2),
+                "endTime": _safe_time(candles, len(candles) - 1),
+                "top": current_low,
+                "bottom": prev2_high,
+                "label": "Bullish FVG",
+                "direction": "bullish",
+                "kind": "fvg",
+                "index": i,
+            })
 
-        bullish = current.low > two_back.high and prev.close > two_back.high and prev_delta_pct >= threshold
-        bearish = current.high < two_back.low and prev.close < two_back.low and prev_delta_pct >= threshold
+        if current_high < prev2_low and (prev2_low - current_high) >= min_gap:
+            zones.append({
+                "startTime": _safe_time(candles, i - 2),
+                "endTime": _safe_time(candles, len(candles) - 1),
+                "top": prev2_low,
+                "bottom": current_high,
+                "label": "Bearish FVG",
+                "direction": "bearish",
+                "kind": "fvg",
+                "index": i,
+            })
 
-        if bullish:
-            zones.append(
-                SmcZone(
-                    startTime=two_back.time,
-                    endTime=candles[-1].time,
-                    top=current.low,
-                    bottom=two_back.high,
-                    label="Bullish FVG",
-                    direction="bullish",
-                    kind="fvg",
-                )
-            )
-
-        if bearish:
-            zones.append(
-                SmcZone(
-                    startTime=two_back.time,
-                    endTime=candles[-1].time,
-                    top=two_back.low,
-                    bottom=current.high,
-                    label="Bearish FVG",
-                    direction="bearish",
-                    kind="fvg",
-                )
-            )
-
-    # Remove mitigated FVGs.
-    active: List[SmcZone] = []
-
-    for zone in zones:
-        try:
-            start_index = next(i for i, candle in enumerate(candles) if candle.time == zone.startTime)
-        except StopIteration:
-            start_index = 0
-
-        mitigated = False
-
-        for candle in candles[start_index + 2:]:
-            if zone.direction == "bullish" and candle.low <= zone.bottom:
-                mitigated = True
-                break
-            if zone.direction == "bearish" and candle.high >= zone.top:
-                mitigated = True
-                break
-
-        if not mitigated:
-            active.append(zone)
-
-    return active[-max_fvgs:]
+    return zones[-max_zones:]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PREMIUM / DISCOUNT
-# ─────────────────────────────────────────────────────────────────────────────
-
-def build_premium_discount_zones(
-    candles: List[Candle],
-    swing_highs: List[PivotPoint],
-    swing_lows: List[PivotPoint],
-) -> List[SmcZone]:
+def detect_premium_discount_zones(candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not candles:
         return []
 
-    if swing_highs:
-        top_pivot = max(swing_highs[-5:], key=lambda p: p.price)
-        top = top_pivot.price
-        top_time = top_pivot.time
-    else:
-        top = max(c.high for c in candles)
-        top_time = candles[0].time
+    highs = [_float(c.get("high")) for c in candles]
+    lows = [_float(c.get("low")) for c in candles]
 
-    if swing_lows:
-        bottom_pivot = min(swing_lows[-5:], key=lambda p: p.price)
-        bottom = bottom_pivot.price
-        bottom_time = bottom_pivot.time
-    else:
-        bottom = min(c.low for c in candles)
-        bottom_time = candles[0].time
-
-    if top <= bottom:
-        return []
-
-    start_time = top_time if str(top_time) < str(bottom_time) else bottom_time
-    end_time = candles[-1].time
-
-    # Mirrors Pine proportions:
-    # premium: top to 0.95 top + 0.05 bottom
-    # equilibrium: 0.525 top + 0.475 bottom to 0.525 bottom + 0.475 top
-    # discount: 0.95 bottom + 0.05 top to bottom
-    premium_bottom = 0.95 * top + 0.05 * bottom
-    eq_top = 0.525 * top + 0.475 * bottom
-    eq_bottom = 0.525 * bottom + 0.475 * top
-    discount_top = 0.95 * bottom + 0.05 * top
+    top = max(highs)
+    bottom = min(lows)
+    mid = (top + bottom) / 2.0
+    start_time = _safe_time(candles, 0)
+    end_time = _safe_time(candles, len(candles) - 1)
 
     return [
-        SmcZone(
-            startTime=start_time,
-            endTime=end_time,
-            top=top,
-            bottom=premium_bottom,
-            label="Premium",
-            direction="bearish",
-            kind="premium",
-        ),
-        SmcZone(
-            startTime=start_time,
-            endTime=end_time,
-            top=eq_top,
-            bottom=eq_bottom,
-            label="Equilibrium",
-            direction="neutral",
-            kind="equilibrium",
-        ),
-        SmcZone(
-            startTime=start_time,
-            endTime=end_time,
-            top=discount_top,
-            bottom=bottom,
-            label="Discount",
-            direction="bullish",
-            kind="discount",
-        ),
+        {
+            "startTime": start_time,
+            "endTime": end_time,
+            "top": top,
+            "bottom": (top * 0.95 + bottom * 0.05),
+            "label": "Premium",
+            "direction": "bearish",
+            "kind": "premium",
+        },
+        {
+            "startTime": start_time,
+            "endTime": end_time,
+            "top": (top * 0.525 + bottom * 0.475),
+            "bottom": (bottom * 0.525 + top * 0.475),
+            "label": "Equilibrium",
+            "direction": "neutral",
+            "kind": "equilibrium",
+        },
+        {
+            "startTime": start_time,
+            "endTime": end_time,
+            "top": (bottom * 0.95 + top * 0.05),
+            "bottom": bottom,
+            "label": "Discount",
+            "direction": "bullish",
+            "kind": "discount",
+        },
     ]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LIQUIDITY EVENTS: EQH/EQL, SWEEPS, POOLS
-# ─────────────────────────────────────────────────────────────────────────────
+def detect_equal_high_low_and_sweeps(
+    candles: List[Dict[str, Any]],
+    pivots: List[Pivot],
+    threshold_atr_mult: float,
+    max_events: int,
+) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
 
-def detect_equal_highs_lows(
-    pivot_highs: List[PivotPoint],
-    pivot_lows: List[PivotPoint],
-    atr_values: List[float],
-    threshold_mult: float,
-    max_events: int = 60,
-) -> List[LiquidityEvent]:
-    events: List[LiquidityEvent] = []
+    if not candles or not pivots:
+        return events
 
-    for pivots, kind, label, direction in [
-        (pivot_highs, "eqh", "EQH", "bearish"),
-        (pivot_lows, "eql", "EQL", "bullish"),
-    ]:
-        for i in range(1, len(pivots)):
-            prev = pivots[i - 1]
-            curr = pivots[i]
+    atr = _atr(candles, 14)
+    highs = [p for p in pivots if p.kind == "high"]
+    lows = [p for p in pivots if p.kind == "low"]
 
-            atr_index = min(curr.index, len(atr_values) - 1)
-            atr = atr_values[atr_index] if atr_values else 0.0
-            threshold = atr * threshold_mult
+    def add_pool_events(points: List[Pivot], direction: str, label: str, sweep_label: str) -> None:
+        for i in range(1, len(points)):
+            prev = points[i - 1]
+            cur = points[i]
+            ref_atr = atr[min(cur.index, len(atr) - 1)] if atr else 0.0
+            threshold = max(ref_atr * threshold_atr_mult, 1e-9)
 
-            if abs(curr.price - prev.price) <= threshold:
-                events.append(
-                    LiquidityEvent(
-                        time=curr.time,
-                        fromTime=prev.time,
-                        price=(curr.price + prev.price) / 2.0,
-                        label=label,
-                        direction=direction,  # type: ignore[arg-type]
-                        kind=kind,  # type: ignore[arg-type]
-                        touches=2,
-                    )
-                )
+            if abs(cur.price - prev.price) <= threshold:
+                level = (cur.price + prev.price) / 2.0
+                events.append({
+                    "time": cur.time,
+                    "price": level,
+                    "label": label,
+                    "direction": direction,
+                    "kind": "liquidity_pool",
+                    "touches": 2,
+                    "index": cur.index,
+                })
 
-    events.sort(key=lambda event: str(event.time))
+                for j in range(cur.index + 1, min(len(candles), cur.index + 80)):
+                    h = _float(candles[j].get("high"))
+                    l = _float(candles[j].get("low"))
+                    cl = _float(candles[j].get("close"))
+
+                    if direction == "bearish":
+                        if h > level and cl < level:
+                            events.append({
+                                "time": _safe_time(candles, j),
+                                "price": level,
+                                "label": sweep_label,
+                                "direction": "bearish",
+                                "kind": "sweep",
+                                "index": j,
+                            })
+                            break
+                    else:
+                        if l < level and cl > level:
+                            events.append({
+                                "time": _safe_time(candles, j),
+                                "price": level,
+                                "label": sweep_label,
+                                "direction": "bullish",
+                                "kind": "sweep",
+                                "index": j,
+                            })
+                            break
+
+    add_pool_events(highs, "bearish", "Buy-Side Pool", "BSL Sweep")
+    add_pool_events(lows, "bullish", "Sell-Side Pool", "SSL Sweep")
+
+    events.sort(key=lambda e: e.get("index", 0))
     return events[-max_events:]
 
 
-def detect_liquidity_sweeps(
-    candles: List[Candle],
-    equal_events: List[LiquidityEvent],
-    atr_values: List[float],
-    cfg: Dict[str, Any],
-    max_events: int = 80,
-) -> List[LiquidityEvent]:
-    sweeps: List[LiquidityEvent] = []
-
-    for event in equal_events:
-        try:
-            start_index = next(i for i, candle in enumerate(candles) if candle.time == event.time)
-        except StopIteration:
-            start_index = 0
-
-        for i in range(start_index + 1, len(candles)):
-            candle = candles[i]
-            atr = atr_values[i] if i < len(atr_values) else 0.0
-            buffer = atr * float(cfg["sweep_atr_buffer"])
-
-            if event.kind == "eql":
-                wick_through = candle.low < event.price - buffer
-                close_back = candle.close > event.price
-                valid = (wick_through if cfg["sweep_use_wick_only"] else candle.low <= event.price) and (
-                    close_back if cfg["sweep_require_close_back"] else True
-                )
-
-                if valid:
-                    sweeps.append(
-                        LiquidityEvent(
-                            time=candle.time,
-                            fromTime=event.fromTime,
-                            price=event.price,
-                            label="iLS" if event.label == "EQL" else "LSL",
-                            direction="bullish",
-                            kind="internal_sweep",
-                        )
-                    )
-                    break
-
-            if event.kind == "eqh":
-                wick_through = candle.high > event.price + buffer
-                close_back = candle.close < event.price
-                valid = (wick_through if cfg["sweep_use_wick_only"] else candle.high >= event.price) and (
-                    close_back if cfg["sweep_require_close_back"] else True
-                )
-
-                if valid:
-                    sweeps.append(
-                        LiquidityEvent(
-                            time=candle.time,
-                            fromTime=event.fromTime,
-                            price=event.price,
-                            label="iHS" if event.label == "EQH" else "LSH",
-                            direction="bearish",
-                            kind="internal_sweep",
-                        )
-                    )
-                    break
-
-    return sweeps[-max_events:]
-
-
-def detect_liquidity_pools(
-    candles: List[Candle],
-    atr_values: List[float],
-    lookback: int,
-    cluster_threshold_atr: float,
-) -> List[LiquidityEvent]:
-    if len(candles) < max(lookback, 5):
-        return []
-
-    recent = candles[-lookback:]
-    latest_atr = atr_values[-1] if atr_values else 0.0
-    threshold = latest_atr * cluster_threshold_atr
-
-    recent_low = min(c.low for c in recent)
-    recent_high = max(c.high for c in recent)
-
-    low_touches = [
-        c for c in recent
-        if abs(c.low - recent_low) <= threshold
-    ]
-
-    high_touches = [
-        c for c in recent
-        if abs(c.high - recent_high) <= threshold
-    ]
-
-    events: List[LiquidityEvent] = []
-
-    if len(low_touches) >= 2:
-        events.append(
-            LiquidityEvent(
-                time=low_touches[-1].time,
-                fromTime=low_touches[0].time,
-                price=recent_low,
-                label="Sell-Side Pool",
-                direction="bullish",
-                kind="liquidity_pool",
-                touches=len(low_touches),
-            )
-        )
-
-    if len(high_touches) >= 2:
-        events.append(
-            LiquidityEvent(
-                time=high_touches[-1].time,
-                fromTime=high_touches[0].time,
-                price=recent_high,
-                label="Buy-Side Pool",
-                direction="bearish",
-                kind="liquidity_pool",
-                touches=len(high_touches),
-            )
-        )
-
-    return events
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# SCORE / SIGNAL SUMMARY
+# ALPHAX DLM PROFILE — PHASE 3A
 # ─────────────────────────────────────────────────────────────────────────────
 
-def calculate_phase2_scores(
-    internal_state: StructureState,
-    swing_state: StructureState,
-    smc_events: List[SMCEvent],
-    zones: List[SmcZone],
-    liquidity_events: List[LiquidityEvent],
-    candles: List[Candle],
+def build_alphax_dlm(
+    candles: List[Dict[str, Any]],
+    config: Dict[str, Any],
 ) -> Dict[str, Any]:
-    latest_event = smc_events[-1] if smc_events else None
-    latest_close = candles[-1].close if candles else 0.0
+    """
+    Python version of the AlphaX DLM profile core.
 
-    bull_score = 50
-    bear_score = 50
+    Backend output is designed for the frontend to draw the Pine-style right
+    liquidity profile:
+    - alphaProfileBins: horizontal bars by price bin
+    - dlmLevels: POC / buy liquidity / sell liquidity
+    - dlmConfluenceMarkers: pressure marker
+    - alphaFvgs: DLM FVG zones
+    - alphaSweeps: DLM sweep labels
+    """
 
-    if swing_state.bias == "bullish":
-        bull_score += 18
-        bear_score -= 18
-    elif swing_state.bias == "bearish":
-        bull_score -= 18
-        bear_score += 18
+    lookback = int(config.get("dlm_lookback", config.get("dlmBridgeLookbackInput", 300)))
+    bins_count = int(config.get("dlm_bins", config.get("dlmBridgeBinsInput", 50)))
+    vol_smooth_len = int(config.get("dlm_vol_smooth", 10))
+    atr_len = int(config.get("dlm_atr_len", 14))
+    fvg_min_atr = float(config.get("dlm_fvg_min_atr", 0.10))
+    sweep_lookback = int(config.get("dlm_sweep_lookback", 5))
+    max_profile_width = int(config.get("dlm_bar_max_width", 50))
 
-    if internal_state.bias == "bullish":
-        bull_score += 10
-        bear_score -= 10
-    elif internal_state.bias == "bearish":
-        bull_score -= 10
-        bear_score += 10
+    lookback = max(20, min(lookback, 1000))
+    bins_count = max(10, min(bins_count, 120))
+    vol_smooth_len = max(1, min(vol_smooth_len, 50))
+    atr_len = max(2, min(atr_len, 100))
+    sweep_lookback = max(2, min(sweep_lookback, 50))
 
-    if latest_event is not None:
-        if latest_event.direction == "bullish":
-            bull_score += 8
-            bear_score -= 8
-        elif latest_event.direction == "bearish":
-            bull_score -= 8
-            bear_score += 8
+    recent = candles[-lookback:] if len(candles) > lookback else candles[:]
 
-    # Zone confluence.
-    for zone in zones[-12:]:
-        inside_zone = zone.bottom <= latest_close <= zone.top
+    if not recent:
+        return {
+            "alphaProfileBins": [],
+            "alphaPoc": None,
+            "alphaBuyLiquidity": None,
+            "alphaSellLiquidity": None,
+            "alphaBullPressure": 50,
+            "alphaBearPressure": 50,
+            "alphaFvgs": [],
+            "alphaSweeps": [],
+            "dlmLevels": [],
+            "dlmConfluenceMarkers": [],
+            "alphaProfileMeta": {
+                "lookback": lookback,
+                "bins": bins_count,
+                "rangeTop": None,
+                "rangeBottom": None,
+                "maxVolume": 0,
+            },
+        }
 
-        if not inside_zone:
-            continue
+    atr_values = _atr(recent, atr_len)
+    volumes = [_float(c.get("volume")) for c in recent]
+    volume_smooth = _sma(volumes, vol_smooth_len)
 
-        if zone.direction == "bullish":
-            bull_score += 5
-        elif zone.direction == "bearish":
-            bear_score += 5
+    # DLM Pine style uses adjusted liquidity levels around highs/lows.
+    offsets: List[float] = []
+    max_vol_smooth = max(max(volume_smooth), 1.0)
 
-    # Liquidity confluence.
-    for event in liquidity_events[-10:]:
-        if event.direction == "bullish":
-            bull_score += 3
-        elif event.direction == "bearish":
-            bear_score += 3
+    for i, c in enumerate(recent):
+        atr_adj = atr_values[i] / 50.0
+        normalized_vol = volume_smooth[i] / max_vol_smooth * 100.0
+        offsets.append(atr_adj * normalized_vol)
 
-    bull_score = max(0, min(100, bull_score))
-    bear_score = max(0, min(100, bear_score))
-    net_bias = bull_score - bear_score
+    range_top = max(_float(c.get("high")) + offsets[i] for i, c in enumerate(recent))
+    range_bottom = min(_float(c.get("low")) - offsets[i] for i, c in enumerate(recent))
 
-    signal = "BUY" if net_bias > 15 else "SELL" if net_bias < -15 else "NEUTRAL"
-    confidence = min(100, abs(net_bias))
+    if range_top <= range_bottom:
+        last_close = _float(recent[-1].get("close"))
+        range_top = last_close + 1.0
+        range_bottom = last_close - 1.0
+
+    step = (range_top - range_bottom) / bins_count
+    if step <= 0:
+        step = max(abs(range_top) * 0.0001, 1e-9)
+
+    total_bins = [0.0 for _ in range(bins_count)]
+    buy_bins = [0.0 for _ in range(bins_count)]
+    sell_bins = [0.0 for _ in range(bins_count)]
+    touch_bins = [0 for _ in range(bins_count)]
+
+    # Bin by hlc3, similar to the bridge, but also split buy/sell side.
+    for i, c in enumerate(recent):
+        h = _float(c.get("high"))
+        l = _float(c.get("low"))
+        o = _float(c.get("open"))
+        cl = _float(c.get("close"))
+        v = max(_float(c.get("volume")), 0.0)
+        src = (h + l + cl) / 3.0
+
+        idx = int(math.floor((src - range_bottom) / step))
+        idx = max(0, min(bins_count - 1, idx))
+
+        total_bins[idx] += v
+        touch_bins[idx] += 1
+
+        if cl >= o:
+            buy_bins[idx] += v
+        else:
+            sell_bins[idx] += v
+
+    max_total = max(total_bins) if total_bins else 0.0
+    max_buy = max(buy_bins) if buy_bins else 0.0
+    max_sell = max(sell_bins) if sell_bins else 0.0
+    min_total = min(total_bins) if total_bins else 0.0
+
+    poc_idx = total_bins.index(max_total) if max_total > 0 else bins_count // 2
+    buy_idx = buy_bins.index(max_buy) if max_buy > 0 else poc_idx
+    sell_idx = sell_bins.index(max_sell) if max_sell > 0 else poc_idx
+
+    def bin_mid(idx: int) -> float:
+        return range_bottom + step * idx + step * 0.5
+
+    poc_price = bin_mid(poc_idx)
+    buy_price = bin_mid(buy_idx)
+    sell_price = bin_mid(sell_idx)
+
+    directional_total = max_buy + max_sell
+    bull_pressure = (max_buy / directional_total * 100.0) if directional_total > 0 else 50.0
+    bear_pressure = (max_sell / directional_total * 100.0) if directional_total > 0 else 50.0
+
+    last_close = _float(recent[-1].get("close"))
+    alpha_bins: List[Dict[str, Any]] = []
+
+    for j in range(bins_count):
+        bottom = range_bottom + step * j
+        top = bottom + step
+        mid = bottom + step * 0.5
+        total = total_bins[j]
+        buy_v = buy_bins[j]
+        sell_v = sell_bins[j]
+
+        width_pct = total / max_total * 100.0 if max_total > 0 else 0.0
+        buy_width_pct = buy_v / max_total * 100.0 if max_total > 0 else 0.0
+        sell_width_pct = sell_v / max_total * 100.0 if max_total > 0 else 0.0
+
+        # Pine profile colors by price position relative to current price.
+        direction = "bullish" if last_close > mid else "bearish"
+        dominant = "bullish" if buy_v > sell_v else "bearish" if sell_v > buy_v else "neutral"
+
+        alpha_bins.append({
+            "index": j,
+            "top": top,
+            "bottom": bottom,
+            "mid": mid,
+            "volume": total,
+            "buyVolume": buy_v,
+            "sellVolume": sell_v,
+            "touches": touch_bins[j],
+            "widthPct": width_pct,
+            "buyWidthPct": buy_width_pct,
+            "sellWidthPct": sell_width_pct,
+            "barWidth": int(round(width_pct / 100.0 * max_profile_width)),
+            "isPoc": j == poc_idx,
+            "isBuyLiquidity": j == buy_idx,
+            "isSellLiquidity": j == sell_idx,
+            "direction": direction,
+            "dominantSide": dominant,
+            "label": f"{round(width_pct)}%",
+        })
+
+    # Only send useful visible bins to avoid chart clutter.
+    # Keep POC/buy/sell even if small.
+    visible_bins = [
+        b for b in alpha_bins
+        if b["widthPct"] >= 3.0 or b["isPoc"] or b["isBuyLiquidity"] or b["isSellLiquidity"]
+    ]
+
+    # DLM FVGs
+    alpha_fvgs: List[Dict[str, Any]] = []
+    for i in range(2, len(recent)):
+        c = recent[i]
+        c2 = recent[i - 2]
+        min_gap = atr_values[i] * fvg_min_atr
+        low = _float(c.get("low"))
+        high = _float(c.get("high"))
+        high2 = _float(c2.get("high"))
+        low2 = _float(c2.get("low"))
+
+        if low > high2 and (low - high2) >= min_gap:
+            alpha_fvgs.append({
+                "startTime": _safe_time(recent, i - 2),
+                "endTime": _safe_time(recent, len(recent) - 1),
+                "top": low,
+                "bottom": high2,
+                "label": "DLM FVG ▲",
+                "direction": "bullish",
+                "kind": "alpha_fvg",
+                "index": i,
+            })
+
+        if high < low2 and (low2 - high) >= min_gap:
+            alpha_fvgs.append({
+                "startTime": _safe_time(recent, i - 2),
+                "endTime": _safe_time(recent, len(recent) - 1),
+                "top": low2,
+                "bottom": high,
+                "label": "DLM FVG ▼",
+                "direction": "bearish",
+                "kind": "alpha_fvg",
+                "index": i,
+            })
+
+    alpha_fvgs = alpha_fvgs[-12:]
+
+    # DLM sweep detection
+    alpha_sweeps: List[Dict[str, Any]] = []
+    for i in range(sweep_lookback + 1, len(recent)):
+        prev_window = recent[i - sweep_lookback:i]
+        recent_low = min(_float(c.get("low")) for c in prev_window)
+        recent_high = max(_float(c.get("high")) for c in prev_window)
+
+        c = recent[i]
+        low = _float(c.get("low"))
+        high = _float(c.get("high"))
+        o = _float(c.get("open"))
+        cl = _float(c.get("close"))
+
+        if low < recent_low and cl > recent_low and cl > o:
+            alpha_sweeps.append({
+                "time": _safe_time(recent, i),
+                "price": recent_low,
+                "label": "DLM Sweep Low",
+                "direction": "bullish",
+                "kind": "alpha_sweep",
+                "index": i,
+            })
+
+        if high > recent_high and cl < recent_high and cl < o:
+            alpha_sweeps.append({
+                "time": _safe_time(recent, i),
+                "price": recent_high,
+                "label": "DLM Sweep High",
+                "direction": "bearish",
+                "kind": "alpha_sweep",
+                "index": i,
+            })
+
+    alpha_sweeps = alpha_sweeps[-30:]
+
+    dlm_direction = "bullish" if bull_pressure >= bear_pressure else "bearish"
+    dlm_pressure = round(max(bull_pressure, bear_pressure), 2)
+
+    dlm_levels = [
+        {
+            "label": "AlphaX POC",
+            "price": poc_price,
+            "direction": "neutral",
+            "kind": "poc",
+            "volume": max_total,
+            "index": poc_idx,
+        },
+        {
+            "label": "DLM Buy Liquidity",
+            "price": buy_price,
+            "direction": "bullish",
+            "kind": "buy_liquidity",
+            "volume": max_buy,
+            "index": buy_idx,
+        },
+        {
+            "label": "DLM Sell Liquidity",
+            "price": sell_price,
+            "direction": "bearish",
+            "kind": "sell_liquidity",
+            "volume": max_sell,
+            "index": sell_idx,
+        },
+    ]
+
+    confluence_markers = [
+        {
+            "time": _safe_time(recent, len(recent) - 1),
+            "price": last_close,
+            "label": "AlphaX Pressure",
+            "direction": dlm_direction,
+            "kind": "pressure",
+            "pressurePct": dlm_pressure,
+            "bullPressure": round(bull_pressure, 2),
+            "bearPressure": round(bear_pressure, 2),
+        }
+    ]
 
     return {
-        "signal": signal,
-        "confidence": confidence,
-        "bullScore": bull_score,
-        "bearScore": bear_score,
-        "netBias": net_bias,
-        "latestSmcEvent": asdict(latest_event) if latest_event else None,
-        "internalBias": internal_state.bias,
-        "swingBias": swing_state.bias,
-        "activeZones": len(zones),
-        "activeLiquidityEvents": len(liquidity_events),
+        "alphaProfileBins": visible_bins,
+        "alphaPoc": poc_price,
+        "alphaBuyLiquidity": buy_price,
+        "alphaSellLiquidity": sell_price,
+        "alphaBullPressure": round(bull_pressure, 2),
+        "alphaBearPressure": round(bear_pressure, 2),
+        "alphaFvgs": alpha_fvgs,
+        "alphaSweeps": alpha_sweeps,
+        "dlmLevels": dlm_levels,
+        "dlmConfluenceMarkers": confluence_markers,
+        "alphaProfileMeta": {
+            "lookback": len(recent),
+            "requestedLookback": lookback,
+            "bins": bins_count,
+            "visibleBins": len(visible_bins),
+            "rangeTop": range_top,
+            "rangeBottom": range_bottom,
+            "step": step,
+            "maxVolume": max_total,
+            "minVolume": min_total,
+            "maxBuyVolume": max_buy,
+            "maxSellVolume": max_sell,
+            "pocIndex": poc_idx,
+            "buyIndex": buy_idx,
+            "sellIndex": sell_idx,
+            "barMaxWidth": max_profile_width,
+        },
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PUBLIC ENGINE ENTRY
+# GHOST CANDLES — BASE PLACEHOLDER UNTIL PHASE 4
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_base_ghost_candles(candles: List[Dict[str, Any]], count: int = 3) -> List[Dict[str, Any]]:
+    if not candles:
+        return []
+
+    ha = build_heikin_ashi(candles)
+    last = ha[-1]
+    atr_values = _atr(candles, 14)
+    nf = max(atr_values[-1] if atr_values else 0.0, _float(candles[-1].get("close")) * 0.0005, 1e-9)
+
+    prev_open = _float(last.get("open"))
+    prev_close = _float(last.get("close"))
+    momentum = _float(last.get("close")) - _float(ha[-2].get("close")) if len(ha) >= 2 else 0.0
+
+    ghosts: List[Dict[str, Any]] = []
+
+    for i in range(count):
+        decay = math.pow(0.75, i)
+        g_open = (prev_open + prev_close) / 2.0
+        g_close = prev_close + momentum * decay
+        body = abs(g_close - g_open)
+
+        if body < nf * 0.08:
+            direction = 1 if momentum >= 0 else -1
+            g_close = g_open + direction * nf * 0.08
+
+        top = max(g_open, g_close)
+        bottom = min(g_open, g_close)
+        wick = max(nf * 0.15, abs(g_close - g_open) * 0.25)
+
+        g_high = top + wick
+        g_low = bottom - wick
+
+        ghosts.append({
+            "index": i + 1,
+            "label": f"Ghost #{i + 1}",
+            "direction": "up" if g_close >= g_open else "down",
+            "open": g_open,
+            "high": g_high,
+            "low": g_low,
+            "close": g_close,
+            "confidence": max(0, round(10 - i * 4)),
+        })
+
+        prev_open = g_open
+        prev_close = g_close
+
+    return ghosts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_phase1_engine(
-    raw_candles: List[Any],
+    candles: List[Dict[str, Any]],
     config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """
-    Function name remains run_phase1_engine so api/main.py does not need a change.
-    The response phase now reports phase_2_python_zones.
-    """
+    config = config or {}
+    clean = _prepare_candles(candles)
 
-    cfg = {**DEFAULT_ENGINE_CONFIG, **(config or {})}
+    max_events = int(config.get("max_events", 150))
+    max_zones = int(config.get("max_zones", 80))
+    max_liquidity_events = int(config.get("max_liquidity_events", 120))
 
-    candles = normalize_candles(raw_candles)
-    ha_candles = calculate_heikin_ashi(candles)
-    atr_values = calculate_atr(candles, 200)
+    internal_len = int(config.get("internal_pivot_len", 5))
+    swing_len = int(config.get("swing_pivot_len", 50))
+    equal_threshold = float(config.get("equal_threshold_atr", 0.10))
 
-    internal_highs, internal_lows = detect_pivots(candles, int(cfg["internal_pivot_len"]))
-    swing_highs, swing_lows = detect_pivots(candles, int(cfg["swing_pivot_len"]))
+    if not clean:
+        return {
+            "engine": "python_smc_alpha_ghost",
+            "phase": "phase_3_alpha_profile",
+            "status": "empty",
+            "candles": [],
+            "heikinAshiCandles": [],
+            "smcEvents": [],
+            "zones": [],
+            "liquidityEvents": [],
+            "dlmLevels": [],
+            "dlmConfluenceMarkers": [],
+            "alphaProfileBins": [],
+            "alphaProfileMeta": {},
+            "alphaPoc": None,
+            "alphaBuyLiquidity": None,
+            "alphaSellLiquidity": None,
+            "alphaBullPressure": 50,
+            "alphaBearPressure": 50,
+            "alphaFvgs": [],
+            "alphaSweeps": [],
+            "scoreMarkers": [],
+            "ghostCandles": [],
+            "signal": "NEUTRAL",
+            "confidence": 0,
+            "bullScore": 50,
+            "bearScore": 50,
+            "netBias": 0,
+            "warnings": ["No candles available"],
+        }
 
-    internal_events, internal_state = detect_structure_events(
-        candles,
-        internal_highs,
-        internal_lows,
-        "internal",
-        max_events=int(cfg["max_events"]),
+    ha_candles = build_heikin_ashi(clean)
+
+    internal_pivots = find_pivots(clean, internal_len, "internal")
+    swing_pivots = find_pivots(clean, swing_len, "swing")
+
+    internal_events, internal_obs = detect_structure_events(
+        clean, internal_pivots, "internal", max_events
+    )
+    swing_events, swing_obs = detect_structure_events(
+        clean, swing_pivots, "swing", max_events
     )
 
-    swing_events, swing_state = detect_structure_events(
-        candles,
-        swing_highs,
-        swing_lows,
-        "swing",
-        max_events=int(cfg["max_events"]),
-    )
+    smc_events = [*internal_events, *swing_events]
+    smc_events.sort(key=lambda e: e.get("index", 0))
+    smc_events = smc_events[-max_events:]
 
-    swing_point_events = build_swing_point_events(swing_highs, swing_lows, max_events=60)
+    zones: List[Dict[str, Any]] = []
+    if config.get("show_internal_order_blocks", True):
+        zones.extend(internal_obs[-int(config.get("internal_order_blocks_size", 5)):])
+    if config.get("show_swing_order_blocks", False):
+        zones.extend(swing_obs[-int(config.get("swing_order_blocks_size", 5)):])
 
-    smc_events: List[SMCEvent] = []
+    if config.get("show_fair_value_gaps", True):
+        zones.extend(detect_fvgs(clean, max_zones))
 
-    if cfg["show_internal_structure"]:
-        smc_events.extend(internal_events)
+    if config.get("show_premium_discount_zones", True):
+        zones.extend(detect_premium_discount_zones(clean))
 
-    if cfg["show_swing_structure"]:
-        smc_events.extend(swing_events)
-        smc_events.extend(swing_point_events)
+    zones = zones[-max_zones:]
 
-    smc_events.sort(key=lambda event: event.toIndex)
-
-    if len(smc_events) > int(cfg["max_events"]):
-        smc_events = smc_events[-int(cfg["max_events"]):]
-
-    zones: List[SmcZone] = []
-
-    use_atr_filter = str(cfg["order_block_filter"]).lower() == "atr"
-    mitigation = str(cfg["order_block_mitigation"])
-
-    if cfg["show_internal_order_blocks"]:
-        internal_obs = build_order_blocks(
-            candles,
-            internal_events,
-            "internal",
-            int(cfg["internal_order_blocks_size"]),
-            use_atr_filter,
-            atr_values,
-        )
-        zones.extend(filter_mitigated_order_blocks(candles, internal_obs, mitigation))
-
-    if cfg["show_swing_order_blocks"]:
-        swing_obs = build_order_blocks(
-            candles,
-            swing_events,
-            "swing",
-            int(cfg["swing_order_blocks_size"]),
-            use_atr_filter,
-            atr_values,
-        )
-        zones.extend(filter_mitigated_order_blocks(candles, swing_obs, mitigation))
-
-    if cfg["show_fair_value_gaps"]:
-        zones.extend(
-            detect_fair_value_gaps(
-                candles,
-                max_fvgs=int(cfg["max_fair_value_gaps"]),
-                auto_threshold=bool(cfg["fair_value_gaps_auto_threshold"]),
-            )
+    liquidity_events: List[Dict[str, Any]] = []
+    if config.get("show_liquidity_pools", True) or config.get("show_equal_highs_lows", True):
+        liquidity_events = detect_equal_high_low_and_sweeps(
+            clean,
+            [*internal_pivots, *swing_pivots],
+            equal_threshold,
+            max_liquidity_events,
         )
 
-    if cfg["show_premium_discount_zones"]:
-        zones.extend(build_premium_discount_zones(candles, swing_highs, swing_lows))
+    alpha = build_alphax_dlm(clean, config)
 
-    if len(zones) > int(cfg["max_zones"]):
-        zones = zones[-int(cfg["max_zones"]):]
+    bull_score = alpha["alphaBullPressure"]
+    bear_score = alpha["alphaBearPressure"]
 
-    liquidity_events: List[LiquidityEvent] = []
+    # Add SMC structure influence to score.
+    recent_events = smc_events[-8:]
+    smc_bias = 0
+    for ev in recent_events:
+        if ev.get("direction") == "bullish":
+            smc_bias += 1
+        elif ev.get("direction") == "bearish":
+            smc_bias -= 1
 
-    if cfg["show_equal_highs_lows"]:
-        equal_internal = detect_equal_highs_lows(
-            internal_highs,
-            internal_lows,
-            atr_values,
-            float(cfg["equal_highs_lows_threshold"]),
-            max_events=60,
-        )
+    smc_adjust = _clamp(smc_bias * 2.0, -12.0, 12.0)
 
-        equal_swing = detect_equal_highs_lows(
-            swing_highs,
-            swing_lows,
-            atr_values,
-            float(cfg["equal_highs_lows_threshold"]),
-            max_events=40,
-        )
+    bull_score = _clamp(bull_score + max(smc_adjust, 0.0), 0.0, 100.0)
+    bear_score = _clamp(bear_score + max(-smc_adjust, 0.0), 0.0, 100.0)
 
-        liquidity_events.extend(equal_internal)
-        liquidity_events.extend(equal_swing)
+    # Normalize if both scores got too large.
+    score_total = bull_score + bear_score
+    if score_total > 100:
+        bull_score = bull_score / score_total * 100.0
+        bear_score = bear_score / score_total * 100.0
 
-    if cfg["show_internal_sweeps"] or cfg["show_swing_sweeps"]:
-        liquidity_events.extend(
-            detect_liquidity_sweeps(
-                candles,
-                liquidity_events,
-                atr_values,
-                cfg,
-                max_events=80,
-            )
-        )
+    net_bias = round(bull_score - bear_score, 2)
+    confidence = round(min(100.0, abs(net_bias)), 2)
+    signal = "BUY" if net_bias > 0 else "SELL" if net_bias < 0 else "NEUTRAL"
 
-    if cfg["show_liquidity_pools"]:
-        liquidity_events.extend(
-            detect_liquidity_pools(
-                candles,
-                atr_values,
-                int(cfg["liquidity_lookback"]),
-                float(cfg["liquidity_cluster_threshold_atr"]),
-            )
-        )
+    last_close = _float(clean[-1].get("close"))
 
-    # Keep chronological-ish order and cap.
-    liquidity_events.sort(key=lambda event: str(event.time))
+    score_markers = [
+        {
+            "time": _safe_time(clean, len(clean) - 1),
+            "price": last_close,
+            "label": "Python Score",
+            "direction": "bullish" if net_bias >= 0 else "bearish",
+            "kind": "python_score",
+            "score": confidence,
+            "grade": "A" if confidence >= 65 else "B" if confidence >= 35 else "C",
+        }
+    ]
 
-    if len(liquidity_events) > int(cfg["max_liquidity_events"]):
-        liquidity_events = liquidity_events[-int(cfg["max_liquidity_events"]):]
-
-    scores = calculate_phase2_scores(
-        internal_state,
-        swing_state,
-        smc_events,
-        zones,
-        liquidity_events,
-        candles,
-    )
+    warnings: List[str] = []
+    if len(clean) < 100:
+        warnings.append("Low candle count. SMC/AlphaX quality improves with 300-1000 candles.")
+    if not alpha.get("alphaProfileBins"):
+        warnings.append("AlphaX profile bins empty. Check candle volume data.")
 
     return {
         "engine": "python_smc_alpha_ghost",
-        "phase": "phase_2_python_zones",
-        "candles": [asdict(candle) for candle in candles],
-        "heikinAshiCandles": [asdict(candle) for candle in ha_candles],
+        "phase": "phase_3_alpha_profile",
+        "status": "ok",
+        "candles": clean,
+        "heikinAshiCandles": ha_candles,
+        "smcEvents": smc_events,
+        "zones": zones,
+        "liquidityEvents": liquidity_events,
 
-        # Dashboard chart overlays:
-        "smcEvents": [asdict(event) for event in smc_events],
-        "zones": [asdict(zone) for zone in zones],
-        "liquidityEvents": [asdict(event) for event in liquidity_events],
+        # AlphaX / DLM Phase 3A
+        "dlmLevels": alpha["dlmLevels"],
+        "dlmConfluenceMarkers": alpha["dlmConfluenceMarkers"],
+        "alphaProfileBins": alpha["alphaProfileBins"],
+        "alphaProfileMeta": alpha["alphaProfileMeta"],
+        "alphaPoc": alpha["alphaPoc"],
+        "alphaBuyLiquidity": alpha["alphaBuyLiquidity"],
+        "alphaSellLiquidity": alpha["alphaSellLiquidity"],
+        "alphaBullPressure": alpha["alphaBullPressure"],
+        "alphaBearPressure": alpha["alphaBearPressure"],
+        "alphaFvgs": alpha["alphaFvgs"],
+        "alphaSweeps": alpha["alphaSweeps"],
 
-        # AlphaX/Ghost come next.
-        "dlmLevels": [],
-        "dlmConfluenceMarkers": [],
-        "scoreMarkers": [],
-
-        # Debug/state:
-        "pivots": {
-            "internalHighs": [asdict(pivot) for pivot in internal_highs[-50:]],
-            "internalLows": [asdict(pivot) for pivot in internal_lows[-50:]],
-            "swingHighs": [asdict(pivot) for pivot in swing_highs[-25:]],
-            "swingLows": [asdict(pivot) for pivot in swing_lows[-25:]],
-        },
-        "structureState": {
-            "internal": asdict(internal_state),
-            "swing": asdict(swing_state),
-        },
-        "scores": scores,
-        "signal": {
-            "symbol": candles[-1].symbol if candles else "",
-            "timeframe": candles[-1].timeframe if candles else "",
-            "signal": scores["signal"],
-            "confidence": scores["confidence"],
-            "bullScore": scores["bullScore"],
-            "bearScore": scores["bearScore"],
-            "netBias": scores["netBias"],
-            "price": candles[-1].close if candles else 0,
-            "smc": (
-                f"{scores['latestSmcEvent']['tag']} {scores['latestSmcEvent']['direction']}"
-                if scores["latestSmcEvent"]
-                else "No SMC event"
-            ),
-            "alphax": "Phase 3 pending",
-            "ghost": "Phase 4 pending",
-        },
+        # Dashboard compatibility
+        "scoreMarkers": score_markers,
+        "ghostCandles": build_base_ghost_candles(clean, 3),
+        "signal": signal,
+        "confidence": confidence,
+        "bullScore": round(bull_score, 2),
+        "bearScore": round(bear_score, 2),
+        "netBias": net_bias,
+        "price": last_close,
+        "smc": "Python SMC Active",
+        "alphax": "Python AlphaX DLM Active",
+        "ghost": "Python Ghost Base",
+        "warnings": warnings,
     }
 
 
-if __name__ == "__main__":
-    sample = [
-        {
-            "time": i,
-            "open": 100 + i * 0.1,
-            "high": 101 + i * 0.1,
-            "low": 99 + i * 0.1,
-            "close": 100.5 + i * 0.1,
-            "volume": 1000,
-            "symbol": "TEST",
-            "timeframe": "1m",
-        }
-        for i in range(300)
-    ]
-
-    result = run_phase1_engine(sample)
-    print(
-        {
-            "phase": result["phase"],
-            "smcEvents": len(result["smcEvents"]),
-            "zones": len(result["zones"]),
-            "liquidityEvents": len(result["liquidityEvents"]),
-            "signal": result["signal"],
-        }
-    )
+# Backward compatibility alias.
+run_engine = run_phase1_engine
