@@ -236,6 +236,7 @@ export default function Dashboard() {
           <SignalCard signal={augmentedLatestSignal} />
 
           <EChartsCandlestickChart
+            heightClass="h-[760px]"
             enableAdvancedOverlays
             defaultSymbol={selectedSymbol}
             defaultTimeframe={selectedTimeframe}
@@ -248,7 +249,7 @@ export default function Dashboard() {
           {/* Two Smaller Charts */}
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
             <EChartsCandlestickChart
-              heightClass="h-[230px]"
+              heightClass="h-[390px]"
               compact
               chartTitle="Mini Chart 1"
               enableAdvancedOverlays={false}
@@ -262,7 +263,7 @@ export default function Dashboard() {
             />
 
             <EChartsCandlestickChart
-              heightClass="h-[230px]"
+              heightClass="h-[390px]"
               compact
               chartTitle="Mini Chart 2"
               enableAdvancedOverlays={false}
