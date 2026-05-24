@@ -49,12 +49,12 @@ type EChartsCandlestickChartProps = {
   heightClass?: string
   compact?: boolean
   chartTitle?: string
+  enableAdvancedOverlays?: boolean
 }
 
 const GREEN = '#089981'
 const RED = '#F23645'
 const BLUE = '#2157f3'
-const GRAY = '#878b94'
 const TEAL = '#26a69a'
 const LIGHT_RED = '#ff4d5e'
 
@@ -451,6 +451,7 @@ export default function EChartsCandlestickChart({
   heightClass = 'h-[650px]',
   compact = false,
   chartTitle,
+  enableAdvancedOverlays = true,
 }: EChartsCandlestickChartProps) {
   const chartRef = useRef<HTMLDivElement | null>(null)
   const chartInstance = useRef<echarts.ECharts | null>(null)
@@ -603,21 +604,29 @@ export default function EChartsCandlestickChart({
 
           markArea: {
             silent: true,
-            data: showZones ? buildZoneMarkAreas(sampleZones, compact) : [],
+            data:
+              enableAdvancedOverlays && showZones
+                ? buildZoneMarkAreas(sampleZones, compact)
+                : [],
           },
 
           markLine: {
             silent: true,
             symbol: 'none',
-            data: [
-              ...(showSmc ? buildSmcMarkLines(sampleSmcEvents) : []),
-              ...(showDlm ? buildDlmMarkLines(sampleDlmLevels, compact) : []),
-            ],
+            data: enableAdvancedOverlays
+              ? [
+                  ...(showSmc ? buildSmcMarkLines(sampleSmcEvents) : []),
+                  ...(showDlm ? buildDlmMarkLines(sampleDlmLevels, compact) : []),
+                ]
+              : [],
           },
 
           markPoint: {
             silent: true,
-            data: showSmc ? buildSmcMarkPoints(sampleSmcEvents, compact) : [],
+            data:
+              enableAdvancedOverlays && showSmc
+                ? buildSmcMarkPoints(sampleSmcEvents, compact)
+                : [],
           },
         },
       ],
@@ -634,7 +643,16 @@ export default function EChartsCandlestickChart({
     return () => {
       window.removeEventListener('resize', resize)
     }
-  }, [symbol, timeframe, candleMode, compact, showSmc, showDlm, showZones])
+  }, [
+    symbol,
+    timeframe,
+    candleMode,
+    compact,
+    showSmc,
+    showDlm,
+    showZones,
+    enableAdvancedOverlays,
+  ])
 
   useEffect(() => {
     return () => {
@@ -694,7 +712,7 @@ export default function EChartsCandlestickChart({
             ))}
           </select>
 
-          {!compact && (
+          {!compact && enableAdvancedOverlays && (
             <>
               <button
                 type="button"
@@ -737,7 +755,7 @@ export default function EChartsCandlestickChart({
 
         {!compact && (
           <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-            Chart Engine v3B
+            {enableAdvancedOverlays ? 'Chart Engine v3B' : 'Chart Engine v2'}
           </div>
         )}
       </div>
