@@ -817,6 +817,642 @@ def build_python_ghost_candles(
     return ghosts
 
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PYTHON TECHNICAL SENTIMENT ENGINE — PHASE 4A
+# Mirrors the LuxAlgo Market Sentiment Technicals meter logic from Pine:
+# RSI, Stochastic, Stoch RSI, CCI, Bull Bear Power, Momentum, MA, VWAP,
+# Bollinger Bands, Supertrend, Linear Regression, Market Structure.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def safe_mean(values: List[float], fallback: float = 0.0) -> float:
+    clean = [float(value) for value in values if isinstance(value, (int, float)) and value == value]
+    return sum(clean) / len(clean) if clean else fallback
+
+
+def sma(values: List[float], length: int) -> Optional[float]:
+    if len(values) < length or length <= 0:
+        return None
+    return sum(values[-length:]) / length
+
+
+def ema_series(values: List[float], length: int) -> List[float]:
+    if not values:
+        return []
+    if length <= 1:
+        return list(values)
+
+    alpha = 2.0 / (length + 1.0)
+    output = [values[0]]
+
+    for value in values[1:]:
+        output.append(value * alpha + output[-1] * (1.0 - alpha))
+
+    return output
+
+
+def ema(values: List[float], length: int) -> Optional[float]:
+    series = ema_series(values, length)
+    return series[-1] if series else None
+
+
+def wma(values: List[float], length: int) -> Optional[float]:
+    if len(values) < length or length <= 0:
+        return None
+
+    sample = values[-length:]
+    weights = list(range(1, length + 1))
+    total_weight = sum(weights)
+
+    return sum(value * weight for value, weight in zip(sample, weights)) / total_weight
+
+
+def stdev(values: List[float], length: int) -> Optional[float]:
+    if len(values) < length or length <= 1:
+        return None
+
+    sample = values[-length:]
+    mean_value = sum(sample) / length
+    variance = sum((value - mean_value) ** 2 for value in sample) / length
+
+    return variance ** 0.5
+
+
+def mean_deviation(values: List[float], length: int) -> Optional[float]:
+    if len(values) < length or length <= 0:
+        return None
+
+    sample = values[-length:]
+    mean_value = sum(sample) / length
+
+    return sum(abs(value - mean_value) for value in sample) / length
+
+
+def interpolate(value: float, value_high: float, value_low: float, range_high: float, range_low: float) -> float:
+    denominator = value_high - value_low
+    if abs(denominator) < 1e-12:
+        return range_low
+
+    return range_low + (value - value_low) * (range_high - range_low) / denominator
+
+
+def classify_sentiment_value(value: float) -> str:
+    if value > 60:
+        return "BULLISH"
+    if value < 40:
+        return "BEARISH"
+    return "NEUTRAL"
+
+
+def normalize_buy_sell(
+    closes: List[float],
+    buy_flags: List[bool],
+    sell_flags: List[bool],
+    smooth: int = 3,
+) -> float:
+    """
+    Python version of the Pine normalize(buy, sell, smooth) helper.
+    It builds a 0-100 oscillator based on buy/sell regime and recent close range.
+    """
+
+    if not closes:
+        return 50.0
+
+    os_state = 0
+    max_value: Optional[float] = None
+    min_value: Optional[float] = None
+    normalized_values: List[float] = []
+
+    for index, close_value in enumerate(closes):
+        previous_os = os_state
+
+        if index < len(buy_flags) and buy_flags[index]:
+            os_state = 1
+        elif index < len(sell_flags) and sell_flags[index]:
+            os_state = -1
+
+        if max_value is None:
+            max_value = close_value
+        if min_value is None:
+            min_value = close_value
+
+        if os_state > previous_os:
+            max_value = close_value
+        elif os_state < previous_os:
+            min_value = close_value
+        else:
+            max_value = max(close_value, max_value)
+            min_value = min(close_value, min_value)
+
+        denominator = max(max_value - min_value, 1e-12)
+        normalized_values.append(clamp((close_value - min_value) / denominator * 100.0, 0.0, 100.0))
+
+    return safe_mean(normalized_values[-max(1, smooth):], 50.0)
+
+
+def rsi_series(values: List[float], length: int = 14) -> List[float]:
+    if len(values) < 2:
+        return [50.0 for _ in values]
+
+    gains: List[float] = []
+    losses: List[float] = []
+
+    for index in range(1, len(values)):
+        change = values[index] - values[index - 1]
+        gains.append(max(change, 0.0))
+        losses.append(max(-change, 0.0))
+
+    output: List[float] = [50.0]
+
+    if len(gains) < length:
+        output.extend([50.0 for _ in gains])
+        return output[:len(values)]
+
+    avg_gain = sum(gains[:length]) / length
+    avg_loss = sum(losses[:length]) / length
+
+    for index in range(len(gains)):
+        if index < length:
+            output.append(50.0)
+            continue
+
+        avg_gain = (avg_gain * (length - 1) + gains[index]) / length
+        avg_loss = (avg_loss * (length - 1) + losses[index]) / length
+
+        if avg_loss == 0:
+            rsi = 100.0
+        else:
+            rs = avg_gain / avg_loss
+            rsi = 100.0 - (100.0 / (1.0 + rs))
+
+        output.append(clamp(rsi, 0.0, 100.0))
+
+    return output[-len(values):]
+
+
+def rsi_normalized(closes: List[float], length: int = 14) -> float:
+    raw = rsi_series(closes, length)[-1] if closes else 50.0
+
+    if raw > 70:
+        return clamp(interpolate(raw, 100, 70, 100, 75), 0, 100)
+    if raw > 50:
+        return clamp(interpolate(raw, 70, 50, 75, 50), 0, 100)
+    if raw > 30:
+        return clamp(interpolate(raw, 50, 30, 50, 25), 0, 100)
+
+    return clamp(interpolate(raw, 30, 0, 25, 0), 0, 100)
+
+
+def stochastic_normalized(highs: List[float], lows: List[float], closes: List[float], length_k: int = 14, smooth_k: int = 3) -> float:
+    if len(closes) < length_k:
+        return 50.0
+
+    stoch_values: List[float] = []
+
+    start = max(0, len(closes) - length_k - smooth_k - 5)
+
+    for index in range(start, len(closes)):
+        if index + 1 < length_k:
+            continue
+
+        high_window = highs[index + 1 - length_k:index + 1]
+        low_window = lows[index + 1 - length_k:index + 1]
+        highest_high = max(high_window)
+        lowest_low = min(low_window)
+        denominator = max(highest_high - lowest_low, 1e-12)
+        stoch_values.append(clamp((closes[index] - lowest_low) / denominator * 100.0, 0.0, 100.0))
+
+    smoothed = safe_mean(stoch_values[-smooth_k:], 50.0)
+
+    if smoothed > 80:
+        return clamp(interpolate(smoothed, 100, 80, 100, 75), 0, 100)
+    if smoothed > 50:
+        return clamp(interpolate(smoothed, 80, 50, 75, 50), 0, 100)
+    if smoothed > 20:
+        return clamp(interpolate(smoothed, 50, 20, 50, 25), 0, 100)
+
+    return clamp(interpolate(smoothed, 20, 0, 25, 0), 0, 100)
+
+
+def stochastic_rsi_normalized(closes: List[float], rsi_length: int = 14, stoch_length: int = 14, smooth_k: int = 3) -> float:
+    rsi_values = rsi_series(closes, rsi_length)
+
+    if len(rsi_values) < stoch_length:
+        return 50.0
+
+    stoch_values: List[float] = []
+
+    start = max(0, len(rsi_values) - stoch_length - smooth_k - 5)
+
+    for index in range(start, len(rsi_values)):
+        if index + 1 < stoch_length:
+            continue
+
+        sample = rsi_values[index + 1 - stoch_length:index + 1]
+        highest = max(sample)
+        lowest = min(sample)
+        denominator = max(highest - lowest, 1e-12)
+        stoch_values.append(clamp((rsi_values[index] - lowest) / denominator * 100.0, 0.0, 100.0))
+
+    smoothed = safe_mean(stoch_values[-smooth_k:], 50.0)
+
+    if smoothed > 80:
+        return clamp(interpolate(smoothed, 100, 80, 100, 75), 0, 100)
+    if smoothed > 50:
+        return clamp(interpolate(smoothed, 80, 50, 75, 50), 0, 100)
+    if smoothed > 20:
+        return clamp(interpolate(smoothed, 50, 20, 50, 25), 0, 100)
+
+    return clamp(interpolate(smoothed, 20, 0, 25, 0), 0, 100)
+
+
+def cci_normalized(highs: List[float], lows: List[float], closes: List[float], length: int = 20) -> float:
+    typical = [(h + l + c) / 3.0 for h, l, c in zip(highs, lows, closes)]
+
+    if len(typical) < length:
+        return 50.0
+
+    ma = sma(typical, length)
+    dev = mean_deviation(typical, length)
+
+    if ma is None or dev is None or dev <= 0:
+        return 50.0
+
+    cci = (typical[-1] - ma) / (0.015 * dev)
+
+    if cci > 100:
+        return 100.0 if cci > 300 else clamp(interpolate(cci, 300, 100, 100, 75), 0, 100)
+    if cci >= 0:
+        return clamp(interpolate(cci, 100, 0, 75, 50), 0, 100)
+    if cci < -100:
+        return 0.0 if cci < -300 else clamp(interpolate(cci, -100, -300, 25, 0), 0, 100)
+
+    return clamp(interpolate(cci, 0, -100, 50, 25), 0, 100)
+
+
+def bull_bear_power_normalized(highs: List[float], lows: List[float], closes: List[float], length: int = 13) -> float:
+    if len(closes) < max(length, 20):
+        return 50.0
+
+    ema_values = ema_series(closes, length)
+    bbp_values = [
+        highs[index] + lows[index] - 2.0 * ema_values[index]
+        for index in range(len(closes))
+    ]
+
+    if len(bbp_values) < 100:
+        sample = bbp_values
+    else:
+        sample = bbp_values[-100:]
+
+    basis = safe_mean(sample, 0.0)
+    deviation = (sum((value - basis) ** 2 for value in sample) / max(len(sample), 1)) ** 0.5
+    upper = basis + 2.0 * deviation
+    lower = basis - 2.0 * deviation
+    bbp = bbp_values[-1]
+
+    if bbp > upper:
+        return 100.0 if bbp > 1.5 * upper else clamp(interpolate(bbp, 1.5 * upper, upper, 100, 75), 0, 100)
+    if bbp > 0:
+        return clamp(interpolate(bbp, upper, 0, 75, 50), 0, 100)
+    if bbp < lower:
+        return 0.0 if bbp < 1.5 * lower else clamp(interpolate(bbp, lower, 1.5 * lower, 25, 0), 0, 100)
+    if bbp < 0:
+        return clamp(interpolate(bbp, 0, lower, 50, 25), 0, 100)
+
+    return 50.0
+
+
+def momentum_normalized(closes: List[float], length: int = 10, smooth: int = 3) -> float:
+    buy_flags: List[bool] = []
+    sell_flags: List[bool] = []
+
+    for index, close_value in enumerate(closes):
+        if index < length:
+            buy_flags.append(False)
+            sell_flags.append(False)
+            continue
+
+        momentum = close_value - closes[index - length]
+        buy_flags.append(momentum > 0)
+        sell_flags.append(momentum < 0)
+
+    return normalize_buy_sell(closes, buy_flags, sell_flags, smooth)
+
+
+def moving_average_normalized(closes: List[float], length: int = 20, ma_type: str = "SMA", smooth: int = 3) -> float:
+    buy_flags: List[bool] = []
+    sell_flags: List[bool] = []
+    ma_type_upper = ma_type.upper()
+
+    for index in range(len(closes)):
+        sub = closes[:index + 1]
+
+        if ma_type_upper == "EMA":
+            basis = ema(sub, length)
+        elif ma_type_upper == "WMA":
+            basis = wma(sub, length)
+        else:
+            basis = sma(sub, length)
+
+        if basis is None:
+            buy_flags.append(False)
+            sell_flags.append(False)
+            continue
+
+        buy_flags.append(closes[index] > basis)
+        sell_flags.append(closes[index] < basis)
+
+    return normalize_buy_sell(closes, buy_flags, sell_flags, smooth)
+
+
+def bollinger_bands_normalized(closes: List[float], length: int = 20, multiplier: float = 2.0, smooth: int = 3) -> float:
+    buy_flags: List[bool] = []
+    sell_flags: List[bool] = []
+
+    for index in range(len(closes)):
+        sub = closes[:index + 1]
+        basis = sma(sub, length)
+        deviation = stdev(sub, length)
+
+        if basis is None or deviation is None:
+            buy_flags.append(False)
+            sell_flags.append(False)
+            continue
+
+        upper = basis + multiplier * deviation
+        lower = basis - multiplier * deviation
+
+        buy_flags.append(closes[index] > upper)
+        sell_flags.append(closes[index] < lower)
+
+    return normalize_buy_sell(closes, buy_flags, sell_flags, smooth)
+
+
+def vwap_bands_normalized(candles: List[Dict[str, Any]], stdev_mult: float = 2.0, smooth: int = 3) -> float:
+    closes = [to_float(c.get("close")) for c in candles]
+    typical = [
+        (to_float(c.get("high")) + to_float(c.get("low")) + to_float(c.get("close"))) / 3.0
+        for c in candles
+    ]
+    volumes = [max(to_float(c.get("volume")), 0.0) for c in candles]
+
+    buy_flags: List[bool] = []
+    sell_flags: List[bool] = []
+
+    # Intraday Auto anchor in the Pine script defaults to day.
+    # The API candles usually contain the most recent day/session, so this rolling
+    # full-sample VWAP is a close approximation and works even when volume is sparse.
+    for index in range(len(candles)):
+        sample_price = typical[:index + 1]
+        sample_volume = volumes[:index + 1]
+
+        volume_sum = sum(sample_volume)
+
+        if volume_sum > 0:
+            vwap = sum(p * v for p, v in zip(sample_price, sample_volume)) / volume_sum
+        else:
+            vwap = safe_mean(sample_price, closes[index])
+
+        deviation = (sum((p - vwap) ** 2 for p in sample_price) / max(len(sample_price), 1)) ** 0.5
+        upper = vwap + stdev_mult * deviation
+        lower = vwap - stdev_mult * deviation
+
+        buy_flags.append(closes[index] > upper)
+        sell_flags.append(closes[index] < lower)
+
+    return normalize_buy_sell(closes, buy_flags, sell_flags, smooth)
+
+
+def supertrend_series(highs: List[float], lows: List[float], closes: List[float], period: int = 10, factor: float = 3.0) -> List[float]:
+    if len(closes) < 2:
+        return [closes[0] if closes else 0.0]
+
+    true_ranges: List[float] = [highs[0] - lows[0]]
+
+    for index in range(1, len(closes)):
+        true_ranges.append(
+            max(
+                highs[index] - lows[index],
+                abs(highs[index] - closes[index - 1]),
+                abs(lows[index] - closes[index - 1]),
+            )
+        )
+
+    atr_values: List[float] = []
+    for index in range(len(true_ranges)):
+        if index + 1 < period:
+            atr_values.append(safe_mean(true_ranges[:index + 1], true_ranges[index]))
+        elif index + 1 == period:
+            atr_values.append(safe_mean(true_ranges[:period], true_ranges[index]))
+        else:
+            atr_values.append((atr_values[-1] * (period - 1) + true_ranges[index]) / period)
+
+    final_upper: List[float] = []
+    final_lower: List[float] = []
+    supertrend_values: List[float] = []
+    direction = 1
+
+    for index in range(len(closes)):
+        hl2 = (highs[index] + lows[index]) / 2.0
+        basic_upper = hl2 + factor * atr_values[index]
+        basic_lower = hl2 - factor * atr_values[index]
+
+        if index == 0:
+            final_upper.append(basic_upper)
+            final_lower.append(basic_lower)
+            supertrend_values.append(basic_lower)
+            continue
+
+        upper = basic_upper if basic_upper < final_upper[-1] or closes[index - 1] > final_upper[-1] else final_upper[-1]
+        lower = basic_lower if basic_lower > final_lower[-1] or closes[index - 1] < final_lower[-1] else final_lower[-1]
+
+        if supertrend_values[-1] == final_upper[-1]:
+            if closes[index] <= upper:
+                direction = -1
+                supertrend_value = upper
+            else:
+                direction = 1
+                supertrend_value = lower
+        else:
+            if closes[index] >= lower:
+                direction = 1
+                supertrend_value = lower
+            else:
+                direction = -1
+                supertrend_value = upper
+
+        final_upper.append(upper)
+        final_lower.append(lower)
+        supertrend_values.append(supertrend_value)
+
+    return supertrend_values
+
+
+def supertrend_normalized(highs: List[float], lows: List[float], closes: List[float], period: int = 10, factor: float = 3.0, smooth: int = 3) -> float:
+    st_values = supertrend_series(highs, lows, closes, period, factor)
+
+    buy_flags = [close > st for close, st in zip(closes, st_values)]
+    sell_flags = [close < st for close, st in zip(closes, st_values)]
+
+    return normalize_buy_sell(closes, buy_flags, sell_flags, smooth)
+
+
+def correlation_with_index(values: List[float], length: int = 25) -> float:
+    if len(values) < length or length <= 1:
+        return 0.0
+
+    y_values = values[-length:]
+    x_values = list(range(length))
+
+    mean_x = safe_mean(x_values, 0.0)
+    mean_y = safe_mean(y_values, 0.0)
+
+    numerator = sum((x - mean_x) * (y - mean_y) for x, y in zip(x_values, y_values))
+    denominator_x = sum((x - mean_x) ** 2 for x in x_values) ** 0.5
+    denominator_y = sum((y - mean_y) ** 2 for y in y_values) ** 0.5
+
+    denominator = denominator_x * denominator_y
+
+    if denominator <= 1e-12:
+        return 0.0
+
+    return numerator / denominator
+
+
+def linear_regression_normalized(closes: List[float], length: int = 25) -> float:
+    corr = correlation_with_index(closes, length)
+    return clamp(50.0 * corr + 50.0, 0.0, 100.0)
+
+
+def market_structure_normalized(highs: List[float], lows: List[float], closes: List[float], length: int = 5, smooth: int = 3) -> float:
+    last_pivot_high: Optional[float] = None
+    last_pivot_low: Optional[float] = None
+    pivot_high_crossed = False
+    pivot_low_crossed = False
+
+    buy_flags = [False for _ in closes]
+    sell_flags = [False for _ in closes]
+
+    for index in range(len(closes)):
+        pivot_index = index - length
+
+        if pivot_index >= length and pivot_index + length < len(closes):
+            high_window = highs[pivot_index - length:pivot_index + length + 1]
+            low_window = lows[pivot_index - length:pivot_index + length + 1]
+
+            if highs[pivot_index] == max(high_window):
+                last_pivot_high = highs[pivot_index]
+                pivot_high_crossed = False
+
+            if lows[pivot_index] == min(low_window):
+                last_pivot_low = lows[pivot_index]
+                pivot_low_crossed = False
+
+        if last_pivot_high is not None and closes[index] > last_pivot_high and not pivot_high_crossed:
+            buy_flags[index] = True
+            pivot_high_crossed = True
+
+        if last_pivot_low is not None and closes[index] < last_pivot_low and not pivot_low_crossed:
+            sell_flags[index] = True
+            pivot_low_crossed = True
+
+    return normalize_buy_sell(closes, buy_flags, sell_flags, smooth)
+
+
+def calculate_technical_sentiment(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if len(candles) < 60:
+        return {
+            "eventType": "PYTHON_TECHNICAL_SENTIMENT",
+            "status": "Waiting",
+            "sentiment": 50.0,
+            "sentimentStatus": "Waiting for more candles",
+            "bearCount": 0,
+            "neutralCount": 0,
+            "bullCount": 0,
+            "bearPct": 0.0,
+            "neutralPct": 0.0,
+            "bullPct": 0.0,
+            "activeCount": 0,
+            "indicators": [],
+        }
+
+    highs = [to_float(c.get("high")) for c in candles]
+    lows = [to_float(c.get("low")) for c in candles]
+    closes = [to_float(c.get("close")) for c in candles]
+
+    indicator_values = [
+        ("RSI", rsi_normalized(closes, 14)),
+        ("Stochastic", stochastic_normalized(highs, lows, closes, 14, 3)),
+        ("Stoch RSI", stochastic_rsi_normalized(closes, 14, 14, 3)),
+        ("CCI", cci_normalized(highs, lows, closes, 20)),
+        ("Bull Bear Power", bull_bear_power_normalized(highs, lows, closes, 13)),
+        ("Momentum", momentum_normalized(closes, 10, 3)),
+        ("Moving Average", moving_average_normalized(closes, 20, "SMA", 3)),
+        ("VWAP", vwap_bands_normalized(candles, 2.0, 3)),
+        ("Bollinger Bands", bollinger_bands_normalized(closes, 20, 2.0, 3)),
+        ("Supertrend", supertrend_normalized(highs, lows, closes, 10, 3.0, 3)),
+        ("Linear Regression", linear_regression_normalized(closes, 25)),
+        ("Market Structure", market_structure_normalized(highs, lows, closes, 5, 3)),
+    ]
+
+    indicators = []
+    bull_count = 0
+    bear_count = 0
+    neutral_count = 0
+
+    for name, value in indicator_values:
+        clean_value = clamp(float(value), 0.0, 100.0)
+        signal = classify_sentiment_value(clean_value)
+
+        if signal == "BULLISH":
+            bull_count += 1
+        elif signal == "BEARISH":
+            bear_count += 1
+        else:
+            neutral_count += 1
+
+        indicators.append(
+            {
+                "name": name,
+                "value": round(clean_value, 2),
+                "signal": signal,
+            }
+        )
+
+    active_count = len(indicators)
+    sentiment = safe_mean([item["value"] for item in indicators], 50.0)
+
+    bear_pct = bear_count * 100.0 / active_count if active_count else 0.0
+    neutral_pct = neutral_count * 100.0 / active_count if active_count else 0.0
+    bull_pct = bull_count * 100.0 / active_count if active_count else 0.0
+
+    if bull_count > bear_count and bull_count > neutral_count:
+        status = "Mostly Bullish"
+    elif bear_count > bull_count and bear_count > neutral_count:
+        status = "Mostly Bearish"
+    elif neutral_count > bull_count and neutral_count > bear_count:
+        status = "Mostly Neutral"
+    else:
+        status = "Mixed"
+
+    return {
+        "eventType": "PYTHON_TECHNICAL_SENTIMENT",
+        "status": "Live",
+        "sentiment": round(sentiment, 2),
+        "sentimentStatus": status,
+        "bearCount": bear_count,
+        "neutralCount": neutral_count,
+        "bullCount": bull_count,
+        "bearPct": round(bear_pct, 2),
+        "neutralPct": round(neutral_pct, 2),
+        "bullPct": round(bull_pct, 2),
+        "activeCount": active_count,
+        "indicators": indicators,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # BASIC ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
@@ -826,7 +1462,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "phase_3x_python_ghost_candles",
+        "engine": "phase_4A_python_technical_sentiment",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
@@ -834,6 +1470,7 @@ def root() -> Dict[str, Any]:
             "/api/historical-candles",
             "/api/merged-candles",
             "/api/engine-state",
+            "/api/latest-sentiment",
             "/webhook/tradingview",
         ],
     }
@@ -988,6 +1625,36 @@ def merged_candles(
     return merged[-safe_limit:]
 
 
+
+
+@app.get("/api/latest-sentiment")
+def latest_sentiment(
+    symbol: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    limit: int = 500,
+) -> Dict[str, Any]:
+    """
+    Phase 4A technical sentiment endpoint.
+    Computes the full 12-indicator LuxAlgo-style sentiment meter from candles.
+    """
+
+    selected_symbol = normalize_symbol(symbol or str(LATEST_SIGNAL.get("symbol") or "BTCUSD"))
+    selected_timeframe = normalize_timeframe(timeframe or str(LATEST_SIGNAL.get("timeframe") or "1m"))
+    safe_limit = max(100, min(int(limit or 500), 1000))
+
+    historical = fetch_alpaca_historical_candles(selected_symbol, selected_timeframe, safe_limit)
+    live = get_live_recent_candles(selected_symbol, selected_timeframe)
+    candles = merge_candles_by_time([*historical, *live])[-safe_limit:]
+
+    sentiment = calculate_technical_sentiment(candles)
+    sentiment["symbol"] = selected_symbol
+    sentiment["timeframe"] = selected_timeframe
+    sentiment["price"] = candles[-1]["close"] if candles else 0
+    sentiment["time"] = candles[-1].get("time") if candles else None
+    sentiment["createdAt"] = now_iso()
+
+    return sentiment
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PYTHON ENGINE ROUTE — PHASE 3X
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1044,8 +1711,10 @@ def engine_state(
     )
 
     ghost_candles = build_python_ghost_candles(candles, result, count=3)
+    technical_sentiment = calculate_technical_sentiment(candles)
 
-    result["ghostCandles"] = ghost_candles
+    result["technicalSentiment"] = technical_sentiment
+    result["sentiment"] = technical_sentiment
     result["ghostProjections"] = ghost_candles
     result["ghostEngine"] = {
         "phase": "phase_3x_python_ghost_candles",
