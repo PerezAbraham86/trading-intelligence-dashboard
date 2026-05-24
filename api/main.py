@@ -211,6 +211,10 @@ def to_float(value: Any, fallback: float = 0.0) -> float:
         return fallback
 
 
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
 def to_epoch_seconds(value: Any) -> float:
     """
     Converts every time format we use into sortable epoch seconds.
@@ -495,6 +499,325 @@ def get_live_recent_candles(symbol: str, timeframe: str) -> List[Dict[str, Any]]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PYTHON GHOST CANDLE ENGINE — PHASE 3X
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_heikin_ashi_candles(candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    ha_candles: List[Dict[str, Any]] = []
+
+    for index, candle in enumerate(candles):
+        o = to_float(candle.get("open"))
+        h = to_float(candle.get("high"))
+        l = to_float(candle.get("low"))
+        c = to_float(candle.get("close"))
+
+        ha_close = (o + h + l + c) / 4.0
+
+        if index == 0:
+            ha_open = (o + c) / 2.0
+        else:
+            prev = ha_candles[-1]
+            ha_open = (prev["open"] + prev["close"]) / 2.0
+
+        ha_high = max(h, ha_open, ha_close)
+        ha_low = min(l, ha_open, ha_close)
+
+        ha_candles.append(
+            {
+                **candle,
+                "open": ha_open,
+                "high": ha_high,
+                "low": ha_low,
+                "close": ha_close,
+            }
+        )
+
+    return ha_candles
+
+
+def average_true_range(candles: List[Dict[str, Any]], length: int = 14) -> float:
+    if len(candles) < 2:
+        return 0.0
+
+    ranges: List[float] = []
+
+    for index in range(max(1, len(candles) - length), len(candles)):
+        current = candles[index]
+        previous = candles[index - 1]
+
+        high = to_float(current.get("high"))
+        low = to_float(current.get("low"))
+        previous_close = to_float(previous.get("close"))
+
+        true_range = max(
+            high - low,
+            abs(high - previous_close),
+            abs(low - previous_close),
+        )
+        ranges.append(true_range)
+
+    return sum(ranges) / len(ranges) if ranges else 0.0
+
+
+def candle_momentum(candles: List[Dict[str, Any]], lookback: int = 8) -> float:
+    if len(candles) < 2:
+        return 0.0
+
+    sample = candles[-lookback:]
+    if len(sample) < 2:
+        return 0.0
+
+    weighted_sum = 0.0
+    weight_total = 0.0
+
+    for index in range(1, len(sample)):
+        weight = index
+        weighted_sum += (to_float(sample[index].get("close")) - to_float(sample[index - 1].get("close"))) * weight
+        weight_total += weight
+
+    return weighted_sum / max(weight_total, 1.0)
+
+
+def extract_levels_from_engine(result: Dict[str, Any], last_close: float) -> Dict[str, List[float]]:
+    upside: List[float] = []
+    downside: List[float] = []
+
+    def add_level(value: Any) -> None:
+        level = to_float(value, 0.0)
+
+        if level <= 0:
+            return
+
+        if level > last_close:
+            upside.append(level)
+        elif level < last_close:
+            downside.append(level)
+
+    for zone in result.get("zones", []) or []:
+        if not isinstance(zone, dict):
+            continue
+        add_level(zone.get("top"))
+        add_level(zone.get("bottom"))
+
+    for event in result.get("liquidityEvents", []) or []:
+        if isinstance(event, dict):
+            add_level(event.get("price") or event.get("level"))
+
+    for level in result.get("dlmLevels", []) or []:
+        if isinstance(level, dict):
+            add_level(level.get("price"))
+
+    return {
+        "upside": sorted(set(round(level, 8) for level in upside)),
+        "downside": sorted(set(round(level, 8) for level in downside), reverse=True),
+    }
+
+
+def recent_engine_bias(result: Dict[str, Any]) -> float:
+    bias = 0.0
+
+    for event in (result.get("smcEvents", []) or [])[-12:]:
+        if not isinstance(event, dict):
+            continue
+
+        direction = str(event.get("direction") or "").lower()
+        tag = str(event.get("tag") or "").upper()
+        scope = str(event.get("scope") or "").lower()
+
+        weight = 1.0
+        if "BOS" in tag:
+            weight += 0.4
+        if "CHOCH" in tag:
+            weight += 0.25
+        if scope == "swing":
+            weight += 0.35
+
+        if direction == "bullish":
+            bias += weight
+        elif direction == "bearish":
+            bias -= weight
+
+    for event in (result.get("liquidityEvents", []) or [])[-12:]:
+        if not isinstance(event, dict):
+            continue
+
+        direction = str(event.get("direction") or "").lower()
+
+        if direction == "bullish":
+            bias += 0.35
+        elif direction == "bearish":
+            bias -= 0.35
+
+    return clamp(bias / 8.0, -1.0, 1.0)
+
+
+def build_python_ghost_candles(
+    candles: List[Dict[str, Any]],
+    result: Dict[str, Any],
+    count: int = 3,
+) -> List[Dict[str, Any]]:
+    """
+    Phase 3X Python ghost candles.
+
+    This creates the same frontend shape that v3W already knows how to draw:
+    open/high/low/close/confidence/direction.
+
+    Logic:
+    - Start from Heikin Ashi so ghost candles remain smooth.
+    - Use recent momentum + SMC/liquidity bias.
+    - React to nearby SMC zones / liquidity levels as targets.
+    - Return PY-ready candles so frontend labels become PY1/PY2/PY3.
+    """
+
+    if len(candles) < 10:
+        return []
+
+    ha = build_heikin_ashi_candles(candles)
+
+    last_ha = ha[-1]
+    last_real = candles[-1]
+
+    atr = average_true_range(candles, 14)
+    if atr <= 0:
+        atr = max(to_float(last_real.get("high")) - to_float(last_real.get("low")), to_float(last_real.get("close")) * 0.001, 0.01)
+
+    momentum = candle_momentum(ha, 8)
+    last_close = to_float(last_real.get("close"))
+
+    smc_bias = recent_engine_bias(result)
+
+    latest_signal = str(LATEST_SIGNAL.get("signal") or "").upper()
+    if latest_signal == "BUY":
+        dashboard_bias = 0.25
+    elif latest_signal == "SELL":
+        dashboard_bias = -0.25
+    else:
+        dashboard_bias = 0.0
+
+    bull_score = to_float(LATEST_SIGNAL.get("bullScore"), 50)
+    bear_score = to_float(LATEST_SIGNAL.get("bearScore"), 50)
+    pressure_bias = clamp((bull_score - bear_score) / 100.0, -0.5, 0.5)
+
+    levels = extract_levels_from_engine(result, last_close)
+
+    prev_open = to_float(last_ha.get("open"))
+    prev_close = to_float(last_ha.get("close"))
+    prev_high = to_float(last_ha.get("high"))
+    prev_low = to_float(last_ha.get("low"))
+
+    previous_body = max(abs(prev_close - prev_open), atr * 0.08)
+
+    ghosts: List[Dict[str, Any]] = []
+    commit_direction = 0
+    commit_left = 0
+
+    for index in range(count):
+        step = index + 1
+        decay = 0.82 ** index
+
+        ha_open = (prev_open + prev_close) / 2.0
+
+        raw_delta = momentum * decay
+        bias_delta = (smc_bias * 0.30 + pressure_bias * 0.45 + dashboard_bias * 0.25) * atr * (0.75 ** index)
+        projected_close = prev_close + raw_delta + bias_delta
+
+        direction = 1 if projected_close >= ha_open else -1
+
+        if commit_left > 0 and commit_direction != 0:
+            direction = commit_direction
+            commit_left -= 1
+
+        body_size = abs(projected_close - ha_open)
+        body_size = max(body_size, atr * (0.16 if commit_direction else 0.10))
+        body_size = min(body_size, atr * 1.10)
+
+        # Smooth body rhythm like Pine HA ghost logic.
+        body_size = previous_body * 0.55 + body_size * 0.45
+
+        ha_close = ha_open + direction * body_size
+
+        top = max(ha_open, ha_close)
+        bottom = min(ha_open, ha_close)
+
+        upper_wick = max(atr * 0.10, body_size * 0.30)
+        lower_wick = max(atr * 0.10, body_size * 0.30)
+
+        # Target-aware SMC/Alpha reaction.
+        nearest_up = levels["upside"][0] if levels["upside"] else None
+        nearest_down = levels["downside"][0] if levels["downside"] else None
+
+        target_reaction = "continuation"
+        severity = 0.0
+
+        if nearest_up is not None:
+            up_distance = nearest_up - top
+            if 0 <= up_distance <= atr * 1.4 or top >= nearest_up:
+                severity = max(severity, clamp(1.0 - max(up_distance, 0.0) / max(atr * 1.4, 0.01), 0.0, 1.0))
+                upper_wick = max(upper_wick, atr * (0.35 + severity * 0.65))
+                if direction > 0 and severity >= 0.65:
+                    # Upside target rejection -> bearish flip.
+                    ha_close = ha_open - max(body_size * 0.65, atr * 0.12)
+                    direction = -1
+                    commit_direction = -1
+                    commit_left = 2
+                    target_reaction = "upside_target_rejection"
+
+        if nearest_down is not None:
+            down_distance = bottom - nearest_down
+            if 0 <= down_distance <= atr * 1.4 or bottom <= nearest_down:
+                dn_severity = clamp(1.0 - max(down_distance, 0.0) / max(atr * 1.4, 0.01), 0.0, 1.0)
+                if dn_severity > severity:
+                    severity = dn_severity
+                    lower_wick = max(lower_wick, atr * (0.35 + severity * 0.65))
+                    if direction < 0 and severity >= 0.65:
+                        # Downside target rejection -> bullish flip.
+                        ha_close = ha_open + max(body_size * 0.65, atr * 0.12)
+                        direction = 1
+                        commit_direction = 1
+                        commit_left = 2
+                        target_reaction = "downside_target_rejection"
+
+        top = max(ha_open, ha_close)
+        bottom = min(ha_open, ha_close)
+
+        ha_high = max(top + upper_wick, top)
+        ha_low = min(bottom - lower_wick, bottom)
+
+        # Confidence combines directional pressure, SMC agreement, HA momentum, and target severity.
+        momentum_score = clamp(abs(momentum) / max(atr, 0.01) * 25.0, 0.0, 25.0)
+        smc_score = abs(smc_bias) * 25.0
+        pressure_score = abs(pressure_bias) * 35.0
+        target_score = severity * 15.0
+        confidence = int(round(clamp(momentum_score + smc_score + pressure_score + target_score, 4.0, 96.0)))
+
+        ghosts.append(
+            {
+                "open": round(ha_open, 8),
+                "high": round(ha_high, 8),
+                "low": round(ha_low, 8),
+                "close": round(ha_close, 8),
+                "confidence": confidence,
+                "direction": "bullish" if direction > 0 else "bearish",
+                "label": f"Python Ghost #{step}",
+                "source": "python",
+                "engine": "python_smc_alpha_ghost",
+                "targetReaction": target_reaction,
+                "targetSeverity": round(severity, 4),
+                "smcBias": round(smc_bias, 4),
+                "pressureBias": round(pressure_bias, 4),
+            }
+        )
+
+        prev_open = ha_open
+        prev_close = ha_close
+        prev_high = ha_high
+        prev_low = ha_low
+        previous_body = max(abs(ha_close - ha_open), atr * 0.08)
+
+    return ghosts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # BASIC ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -503,7 +826,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "phase_2_python_zones_ready_sort_fix",
+        "engine": "phase_3x_python_ghost_candles",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
@@ -666,7 +989,7 @@ def merged_candles(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PYTHON ENGINE ROUTE — PHASE 2
+# PYTHON ENGINE ROUTE — PHASE 3X
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/api/engine-state")
@@ -676,7 +999,7 @@ def engine_state(
     limit: int = 500,
 ) -> Dict[str, Any]:
     """
-    Phase 2 endpoint.
+    Phase 3X endpoint.
 
     Browser test:
     https://trading-intelligence-dashboard.onrender.com/api/engine-state?symbol=BTCUSD&timeframe=1m&limit=500
@@ -685,7 +1008,8 @@ def engine_state(
     1. Gets historical candles from Alpaca.
     2. Merges any live webhook candles.
     3. Runs the Python SMC Phase 2 engine.
-    4. Returns candles + heikinAshiCandles + smcEvents + zones + liquidityEvents.
+    4. Adds Python Ghost Candles from HA + SMC + AlphaX-style pressure.
+    5. Returns candles + heikinAshiCandles + smcEvents + zones + liquidityEvents + ghostCandles.
     """
 
     safe_limit = max(100, min(int(limit or 500), 1000))
@@ -718,6 +1042,22 @@ def engine_state(
             "max_liquidity_events": 120,
         },
     )
+
+    ghost_candles = build_python_ghost_candles(candles, result, count=3)
+
+    result["ghostCandles"] = ghost_candles
+    result["ghostProjections"] = ghost_candles
+    result["ghostEngine"] = {
+        "phase": "phase_3x_python_ghost_candles",
+        "source": "python",
+        "count": len(ghost_candles),
+        "uses": [
+            "heikin_ashi_sequence",
+            "smc_structure_bias",
+            "liquidity_target_reaction",
+            "dashboard_pressure_bias",
+        ],
+    }
 
     result["source"] = {
         "symbol": normalize_symbol(symbol),
