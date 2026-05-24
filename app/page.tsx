@@ -47,7 +47,7 @@ export default function Dashboard() {
       >
         <div className="mb-2 flex items-center justify-between">
           <h1 className="text-4xl font-bold gradient-text">
-            TRADING DASHBOARD TEST 3K
+            TRADING DASHBOARD
           </h1>
 
           <ConnectionStatusBadge
