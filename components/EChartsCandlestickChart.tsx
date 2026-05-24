@@ -12,6 +12,17 @@ type Candle = {
   volume?: number
 }
 
+type GhostCandle = {
+  slot: string
+  label: string
+  open: number
+  close: number
+  low: number
+  high: number
+  confidence: number
+  direction: 'bullish' | 'bearish' | 'neutral'
+}
+
 type CandleMode = 'Regular' | 'Heikin Ashi'
 type SmcDisplayMode = 'Clean' | 'Full' | 'Structure Only' | 'Zones Only'
 
@@ -157,6 +168,7 @@ const MAX_FULL_SCORE_MARKERS = 12
 // Reserved empty x-axis space between live candles and the right liquidity profile.
 // This keeps future Ghost Candles from colliding with AlphaX / liquidity profile bars.
 const GHOST_CANDLE_RESERVED_SLOTS = 14
+const GHOST_CANDLE_COUNT = 3
 const RIGHT_PROFILE_SLOT_COUNT = 56
 
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
@@ -1190,6 +1202,187 @@ function buildScoreMarkPoints(markers: ScoreMarker[], compact: boolean) {
   })
 }
 
+
+function averageRange(candles: Candle[], lookback = 20): number {
+  if (candles.length === 0) return 1
+
+  const slice = candles.slice(Math.max(0, candles.length - lookback))
+  const total = slice.reduce((sum, candle) => sum + Math.max(candle.high - candle.low, 0), 0)
+  const avg = total / Math.max(1, slice.length)
+
+  return avg > 0 ? avg : Math.max(Math.abs(slice[slice.length - 1]?.close ?? 1) * 0.001, 1)
+}
+
+function averageCloseMomentum(candles: Candle[], lookback = 8): number {
+  if (candles.length < 2) return 0
+
+  const start = Math.max(1, candles.length - lookback)
+  let weighted = 0
+  let weightSum = 0
+
+  for (let i = start; i < candles.length; i++) {
+    const weight = i - start + 1
+    weighted += (candles[i].close - candles[i - 1].close) * weight
+    weightSum += weight
+  }
+
+  return weightSum > 0 ? weighted / weightSum : 0
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value))
+}
+
+function buildGhostCandlesFromChart(candles: Candle[], ghostSlots: string[]): GhostCandle[] {
+  if (candles.length < 3 || ghostSlots.length === 0) return []
+
+  const last = candles[candles.length - 1]
+  const previous = candles[candles.length - 2]
+  const range = averageRange(candles, 20)
+  const momentum = averageCloseMomentum(candles, 8)
+  const immediateBias = last.close - previous.close
+  const directionSeed = momentum !== 0 ? momentum : immediateBias
+  const baseDirection = directionSeed >= 0 ? 1 : -1
+  const minBody = Math.max(range * 0.10, Math.abs(last.close) * 0.00004)
+  const maxBody = Math.max(range * 0.75, minBody)
+
+  let prevOpen = last.open
+  let prevClose = last.close
+
+  return ghostSlots.slice(0, GHOST_CANDLE_COUNT).map((slot, index) => {
+    const decay = Math.pow(0.72, index)
+    const sequenceOpen = (prevOpen + prevClose) / 2
+    const rawMove = momentum * decay + baseDirection * range * 0.11 * decay
+    const direction = rawMove >= 0 ? 1 : -1
+    const bodySize = clampNumber(Math.abs(rawMove), minBody, maxBody)
+    const sequenceClose = sequenceOpen + direction * bodySize
+
+    const top = Math.max(sequenceOpen, sequenceClose)
+    const bottom = Math.min(sequenceOpen, sequenceClose)
+    const wickScale = 0.22 + index * 0.05
+    const upperWick = range * wickScale * (direction < 0 ? 1.25 : 0.85)
+    const lowerWick = range * wickScale * (direction > 0 ? 1.25 : 0.85)
+    const high = top + upperWick
+    const low = bottom - lowerWick
+    const confidence = Math.round(clampNumber((Math.abs(momentum) / Math.max(range, 1e-9)) * 45 + 18 - index * 6, 4, 88))
+
+    prevOpen = sequenceOpen
+    prevClose = sequenceClose
+
+    return {
+      slot,
+      label: `Ghost #${index + 1}`,
+      open: Number(sequenceOpen.toFixed(4)),
+      close: Number(sequenceClose.toFixed(4)),
+      low: Number(low.toFixed(4)),
+      high: Number(high.toFixed(4)),
+      confidence,
+      direction: direction > 0 ? 'bullish' : 'bearish',
+    }
+  })
+}
+
+function buildGhostCandleSeries(ghostCandles: GhostCandle[], compact: boolean): any[] {
+  if (!Array.isArray(ghostCandles) || ghostCandles.length === 0 || compact) return []
+
+  const data = ghostCandles.map((ghost) => ({
+    value: [
+      ghost.slot,
+      ghost.open,
+      ghost.close,
+      ghost.low,
+      ghost.high,
+      ghost.label,
+      ghost.confidence,
+      ghost.direction,
+    ],
+    ghost,
+  }))
+
+  return [
+    {
+      name: 'Python Ghost Candles',
+      type: 'custom',
+      coordinateSystem: 'cartesian2d',
+      silent: true,
+      z: 12,
+      data,
+      renderItem: (_params: any, api: any) => {
+        const slot = api.value(0)
+        const open = Number(api.value(1))
+        const close = Number(api.value(2))
+        const low = Number(api.value(3))
+        const high = Number(api.value(4))
+        const confidence = Number(api.value(6))
+        const direction = String(api.value(7))
+
+        const xPoint = api.coord([slot, close])
+        const highPoint = api.coord([slot, high])
+        const lowPoint = api.coord([slot, low])
+        const openPoint = api.coord([slot, open])
+        const closePoint = api.coord([slot, close])
+        const slotSize = api.size([1, 0])?.[0] ?? 12
+
+        const candleWidth = Math.max(4, slotSize * 0.46)
+        const bodyX = xPoint[0] - candleWidth / 2
+        const bodyY = Math.min(openPoint[1], closePoint[1])
+        const bodyHeight = Math.max(2, Math.abs(openPoint[1] - closePoint[1]))
+        const bull = direction === 'bullish'
+        const color = bull ? 'rgba(8, 153, 129, 0.42)' : 'rgba(242, 54, 69, 0.42)'
+        const borderColor = bull ? 'rgba(38, 166, 154, 0.95)' : 'rgba(255, 77, 94, 0.95)'
+        const wickColor = bull ? 'rgba(38, 166, 154, 0.72)' : 'rgba(255, 77, 94, 0.72)'
+
+        return {
+          type: 'group',
+          children: [
+            {
+              type: 'line',
+              shape: {
+                x1: xPoint[0],
+                y1: highPoint[1],
+                x2: xPoint[0],
+                y2: lowPoint[1],
+              },
+              style: {
+                stroke: wickColor,
+                lineWidth: 1.5,
+                lineDash: [3, 3],
+              },
+            },
+            {
+              type: 'rect',
+              shape: {
+                x: bodyX,
+                y: bodyY,
+                width: candleWidth,
+                height: bodyHeight,
+              },
+              style: {
+                fill: color,
+                stroke: borderColor,
+                lineWidth: 1.2,
+              },
+            },
+            {
+              type: 'text',
+              style: {
+                text: `${confidence}%`,
+                x: xPoint[0] + candleWidth * 0.72,
+                y: bull ? highPoint[1] - 10 : lowPoint[1] + 14,
+                fill: borderColor,
+                font: '700 9px sans-serif',
+                align: 'left',
+                verticalAlign: 'middle',
+              },
+            },
+          ],
+        }
+      },
+      encode: { x: 0, y: [1, 2, 3, 4] },
+    },
+  ]
+}
+
 function buildAlphaProfileSeries(
   alphaProfileBins: AlphaProfileBin[],
   profileSlots: string[],
@@ -1343,6 +1536,7 @@ export default function EChartsCandlestickChart({
   const [showZones, setShowZones] = useState(true)
   const [showLiquidity, setShowLiquidity] = useState(true)
   const [showScores, setShowScores] = useState(true)
+  const [showGhost, setShowGhost] = useState(true)
   const [smcDisplayMode, setSmcDisplayMode] = useState<SmcDisplayMode>('Clean')
   const [engineState, setEngineState] = useState<EngineState | null>(null)
   const [engineStatus, setEngineStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle')
@@ -1592,6 +1786,10 @@ export default function EChartsCandlestickChart({
       ? Array.from({ length: RIGHT_PROFILE_SLOT_COUNT }, (_, index) => `__profile_${index + 1}`)
       : []
 
+    const ghostCandles = enableAdvancedOverlays && showGhost
+      ? buildGhostCandlesFromChart(activeCandles, ghostGapSlots)
+      : []
+
     const xAxisData = [...candleTimes, ...ghostGapSlots, ...profileSlots]
 
     const candleData = activeCandles.map((c) => [
@@ -1780,6 +1978,9 @@ export default function EChartsCandlestickChart({
             data: markPointData,
           },
         },
+        ...(enableAdvancedOverlays && showGhost
+          ? buildGhostCandleSeries(ghostCandles, compact)
+          : []),
         ...(showRightProfile
           ? buildAlphaProfileSeries(alphaProfileBins, profileSlots, compact)
           : []),
@@ -1811,6 +2012,7 @@ export default function EChartsCandlestickChart({
     showZones,
     showLiquidity,
     showScores,
+    showGhost,
     smcDisplayMode,
     enableAdvancedOverlays,
     baseCandles,
@@ -1972,6 +2174,18 @@ export default function EChartsCandlestickChart({
               >
                 Scores
               </button>
+
+              <button
+                type="button"
+                onClick={() => setShowGhost((value) => !value)}
+                className={`rounded-md border px-3 py-1.5 text-sm font-semibold ${
+                  showGhost
+                    ? 'border-cyan-500/50 bg-cyan-500/10 text-cyan-300'
+                    : 'border-dark-700 bg-[#151922] text-gray-400'
+                }`}
+              >
+                Ghost
+              </button>
             </>
           )}
         </div>
@@ -1999,7 +2213,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3T' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3U' : 'Chart Engine v2'}
             </div>
           </div>
         )}
