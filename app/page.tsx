@@ -30,6 +30,12 @@ type PythonEngineState = {
   }
 }
 
+type ChartSelection = {
+  symbol: string
+  timeframe: string
+  candleMode: 'Candles' | 'Heikin Ashi'
+}
+
 function normalizeSymbol(value: unknown) {
   return String(value ?? 'BTCUSD')
     .trim()
@@ -120,6 +126,12 @@ export default function Dashboard() {
   const [pythonEngineState, setPythonEngineState] =
     useState<PythonEngineState | null>(null)
 
+  const [mainChartSelection, setMainChartSelection] = useState<ChartSelection>({
+    symbol: 'BTCUSD',
+    timeframe: '1m',
+    candleMode: 'Heikin Ashi',
+  })
+
   const {
     latestSignal,
     recentSignals,
@@ -133,8 +145,8 @@ export default function Dashboard() {
     setIsClient(true)
   }, [])
 
-  const selectedSymbol = normalizeSymbol(latestSignal?.symbol)
-  const selectedTimeframe = normalizeTimeframe(latestSignal?.timeframe)
+  const selectedSymbol = normalizeSymbol(mainChartSelection.symbol || latestSignal?.symbol)
+  const selectedTimeframe = normalizeTimeframe(mainChartSelection.timeframe || latestSignal?.timeframe)
 
   useEffect(() => {
     if (!isClient || !apiBaseUrl) return
@@ -179,12 +191,14 @@ export default function Dashboard() {
     const ghostConfidence = getAverageGhostConfidence(pythonEngineState)
     const pythonGhostText = getPythonGhostText(pythonEngineState)
 
-    if (!ghostConfidence && !pythonGhostText) {
-      return latestSignal
-    }
-
     return {
       ...latestSignal,
+
+      // Main chart is now the master symbol/timeframe source for every outside panel.
+      // When the chart dropdown changes, SignalCard, Market Sentiment, Pressure Gauges,
+      // Warnings, Factor Confirmation, Ghost Projections, and Recent Signals all follow it.
+      symbol: selectedSymbol,
+      timeframe: selectedTimeframe,
 
       // This syncs the Python ghost engine into the dashboard summary cards.
       // It fixes Pressure Gauges and Factor Confirmation showing Ghost Confidence as 0
@@ -192,9 +206,10 @@ export default function Dashboard() {
       confidence: Math.max(Number(latestSignal?.confidence ?? 0), ghostConfidence),
       ghost: pythonGhostText || latestSignal?.ghost || 'Python Ghost Projection',
       ghostConfidence,
-      pythonGhostEngine: true,
+      pythonGhostEngine: Boolean(ghostConfidence || pythonGhostText),
+      chartCandleMode: mainChartSelection.candleMode,
     }
-  }, [latestSignal, pythonEngineState])
+  }, [latestSignal, pythonEngineState, selectedSymbol, selectedTimeframe, mainChartSelection.candleMode])
 
   if (!isClient) {
     return null
@@ -224,8 +239,8 @@ export default function Dashboard() {
         </div>
 
         <p className="text-sm text-gray-400">
-          Real-time trading signals and analysis • {augmentedLatestSignal.symbol} •{' '}
-          {augmentedLatestSignal.timeframe} timeframe
+          Real-time trading signals and analysis • {selectedSymbol} •{' '}
+          {selectedTimeframe} timeframe
         </p>
       </motion.div>
 
@@ -240,7 +255,16 @@ export default function Dashboard() {
             enableAdvancedOverlays
             defaultSymbol={selectedSymbol}
             defaultTimeframe={selectedTimeframe}
-            defaultCandleMode="Heikin Ashi"
+            defaultCandleMode={mainChartSelection.candleMode}
+            onChartSelectionChange={(selection) => {
+              if (!selection.compact) {
+                setMainChartSelection({
+                  symbol: normalizeSymbol(selection.symbol),
+                  timeframe: normalizeTimeframe(selection.timeframe),
+                  candleMode: selection.candleMode,
+                })
+              }
+            }}
             latestSignal={augmentedLatestSignal}
             recentSignals={recentSignals}
             recentCandles={recentCandles}
