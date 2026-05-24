@@ -1783,6 +1783,7 @@ export default function EChartsCandlestickChart({
   const [engineStatus, setEngineStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle')
   const [historicalCandles, setHistoricalCandles] = useState<any[]>([])
   const [historicalStatus, setHistoricalStatus] = useState<'idle' | 'loading' | 'loaded' | 'unavailable' | 'error'>('idle')
+  const [livePolledCandle, setLivePolledCandle] = useState<any | null>(null)
 
   useEffect(() => {
     const nextSymbol = normalizeDefaultSymbol(
@@ -1903,6 +1904,43 @@ export default function EChartsCandlestickChart({
     }
   }, [symbol, timeframe, compact, allowCompactHistory])
 
+  useEffect(() => {
+    let cancelled = false
+    let intervalId: ReturnType<typeof setInterval> | null = null
+
+    async function fetchLiveCandle() {
+      try {
+        const params = new URLSearchParams({
+          symbol,
+          timeframe,
+        })
+
+        const response = await fetch(`${API_BASE_URL}/api/live-candle?${params.toString()}`, {
+          cache: 'no-store',
+        })
+
+        if (!response.ok) return
+
+        const json = await response.json()
+
+        if (!cancelled && json && typeof json === 'object') {
+          setLivePolledCandle(json)
+        }
+      } catch (error) {
+        console.error('Live 1-second candle fetch error:', error)
+      }
+    }
+
+    setLivePolledCandle(null)
+    fetchLiveCandle()
+    intervalId = setInterval(fetchLiveCandle, 1000)
+
+    return () => {
+      cancelled = true
+      if (intervalId) clearInterval(intervalId)
+    }
+  }, [symbol, timeframe])
+
   const engineCandles = useMemo(
     () =>
       Array.isArray(engineState?.candles)
@@ -1934,22 +1972,50 @@ export default function EChartsCandlestickChart({
     [historicalCandles, symbol, timeframe]
   )
 
-  const liveCandles = useMemo(() => {
-    if (engineCandles.length > 0) return engineCandles
+  const livePolledCandles = useMemo(() => {
+    const candle = candleFromAny(livePolledCandle)
 
-    if (historicalCandlesFromAlpaca.length > 0 || liveCandlesFromCandlesEndpoint.length > 0) {
+    if (!candle) return []
+
+    const candleSymbol = normalizeSymbol(livePolledCandle?.symbol ?? symbol)
+    const candleTimeframe = normalizeTimeframe(livePolledCandle?.timeframe ?? timeframe)
+
+    if (candleSymbol !== normalizeSymbol(symbol)) return []
+    if (candleTimeframe !== normalizeTimeframe(timeframe)) return []
+
+    return [candle]
+  }, [livePolledCandle, symbol, timeframe])
+
+  const liveCandles = useMemo(() => {
+    if (engineCandles.length > 0) {
       return mergeCandlesByTime([
-        ...historicalCandlesFromAlpaca,
-        ...liveCandlesFromCandlesEndpoint,
+        ...engineCandles,
+        ...livePolledCandles,
       ])
     }
 
-    return liveCandlesFromSignalsEndpoint
+    if (
+      historicalCandlesFromAlpaca.length > 0 ||
+      liveCandlesFromCandlesEndpoint.length > 0 ||
+      livePolledCandles.length > 0
+    ) {
+      return mergeCandlesByTime([
+        ...historicalCandlesFromAlpaca,
+        ...liveCandlesFromCandlesEndpoint,
+        ...livePolledCandles,
+      ])
+    }
+
+    return mergeCandlesByTime([
+      ...liveCandlesFromSignalsEndpoint,
+      ...livePolledCandles,
+    ])
   }, [
     engineCandles,
     historicalCandlesFromAlpaca,
     liveCandlesFromCandlesEndpoint,
     liveCandlesFromSignalsEndpoint,
+    livePolledCandles,
   ])
 
   const lastValidLiveCandlesRef = useRef<Candle[]>([])
