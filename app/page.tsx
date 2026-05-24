@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import SignalCard from '@/components/SignalCard'
 import EChartsCandlestickChart from '@/components/EChartsCandlestickChart'
 import PressureGauges from '@/components/PressureGauges'
@@ -13,8 +13,112 @@ import MarketSentimentGauge from '@/components/MarketSentimentGauge'
 import { motion } from 'framer-motion'
 import { useApiPolling } from '@/hooks/useApiPolling'
 
+type PythonGhostCandle = {
+  confidence?: number
+  direction?: string
+  source?: string
+}
+
+type PythonEngineState = {
+  ghostCandles?: PythonGhostCandle[]
+  ghostProjections?: PythonGhostCandle[]
+  projections?: PythonGhostCandle[]
+  ghostEngine?: {
+    phase?: string
+    source?: string
+    count?: number
+  }
+}
+
+function normalizeSymbol(value: unknown) {
+  return String(value ?? 'BTCUSD')
+    .trim()
+    .toUpperCase()
+    .replace('BINANCE:', '')
+    .replace('COINBASE:', '')
+    .replace('CRYPTO:', '')
+    .replace('CME_MINI:', '')
+    .replace('CME:', '')
+}
+
+function normalizeTimeframe(value: unknown) {
+  const tf = String(value ?? '1m').trim().toLowerCase()
+
+  if (tf === '1') return '1m'
+  if (tf === '3') return '3m'
+  if (tf === '5') return '5m'
+  if (tf === '15') return '15m'
+  if (tf === '30') return '30m'
+  if (tf === '60') return '1h'
+  if (tf === '120') return '2h'
+  if (tf === '240') return '4h'
+  if (tf === 'd' || tf === '1d') return '1d'
+  if (tf === 'w' || tf === '1w') return '1w'
+
+  return tf || '1m'
+}
+
+function clampPercent(value: number) {
+  if (!Number.isFinite(value)) return 0
+  return Math.max(0, Math.min(100, Math.round(value)))
+}
+
+function getPythonGhostCandles(engineState: PythonEngineState | null) {
+  if (!engineState) return []
+
+  if (Array.isArray(engineState.ghostCandles)) return engineState.ghostCandles
+  if (Array.isArray(engineState.ghostProjections)) return engineState.ghostProjections
+  if (Array.isArray(engineState.projections)) return engineState.projections
+
+  return []
+}
+
+function getAverageGhostConfidence(engineState: PythonEngineState | null) {
+  const ghostCandles = getPythonGhostCandles(engineState)
+
+  if (ghostCandles.length === 0) return 0
+
+  const values = ghostCandles
+    .map((ghost) => Number(ghost.confidence ?? 0))
+    .filter((value) => Number.isFinite(value))
+
+  if (values.length === 0) return 0
+
+  return clampPercent(
+    values.reduce((sum, value) => sum + value, 0) / values.length
+  )
+}
+
+function getPythonGhostText(engineState: PythonEngineState | null) {
+  const ghostCandles = getPythonGhostCandles(engineState)
+
+  if (ghostCandles.length === 0) return ''
+
+  const firstDirection = String(ghostCandles[0]?.direction ?? '').toLowerCase()
+
+  if (
+    firstDirection.includes('bull') ||
+    firstDirection.includes('up') ||
+    firstDirection.includes('buy')
+  ) {
+    return 'Python Bullish Projection'
+  }
+
+  if (
+    firstDirection.includes('bear') ||
+    firstDirection.includes('down') ||
+    firstDirection.includes('sell')
+  ) {
+    return 'Python Bearish Projection'
+  }
+
+  return 'Python Neutral Projection'
+}
+
 export default function Dashboard() {
   const [isClient, setIsClient] = useState(false)
+  const [pythonEngineState, setPythonEngineState] =
+    useState<PythonEngineState | null>(null)
 
   const {
     latestSignal,
@@ -28,6 +132,69 @@ export default function Dashboard() {
   useEffect(() => {
     setIsClient(true)
   }, [])
+
+  const selectedSymbol = normalizeSymbol(latestSignal?.symbol)
+  const selectedTimeframe = normalizeTimeframe(latestSignal?.timeframe)
+
+  useEffect(() => {
+    if (!isClient || !apiBaseUrl) return
+
+    let cancelled = false
+    let intervalId: ReturnType<typeof setInterval> | null = null
+
+    async function fetchPythonEngineState() {
+      try {
+        const params = new URLSearchParams({
+          symbol: selectedSymbol,
+          timeframe: selectedTimeframe,
+          limit: '500',
+        })
+
+        const response = await fetch(`${apiBaseUrl}/api/engine-state?${params.toString()}`, {
+          cache: 'no-store',
+        })
+
+        if (!response.ok) return
+
+        const json = await response.json()
+
+        if (!cancelled) {
+          setPythonEngineState(json && typeof json === 'object' ? json : null)
+        }
+      } catch (error) {
+        console.error('Dashboard Python engine sync error:', error)
+      }
+    }
+
+    fetchPythonEngineState()
+    intervalId = setInterval(fetchPythonEngineState, 15000)
+
+    return () => {
+      cancelled = true
+      if (intervalId) clearInterval(intervalId)
+    }
+  }, [apiBaseUrl, isClient, selectedSymbol, selectedTimeframe])
+
+  const augmentedLatestSignal = useMemo(() => {
+    const ghostConfidence = getAverageGhostConfidence(pythonEngineState)
+    const pythonGhostText = getPythonGhostText(pythonEngineState)
+
+    if (!ghostConfidence && !pythonGhostText) {
+      return latestSignal
+    }
+
+    return {
+      ...latestSignal,
+
+      // This syncs the Python ghost engine into the dashboard summary cards.
+      // It fixes Pressure Gauges and Factor Confirmation showing Ghost Confidence as 0
+      // while the Python ghost panel already shows PY confidence.
+      confidence: Math.max(Number(latestSignal?.confidence ?? 0), ghostConfidence),
+      ghost: pythonGhostText || latestSignal?.ghost || 'Python Ghost Projection',
+      ghostConfidence,
+      pythonGhostEngine: true,
+    }
+  }, [latestSignal, pythonEngineState])
 
   if (!isClient) {
     return null
@@ -57,8 +224,8 @@ export default function Dashboard() {
         </div>
 
         <p className="text-sm text-gray-400">
-          Real-time trading signals and analysis • {latestSignal.symbol} •{' '}
-          {latestSignal.timeframe} timeframe
+          Real-time trading signals and analysis • {augmentedLatestSignal.symbol} •{' '}
+          {augmentedLatestSignal.timeframe} timeframe
         </p>
       </motion.div>
 
@@ -66,11 +233,11 @@ export default function Dashboard() {
       <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
         {/* Left Column */}
         <div className="space-y-6 lg:col-span-2">
-          <SignalCard signal={latestSignal} />
+          <SignalCard signal={augmentedLatestSignal} />
 
           <EChartsCandlestickChart
             enableAdvancedOverlays
-            latestSignal={latestSignal}
+            latestSignal={augmentedLatestSignal}
             recentSignals={recentSignals}
             recentCandles={recentCandles}
           />
@@ -82,7 +249,7 @@ export default function Dashboard() {
               compact
               chartTitle="Mini Chart 1"
               enableAdvancedOverlays={false}
-              latestSignal={latestSignal}
+              latestSignal={augmentedLatestSignal}
               recentSignals={recentSignals}
               recentCandles={recentCandles}
             />
@@ -92,7 +259,7 @@ export default function Dashboard() {
               compact
               chartTitle="Mini Chart 2"
               enableAdvancedOverlays={false}
-              latestSignal={latestSignal}
+              latestSignal={augmentedLatestSignal}
               recentSignals={recentSignals}
               recentCandles={recentCandles}
             />
@@ -103,17 +270,17 @@ export default function Dashboard() {
         <div className="space-y-6">
           <MarketSentimentGauge />
 
-          <PressureGauges signal={latestSignal} />
+          <PressureGauges signal={augmentedLatestSignal} />
 
-          <WarningsPanel signal={latestSignal} />
+          <WarningsPanel signal={augmentedLatestSignal} />
         </div>
       </div>
 
       {/* Second Row */}
       <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <FactorConfirmationTable signal={latestSignal} />
+        <FactorConfirmationTable signal={augmentedLatestSignal} />
 
-        <GhostCandleProjection signal={latestSignal} />
+        <GhostCandleProjection signal={augmentedLatestSignal} />
       </div>
 
       <RecentSignalsTable signals={visibleRecentSignals} />
