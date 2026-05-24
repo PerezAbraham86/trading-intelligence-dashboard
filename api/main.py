@@ -52,6 +52,7 @@ ALPACA_CRYPTO_BASE_URL = "https://data.alpaca.markets/v1beta3"
 LATEST_SIGNAL: Dict[str, Any] = {}
 RECENT_SIGNALS: List[Dict[str, Any]] = []
 RECENT_CANDLES: List[Dict[str, Any]] = []
+LIVE_CANDLES: Dict[str, Dict[str, Any]] = {}
 
 MAX_RECENT_SIGNALS = 50
 MAX_RECENT_CANDLES = 1000
@@ -496,6 +497,167 @@ def get_live_recent_candles(symbol: str, timeframe: str) -> List[Dict[str, Any]]
         if normalize_symbol(str(candle.get("symbol", ""))) == normalized_symbol
         and normalize_timeframe(str(candle.get("timeframe", ""))) == normalized_timeframe
     ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LIVE CURRENT CANDLE BUILDER — PHASE 4B / 1-SECOND POLLING
+# ─────────────────────────────────────────────────────────────────────────────
+
+def timeframe_seconds(timeframe: str) -> int:
+    tf = normalize_timeframe(timeframe)
+
+    mapping = {
+        "1m": 60,
+        "3m": 180,
+        "5m": 300,
+        "15m": 900,
+        "30m": 1800,
+        "1h": 3600,
+        "2h": 7200,
+        "4h": 14400,
+        "1d": 86400,
+        "1w": 604800,
+    }
+
+    return mapping.get(tf, 60)
+
+
+def candle_bucket_epoch(epoch_seconds: float, timeframe: str) -> int:
+    seconds = timeframe_seconds(timeframe)
+    return int(epoch_seconds // seconds * seconds)
+
+
+def pick_latest_candle_source(symbol: str, timeframe: str) -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    candidates: List[Dict[str, Any]] = []
+
+    # 1) Prefer newest Alpaca candle/bar when available.
+    # This keeps BTCUSD/ETHUSD moving from the provider even if no webhook candle arrives.
+    try:
+        alpaca_candles = fetch_alpaca_historical_candles(
+            normalized_symbol,
+            normalized_timeframe,
+            limit=2,
+        )
+        candidates.extend(alpaca_candles)
+    except Exception:
+        pass
+
+    # 2) Then use recent live webhook candles.
+    candidates.extend(get_live_recent_candles(normalized_symbol, normalized_timeframe)[-5:])
+
+    # 3) Then use latest signal price as fallback.
+    if LATEST_SIGNAL:
+        latest_symbol = normalize_symbol(str(LATEST_SIGNAL.get("symbol") or normalized_symbol))
+        latest_timeframe = normalize_timeframe(str(LATEST_SIGNAL.get("timeframe") or normalized_timeframe))
+
+        if latest_symbol == normalized_symbol and latest_timeframe == normalized_timeframe:
+            price = to_float(
+                LATEST_SIGNAL.get("current"),
+                to_float(LATEST_SIGNAL.get("price"), to_float(LATEST_SIGNAL.get("close"), 0.0)),
+            )
+
+            if price > 0:
+                now_epoch = time.time()
+                candidates.append(
+                    {
+                        "time": int(now_epoch),
+                        "timestamp": int(now_epoch),
+                        "epoch": now_epoch,
+                        "open": price,
+                        "high": price,
+                        "low": price,
+                        "close": price,
+                        "volume": to_float(LATEST_SIGNAL.get("volume"), 0.0),
+                        "symbol": normalized_symbol,
+                        "timeframe": normalized_timeframe,
+                        "createdAt": now_iso(),
+                        "source": "latest_signal",
+                    }
+                )
+
+    valid = [
+        candidate
+        for candidate in candidates
+        if to_float(candidate.get("close"), 0.0) > 0
+    ]
+
+    if not valid:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No live candle source available for {normalized_symbol} {normalized_timeframe}",
+        )
+
+    return sorted(
+        valid,
+        key=lambda item: to_epoch_seconds(item.get("epoch") or item.get("time") or item.get("timestamp")),
+    )[-1]
+
+
+def update_live_candle_cache(symbol: str, timeframe: str, source: Dict[str, Any]) -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    key = f"{normalized_symbol}:{normalized_timeframe}"
+
+    source_epoch = to_epoch_seconds(source.get("epoch") or source.get("time") or source.get("timestamp"))
+    if source_epoch <= 0:
+        source_epoch = time.time()
+
+    bucket = candle_bucket_epoch(source_epoch, normalized_timeframe)
+
+    price = to_float(source.get("close"), 0.0)
+    source_open = to_float(source.get("open"), price)
+    source_high = to_float(source.get("high"), price)
+    source_low = to_float(source.get("low"), price)
+    source_close = to_float(source.get("close"), price)
+    source_volume = to_float(source.get("volume"), 0.0)
+
+    cached = LIVE_CANDLES.get(key)
+
+    if not cached or int(cached.get("bucket", 0)) != bucket:
+        # New candle bucket. Open should be the first available price for this timeframe.
+        live = {
+            "time": bucket,
+            "timestamp": bucket,
+            "epoch": bucket,
+            "bucket": bucket,
+            "open": source_open if source_open > 0 else source_close,
+            "high": max(source_high, source_open, source_close),
+            "low": min(source_low, source_open, source_close),
+            "close": source_close,
+            "volume": source_volume,
+            "symbol": normalized_symbol,
+            "timeframe": normalized_timeframe,
+            "createdAt": now_iso(),
+            "source": source.get("source") or "live_candle_builder",
+            "isLive": True,
+            "pollingMs": 1000,
+        }
+    else:
+        live = dict(cached)
+        live["high"] = max(to_float(live.get("high"), source_close), source_high, source_close)
+        live["low"] = min(to_float(live.get("low"), source_close), source_low, source_close)
+        live["close"] = source_close
+        live["volume"] = max(to_float(live.get("volume"), 0.0), source_volume)
+        live["createdAt"] = now_iso()
+        live["source"] = source.get("source") or live.get("source") or "live_candle_builder"
+        live["isLive"] = True
+        live["pollingMs"] = 1000
+
+    LIVE_CANDLES[key] = live
+    return live
+
+
+def get_cached_or_build_live_candle(symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
+    try:
+        source = pick_latest_candle_source(symbol, timeframe)
+        return update_live_candle_cache(symbol, timeframe, source)
+    except HTTPException:
+        return None
+    except Exception:
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1462,13 +1624,14 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "phase_4A_python_technical_sentiment",
+        "engine": "phase_4B_1_second_live_candle_polling",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
             "/api/recent-candles",
             "/api/historical-candles",
             "/api/merged-candles",
+            "/api/live-candle",
             "/api/engine-state",
             "/api/latest-sentiment",
             "/webhook/tradingview",
@@ -1618,11 +1781,34 @@ def merged_candles(
 ) -> List[Dict[str, Any]]:
     historical = fetch_alpaca_historical_candles(symbol, timeframe, limit)
     live = get_live_recent_candles(symbol, timeframe)
+    live_current = get_cached_or_build_live_candle(symbol, timeframe)
 
-    merged = merge_candles_by_time([*historical, *live])
+    merged = merge_candles_by_time([
+        *historical,
+        *live,
+        *([live_current] if live_current else []),
+    ])
     safe_limit = max(1, min(int(limit or 300), 1000))
 
     return merged[-safe_limit:]
+
+
+@app.get("/api/live-candle")
+def live_candle(
+    symbol: str = "BTCUSD",
+    timeframe: str = "1m",
+) -> Dict[str, Any]:
+    """
+    Returns one mutable current candle for the selected symbol/timeframe.
+
+    Frontend polls this every 1 second and replaces only the last candle.
+    Historical candles remain stable. This creates the live moving candle effect.
+    """
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    source = pick_latest_candle_source(normalized_symbol, normalized_timeframe)
+    return update_live_candle_cache(normalized_symbol, normalized_timeframe, source)
 
 
 
@@ -1644,7 +1830,12 @@ def latest_sentiment(
 
     historical = fetch_alpaca_historical_candles(selected_symbol, selected_timeframe, safe_limit)
     live = get_live_recent_candles(selected_symbol, selected_timeframe)
-    candles = merge_candles_by_time([*historical, *live])[-safe_limit:]
+    live_current = get_cached_or_build_live_candle(selected_symbol, selected_timeframe)
+    candles = merge_candles_by_time([
+        *historical,
+        *live,
+        *([live_current] if live_current else []),
+    ])[-safe_limit:]
 
     sentiment = calculate_technical_sentiment(candles)
     sentiment["symbol"] = selected_symbol
@@ -1683,7 +1874,12 @@ def engine_state(
 
     historical = fetch_alpaca_historical_candles(symbol, timeframe, safe_limit)
     live = get_live_recent_candles(symbol, timeframe)
-    candles = merge_candles_by_time([*historical, *live])[-safe_limit:]
+    live_current = get_cached_or_build_live_candle(symbol, timeframe)
+    candles = merge_candles_by_time([
+        *historical,
+        *live,
+        *([live_current] if live_current else []),
+    ])[-safe_limit:]
 
     result = run_phase1_engine(
         candles,
@@ -1734,6 +1930,7 @@ def engine_state(
         "limit": safe_limit,
         "historicalCandles": len(historical),
         "liveCandles": len(live),
+        "liveCurrentCandle": live_current is not None,
         "mergedCandles": len(candles),
         "dataProvider": "alpaca",
     }
