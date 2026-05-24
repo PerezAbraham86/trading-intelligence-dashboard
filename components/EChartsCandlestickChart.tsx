@@ -1973,7 +1973,10 @@ export default function EChartsCandlestickChart({
   )
 
   const livePolledCandles = useMemo(() => {
-    const candle = candleFromAny(livePolledCandle)
+    const candle = candleFromAny(livePolledCandle, {
+      symbol,
+      timeframe,
+    })
 
     if (!candle) return []
 
