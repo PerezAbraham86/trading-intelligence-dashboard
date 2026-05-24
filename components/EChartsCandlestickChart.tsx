@@ -63,6 +63,15 @@ type LiquidityEvent = {
   touches?: number
 }
 
+type DlmConfluenceMarker = {
+  time: string
+  price: number
+  label: string
+  direction: 'bullish' | 'bearish' | 'neutral'
+  kind: 'poc_touch' | 'liquidity_touch' | 'ob_confirm' | 'entry_confirm' | 'pressure'
+  pressurePct?: number
+}
+
 type EChartsCandlestickChartProps = {
   heightClass?: string
   compact?: boolean
@@ -77,6 +86,7 @@ const TEAL = '#26a69a'
 const LIGHT_RED = '#ff4d5e'
 const YELLOW = '#facc15'
 const PURPLE = '#a855f7'
+const CYAN = '#22d3ee'
 
 const sampleCandles: Candle[] = [
   { time: '5/20 09:00', open: 76450, close: 76680, low: 76380, high: 76750 },
@@ -291,6 +301,49 @@ const sampleLiquidityEvents: LiquidityEvent[] = [
   },
 ]
 
+const sampleDlmConfluenceMarkers: DlmConfluenceMarker[] = [
+  {
+    time: '5/20 13:00',
+    price: 76720,
+    label: 'DLM OB Confirm',
+    direction: 'bullish',
+    kind: 'ob_confirm',
+    pressurePct: 62,
+  },
+  {
+    time: '5/20 17:00',
+    price: 77840,
+    label: 'Sell Liquidity Hit',
+    direction: 'bearish',
+    kind: 'liquidity_touch',
+    pressurePct: 58,
+  },
+  {
+    time: '5/21 01:00',
+    price: 75840,
+    label: 'Buy Liquidity Hit',
+    direction: 'bullish',
+    kind: 'liquidity_touch',
+    pressurePct: 64,
+  },
+  {
+    time: '5/21 04:00',
+    price: 76580,
+    label: 'POC Touch',
+    direction: 'neutral',
+    kind: 'poc_touch',
+    pressurePct: 50,
+  },
+  {
+    time: '5/21 06:00',
+    price: 76690,
+    label: 'DLM Entry Confirm',
+    direction: 'bullish',
+    kind: 'entry_confirm',
+    pressurePct: 67,
+  },
+]
+
 const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1D']
 const candleModeOptions: CandleMode[] = ['Regular', 'Heikin Ashi']
 
@@ -340,6 +393,15 @@ function getLiquidityColor(event: LiquidityEvent) {
   if (event.direction === 'bullish') return GREEN
   if (event.direction === 'bearish') return RED
   return BLUE
+}
+
+function getDlmConfluenceColor(marker: DlmConfluenceMarker) {
+  if (marker.kind === 'poc_touch') return CYAN
+  if (marker.kind === 'ob_confirm') return BLUE
+  if (marker.kind === 'entry_confirm') return GREEN
+  if (marker.direction === 'bullish') return GREEN
+  if (marker.direction === 'bearish') return RED
+  return CYAN
 }
 
 function getZoneStyle(zone: SmcZone, compact: boolean) {
@@ -643,6 +705,46 @@ function buildLiquidityMarkPoints(events: LiquidityEvent[], compact: boolean) {
     })
 }
 
+function buildDlmConfluenceMarkPoints(
+  markers: DlmConfluenceMarker[],
+  compact: boolean
+) {
+  return markers.map((marker) => {
+    const color = getDlmConfluenceColor(marker)
+    const isTopLabel = marker.direction === 'bearish'
+    const pressureText =
+      typeof marker.pressurePct === 'number' ? ` ${marker.pressurePct}%` : ''
+
+    return {
+      name: marker.label,
+      coord: [marker.time, marker.price],
+      value: `${marker.label}${pressureText}`,
+      symbol: marker.kind === 'entry_confirm' ? 'triangle' : 'circle',
+      symbolSize: compact ? 18 : marker.kind === 'entry_confirm' ? 24 : 20,
+      symbolRotate: marker.direction === 'bearish' ? 180 : 0,
+      itemStyle: {
+        color,
+        opacity: 0.95,
+        borderColor: '#0f1115',
+        borderWidth: 2,
+      },
+      label: {
+        show: !compact,
+        formatter: `${marker.label}${pressureText}`,
+        color,
+        fontSize: 10,
+        fontWeight: 800,
+        position: isTopLabel ? 'top' : 'bottom',
+        backgroundColor: 'rgba(15, 17, 21, 0.88)',
+        borderColor: color,
+        borderWidth: 1,
+        borderRadius: 4,
+        padding: [3, 6],
+      },
+    }
+  })
+}
+
 export default function EChartsCandlestickChart({
   heightClass = 'h-[650px]',
   compact = false,
@@ -829,6 +931,12 @@ export default function EChartsCandlestickChart({
                   ...(showLiquidity
                     ? buildLiquidityMarkPoints(sampleLiquidityEvents, compact)
                     : []),
+                  ...(showDlm
+                    ? buildDlmConfluenceMarkPoints(
+                        sampleDlmConfluenceMarkers,
+                        compact
+                      )
+                    : []),
                 ]
               : [],
           },
@@ -972,7 +1080,7 @@ export default function EChartsCandlestickChart({
 
         {!compact && (
           <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-            {enableAdvancedOverlays ? 'Chart Engine v3C' : 'Chart Engine v2'}
+            {enableAdvancedOverlays ? 'Chart Engine v3D' : 'Chart Engine v2'}
           </div>
         )}
       </div>
