@@ -268,7 +268,7 @@ export default function Dashboard() {
 
         {/* Right Column */}
         <div className="space-y-6">
-          <MarketSentimentGauge />
+          <MarketSentimentGauge signal={augmentedLatestSignal} />
 
           <PressureGauges signal={augmentedLatestSignal} />
 
