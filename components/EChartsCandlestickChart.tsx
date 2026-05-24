@@ -143,6 +143,13 @@ type EChartsCandlestickChartProps = {
   defaultTimeframe?: string
   defaultCandleMode?: CandleMode
   allowCompactHistory?: boolean
+  onChartSelectionChange?: (selection: {
+    symbol: string
+    timeframe: string
+    candleMode: CandleMode
+    compact: boolean
+    chartTitle?: string
+  }) => void
   latestSignal?: any
   recentSignals?: any[]
   recentCandles?: any[]
@@ -1734,6 +1741,7 @@ export default function EChartsCandlestickChart({
   defaultTimeframe = '1m',
   defaultCandleMode = 'Heikin Ashi',
   allowCompactHistory = true,
+  onChartSelectionChange,
   latestSignal,
   recentSignals,
   recentCandles,
@@ -1753,6 +1761,17 @@ export default function EChartsCandlestickChart({
   const [symbol, setSymbol] = useState(initialSymbol)
   const [timeframe, setTimeframe] = useState(initialTimeframe)
   const [candleMode, setCandleMode] = useState<CandleMode>(initialCandleMode)
+
+  useEffect(() => {
+    onChartSelectionChange?.({
+      symbol,
+      timeframe,
+      candleMode,
+      compact,
+      chartTitle,
+    })
+  }, [symbol, timeframe, candleMode, compact, chartTitle, onChartSelectionChange])
+
   const [showSmc, setShowSmc] = useState(true)
   const [showDlm, setShowDlm] = useState(true)
   const [showZones, setShowZones] = useState(true)
@@ -2379,7 +2398,7 @@ export default function EChartsCandlestickChart({
 
           <select
             value={symbol}
-            onChange={(e) => setSymbol(e.target.value)}
+            onChange={(e) => setSymbol(normalizeDefaultSymbol(e.target.value, symbol))}
             className="rounded-md border border-dark-700 bg-[#151922] px-3 py-1.5 text-sm text-gray-100 outline-none"
           >
             <option value="BTCUSD">BTCUSD</option>
@@ -2391,7 +2410,7 @@ export default function EChartsCandlestickChart({
 
           <select
             value={timeframe}
-            onChange={(e) => setTimeframe(e.target.value)}
+            onChange={(e) => setTimeframe(normalizeDefaultTimeframe(e.target.value, timeframe))}
             className="rounded-md border border-dark-700 bg-[#151922] px-3 py-1.5 text-sm text-gray-100 outline-none"
           >
             {timeframeOptions.map((tf) => (
