@@ -1,242 +1,134 @@
-from fastapi import FastAPI, HTTPException, status, Query
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional, List, Any, Dict
-from datetime import datetime, timezone, timedelta
+from __future__ import annotations
+
+import json
+import os
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
-import json
-import os
-from dotenv import load_dotenv
 
-load_dotenv()
+from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
-app = FastAPI(
-    title="Trading Intelligence API",
-    description="Backend for receiving TradingView webhook alerts and serving live trading signals",
-    version="1.0.0",
-)
+from trading_engine import run_phase1_engine
 
-origins = [
-    "https://trading-intelligence-dashboard.vercel.app",
-    "http://localhost:3000",
-]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APP SETUP
+# ─────────────────────────────────────────────────────────────────────────────
+
+app = FastAPI(title="Trading Intelligence Dashboard API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
-ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENVIRONMENT
+# ─────────────────────────────────────────────────────────────────────────────
+
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
+DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "my_trading_secret_123")
+
+ALPACA_STOCKS_BASE_URL = "https://data.alpaca.markets/v2"
+ALPACA_CRYPTO_BASE_URL = "https://data.alpaca.markets/v1beta3"
 
 
-class CandleData(BaseModel):
-    time: int
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: Optional[float] = 0.0
-    symbol: str
-    timeframe: str
-    createdAt: Optional[str] = None
+# ─────────────────────────────────────────────────────────────────────────────
+# IN-MEMORY STATE
+# Render can restart, so this is not permanent storage.
+# It is enough for current live dashboard state.
+# ─────────────────────────────────────────────────────────────────────────────
+
+LATEST_SIGNAL: Dict[str, Any] = {}
+RECENT_SIGNALS: List[Dict[str, Any]] = []
+RECENT_CANDLES: List[Dict[str, Any]] = []
+
+MAX_RECENT_SIGNALS = 50
+MAX_RECENT_CANDLES = 1000
 
 
-class SentimentData(BaseModel):
-    eventType: str = "SENTIMENT_UPDATE"
-    symbol: str
-    timeframe: str
-    sentiment: float
-    sentimentStatus: str
-    bearCount: int
-    neutralCount: int
-    bullCount: int
-    bearPct: float
-    neutralPct: float
-    bullPct: float
-    activeCount: int
-    price: Optional[float] = 0.0
-    time: Optional[int] = None
-    createdAt: Optional[str] = None
+# ─────────────────────────────────────────────────────────────────────────────
+# MODELS
+# ─────────────────────────────────────────────────────────────────────────────
 
-
-class TradingSignal(BaseModel):
-    eventType: str = "TRADE_SIGNAL"
-    status: str = "Open"
-
-    symbol: str
-    timeframe: str
-    signal: str
-
-    confidence: int
-    bullScore: int
-    bearScore: int
-    netBias: int
-
-    price: float
-    entry: Optional[float] = None
-    current: Optional[float] = None
-    pnl: Optional[float] = 0.0
-    percent: Optional[float] = 0.0
-
-    time: Optional[int] = None
-    open: Optional[float] = None
-    high: Optional[float] = None
-    low: Optional[float] = None
-    close: Optional[float] = None
-    volume: Optional[float] = 0.0
-
-    smc: str
-    alphax: str
-    ghost: str
-    chartOverlays: Optional[str] = None
-    openInterest: str
-    footprint: str
-    session: str
-    fredMacro: str
-    finraShortVolume: str
-    cot: str
-
-    warnings: List[str]
-    createdAt: Optional[str] = None
-
-
-class WebhookPayload(BaseModel):
+class TradingViewPayload(BaseModel):
     secret: Optional[str] = None
+    eventType: Optional[str] = None
+    status: Optional[str] = None
 
-    eventType: Optional[str] = "TRADE_SIGNAL"
-    symbol: str
-    timeframe: str
-    price: Optional[float] = 0.0
-    time: Optional[int] = None
-
-    status: Optional[str] = "Open"
+    symbol: Optional[str] = None
+    timeframe: Optional[str] = None
     signal: Optional[str] = None
-    confidence: Optional[int] = None
-    bullScore: Optional[int] = None
-    bearScore: Optional[int] = None
-    netBias: Optional[int] = None
-    entry: Optional[float] = None
-    current: Optional[float] = None
-    pnl: Optional[float] = 0.0
-    percent: Optional[float] = 0.0
+    confidence: Optional[float] = None
+    bullScore: Optional[float] = None
+    bearScore: Optional[float] = None
+    netBias: Optional[float] = None
+    price: Optional[float] = None
 
+    time: Optional[Any] = None
+    timestamp: Optional[Any] = None
     open: Optional[float] = None
     high: Optional[float] = None
     low: Optional[float] = None
     close: Optional[float] = None
-    volume: Optional[float] = 0.0
+    volume: Optional[float] = None
+
+    entry: Optional[float] = None
+    current: Optional[float] = None
+    pnl: Optional[float] = None
+    percent: Optional[float] = None
 
     smc: Optional[str] = None
     alphax: Optional[str] = None
     ghost: Optional[str] = None
-    chartOverlays: Optional[str] = None
+    chartOverlays: Optional[Any] = None
+
     openInterest: Optional[str] = None
     footprint: Optional[str] = None
     session: Optional[str] = None
     fredMacro: Optional[str] = None
     finraShortVolume: Optional[str] = None
     cot: Optional[str] = None
-    warnings: Optional[List[str]] = []
-
-    sentiment: Optional[float] = None
-    sentimentStatus: Optional[str] = None
-    bearCount: Optional[int] = None
-    neutralCount: Optional[int] = None
-    bullCount: Optional[int] = None
-    bearPct: Optional[float] = None
-    neutralPct: Optional[float] = None
-    bullPct: Optional[float] = None
-    activeCount: Optional[int] = None
+    warnings: Optional[List[str]] = Field(default_factory=list)
 
 
-class HealthResponse(BaseModel):
-    status: str
-    service: str
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
 
-
-class WebhookResponse(BaseModel):
-    ok: bool
-    message: str
-
-
-latest_signal: Optional[TradingSignal] = None
-recent_signals: List[TradingSignal] = []
-recent_candles: List[CandleData] = []
-latest_sentiment: Optional[SentimentData] = None
-
-
-DEFAULT_WAITING_SIGNAL = TradingSignal(
-    eventType="WAITING",
-    status="Waiting",
-    symbol="WAITING",
-    timeframe="Waiting",
-    signal="NEUTRAL",
-    confidence=0,
-    bullScore=50,
-    bearScore=50,
-    netBias=0,
-    price=0.0,
-    entry=0.0,
-    current=0.0,
-    pnl=0.0,
-    percent=0.0,
-    time=None,
-    open=None,
-    high=None,
-    low=None,
-    close=None,
-    volume=0.0,
-    smc="Awaiting signal",
-    alphax="Awaiting signal",
-    ghost="Awaiting signal",
-    chartOverlays=None,
-    openInterest="Awaiting signal",
-    footprint="Awaiting signal",
-    session="Market awaiting alert",
-    fredMacro="Neutral",
-    finraShortVolume="Awaiting signal",
-    cot="Awaiting signal",
-    warnings=["No signal received yet"],
-    createdAt=datetime.now(timezone.utc).isoformat(),
-)
-
-
-DEFAULT_SENTIMENT = SentimentData(
-    eventType="SENTIMENT_UPDATE",
-    symbol="WAITING",
-    timeframe="Waiting",
-    sentiment=50.0,
-    sentimentStatus="Waiting",
-    bearCount=0,
-    neutralCount=0,
-    bullCount=0,
-    bearPct=0.0,
-    neutralPct=0.0,
-    bullPct=0.0,
-    activeCount=0,
-    price=0.0,
-    time=None,
-    createdAt=datetime.now(timezone.utc).isoformat(),
-)
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def normalize_symbol(symbol: str) -> str:
-    return (symbol or "").replace(" ", "").upper()
+    raw = (symbol or "").upper().strip()
+
+    # TradingView prefixes
+    for prefix in ["BINANCE:", "COINBASE:", "CRYPTO:", "CME_MINI:", "CME:", "AMEX:", "NASDAQ:", "NYSE:"]:
+        raw = raw.replace(prefix, "")
+
+    # Frontend / Alpaca friendly
+    if raw in ["BTCUSD", "BTC/USD", "XBTUSD"]:
+        return "BTCUSD"
+    if raw in ["ETHUSD", "ETH/USD"]:
+        return "ETHUSD"
+
+    return raw
 
 
 def normalize_timeframe(timeframe: str) -> str:
-    return str(timeframe or "").replace(" ", "").lower()
+    tf = str(timeframe or "1m").strip().lower()
 
-
-def normalize_timeframe_for_matching(timeframe: str) -> str:
-    tf = normalize_timeframe(timeframe)
     mapping = {
         "1": "1m",
         "3": "3m",
@@ -251,11 +143,13 @@ def normalize_timeframe_for_matching(timeframe: str) -> str:
         "w": "1w",
         "1w": "1w",
     }
+
     return mapping.get(tf, tf)
 
 
 def alpaca_timeframe(timeframe: str) -> str:
-    tf = normalize_timeframe_for_matching(timeframe)
+    tf = normalize_timeframe(timeframe)
+
     mapping = {
         "1m": "1Min",
         "3m": "3Min",
@@ -266,376 +160,464 @@ def alpaca_timeframe(timeframe: str) -> str:
         "2h": "2Hour",
         "4h": "4Hour",
         "1d": "1Day",
+        "1w": "1Week",
     }
-    if tf not in mapping:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported timeframe for Alpaca preload: {timeframe}",
-        )
-    return mapping[tf]
 
-
-def timeframe_minutes(timeframe: str) -> int:
-    tf = normalize_timeframe_for_matching(timeframe)
-    mapping = {
-        "1m": 1,
-        "3m": 3,
-        "5m": 5,
-        "15m": 15,
-        "30m": 30,
-        "1h": 60,
-        "2h": 120,
-        "4h": 240,
-        "1d": 1440,
-    }
-    return mapping.get(tf, 1)
+    return mapping.get(tf, "1Min")
 
 
 def is_crypto_symbol(symbol: str) -> bool:
     normalized = normalize_symbol(symbol)
-    return "BTC" in normalized or "ETH" in normalized
+    return normalized in {"BTCUSD", "ETHUSD"}
 
 
-def map_crypto_symbol(symbol: str) -> str:
+def to_alpaca_crypto_symbol(symbol: str) -> str:
     normalized = normalize_symbol(symbol)
-    if "BTC" in normalized:
+
+    if normalized == "BTCUSD":
         return "BTC/USD"
-    if "ETH" in normalized:
+    if normalized == "ETHUSD":
         return "ETH/USD"
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail=f"Unsupported crypto symbol for Alpaca preload: {symbol}",
-    )
+
+    return normalized
 
 
-def map_stock_symbol(symbol: str) -> str:
-    normalized = normalize_symbol(symbol)
-    if ":" in normalized:
-        normalized = normalized.split(":")[-1]
-    if normalized in {"SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "TSLA"}:
-        return normalized
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail=(
-            f"Unsupported symbol for Alpaca preload: {symbol}. "
-            "Currently supports BTCUSD, ETHUSD, and basic stock symbols like SPY. "
-            "MES1!/ES1! futures preload will be added later with a futures data provider."
-        ),
-    )
-
-
-def epoch_seconds_from_alpaca_time(value: Any) -> int:
-    if isinstance(value, (int, float)):
-        return int(value / 1000) if value > 1000000000000 else int(value)
-    text = str(value or "").replace("Z", "+00:00")
+def to_float(value: Any, fallback: float = 0.0) -> float:
     try:
-        return int(datetime.fromisoformat(text).timestamp())
-    except ValueError:
-        return int(datetime.now(timezone.utc).timestamp())
+        if value is None:
+            return fallback
+        parsed = float(value)
+        if parsed != parsed:
+            return fallback
+        return parsed
+    except Exception:
+        return fallback
+
+
+def format_bar_time(value: Any) -> Any:
+    # Keep unix timestamps as seconds if sent by Pine.
+    if value is None:
+        return int(time.time())
+
+    try:
+        numeric = float(value)
+        if numeric > 1000000000000:
+            return int(numeric / 1000)
+        return int(numeric)
+    except Exception:
+        return value
+
+
+def candle_from_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    required = ["open", "high", "low", "close"]
+    if not all(payload.get(key) is not None for key in required):
+        return None
+
+    symbol = normalize_symbol(str(payload.get("symbol") or ""))
+    timeframe = normalize_timeframe(str(payload.get("timeframe") or "1m"))
+
+    candle_time = payload.get("time") or payload.get("timestamp") or payload.get("createdAt") or int(time.time())
+
+    return {
+        "time": format_bar_time(candle_time),
+        "timestamp": format_bar_time(candle_time),
+        "open": to_float(payload.get("open")),
+        "high": to_float(payload.get("high")),
+        "low": to_float(payload.get("low")),
+        "close": to_float(payload.get("close")),
+        "volume": to_float(payload.get("volume")),
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "createdAt": payload.get("createdAt") or now_iso(),
+    }
+
+
+def merge_candles_by_time(candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {}
+
+    for candle in candles:
+        key = f"{normalize_symbol(str(candle.get('symbol', '')))}:{normalize_timeframe(str(candle.get('timeframe', '')))}:{candle.get('time')}"
+        merged[key] = candle
+
+    def sort_key(item: Dict[str, Any]) -> Any:
+        value = item.get("time")
+        try:
+            return float(value)
+        except Exception:
+            return str(value)
+
+    return sorted(merged.values(), key=sort_key)
+
+
+def sanitize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(payload)
+
+    normalized["symbol"] = normalize_symbol(str(normalized.get("symbol") or ""))
+    normalized["timeframe"] = normalize_timeframe(str(normalized.get("timeframe") or "1m"))
+    normalized["signal"] = str(normalized.get("signal") or "NEUTRAL")
+    normalized["confidence"] = to_float(normalized.get("confidence"), 0)
+    normalized["bullScore"] = to_float(normalized.get("bullScore"), 50)
+    normalized["bearScore"] = to_float(normalized.get("bearScore"), 50)
+    normalized["netBias"] = to_float(
+        normalized.get("netBias"),
+        normalized["bullScore"] - normalized["bearScore"],
+    )
+    normalized["price"] = to_float(
+        normalized.get("price"),
+        to_float(normalized.get("close"), 0),
+    )
+    normalized["createdAt"] = normalized.get("createdAt") or now_iso()
+
+    # Preserve chartOverlays exactly. It may be a JSON string from Pine.
+    if "chartOverlays" not in normalized:
+        normalized["chartOverlays"] = None
+
+    if not isinstance(normalized.get("warnings"), list):
+        normalized["warnings"] = []
+
+    return normalized
 
 
 def alpaca_headers() -> Dict[str, str]:
-    headers = {"Accept": "application/json"}
-    if ALPACA_API_KEY and ALPACA_SECRET_KEY:
-        headers["APCA-API-KEY-ID"] = ALPACA_API_KEY
-        headers["APCA-API-SECRET-KEY"] = ALPACA_SECRET_KEY
-    return headers
+    if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="Missing Alpaca environment variables: ALPACA_API_KEY and/or ALPACA_SECRET_KEY",
+        )
+
+    return {
+        "APCA-API-KEY-ID": ALPACA_API_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
+    }
 
 
-def request_json(url: str, headers: Optional[Dict[str, str]] = None) -> Any:
-    req = Request(url, headers=headers or {"Accept": "application/json"})
+def http_get_json(url: str, headers: Optional[Dict[str, str]] = None) -> Any:
+    request = Request(url, headers=headers or {})
+
     try:
-        with urlopen(req, timeout=20) as response:
-            raw = response.read().decode("utf-8")
-            return json.loads(raw)
+        with urlopen(request, timeout=20) as response:
+            body = response.read().decode("utf-8")
+            return json.loads(body)
     except HTTPError as error:
-        try:
-            body = error.read().decode("utf-8")
-        except Exception:
-            body = str(error)
+        body = error.read().decode("utf-8", errors="ignore")
         raise HTTPException(
             status_code=error.code,
-            detail=f"Alpaca request failed: {body}",
+            detail=f"Alpaca request failed: {body or error.reason}",
         )
     except URLError as error:
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Alpaca connection failed: {error}",
+            status_code=502,
+            detail=f"Alpaca connection failed: {error.reason}",
+        )
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Request failed: {str(error)}",
         )
 
 
-def parse_alpaca_bar(symbol: str, timeframe: str, bar: Dict[str, Any]) -> CandleData:
-    return CandleData(
-        time=epoch_seconds_from_alpaca_time(bar.get("t")),
-        open=float(bar.get("o", 0.0)),
-        high=float(bar.get("h", 0.0)),
-        low=float(bar.get("l", 0.0)),
-        close=float(bar.get("c", 0.0)),
-        volume=float(bar.get("v", 0.0) or 0.0),
-        symbol=symbol,
-        timeframe=timeframe,
-        createdAt=datetime.now(timezone.utc).isoformat(),
-    )
+def normalize_alpaca_bar(raw: Dict[str, Any], symbol: str, timeframe: str) -> Dict[str, Any]:
+    raw_time = raw.get("t")
+
+    # Alpaca time is ISO string. Keep ISO-like string for frontend and engine.
+    return {
+        "time": raw_time,
+        "timestamp": raw_time,
+        "open": to_float(raw.get("o")),
+        "high": to_float(raw.get("h")),
+        "low": to_float(raw.get("l")),
+        "close": to_float(raw.get("c")),
+        "volume": to_float(raw.get("v")),
+        "symbol": normalize_symbol(symbol),
+        "timeframe": normalize_timeframe(timeframe),
+        "createdAt": now_iso(),
+    }
 
 
-def fetch_alpaca_historical_candles(symbol: str, timeframe: str, limit: int = 300) -> List[CandleData]:
-    clean_limit = max(1, min(int(limit or 300), 1000))
-    alpaca_tf = alpaca_timeframe(timeframe)
-    minutes = timeframe_minutes(timeframe)
-    lookback_minutes = max(clean_limit * minutes * 3, 240)
-    end_dt = datetime.now(timezone.utc) - timedelta(minutes=1)
-    start_dt = end_dt - timedelta(minutes=lookback_minutes)
-    start = start_dt.isoformat().replace("+00:00", "Z")
-    end = end_dt.isoformat().replace("+00:00", "Z")
+def fetch_alpaca_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 300) -> List[Dict[str, Any]]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    alpaca_tf = alpaca_timeframe(normalized_timeframe)
+    safe_limit = max(1, min(int(limit or 300), 1000))
 
-    if is_crypto_symbol(symbol):
-        alpaca_symbol = map_crypto_symbol(symbol)
+    headers = alpaca_headers()
+
+    if is_crypto_symbol(normalized_symbol):
+        alpaca_symbol = to_alpaca_crypto_symbol(normalized_symbol)
+
         params = urlencode(
             {
                 "symbols": alpaca_symbol,
                 "timeframe": alpaca_tf,
-                "start": start,
-                "end": end,
-                "limit": clean_limit,
+                "limit": safe_limit,
+                "sort": "asc",
             }
         )
-        url = f"https://data.alpaca.markets/v1beta3/crypto/us/bars?{params}"
-        payload = request_json(url, headers=alpaca_headers())
-        bars_by_symbol = payload.get("bars", {})
-        bars = bars_by_symbol.get(alpaca_symbol, [])
-        candles = [parse_alpaca_bar(symbol=symbol, timeframe=timeframe, bar=bar) for bar in bars]
-        candles.sort(key=lambda item: item.time)
-        return candles[-clean_limit:]
 
-    alpaca_symbol = map_stock_symbol(symbol)
+        url = f"{ALPACA_CRYPTO_BASE_URL}/crypto/us/bars?{params}"
+        data = http_get_json(url, headers=headers)
+
+        bars_by_symbol = data.get("bars", {})
+        bars = bars_by_symbol.get(alpaca_symbol, [])
+
+        return [
+            normalize_alpaca_bar(bar, normalized_symbol, normalized_timeframe)
+            for bar in bars
+        ]
+
+    # Stocks/ETFs. This is for SPY and similar. Futures like ES1!/MES1! are not covered by Alpaca data.
     params = urlencode(
         {
-            "symbols": alpaca_symbol,
+            "symbols": normalized_symbol,
             "timeframe": alpaca_tf,
-            "start": start,
-            "end": end,
-            "limit": clean_limit,
+            "limit": safe_limit,
+            "adjustment": "raw",
             "feed": "iex",
+            "sort": "asc",
         }
     )
-    url = f"https://data.alpaca.markets/v2/stocks/bars?{params}"
-    payload = request_json(url, headers=alpaca_headers())
-    bars_by_symbol = payload.get("bars", {})
-    bars = bars_by_symbol.get(alpaca_symbol, [])
-    candles = [parse_alpaca_bar(symbol=symbol, timeframe=timeframe, bar=bar) for bar in bars]
-    candles.sort(key=lambda item: item.time)
-    return candles[-clean_limit:]
 
+    url = f"{ALPACA_STOCKS_BASE_URL}/stocks/bars?{params}"
+    data = http_get_json(url, headers=headers)
 
-def upsert_recent_signal(signal: TradingSignal, max_items: int = 300) -> None:
-    global recent_signals
-    signal_symbol = normalize_symbol(signal.symbol)
-    signal_timeframe = normalize_timeframe(signal.timeframe)
-    existing_index = next(
-        (
-            i
-            for i, item in enumerate(recent_signals)
-            if item.time == signal.time
-            and normalize_symbol(item.symbol) == signal_symbol
-            and normalize_timeframe(item.timeframe) == signal_timeframe
-        ),
-        None,
-    )
-    if existing_index is not None:
-        recent_signals[existing_index] = signal
-    else:
-        recent_signals.insert(0, signal)
-    recent_signals = recent_signals[:max_items]
+    bars_by_symbol = data.get("bars", {})
+    bars = bars_by_symbol.get(normalized_symbol, [])
 
-
-def upsert_recent_candle(candle: CandleData, max_items: int = 300) -> None:
-    global recent_candles
-    candle_symbol = normalize_symbol(candle.symbol)
-    candle_timeframe = normalize_timeframe(candle.timeframe)
-    existing_index = next(
-        (
-            i
-            for i, item in enumerate(recent_candles)
-            if item.time == candle.time
-            and normalize_symbol(item.symbol) == candle_symbol
-            and normalize_timeframe(item.timeframe) == candle_timeframe
-        ),
-        None,
-    )
-    if existing_index is not None:
-        recent_candles[existing_index] = candle
-    else:
-        recent_candles.insert(0, candle)
-    recent_candles = recent_candles[:max_items]
-
-
-def filter_candles(symbol: str, timeframe: str, candles: List[CandleData]) -> List[CandleData]:
-    selected_symbol = normalize_symbol(symbol)
-    selected_tf = normalize_timeframe_for_matching(timeframe)
-    filtered = [
-        candle
-        for candle in candles
-        if (
-            normalize_symbol(candle.symbol) == selected_symbol
-            or normalize_symbol(candle.symbol).endswith(selected_symbol)
-            or selected_symbol.endswith(normalize_symbol(candle.symbol))
-        )
-        and normalize_timeframe_for_matching(candle.timeframe) == selected_tf
+    return [
+        normalize_alpaca_bar(bar, normalized_symbol, normalized_timeframe)
+        for bar in bars
     ]
-    filtered.sort(key=lambda item: item.time)
-    return filtered
 
 
-def merge_candles(historical: List[CandleData], live: List[CandleData], limit: int = 300) -> List[CandleData]:
-    merged: Dict[str, CandleData] = {}
-    for candle in historical + live:
-        key = f"{normalize_symbol(candle.symbol)}:{normalize_timeframe_for_matching(candle.timeframe)}:{candle.time}"
-        merged[key] = candle
-    output = list(merged.values())
-    output.sort(key=lambda item: item.time)
-    return output[-max(1, min(limit, 1000)):]
+def get_live_recent_candles(symbol: str, timeframe: str) -> List[Dict[str, Any]]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    return [
+        candle
+        for candle in RECENT_CANDLES
+        if normalize_symbol(str(candle.get("symbol", ""))) == normalized_symbol
+        and normalize_timeframe(str(candle.get("timeframe", ""))) == normalized_timeframe
+    ]
 
 
-@app.get("/", response_model=HealthResponse)
-async def health_check():
-    return {"status": "ok", "service": "Trading Intelligence API"}
+# ─────────────────────────────────────────────────────────────────────────────
+# BASIC ROUTES
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/")
+def root() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "service": "Trading Intelligence Dashboard API",
+        "engine": "phase_1_python_smc_core_ready",
+        "endpoints": [
+            "/api/latest-signal",
+            "/api/recent-signals",
+            "/api/recent-candles",
+            "/api/historical-candles",
+            "/api/merged-candles",
+            "/api/engine-state",
+            "/webhook/tradingview",
+        ],
+    }
 
 
-@app.post("/webhook/tradingview", response_model=WebhookResponse)
-async def receive_tradingview_webhook(payload: WebhookPayload):
-    global latest_signal, latest_sentiment
+@app.get("/health")
+def health() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "time": now_iso(),
+        "alpacaKeyPresent": bool(ALPACA_API_KEY),
+        "alpacaSecretPresent": bool(ALPACA_SECRET_KEY),
+    }
 
-    if WEBHOOK_SECRET:
-        if not payload.secret or payload.secret != WEBHOOK_SECRET:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or missing webhook secret",
-            )
 
-    event_type = payload.eventType or "TRADE_SIGNAL"
-    created_at = datetime.now(timezone.utc).isoformat()
+# ─────────────────────────────────────────────────────────────────────────────
+# WEBHOOK
+# ─────────────────────────────────────────────────────────────────────────────
 
-    if event_type == "SENTIMENT_UPDATE":
-        sentiment = SentimentData(
-            eventType="SENTIMENT_UPDATE",
-            symbol=payload.symbol,
-            timeframe=payload.timeframe,
-            sentiment=payload.sentiment if payload.sentiment is not None else 50.0,
-            sentimentStatus=payload.sentimentStatus or "Waiting",
-            bearCount=payload.bearCount if payload.bearCount is not None else 0,
-            neutralCount=payload.neutralCount if payload.neutralCount is not None else 0,
-            bullCount=payload.bullCount if payload.bullCount is not None else 0,
-            bearPct=payload.bearPct if payload.bearPct is not None else 0.0,
-            neutralPct=payload.neutralPct if payload.neutralPct is not None else 0.0,
-            bullPct=payload.bullPct if payload.bullPct is not None else 0.0,
-            activeCount=payload.activeCount if payload.activeCount is not None else 0,
-            price=payload.price if payload.price is not None else 0.0,
-            time=payload.time,
-            createdAt=created_at,
-        )
-        latest_sentiment = sentiment
-        return {"ok": True, "message": "SENTIMENT_UPDATE received"}
+@app.post("/webhook/tradingview")
+async def tradingview_webhook(request: FastAPIRequest) -> Dict[str, Any]:
+    global LATEST_SIGNAL, RECENT_SIGNALS, RECENT_CANDLES
 
-    signal = TradingSignal(
-        eventType=event_type,
-        status=payload.status or ("Open" if event_type == "TRADE_SIGNAL" else "Live"),
-        symbol=payload.symbol,
-        timeframe=payload.timeframe,
-        signal=payload.signal or "NEUTRAL",
-        confidence=payload.confidence if payload.confidence is not None else 0,
-        bullScore=payload.bullScore if payload.bullScore is not None else 50,
-        bearScore=payload.bearScore if payload.bearScore is not None else 50,
-        netBias=payload.netBias if payload.netBias is not None else 0,
-        price=payload.price if payload.price is not None else 0.0,
-        entry=payload.entry if payload.entry is not None else payload.price,
-        current=payload.current if payload.current is not None else payload.price,
-        pnl=payload.pnl if payload.pnl is not None else 0.0,
-        percent=payload.percent if payload.percent is not None else 0.0,
-        time=payload.time,
-        open=payload.open,
-        high=payload.high,
-        low=payload.low,
-        close=payload.close,
-        volume=payload.volume if payload.volume is not None else 0.0,
-        smc=payload.smc or "Awaiting signal",
-        alphax=payload.alphax or "Awaiting signal",
-        ghost=payload.ghost or "Awaiting signal",
-        chartOverlays=payload.chartOverlays,
-        openInterest=payload.openInterest or "Awaiting signal",
-        footprint=payload.footprint or "Awaiting signal",
-        session=payload.session or "Live Market",
-        fredMacro=payload.fredMacro or "Neutral",
-        finraShortVolume=payload.finraShortVolume or "Awaiting signal",
-        cot=payload.cot or "Awaiting signal",
-        warnings=payload.warnings or [],
-        createdAt=created_at,
+    try:
+        raw_payload = await request.json()
+    except Exception:
+        raw_text = await request.body()
+        try:
+            raw_payload = json.loads(raw_text.decode("utf-8"))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    if not isinstance(raw_payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+
+    supplied_secret = raw_payload.get("secret")
+    if DASHBOARD_SECRET and supplied_secret and supplied_secret != DASHBOARD_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
+    payload = sanitize_payload(raw_payload)
+
+    LATEST_SIGNAL = payload
+
+    candle = candle_from_payload(payload)
+    if candle is not None:
+        RECENT_CANDLES.append(candle)
+        RECENT_CANDLES = merge_candles_by_time(RECENT_CANDLES)[-MAX_RECENT_CANDLES:]
+
+    event_type = str(payload.get("eventType") or "").upper()
+    if event_type == "TRADE_SIGNAL":
+        RECENT_SIGNALS.insert(0, payload)
+        RECENT_SIGNALS = RECENT_SIGNALS[:MAX_RECENT_SIGNALS]
+
+    return {
+        "ok": True,
+        "message": "Webhook received",
+        "storedAsLatest": True,
+        "storedCandle": candle is not None,
+        "storedRecentSignal": event_type == "TRADE_SIGNAL",
+        "chartOverlaysPresent": payload.get("chartOverlays") is not None,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DASHBOARD STATE ROUTES
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/latest-signal")
+def latest_signal() -> Dict[str, Any]:
+    if LATEST_SIGNAL:
+        return LATEST_SIGNAL
+
+    return {
+        "eventType": "WAITING",
+        "status": "Waiting",
+        "symbol": "WAITING",
+        "timeframe": "1m",
+        "signal": "NEUTRAL",
+        "confidence": 0,
+        "bullScore": 50,
+        "bearScore": 50,
+        "netBias": 0,
+        "price": 0,
+        "smc": "Waiting for signal",
+        "alphax": "Waiting for signal",
+        "ghost": "Waiting for signal",
+        "chartOverlays": None,
+        "warnings": ["No webhook received yet"],
+        "createdAt": now_iso(),
+    }
+
+
+@app.get("/api/recent-signals")
+def recent_signals(limit: int = 20) -> List[Dict[str, Any]]:
+    safe_limit = max(1, min(int(limit or 20), MAX_RECENT_SIGNALS))
+    return RECENT_SIGNALS[:safe_limit]
+
+
+@app.get("/api/recent-candles")
+def recent_candles(
+    symbol: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    limit: int = 300,
+) -> List[Dict[str, Any]]:
+    candles = RECENT_CANDLES
+
+    if symbol:
+        normalized_symbol = normalize_symbol(symbol)
+        candles = [
+            candle for candle in candles
+            if normalize_symbol(str(candle.get("symbol", ""))) == normalized_symbol
+        ]
+
+    if timeframe:
+        normalized_timeframe = normalize_timeframe(timeframe)
+        candles = [
+            candle for candle in candles
+            if normalize_timeframe(str(candle.get("timeframe", ""))) == normalized_timeframe
+        ]
+
+    safe_limit = max(1, min(int(limit or 300), MAX_RECENT_CANDLES))
+    return candles[-safe_limit:]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ALPACA ROUTES
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/historical-candles")
+def historical_candles(
+    symbol: str = "BTCUSD",
+    timeframe: str = "1m",
+    limit: int = 300,
+) -> List[Dict[str, Any]]:
+    return fetch_alpaca_historical_candles(symbol, timeframe, limit)
+
+
+@app.get("/api/merged-candles")
+def merged_candles(
+    symbol: str = "BTCUSD",
+    timeframe: str = "1m",
+    limit: int = 300,
+) -> List[Dict[str, Any]]:
+    historical = fetch_alpaca_historical_candles(symbol, timeframe, limit)
+    live = get_live_recent_candles(symbol, timeframe)
+
+    merged = merge_candles_by_time([*historical, *live])
+    safe_limit = max(1, min(int(limit or 300), 1000))
+
+    return merged[-safe_limit:]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PYTHON ENGINE ROUTE — PHASE 1
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/engine-state")
+def engine_state(
+    symbol: str = "BTCUSD",
+    timeframe: str = "1m",
+    limit: int = 500,
+) -> Dict[str, Any]:
+    """
+    Phase 1 endpoint.
+
+    Browser test:
+    https://trading-intelligence-dashboard.onrender.com/api/engine-state?symbol=BTCUSD&timeframe=1m&limit=500
+
+    What it does:
+    1. Gets historical candles from Alpaca.
+    2. Merges any live webhook candles.
+    3. Runs the Python SMC Phase 1 engine.
+    4. Returns candles + heikinAshiCandles + smcEvents.
+    """
+
+    safe_limit = max(100, min(int(limit or 500), 1000))
+
+    historical = fetch_alpaca_historical_candles(symbol, timeframe, safe_limit)
+    live = get_live_recent_candles(symbol, timeframe)
+    candles = merge_candles_by_time([*historical, *live])[-safe_limit:]
+
+    result = run_phase1_engine(
+        candles,
+        config={
+            "internal_pivot_len": 5,
+            "swing_pivot_len": 50,
+            "show_internal_structure": True,
+            "show_swing_structure": True,
+            "max_events": 150,
+        },
     )
 
-    latest_signal = signal
-    upsert_recent_signal(signal)
+    result["source"] = {
+        "symbol": normalize_symbol(symbol),
+        "timeframe": normalize_timeframe(timeframe),
+        "limit": safe_limit,
+        "historicalCandles": len(historical),
+        "liveCandles": len(live),
+        "mergedCandles": len(candles),
+        "dataProvider": "alpaca",
+    }
 
-    if (
-        payload.time is not None
-        and payload.open is not None
-        and payload.high is not None
-        and payload.low is not None
-        and payload.close is not None
-    ):
-        candle = CandleData(
-            time=payload.time,
-            open=payload.open,
-            high=payload.high,
-            low=payload.low,
-            close=payload.close,
-            volume=payload.volume if payload.volume is not None else 0.0,
-            symbol=payload.symbol,
-            timeframe=payload.timeframe,
-            createdAt=created_at,
-        )
-        upsert_recent_candle(candle)
-
-    return {"ok": True, "message": f"{event_type} received"}
-
-
-@app.get("/api/latest-signal", response_model=TradingSignal)
-async def get_latest_signal():
-    if latest_signal is None:
-        return DEFAULT_WAITING_SIGNAL
-    return latest_signal
-
-
-@app.get("/api/recent-signals", response_model=List[TradingSignal])
-async def get_recent_signals():
-    return recent_signals
-
-
-@app.get("/api/recent-candles", response_model=List[CandleData])
-async def get_recent_candles():
-    return recent_candles
-
-
-@app.get("/api/historical-candles", response_model=List[CandleData])
-async def get_historical_candles(
-    symbol: str = Query(..., description="Example: BTCUSD, ETHUSD, SPY"),
-    timeframe: str = Query("1m", description="Example: 1m, 5m, 15m, 1h, 4h, 1D"),
-    limit: int = Query(300, ge=1, le=1000),
-):
-    return fetch_alpaca_historical_candles(symbol=symbol, timeframe=timeframe, limit=limit)
-
-
-@app.get("/api/merged-candles", response_model=List[CandleData])
-async def get_merged_candles(
-    symbol: str = Query(..., description="Example: BTCUSD, ETHUSD, SPY"),
-    timeframe: str = Query("1m", description="Example: 1m, 5m, 15m, 1h, 4h, 1D"),
-    limit: int = Query(300, ge=1, le=1000),
-):
-    historical = fetch_alpaca_historical_candles(symbol=symbol, timeframe=timeframe, limit=limit)
-    live = filter_candles(symbol=symbol, timeframe=timeframe, candles=recent_candles)
-    return merge_candles(historical=historical, live=live, limit=limit)
-
-
-@app.get("/api/latest-sentiment", response_model=SentimentData)
-async def get_latest_sentiment():
-    if latest_sentiment is None:
-        return DEFAULT_SENTIMENT
-    return latest_sentiment
+    return result
