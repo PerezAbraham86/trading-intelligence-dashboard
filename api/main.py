@@ -113,11 +113,22 @@ def now_iso() -> str:
 def normalize_symbol(symbol: str) -> str:
     raw = (symbol or "").upper().strip()
 
-    # TradingView prefixes
-    for prefix in ["BINANCE:", "COINBASE:", "CRYPTO:", "CME_MINI:", "CME:", "AMEX:", "NASDAQ:", "NYSE:"]:
+    # TradingView prefixes.
+    for prefix in [
+        "BINANCE:",
+        "COINBASE:",
+        "CRYPTO:",
+        "CME_MINI:",
+        "CME:",
+        "AMEX:",
+        "NASDAQ:",
+        "NYSE:",
+    ]:
         raw = raw.replace(prefix, "")
 
-    # Frontend / Alpaca friendly
+    raw = raw.replace("-", "").replace("_", "")
+
+    # Frontend / Alpaca friendly.
     if raw in ["BTCUSD", "BTC/USD", "XBTUSD"]:
         return "BTCUSD"
     if raw in ["ETHUSD", "ETH/USD"]:
@@ -131,13 +142,21 @@ def normalize_timeframe(timeframe: str) -> str:
 
     mapping = {
         "1": "1m",
+        "1m": "1m",
         "3": "3m",
+        "3m": "3m",
         "5": "5m",
+        "5m": "5m",
         "15": "15m",
+        "15m": "15m",
         "30": "30m",
+        "30m": "30m",
         "60": "1h",
+        "1h": "1h",
         "120": "2h",
+        "2h": "2h",
         "240": "4h",
+        "4h": "4h",
         "d": "1d",
         "1d": "1d",
         "w": "1w",
@@ -216,7 +235,12 @@ def candle_from_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     symbol = normalize_symbol(str(payload.get("symbol") or ""))
     timeframe = normalize_timeframe(str(payload.get("timeframe") or "1m"))
 
-    candle_time = payload.get("time") or payload.get("timestamp") or payload.get("createdAt") or int(time.time())
+    candle_time = (
+        payload.get("time")
+        or payload.get("timestamp")
+        or payload.get("createdAt")
+        or int(time.time())
+    )
 
     return {
         "time": format_bar_time(candle_time),
@@ -236,7 +260,11 @@ def merge_candles_by_time(candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     merged: Dict[str, Dict[str, Any]] = {}
 
     for candle in candles:
-        key = f"{normalize_symbol(str(candle.get('symbol', '')))}:{normalize_timeframe(str(candle.get('timeframe', '')))}:{candle.get('time')}"
+        key = (
+            f"{normalize_symbol(str(candle.get('symbol', '')))}:"
+            f"{normalize_timeframe(str(candle.get('timeframe', '')))}:"
+            f"{candle.get('time')}"
+        )
         merged[key] = candle
 
     def sort_key(item: Dict[str, Any]) -> Any:
@@ -334,7 +362,11 @@ def normalize_alpaca_bar(raw: Dict[str, Any], symbol: str, timeframe: str) -> Di
     }
 
 
-def fetch_alpaca_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 300) -> List[Dict[str, Any]]:
+def fetch_alpaca_historical_candles(
+    symbol: str,
+    timeframe: str = "1m",
+    limit: int = 300,
+) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     alpaca_tf = alpaca_timeframe(normalized_timeframe)
@@ -343,29 +375,47 @@ def fetch_alpaca_historical_candles(symbol: str, timeframe: str = "1m", limit: i
     headers = alpaca_headers()
 
     if is_crypto_symbol(normalized_symbol):
-        alpaca_symbol = to_alpaca_crypto_symbol(normalized_symbol)
+        slash_symbol = to_alpaca_crypto_symbol(normalized_symbol)
 
-        params = urlencode(
-            {
-                "symbols": alpaca_symbol,
-                "timeframe": alpaca_tf,
-                "limit": safe_limit,
-                "sort": "asc",
-            }
-        )
-
-        url = f"{ALPACA_CRYPTO_BASE_URL}/crypto/us/bars?{params}"
-        data = http_get_json(url, headers=headers)
-
-        bars_by_symbol = data.get("bars", {})
-        bars = bars_by_symbol.get(alpaca_symbol, [])
-
-        return [
-            normalize_alpaca_bar(bar, normalized_symbol, normalized_timeframe)
-            for bar in bars
+        # BTCUSD sometimes works as BTC/USD in Alpaca responses, while the dashboard
+        # uses BTCUSD. Try both and read both possible response keys.
+        symbol_candidates = [
+            slash_symbol,       # BTC/USD
+            normalized_symbol,  # BTCUSD
         ]
 
-    # Stocks/ETFs. This is for SPY and similar. Futures like ES1!/MES1! are not covered by Alpaca data.
+        for candidate_symbol in symbol_candidates:
+            params = urlencode(
+                {
+                    "symbols": candidate_symbol,
+                    "timeframe": alpaca_tf,
+                    "limit": safe_limit,
+                    "sort": "asc",
+                }
+            )
+
+            url = f"{ALPACA_CRYPTO_BASE_URL}/crypto/us/bars?{params}"
+            data = http_get_json(url, headers=headers)
+
+            bars_by_symbol = data.get("bars", {})
+
+            bars = (
+                bars_by_symbol.get(candidate_symbol)
+                or bars_by_symbol.get(slash_symbol)
+                or bars_by_symbol.get(normalized_symbol)
+                or []
+            )
+
+            if bars:
+                return [
+                    normalize_alpaca_bar(bar, normalized_symbol, normalized_timeframe)
+                    for bar in bars
+                ]
+
+        return []
+
+    # Stocks/ETFs. This is for SPY and similar.
+    # Futures like ES1!/MES1! are not covered by Alpaca data.
     params = urlencode(
         {
             "symbols": normalized_symbol,
@@ -410,7 +460,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "phase_1_python_smc_core_ready",
+        "engine": "phase_2_python_zones_ready",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
@@ -527,14 +577,16 @@ def recent_candles(
     if symbol:
         normalized_symbol = normalize_symbol(symbol)
         candles = [
-            candle for candle in candles
+            candle
+            for candle in candles
             if normalize_symbol(str(candle.get("symbol", ""))) == normalized_symbol
         ]
 
     if timeframe:
         normalized_timeframe = normalize_timeframe(timeframe)
         candles = [
-            candle for candle in candles
+            candle
+            for candle in candles
             if normalize_timeframe(str(candle.get("timeframe", ""))) == normalized_timeframe
         ]
 
@@ -571,7 +623,7 @@ def merged_candles(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PYTHON ENGINE ROUTE — PHASE 1
+# PYTHON ENGINE ROUTE — PHASE 2
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/api/engine-state")
@@ -581,7 +633,7 @@ def engine_state(
     limit: int = 500,
 ) -> Dict[str, Any]:
     """
-    Phase 1 endpoint.
+    Phase 2 endpoint.
 
     Browser test:
     https://trading-intelligence-dashboard.onrender.com/api/engine-state?symbol=BTCUSD&timeframe=1m&limit=500
@@ -589,8 +641,8 @@ def engine_state(
     What it does:
     1. Gets historical candles from Alpaca.
     2. Merges any live webhook candles.
-    3. Runs the Python SMC Phase 1 engine.
-    4. Returns candles + heikinAshiCandles + smcEvents.
+    3. Runs the Python SMC Phase 2 engine.
+    4. Returns candles + heikinAshiCandles + smcEvents + zones + liquidityEvents.
     """
 
     safe_limit = max(100, min(int(limit or 500), 1000))
@@ -604,9 +656,23 @@ def engine_state(
         config={
             "internal_pivot_len": 5,
             "swing_pivot_len": 50,
+            "internal_equal_pivot_len": 3,
+            "swing_equal_pivot_len": 3,
             "show_internal_structure": True,
             "show_swing_structure": True,
+            "show_internal_order_blocks": True,
+            "show_swing_order_blocks": False,
+            "internal_order_blocks_size": 5,
+            "swing_order_blocks_size": 5,
+            "show_fair_value_gaps": True,
+            "show_premium_discount_zones": True,
+            "show_equal_highs_lows": True,
+            "show_internal_sweeps": True,
+            "show_swing_sweeps": True,
+            "show_liquidity_pools": True,
             "max_events": 150,
+            "max_zones": 80,
+            "max_liquidity_events": 120,
         },
     )
 
