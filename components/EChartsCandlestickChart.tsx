@@ -15,7 +15,7 @@ type CandleMode = 'Regular' | 'Heikin Ashi'
 
 type StructureDirection = 'bullish' | 'bearish'
 type StructureScope = 'internal' | 'swing'
-type StructureTag = 'BOS' | 'CHoCH' | 'HH' | 'HL' | 'LH' | 'LL'
+type StructureTag = 'BOS' | 'CHoCH' | 'iBOS' | 'iCHoCH' | 'HH' | 'HL' | 'LH' | 'LL'
 
 type SmcStructureEvent = {
   time: string
@@ -30,6 +30,19 @@ type DlmLevel = {
   label: string
   price: number
   direction: 'neutral' | 'bullish' | 'bearish'
+}
+
+type ZoneDirection = 'bullish' | 'bearish' | 'neutral'
+type ZoneKind = 'internal_ob' | 'swing_ob' | 'fvg' | 'premium' | 'equilibrium' | 'discount'
+
+type SmcZone = {
+  startTime: string
+  endTime: string
+  top: number
+  bottom: number
+  label: string
+  direction: ZoneDirection
+  kind: ZoneKind
 }
 
 type EChartsCandlestickChartProps = {
@@ -75,7 +88,7 @@ const sampleSmcEvents: SmcStructureEvent[] = [
     time: '5/20 13:00',
     fromTime: '5/20 11:00',
     price: 77100,
-    tag: 'iBOS' as StructureTag,
+    tag: 'iBOS',
     direction: 'bullish',
     scope: 'internal',
   },
@@ -91,7 +104,7 @@ const sampleSmcEvents: SmcStructureEvent[] = [
     time: '5/20 21:00',
     fromTime: '5/20 18:00',
     price: 77090,
-    tag: 'iCHoCH' as StructureTag,
+    tag: 'iCHoCH',
     direction: 'bearish',
     scope: 'internal',
   },
@@ -123,6 +136,81 @@ const sampleDlmLevels: DlmLevel[] = [
   { label: 'AlphaX POC', price: 76580, direction: 'neutral' },
   { label: 'DLM Buy Liquidity', price: 75840, direction: 'bullish' },
   { label: 'DLM Sell Liquidity', price: 77840, direction: 'bearish' },
+]
+
+const sampleZones: SmcZone[] = [
+  {
+    startTime: '5/20 12:00',
+    endTime: '5/20 18:00',
+    top: 77100,
+    bottom: 76720,
+    label: 'Internal Bullish OB',
+    direction: 'bullish',
+    kind: 'internal_ob',
+  },
+  {
+    startTime: '5/20 18:00',
+    endTime: '5/21 02:00',
+    top: 77910,
+    bottom: 77580,
+    label: 'Internal Bearish OB',
+    direction: 'bearish',
+    kind: 'internal_ob',
+  },
+  {
+    startTime: '5/20 14:00',
+    endTime: '5/21 06:00',
+    top: 77410,
+    bottom: 77090,
+    label: 'Swing Bullish OB',
+    direction: 'bullish',
+    kind: 'swing_ob',
+  },
+  {
+    startTime: '5/20 21:00',
+    endTime: '5/21 06:00',
+    top: 76980,
+    bottom: 76550,
+    label: 'Bearish FVG',
+    direction: 'bearish',
+    kind: 'fvg',
+  },
+  {
+    startTime: '5/21 01:00',
+    endTime: '5/21 06:00',
+    top: 76020,
+    bottom: 75840,
+    label: 'Bullish FVG',
+    direction: 'bullish',
+    kind: 'fvg',
+  },
+  {
+    startTime: '5/20 09:00',
+    endTime: '5/21 06:00',
+    top: 77930,
+    bottom: 77220,
+    label: 'Premium',
+    direction: 'bearish',
+    kind: 'premium',
+  },
+  {
+    startTime: '5/20 09:00',
+    endTime: '5/21 06:00',
+    top: 77220,
+    bottom: 76680,
+    label: 'Equilibrium',
+    direction: 'neutral',
+    kind: 'equilibrium',
+  },
+  {
+    startTime: '5/20 09:00',
+    endTime: '5/21 06:00',
+    top: 76680,
+    bottom: 75350,
+    label: 'Discount',
+    direction: 'bullish',
+    kind: 'discount',
+  },
 ]
 
 const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1D']
@@ -168,6 +256,63 @@ function getDlmColor(direction: DlmLevel['direction']) {
   return BLUE
 }
 
+function getZoneStyle(zone: SmcZone, compact: boolean) {
+  if (zone.kind === 'premium') {
+    return {
+      color: 'rgba(242, 54, 69, 0.06)',
+      borderColor: 'rgba(242, 54, 69, 0.18)',
+    }
+  }
+
+  if (zone.kind === 'equilibrium') {
+    return {
+      color: 'rgba(135, 139, 148, 0.045)',
+      borderColor: 'rgba(135, 139, 148, 0.16)',
+    }
+  }
+
+  if (zone.kind === 'discount') {
+    return {
+      color: 'rgba(8, 153, 129, 0.06)',
+      borderColor: 'rgba(8, 153, 129, 0.18)',
+    }
+  }
+
+  if (zone.kind === 'fvg') {
+    return zone.direction === 'bullish'
+      ? {
+          color: compact ? 'rgba(0, 255, 104, 0.08)' : 'rgba(0, 255, 104, 0.12)',
+          borderColor: 'rgba(0, 255, 104, 0.32)',
+        }
+      : {
+          color: compact ? 'rgba(255, 0, 8, 0.08)' : 'rgba(255, 0, 8, 0.12)',
+          borderColor: 'rgba(255, 0, 8, 0.32)',
+        }
+  }
+
+  if (zone.kind === 'swing_ob') {
+    return zone.direction === 'bullish'
+      ? {
+          color: compact ? 'rgba(24, 72, 204, 0.10)' : 'rgba(24, 72, 204, 0.16)',
+          borderColor: 'rgba(24, 72, 204, 0.42)',
+        }
+      : {
+          color: compact ? 'rgba(178, 40, 51, 0.10)' : 'rgba(178, 40, 51, 0.16)',
+          borderColor: 'rgba(178, 40, 51, 0.42)',
+        }
+  }
+
+  return zone.direction === 'bullish'
+    ? {
+        color: compact ? 'rgba(49, 121, 245, 0.10)' : 'rgba(49, 121, 245, 0.16)',
+        borderColor: 'rgba(49, 121, 245, 0.42)',
+      }
+    : {
+        color: compact ? 'rgba(247, 124, 128, 0.10)' : 'rgba(247, 124, 128, 0.16)',
+        borderColor: 'rgba(247, 124, 128, 0.42)',
+      }
+}
+
 function buildSmcMarkLines(events: SmcStructureEvent[]) {
   return events
     .filter((event) => event.fromTime)
@@ -211,13 +356,14 @@ function buildSmcMarkPoints(events: SmcStructureEvent[], compact: boolean) {
       event.direction === 'bearish' ||
       event.tag === 'HH' ||
       event.tag === 'LH' ||
-      event.tag === 'CHoCH'
+      event.tag === 'CHoCH' ||
+      event.tag === 'iCHoCH'
 
     return {
       name: event.tag,
       coord: [event.time, event.price],
       value: event.tag,
-      symbol: isTopLabel ? 'pin' : 'pin',
+      symbol: 'pin',
       symbolSize: compact ? 28 : 38,
       symbolRotate: isTopLabel ? 0 : 180,
       itemStyle: {
@@ -267,6 +413,40 @@ function buildDlmMarkLines(levels: DlmLevel[], compact: boolean) {
   })
 }
 
+function buildZoneMarkAreas(zones: SmcZone[], compact: boolean) {
+  return zones.map((zone) => {
+    const style = getZoneStyle(zone, compact)
+
+    return [
+      {
+        xAxis: zone.startTime,
+        yAxis: zone.top,
+        itemStyle: {
+          color: style.color,
+          borderColor: style.borderColor,
+          borderWidth: zone.kind === 'swing_ob' ? 1.4 : 1,
+          borderType: zone.kind === 'fvg' ? 'dashed' : 'solid',
+        },
+        label: {
+          show: !compact,
+          formatter: zone.label,
+          color: style.borderColor,
+          fontSize: 10,
+          fontWeight: 700,
+          position: 'insideTopLeft',
+          backgroundColor: 'rgba(15, 17, 21, 0.60)',
+          borderRadius: 4,
+          padding: [2, 5],
+        },
+      },
+      {
+        xAxis: zone.endTime,
+        yAxis: zone.bottom,
+      },
+    ]
+  })
+}
+
 export default function EChartsCandlestickChart({
   heightClass = 'h-[650px]',
   compact = false,
@@ -280,6 +460,7 @@ export default function EChartsCandlestickChart({
   const [candleMode, setCandleMode] = useState<CandleMode>('Heikin Ashi')
   const [showSmc, setShowSmc] = useState(true)
   const [showDlm, setShowDlm] = useState(true)
+  const [showZones, setShowZones] = useState(true)
 
   useEffect(() => {
     if (!chartRef.current) return
@@ -304,7 +485,7 @@ export default function EChartsCandlestickChart({
       c.high,
     ])
 
-    const option: echarts.EChartsOption = {
+    const option: any = {
       backgroundColor: '#0f1115',
       animation: false,
 
@@ -419,6 +600,12 @@ export default function EChartsCandlestickChart({
             borderColor0: LIGHT_RED,
           },
           barWidth: compact ? '48%' : '58%',
+
+          markArea: {
+            silent: true,
+            data: showZones ? buildZoneMarkAreas(sampleZones, compact) : [],
+          },
+
           markLine: {
             silent: true,
             symbol: 'none',
@@ -427,6 +614,7 @@ export default function EChartsCandlestickChart({
               ...(showDlm ? buildDlmMarkLines(sampleDlmLevels, compact) : []),
             ],
           },
+
           markPoint: {
             silent: true,
             data: showSmc ? buildSmcMarkPoints(sampleSmcEvents, compact) : [],
@@ -446,7 +634,7 @@ export default function EChartsCandlestickChart({
     return () => {
       window.removeEventListener('resize', resize)
     }
-  }, [symbol, timeframe, candleMode, compact, showSmc, showDlm])
+  }, [symbol, timeframe, candleMode, compact, showSmc, showDlm, showZones])
 
   useEffect(() => {
     return () => {
@@ -522,6 +710,18 @@ export default function EChartsCandlestickChart({
 
               <button
                 type="button"
+                onClick={() => setShowZones((value) => !value)}
+                className={`rounded-md border px-3 py-1.5 text-sm font-semibold ${
+                  showZones
+                    ? 'border-purple-500/50 bg-purple-500/10 text-purple-300'
+                    : 'border-dark-700 bg-[#151922] text-gray-400'
+                }`}
+              >
+                Zones
+              </button>
+
+              <button
+                type="button"
                 onClick={() => setShowDlm((value) => !value)}
                 className={`rounded-md border px-3 py-1.5 text-sm font-semibold ${
                   showDlm
@@ -537,7 +737,7 @@ export default function EChartsCandlestickChart({
 
         {!compact && (
           <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-            Chart Engine v3A
+            Chart Engine v3B
           </div>
         )}
       </div>
