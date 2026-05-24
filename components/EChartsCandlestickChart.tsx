@@ -13,6 +13,7 @@ type Candle = {
 }
 
 type CandleMode = 'Regular' | 'Heikin Ashi'
+type SmcDisplayMode = 'Clean' | 'Full' | 'Structure Only' | 'Zones Only'
 
 type SmcStructureEvent = {
   time: string
@@ -140,12 +141,18 @@ const ORANGE = '#fb923c'
 const PINK = '#f472b6'
 const GRAY = '#94a3b8'
 
-const MAX_INTERNAL_OB_ZONES = 5
+const MAX_INTERNAL_OB_ZONES = 4
 const MAX_SWING_OB_ZONES = 2
-const MAX_FVG_ZONES = 3
-const MAX_ALPHA_FVG_ZONES = 2
-const MAX_GENERIC_ZONES = 4
-const MAX_ZONE_LOOKBACK_CANDLES = 220
+const MAX_FVG_ZONES = 2
+const MAX_ALPHA_FVG_ZONES = 1
+const MAX_GENERIC_ZONES = 2
+const MAX_ZONE_LOOKBACK_CANDLES = 180
+const MAX_CLEAN_STRUCTURE_EVENTS = 18
+const MAX_FULL_STRUCTURE_EVENTS = 60
+const MAX_CLEAN_LIQUIDITY_EVENTS = 10
+const MAX_FULL_LIQUIDITY_EVENTS = 40
+const MAX_CLEAN_SCORE_MARKERS = 2
+const MAX_FULL_SCORE_MARKERS = 12
 
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
 
@@ -495,6 +502,7 @@ function getScoreColor(marker: ScoreMarker) {
   return YELLOW
 }
 
+
 function zoneTimeValue(value: any): number {
   const parsed = Date.parse(String(value ?? ''))
   return Number.isFinite(parsed) ? parsed : 0
@@ -515,7 +523,8 @@ function normalizeZoneKind(kind: string): string {
   const text = String(kind ?? '').toLowerCase()
 
   if (text.includes('premium')) return 'premium'
-  if (text.includes('equilibrium') || text.includes('eq')) return 'equilibrium'
+  if (text.includes('equilibrium')) return 'equilibrium'
+  if (text === 'eq' || text.includes('eq_')) return 'equilibrium'
   if (text.includes('discount')) return 'discount'
   if (text.includes('swing') && text.includes('ob')) return 'swing_ob'
   if (text.includes('internal') && text.includes('ob')) return 'internal_ob'
@@ -578,8 +587,14 @@ function getZoneEndTime(zone: SmcZone): number {
   return zoneTimeValue(zone.endTime || zone.startTime)
 }
 
-function filterZonesPineStyle(zones: SmcZone[], candles: Candle[], compact: boolean): SmcZone[] {
+function filterZonesPineStyle(
+  zones: SmcZone[],
+  candles: Candle[],
+  compact: boolean,
+  displayMode: SmcDisplayMode
+): SmcZone[] {
   if (!Array.isArray(zones) || zones.length === 0) return []
+  if (compact || displayMode === 'Structure Only') return []
 
   const normalized = zones
     .map(normalizeZone)
@@ -588,22 +603,22 @@ function filterZonesPineStyle(zones: SmcZone[], candles: Candle[], compact: bool
   if (normalized.length === 0) return []
 
   const candleTimes = candles.map((candle) => candle.time)
-  const visibleTimeSet = new Set(candleTimes)
-  const recentTimeSet = new Set(candleTimes.slice(Math.max(0, candleTimes.length - MAX_ZONE_LOOKBACK_CANDLES)))
+  const recentTimeSet = new Set(
+    candleTimes.slice(Math.max(0, candleTimes.length - MAX_ZONE_LOOKBACK_CANDLES))
+  )
+
+  const firstRecentMs = zoneTimeValue(
+    candleTimes[Math.max(0, candleTimes.length - MAX_ZONE_LOOKBACK_CANDLES)]
+  )
+  const lastMs = zoneTimeValue(candleTimes[candleTimes.length - 1])
 
   const isCurrentEnough = (zone: SmcZone) => {
-    if (compact) return false
-
     if (recentTimeSet.has(zone.startTime) || recentTimeSet.has(zone.endTime)) return true
 
     const startMs = zoneTimeValue(zone.startTime)
     const endMs = zoneTimeValue(zone.endTime)
-    const firstRecentMs = zoneTimeValue(candleTimes[Math.max(0, candleTimes.length - MAX_ZONE_LOOKBACK_CANDLES)])
-    const lastMs = zoneTimeValue(candleTimes[candleTimes.length - 1])
 
-    if (!firstRecentMs || !lastMs || !startMs || !endMs) {
-      return visibleTimeSet.has(zone.startTime) || visibleTimeSet.has(zone.endTime)
-    }
+    if (!firstRecentMs || !lastMs || !startMs || !endMs) return false
 
     return endMs >= firstRecentMs && startMs <= lastMs
   }
@@ -638,12 +653,14 @@ function filterZonesPineStyle(zones: SmcZone[], candles: Candle[], compact: bool
     )
     .filter((zone): zone is SmcZone => Boolean(zone))
 
+  const zoneMultiplier = displayMode === 'Full' ? 2 : 1
+
   const selected = [
     ...pdZones,
-    ...latestDirectional('internal_ob', Math.ceil(MAX_INTERNAL_OB_ZONES / 2)),
-    ...latestDirectional('swing_ob', Math.ceil(MAX_SWING_OB_ZONES / 2)),
-    ...latestByKind('fvg', MAX_FVG_ZONES),
-    ...latestByKind('alpha_fvg', MAX_ALPHA_FVG_ZONES),
+    ...latestDirectional('internal_ob', Math.ceil((MAX_INTERNAL_OB_ZONES * zoneMultiplier) / 2)),
+    ...latestDirectional('swing_ob', Math.ceil((MAX_SWING_OB_ZONES * zoneMultiplier) / 2)),
+    ...latestByKind('fvg', MAX_FVG_ZONES * zoneMultiplier),
+    ...latestByKind('alpha_fvg', MAX_ALPHA_FVG_ZONES * zoneMultiplier),
     ...currentZones
       .filter(
         (zone) =>
@@ -658,7 +675,7 @@ function filterZonesPineStyle(zones: SmcZone[], candles: Candle[], compact: bool
           ].includes(zone.kind)
       )
       .sort((a, b) => getZoneEndTime(b) - getZoneEndTime(a))
-      .slice(0, MAX_GENERIC_ZONES),
+      .slice(0, MAX_GENERIC_ZONES * zoneMultiplier),
   ]
 
   const deduped = new Map<string, SmcZone>()
@@ -682,8 +699,11 @@ function filterZonesPineStyle(zones: SmcZone[], candles: Candle[], compact: bool
   })
 }
 
-function shouldShowZoneLabel(zone: SmcZone, compact: boolean): boolean {
+function shouldShowZoneLabel(zone: SmcZone, compact: boolean, displayMode: SmcDisplayMode): boolean {
   if (compact) return false
+  if (displayMode === 'Clean') {
+    return zone.kind === 'premium' || zone.kind === 'equilibrium' || zone.kind === 'discount'
+  }
 
   return (
     zone.kind === 'premium' ||
@@ -692,6 +712,76 @@ function shouldShowZoneLabel(zone: SmcZone, compact: boolean): boolean {
     zone.kind === 'internal_ob' ||
     zone.kind === 'swing_ob'
   )
+}
+
+function eventTimeValue(value: any): number {
+  const parsed = Date.parse(String(value ?? ''))
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function isMajorStructureEvent(event: SmcStructureEvent): boolean {
+  const tag = String(event.tag ?? '').toUpperCase()
+  return (
+    event.scope === 'swing' ||
+    tag === 'BOS' ||
+    tag === 'CHOCH' ||
+    tag === 'MSS' ||
+    tag === 'IBOS' ||
+    tag === 'ICHOCH'
+  )
+}
+
+function filterSmcEventsForDisplay(
+  events: SmcStructureEvent[],
+  displayMode: SmcDisplayMode,
+  compact: boolean
+): SmcStructureEvent[] {
+  if (!Array.isArray(events) || compact || displayMode === 'Zones Only') return []
+
+  const sorted = [...events].sort((a, b) => eventTimeValue(a.time) - eventTimeValue(b.time))
+  const major = sorted.filter(isMajorStructureEvent)
+  const source = displayMode === 'Full' ? sorted : major
+  const limit = displayMode === 'Full' ? MAX_FULL_STRUCTURE_EVENTS : MAX_CLEAN_STRUCTURE_EVENTS
+
+  return source.slice(-limit)
+}
+
+function isMajorLiquidityEvent(event: LiquidityEvent): boolean {
+  return (
+    event.kind === 'liquidity_pool' ||
+    event.kind === 'sweep' ||
+    event.kind === 'internal_sweep' ||
+    event.kind === 'swing_sweep' ||
+    event.kind === 'alpha_sweep'
+  )
+}
+
+function filterLiquidityEventsForDisplay(
+  events: LiquidityEvent[],
+  displayMode: SmcDisplayMode,
+  compact: boolean
+): LiquidityEvent[] {
+  if (!Array.isArray(events) || compact || displayMode === 'Structure Only') return []
+
+  const sorted = [...events]
+    .filter((event) => (displayMode === 'Full' ? true : isMajorLiquidityEvent(event)))
+    .sort((a, b) => eventTimeValue(a.time || a.fromTime) - eventTimeValue(b.time || b.fromTime))
+
+  const limit = displayMode === 'Full' ? MAX_FULL_LIQUIDITY_EVENTS : MAX_CLEAN_LIQUIDITY_EVENTS
+
+  return sorted.slice(-limit)
+}
+
+function filterScoreMarkersForDisplay(
+  markers: ScoreMarker[],
+  displayMode: SmcDisplayMode,
+  compact: boolean
+): ScoreMarker[] {
+  if (!Array.isArray(markers) || compact || displayMode !== 'Full') return []
+
+  return [...markers]
+    .sort((a, b) => eventTimeValue(a.time) - eventTimeValue(b.time))
+    .slice(-MAX_FULL_SCORE_MARKERS)
 }
 
 function getZoneStyle(zone: SmcZone, compact: boolean) {
@@ -719,35 +809,35 @@ function getZoneStyle(zone: SmcZone, compact: boolean) {
   if (zone.kind === 'fvg' || zone.kind === 'alpha_fvg') {
     return zone.direction === 'bullish'
       ? {
-          color: compact ? 'rgba(0, 255, 104, 0.025)' : 'rgba(0, 255, 104, 0.045)',
-          borderColor: 'rgba(0, 255, 104, 0.20)',
+          color: compact ? 'rgba(0, 255, 104, 0.020)' : 'rgba(0, 255, 104, 0.040)',
+          borderColor: 'rgba(0, 255, 104, 0.18)',
         }
       : {
-          color: compact ? 'rgba(255, 0, 8, 0.025)' : 'rgba(255, 0, 8, 0.045)',
-          borderColor: 'rgba(255, 0, 8, 0.20)',
+          color: compact ? 'rgba(255, 0, 8, 0.020)' : 'rgba(255, 0, 8, 0.040)',
+          borderColor: 'rgba(255, 0, 8, 0.18)',
         }
   }
 
   if (zone.kind === 'swing_ob') {
     return zone.direction === 'bullish'
       ? {
-          color: compact ? 'rgba(24, 72, 204, 0.045)' : 'rgba(24, 72, 204, 0.07)',
-          borderColor: 'rgba(24, 72, 204, 0.34)',
+          color: compact ? 'rgba(24, 72, 204, 0.040)' : 'rgba(24, 72, 204, 0.065)',
+          borderColor: 'rgba(24, 72, 204, 0.32)',
         }
       : {
-          color: compact ? 'rgba(178, 40, 51, 0.045)' : 'rgba(178, 40, 51, 0.07)',
-          borderColor: 'rgba(178, 40, 51, 0.34)',
+          color: compact ? 'rgba(178, 40, 51, 0.040)' : 'rgba(178, 40, 51, 0.065)',
+          borderColor: 'rgba(178, 40, 51, 0.32)',
         }
   }
 
   return zone.direction === 'bullish'
     ? {
-        color: compact ? 'rgba(49, 121, 245, 0.045)' : 'rgba(49, 121, 245, 0.07)',
-        borderColor: 'rgba(49, 121, 245, 0.34)',
+        color: compact ? 'rgba(49, 121, 245, 0.040)' : 'rgba(49, 121, 245, 0.065)',
+        borderColor: 'rgba(49, 121, 245, 0.32)',
       }
     : {
-        color: compact ? 'rgba(247, 124, 128, 0.045)' : 'rgba(247, 124, 128, 0.07)',
-        borderColor: 'rgba(247, 124, 128, 0.34)',
+        color: compact ? 'rgba(247, 124, 128, 0.040)' : 'rgba(247, 124, 128, 0.065)',
+        borderColor: 'rgba(247, 124, 128, 0.32)',
       }
 }
 
@@ -851,10 +941,10 @@ function buildDlmMarkLines(levels: DlmLevel[], compact: boolean) {
   })
 }
 
-function buildZoneMarkAreas(zones: SmcZone[], compact: boolean) {
+function buildZoneMarkAreas(zones: SmcZone[], compact: boolean, displayMode: SmcDisplayMode) {
   return zones.map((zone) => {
     const style = getZoneStyle(zone, compact)
-    const showLabel = shouldShowZoneLabel(zone, compact)
+    const showLabel = shouldShowZoneLabel(zone, compact, displayMode)
 
     return [
       {
@@ -870,7 +960,7 @@ function buildZoneMarkAreas(zones: SmcZone[], compact: boolean) {
           show: showLabel,
           formatter: zone.label,
           color: style.borderColor,
-          fontSize: 9,
+          fontSize: displayMode === 'Clean' ? 8 : 9,
           fontWeight: 700,
           position:
             zone.kind === 'premium'
@@ -880,7 +970,7 @@ function buildZoneMarkAreas(zones: SmcZone[], compact: boolean) {
                 : zone.kind === 'equilibrium'
                   ? 'inside'
                   : 'insideTopLeft',
-          backgroundColor: 'rgba(15, 17, 21, 0.45)',
+          backgroundColor: 'rgba(15, 17, 21, 0.42)',
           borderRadius: 4,
           padding: [2, 5],
         },
@@ -1248,6 +1338,7 @@ export default function EChartsCandlestickChart({
   const [showZones, setShowZones] = useState(true)
   const [showLiquidity, setShowLiquidity] = useState(true)
   const [showScores, setShowScores] = useState(true)
+  const [smcDisplayMode, setSmcDisplayMode] = useState<SmcDisplayMode>('Clean')
   const [engineState, setEngineState] = useState<EngineState | null>(null)
   const [engineStatus, setEngineStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle')
   const [historicalCandles, setHistoricalCandles] = useState<any[]>([])
@@ -1415,33 +1506,55 @@ export default function EChartsCandlestickChart({
   const overlayPayload = useMemo(() => extractOverlayPayload(latestSignal), [latestSignal])
 
   const engineAvailable = Boolean(engineState && engineStatus === 'loaded' && engineCandles.length > 0)
-  const activeSmcEvents = Array.isArray(engineState?.smcEvents)
+
+  const rawSmcEvents = Array.isArray(engineState?.smcEvents)
     ? engineState?.smcEvents ?? []
     : overlayPayload.smcEvents ?? []
+
+  const activeSmcEvents = useMemo(
+    () => filterSmcEventsForDisplay(rawSmcEvents, smcDisplayMode, compact),
+    [rawSmcEvents, smcDisplayMode, compact]
+  )
+
   const activeDlmLevels = Array.isArray(engineState?.dlmLevels)
     ? engineState?.dlmLevels ?? []
     : overlayPayload.dlmLevels ?? []
+
   const rawActiveZones = [
     ...(Array.isArray(engineState?.zones) ? engineState?.zones ?? [] : overlayPayload.zones ?? []),
     ...(Array.isArray(engineState?.alphaFvgs) ? engineState?.alphaFvgs ?? [] : []),
   ]
 
   const activeZones = useMemo(
-    () => filterZonesPineStyle(rawActiveZones, baseCandles, compact),
-    [rawActiveZones, baseCandles, compact]
+    () => filterZonesPineStyle(rawActiveZones, baseCandles, compact, smcDisplayMode),
+    [rawActiveZones, baseCandles, compact, smcDisplayMode]
   )
-  const activeLiquidityEvents = [
+
+  const rawLiquidityEvents = [
     ...(Array.isArray(engineState?.liquidityEvents)
       ? engineState?.liquidityEvents ?? []
       : overlayPayload.liquidityEvents ?? []),
     ...(Array.isArray(engineState?.alphaSweeps) ? engineState?.alphaSweeps ?? [] : []),
   ]
+
+  const activeLiquidityEvents = useMemo(
+    () => filterLiquidityEventsForDisplay(rawLiquidityEvents, smcDisplayMode, compact),
+    [rawLiquidityEvents, smcDisplayMode, compact]
+  )
+
   const activeDlmConfluenceMarkers = Array.isArray(engineState?.dlmConfluenceMarkers)
     ? engineState?.dlmConfluenceMarkers ?? []
     : overlayPayload.dlmConfluenceMarkers ?? []
-  const activeScoreMarkers = Array.isArray(engineState?.scoreMarkers)
+
+  const rawScoreMarkers = Array.isArray(engineState?.scoreMarkers)
     ? engineState?.scoreMarkers ?? []
     : overlayPayload.scoreMarkers ?? []
+
+  const activeScoreMarkers = useMemo(
+    () => filterScoreMarkersForDisplay(rawScoreMarkers, smcDisplayMode, compact),
+    [rawScoreMarkers, smcDisplayMode, compact]
+  )
+
   const alphaProfileBins = Array.isArray(engineState?.alphaProfileBins)
     ? engineState?.alphaProfileBins ?? []
     : []
@@ -1479,22 +1592,27 @@ export default function EChartsCandlestickChart({
       c.high,
     ])
 
+    const effectiveShowSmc = showSmc && smcDisplayMode !== 'Zones Only'
+    const effectiveShowZones = showZones && smcDisplayMode !== 'Structure Only'
+    const effectiveShowLiquidity = showLiquidity && smcDisplayMode !== 'Structure Only'
+    const effectiveShowScores = showScores && smcDisplayMode === 'Full'
+
     const markLineData = enableAdvancedOverlays
       ? [
-          ...(showSmc ? buildSmcMarkLines(activeSmcEvents) : []),
+          ...(effectiveShowSmc ? buildSmcMarkLines(activeSmcEvents) : []),
           ...(showDlm ? buildDlmMarkLines(activeDlmLevels, compact) : []),
-          ...(showLiquidity ? buildLiquidityMarkLines(activeLiquidityEvents, compact) : []),
+          ...(effectiveShowLiquidity ? buildLiquidityMarkLines(activeLiquidityEvents, compact) : []),
         ]
       : []
 
     const markPointData = enableAdvancedOverlays
       ? [
-          ...(showSmc ? buildSmcMarkPoints(activeSmcEvents, compact) : []),
-          ...(showLiquidity ? buildLiquidityMarkPoints(activeLiquidityEvents, compact) : []),
-          ...(showDlm
+          ...(effectiveShowSmc ? buildSmcMarkPoints(activeSmcEvents, compact) : []),
+          ...(effectiveShowLiquidity ? buildLiquidityMarkPoints(activeLiquidityEvents, compact) : []),
+          ...(showDlm && smcDisplayMode === 'Full'
             ? buildDlmConfluenceMarkPoints(activeDlmConfluenceMarkers, compact)
             : []),
-          ...(showScores ? buildScoreMarkPoints(activeScoreMarkers, compact) : []),
+          ...(effectiveShowScores ? buildScoreMarkPoints(activeScoreMarkers, compact) : []),
         ]
       : []
 
@@ -1631,8 +1749,8 @@ export default function EChartsCandlestickChart({
           markArea: {
             silent: true,
             data:
-              enableAdvancedOverlays && showZones
-                ? buildZoneMarkAreas(activeZones, compact)
+              enableAdvancedOverlays && effectiveShowZones
+                ? buildZoneMarkAreas(activeZones, compact, smcDisplayMode)
                 : [],
           },
 
@@ -1678,6 +1796,7 @@ export default function EChartsCandlestickChart({
     showZones,
     showLiquidity,
     showScores,
+    smcDisplayMode,
     enableAdvancedOverlays,
     baseCandles,
     engineHaCandles,
@@ -1763,6 +1882,19 @@ export default function EChartsCandlestickChart({
               </option>
             ))}
           </select>
+
+          {!compact && enableAdvancedOverlays && (
+            <select
+              value={smcDisplayMode}
+              onChange={(e) => setSmcDisplayMode(e.target.value as SmcDisplayMode)}
+              className="rounded-md border border-dark-700 bg-[#151922] px-3 py-1.5 text-sm text-gray-100 outline-none"
+            >
+              <option value="Clean">Clean</option>
+              <option value="Full">Full</option>
+              <option value="Structure Only">Structure Only</option>
+              <option value="Zones Only">Zones Only</option>
+            </select>
+          )}
 
           {!compact && enableAdvancedOverlays && (
             <>
@@ -1852,7 +1984,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3R' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3S' : 'Chart Engine v2'}
             </div>
           </div>
         )}
