@@ -1,7 +1,27 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
+
+type TradingSignal = {
+  eventType?: string
+  symbol?: string
+  timeframe?: string
+  signal?: string
+  confidence?: number
+  bullScore?: number
+  bearScore?: number
+  netBias?: number
+  smc?: string
+  alphax?: string
+  ghost?: string
+  openInterest?: string
+  footprint?: string
+  session?: string
+  fredMacro?: string
+  finraShortVolume?: string
+  cot?: string
+}
 
 type SentimentData = {
   eventType: string
@@ -19,6 +39,10 @@ type SentimentData = {
   price?: number
   time?: number
   createdAt?: string
+}
+
+type MarketSentimentGaugeProps = {
+  signal?: TradingSignal
 }
 
 const API_BASE_URL =
@@ -42,7 +66,44 @@ const DEFAULT_SENTIMENT: SentimentData = {
 }
 
 function clamp(value: number) {
+  if (!Number.isFinite(value)) return 0
   return Math.max(0, Math.min(100, value))
+}
+
+function isBullishText(value?: string) {
+  const lower = String(value ?? '').toLowerCase()
+
+  return (
+    lower.includes('bull') ||
+    lower.includes('buy') ||
+    lower.includes('up') ||
+    lower.includes('long') ||
+    lower.includes('positive')
+  )
+}
+
+function isBearishText(value?: string) {
+  const lower = String(value ?? '').toLowerCase()
+
+  return (
+    lower.includes('bear') ||
+    lower.includes('sell') ||
+    lower.includes('down') ||
+    lower.includes('short') ||
+    lower.includes('negative')
+  )
+}
+
+function isNeutralText(value?: string) {
+  const lower = String(value ?? '').toLowerCase()
+
+  return (
+    !lower ||
+    lower.includes('waiting') ||
+    lower.includes('neutral') ||
+    lower.includes('none') ||
+    lower.includes('no signal')
+  )
 }
 
 function getStatusColor(status: string) {
@@ -55,8 +116,102 @@ function getStatusColor(status: string) {
   return 'text-yellow-400'
 }
 
-export default function MarketSentimentGauge() {
-  const [sentiment, setSentiment] = useState<SentimentData>(DEFAULT_SENTIMENT)
+function buildSentimentFromSignal(signal?: TradingSignal): SentimentData | null {
+  if (!signal) return null
+
+  const symbol = String(signal.symbol ?? 'WAITING')
+  const timeframe = String(signal.timeframe ?? '1m')
+  const bullScore = clamp(Number(signal.bullScore ?? 50))
+  const bearScore = clamp(Number(signal.bearScore ?? 50))
+  const netBias = Number(signal.netBias ?? bullScore - bearScore)
+  const confidence = clamp(Number(signal.confidence ?? Math.abs(netBias)))
+
+  const factors = [
+    signal.smc,
+    signal.alphax,
+    signal.ghost,
+    signal.openInterest,
+    signal.footprint,
+    signal.session,
+    signal.fredMacro,
+    signal.finraShortVolume,
+    signal.cot,
+  ]
+
+  let bullCount = 0
+  let bearCount = 0
+  let neutralCount = 0
+
+  factors.forEach((factor) => {
+    if (isBullishText(factor)) {
+      bullCount += 1
+    } else if (isBearishText(factor)) {
+      bearCount += 1
+    } else if (!isNeutralText(factor)) {
+      // Non-waiting custom text counts as active neutral.
+      neutralCount += 1
+    }
+  })
+
+  const dashboardSignal = String(signal.signal ?? '').toUpperCase()
+
+  if (dashboardSignal === 'BUY') bullCount += 1
+  else if (dashboardSignal === 'SELL') bearCount += 1
+  else neutralCount += 1
+
+  if (bullScore > bearScore + 3) bullCount += 1
+  else if (bearScore > bullScore + 3) bearCount += 1
+  else neutralCount += 1
+
+  if (confidence >= 12) {
+    if (netBias > 0) bullCount += 1
+    else if (netBias < 0) bearCount += 1
+    else neutralCount += 1
+  } else {
+    neutralCount += 1
+  }
+
+  const activeCount = bullCount + bearCount + neutralCount
+  const safeActiveCount = Math.max(activeCount, 1)
+
+  const bullPct = (bullCount / safeActiveCount) * 100
+  const bearPct = (bearCount / safeActiveCount) * 100
+  const neutralPct = (neutralCount / safeActiveCount) * 100
+
+  const pressureSentiment = clamp(50 + (bullScore - bearScore) / 2)
+  const voteSentiment = clamp(50 + ((bullPct - bearPct) / 100) * 50)
+  const sentiment = clamp(pressureSentiment * 0.6 + voteSentiment * 0.4)
+
+  const sentimentStatus =
+    sentiment >= 61
+      ? 'Python Bullish'
+      : sentiment <= 39
+        ? 'Python Bearish'
+        : Math.abs(netBias) >= 8
+          ? netBias > 0
+            ? 'Bullish Lean'
+            : 'Bearish Lean'
+          : 'Python Neutral'
+
+  return {
+    eventType: 'PYTHON_DASHBOARD_SENTIMENT',
+    symbol,
+    timeframe,
+    sentiment,
+    sentimentStatus,
+    bearCount,
+    neutralCount,
+    bullCount,
+    bearPct,
+    neutralPct,
+    bullPct,
+    activeCount,
+    price: 0,
+  }
+}
+
+export default function MarketSentimentGauge({ signal }: MarketSentimentGaugeProps) {
+  const [apiSentiment, setApiSentiment] = useState<SentimentData>(DEFAULT_SENTIMENT)
 
   useEffect(() => {
     const fetchSentiment = async () => {
@@ -68,7 +223,7 @@ export default function MarketSentimentGauge() {
         if (!response.ok) return
 
         const data: SentimentData = await response.json()
-        setSentiment(data)
+        setApiSentiment(data)
       } catch (error) {
         console.error('Failed to fetch sentiment:', error)
       }
@@ -76,12 +231,15 @@ export default function MarketSentimentGauge() {
 
     fetchSentiment()
 
-    const interval = window.setInterval(fetchSentiment, 3000)
+    const interval = window.setInterval(fetchSentiment, 10000)
 
     return () => {
       window.clearInterval(interval)
     }
   }, [])
+
+  const signalSentiment = useMemo(() => buildSentimentFromSignal(signal), [signal])
+  const sentiment = signalSentiment ?? apiSentiment
 
   const value = clamp(Number(sentiment.sentiment ?? 50))
   const needleRotation = -90 + (value / 100) * 180
@@ -167,13 +325,13 @@ export default function MarketSentimentGauge() {
               y1="120"
               x2="120"
               y2="46"
-              stroke="rgba(255,255,255,0.85)"
+              stroke="rgba(255,255,255,0.9)"
               strokeWidth="3"
               strokeLinecap="round"
             />
           </g>
 
-          <circle cx="120" cy="120" r="7" fill="rgba(255,255,255,0.8)" />
+          <circle cx="120" cy="120" r="7" fill="rgba(255,255,255,0.85)" />
         </svg>
       </div>
 
