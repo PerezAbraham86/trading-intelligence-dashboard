@@ -113,7 +113,6 @@ def now_iso() -> str:
 def normalize_symbol(symbol: str) -> str:
     raw = (symbol or "").upper().strip()
 
-    # TradingView prefixes.
     for prefix in [
         "BINANCE:",
         "COINBASE:",
@@ -128,7 +127,6 @@ def normalize_symbol(symbol: str) -> str:
 
     raw = raw.replace("-", "").replace("_", "")
 
-    # Frontend / Alpaca friendly.
     if raw in ["BTCUSD", "BTC/USD", "XBTUSD"]:
         return "BTCUSD"
     if raw in ["ETHUSD", "ETH/USD"]:
@@ -213,10 +211,53 @@ def to_float(value: Any, fallback: float = 0.0) -> float:
         return fallback
 
 
+def to_epoch_seconds(value: Any) -> float:
+    """
+    Converts every time format we use into sortable epoch seconds.
+
+    Fixes BTCUSD engine errors caused by mixing:
+    - Alpaca ISO strings: 2026-05-24T...
+    - TradingView/live unix seconds: 1779...
+    - TradingView/live unix milliseconds: 1779...000
+    """
+
+    if value is None:
+        return 0.0
+
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        return numeric / 1000.0 if numeric > 1000000000000 else numeric
+
+    text = str(value).strip()
+    if not text:
+        return 0.0
+
+    try:
+        numeric = float(text)
+        return numeric / 1000.0 if numeric > 1000000000000 else numeric
+    except Exception:
+        pass
+
+    try:
+        iso_text = text.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(iso_text)
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+
+        return parsed.timestamp()
+    except Exception:
+        return 0.0
+
+
 def format_bar_time(value: Any) -> Any:
-    # Keep unix timestamps as seconds if sent by Pine.
     if value is None:
         return int(time.time())
+
+    # Keep ISO strings as ISO strings because Alpaca sends them that way.
+    # The sort key now handles both ISO strings and unix times safely.
+    if isinstance(value, str) and ("T" in value or "-" in value):
+        return value
 
     try:
         numeric = float(value)
@@ -242,9 +283,12 @@ def candle_from_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         or int(time.time())
     )
 
+    normalized_time = format_bar_time(candle_time)
+
     return {
-        "time": format_bar_time(candle_time),
-        "timestamp": format_bar_time(candle_time),
+        "time": normalized_time,
+        "timestamp": normalized_time,
+        "epoch": to_epoch_seconds(normalized_time),
         "open": to_float(payload.get("open")),
         "high": to_float(payload.get("high")),
         "low": to_float(payload.get("low")),
@@ -260,21 +304,22 @@ def merge_candles_by_time(candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     merged: Dict[str, Dict[str, Any]] = {}
 
     for candle in candles:
-        key = (
-            f"{normalize_symbol(str(candle.get('symbol', '')))}:"
-            f"{normalize_timeframe(str(candle.get('timeframe', '')))}:"
-            f"{candle.get('time')}"
-        )
-        merged[key] = candle
+        symbol = normalize_symbol(str(candle.get("symbol", "")))
+        timeframe = normalize_timeframe(str(candle.get("timeframe", "")))
+        epoch = to_epoch_seconds(candle.get("time") or candle.get("timestamp") or candle.get("createdAt"))
 
-    def sort_key(item: Dict[str, Any]) -> Any:
-        value = item.get("time")
-        try:
-            return float(value)
-        except Exception:
-            return str(value)
+        if epoch <= 0:
+            raw_time = str(candle.get("time") or candle.get("timestamp") or candle.get("createdAt") or "")
+            key = f"{symbol}:{timeframe}:{raw_time}"
+        else:
+            # Round because live candles and Alpaca candles can differ by milliseconds.
+            key = f"{symbol}:{timeframe}:{int(epoch)}"
 
-    return sorted(merged.values(), key=sort_key)
+        next_candle = dict(candle)
+        next_candle["epoch"] = epoch
+        merged[key] = next_candle
+
+    return sorted(merged.values(), key=lambda item: to_epoch_seconds(item.get("epoch") or item.get("time")))
 
 
 def sanitize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -296,7 +341,6 @@ def sanitize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
     normalized["createdAt"] = normalized.get("createdAt") or now_iso()
 
-    # Preserve chartOverlays exactly. It may be a JSON string from Pine.
     if "chartOverlays" not in normalized:
         normalized["chartOverlays"] = None
 
@@ -346,11 +390,12 @@ def http_get_json(url: str, headers: Optional[Dict[str, str]] = None) -> Any:
 
 def normalize_alpaca_bar(raw: Dict[str, Any], symbol: str, timeframe: str) -> Dict[str, Any]:
     raw_time = raw.get("t")
+    epoch = to_epoch_seconds(raw_time)
 
-    # Alpaca time is ISO string. Keep ISO-like string for frontend and engine.
     return {
         "time": raw_time,
         "timestamp": raw_time,
+        "epoch": epoch,
         "open": to_float(raw.get("o")),
         "high": to_float(raw.get("h")),
         "low": to_float(raw.get("l")),
@@ -377,8 +422,6 @@ def fetch_alpaca_historical_candles(
     if is_crypto_symbol(normalized_symbol):
         slash_symbol = to_alpaca_crypto_symbol(normalized_symbol)
 
-        # BTCUSD sometimes works as BTC/USD in Alpaca responses, while the dashboard
-        # uses BTCUSD. Try both and read both possible response keys.
         symbol_candidates = [
             slash_symbol,       # BTC/USD
             normalized_symbol,  # BTCUSD
@@ -460,7 +503,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "phase_2_python_zones_ready",
+        "engine": "phase_2_python_zones_ready_sort_fix",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
