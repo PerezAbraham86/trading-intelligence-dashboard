@@ -119,6 +119,8 @@ const ORANGE = '#fb923c'
 const PINK = '#f472b6'
 const GRAY = '#94a3b8'
 
+const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
+
 const sampleCandles: Candle[] = [
   { time: '5/20 09:00', open: 76450, close: 76680, low: 76380, high: 76750 },
   { time: '5/20 10:00', open: 76680, close: 76520, low: 76420, high: 76720 },
@@ -639,6 +641,26 @@ function buildCandlesFromRecentCandles(
       }
     })
     .filter((candle): candle is Candle => candle !== null)
+}
+
+
+function mergeCandlesByTime(candles: Candle[]): Candle[] {
+  const merged = new Map<string, Candle>()
+
+  for (const candle of candles) {
+    merged.set(candle.time, candle)
+  }
+
+  return Array.from(merged.values()).sort((a, b) => {
+    const aTime = Date.parse(a.time)
+    const bTime = Date.parse(b.time)
+
+    if (Number.isFinite(aTime) && Number.isFinite(bTime)) {
+      return aTime - bTime
+    }
+
+    return a.time.localeCompare(b.time)
+  })
 }
 
 function safeParseJson(value: any): any {
@@ -1165,6 +1187,58 @@ export default function EChartsCandlestickChart({
   const [showZones, setShowZones] = useState(true)
   const [showLiquidity, setShowLiquidity] = useState(true)
   const [showScores, setShowScores] = useState(true)
+  const [historicalCandles, setHistoricalCandles] = useState<any[]>([])
+  const [historicalStatus, setHistoricalStatus] = useState<'idle' | 'loading' | 'loaded' | 'unavailable' | 'error'>('idle')
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function fetchHistoricalCandles() {
+      if (compact) return
+
+      setHistoricalStatus('loading')
+
+      try {
+        const params = new URLSearchParams({
+          symbol,
+          timeframe,
+          limit: '300',
+        })
+
+        const response = await fetch(`${API_BASE_URL}/api/historical-candles?${params.toString()}`, {
+          cache: 'no-store',
+        })
+
+        if (!response.ok) {
+          if (!cancelled) {
+            setHistoricalCandles([])
+            setHistoricalStatus(response.status === 404 ? 'unavailable' : 'error')
+          }
+          return
+        }
+
+        const json = await response.json()
+
+        if (!cancelled) {
+          setHistoricalCandles(Array.isArray(json) ? json : [])
+          setHistoricalStatus(Array.isArray(json) && json.length > 0 ? 'loaded' : 'unavailable')
+        }
+      } catch (error) {
+        console.error('Historical candle fetch error:', error)
+
+        if (!cancelled) {
+          setHistoricalCandles([])
+          setHistoricalStatus('error')
+        }
+      }
+    }
+
+    fetchHistoricalCandles()
+
+    return () => {
+      cancelled = true
+    }
+  }, [symbol, timeframe, compact])
 
   const liveCandlesFromCandlesEndpoint = useMemo(
     () => buildCandlesFromRecentCandles(recentCandles, symbol, timeframe),
@@ -1176,18 +1250,47 @@ export default function EChartsCandlestickChart({
     [recentSignals, symbol, timeframe]
   )
 
-  const liveCandles =
-    liveCandlesFromCandlesEndpoint.length > 0
-      ? liveCandlesFromCandlesEndpoint
-      : liveCandlesFromSignalsEndpoint
+  const historicalCandlesFromAlpaca = useMemo(
+    () => buildCandlesFromRecentCandles(historicalCandles, symbol, timeframe),
+    [historicalCandles, symbol, timeframe]
+  )
 
-  const usingLiveCandles = liveCandles.length >= 2
+  const liveCandles = useMemo(() => {
+    if (historicalCandlesFromAlpaca.length > 0 || liveCandlesFromCandlesEndpoint.length > 0) {
+      return mergeCandlesByTime([
+        ...historicalCandlesFromAlpaca,
+        ...liveCandlesFromCandlesEndpoint,
+      ])
+    }
+
+    return liveCandlesFromSignalsEndpoint
+  }, [
+    historicalCandlesFromAlpaca,
+    liveCandlesFromCandlesEndpoint,
+    liveCandlesFromSignalsEndpoint,
+  ])
+
+  // Sticky live cache:
+  // If the API briefly returns [] because Render restarts, wakes from sleep, or the request races,
+  // keep the last valid live candles instead of jumping back to sample candles.
+  const lastValidLiveCandlesRef = useRef<Candle[]>([])
+
+  if (liveCandles.length > 0) {
+    lastValidLiveCandlesRef.current = liveCandles
+  }
+
+  const stickyLiveCandles =
+    liveCandles.length > 0 ? liveCandles : lastValidLiveCandlesRef.current
+
+  // Allow live mode with 1 candle. This prevents the chart from reverting to samples
+  // while waiting for the second or third webhook candle.
+  const usingLiveCandles = stickyLiveCandles.length >= 1
 
   const symbolSampleCandles = useMemo(() => {
     return getSampleCandlesForSymbol(symbol)
   }, [symbol])
 
-  const baseCandles = usingLiveCandles ? liveCandles : symbolSampleCandles
+  const baseCandles = usingLiveCandles ? stickyLiveCandles : symbolSampleCandles
 
   const overlayPayload = useMemo(
     () => extractOverlayPayload(latestSignal),
@@ -1290,7 +1393,7 @@ export default function EChartsCandlestickChart({
                 ${item.axisValue}
               </div>
               <div style="color:#94a3b8;">${symbol} • ${timeframe} • ${candleMode}</div>
-              <div style="color:#64748b;">${usingLiveCandles ? 'Live API candles' : 'Sample candles'}</div>
+              <div style="color:#64748b;">${usingLiveCandles ? (historicalCandlesFromAlpaca.length > 0 ? 'Alpaca history + live candles' : 'Live API candles') : 'Sample candles'}</div>
               <div style="margin-top:6px;color:#e5e7eb;">O&nbsp;&nbsp;${open}</div>
               <div style="color:#e5e7eb;">H&nbsp;&nbsp;${high}</div>
               <div style="color:#e5e7eb;">L&nbsp;&nbsp;${low}</div>
@@ -1440,6 +1543,7 @@ export default function EChartsCandlestickChart({
     activeScoreMarkers,
     usingLiveCandles,
     recentCandles,
+    historicalCandlesFromAlpaca,
   ])
 
   useEffect(() => {
@@ -1574,11 +1678,11 @@ export default function EChartsCandlestickChart({
                   : 'border-yellow-500/50 text-yellow-400'
               }`}
             >
-              {usingLiveCandles ? 'Live API Candles' : 'Sample Candles'}
+              {usingLiveCandles ? (historicalCandlesFromAlpaca.length > 0 ? 'Alpaca + Live Candles' : 'Live API Candles') : historicalStatus === 'loading' ? 'Loading History' : 'Sample Candles'}
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3I' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3K' : 'Chart Engine v2'}
             </div>
           </div>
         )}
