@@ -64,7 +64,7 @@ export default function Dashboard() {
         <div className="space-y-6 lg:col-span-2">
           <SignalCard signal={latestSignal} />
 
-          <EChartsCandlestickChart />
+          <EChartsCandlestickChart enableAdvancedOverlays />
 
           {/* Two Smaller Charts */}
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -72,12 +72,14 @@ export default function Dashboard() {
               heightClass="h-[230px]"
               compact
               chartTitle="Mini Chart 1"
+              enableAdvancedOverlays={false}
             />
 
             <EChartsCandlestickChart
               heightClass="h-[230px]"
               compact
               chartTitle="Mini Chart 2"
+              enableAdvancedOverlays={false}
             />
           </div>
         </div>
