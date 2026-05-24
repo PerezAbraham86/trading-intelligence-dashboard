@@ -283,7 +283,7 @@ export default function Dashboard() {
         <GhostCandleProjection signal={augmentedLatestSignal} />
       </div>
 
-      <RecentSignalsTable signals={visibleRecentSignals} />
+      <RecentSignalsTable signals={visibleRecentSignals} latestSignal={augmentedLatestSignal} />
 
       {/* Footer */}
       <motion.div
