@@ -1,4 +1,4 @@
-'use client'
+use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
@@ -9,31 +9,26 @@ type Candle = {
   close: number
   low: number
   high: number
+  volume?: number
 }
 
 type CandleMode = 'Regular' | 'Heikin Ashi'
-
-type StructureDirection = 'bullish' | 'bearish'
-type StructureScope = 'internal' | 'swing'
-type StructureTag = 'BOS' | 'CHoCH' | 'iBOS' | 'iCHoCH' | 'HH' | 'HL' | 'LH' | 'LL'
 
 type SmcStructureEvent = {
   time: string
   fromTime?: string
   price: number
-  tag: StructureTag
-  direction: StructureDirection
-  scope: StructureScope
+  tag: string
+  direction: 'bullish' | 'bearish'
+  scope?: 'internal' | 'swing'
 }
 
 type DlmLevel = {
   label: string
   price: number
   direction: 'neutral' | 'bullish' | 'bearish'
+  kind?: string
 }
-
-type ZoneDirection = 'bullish' | 'bearish' | 'neutral'
-type ZoneKind = 'internal_ob' | 'swing_ob' | 'fvg' | 'premium' | 'equilibrium' | 'discount'
 
 type SmcZone = {
   startTime: string
@@ -41,17 +36,9 @@ type SmcZone = {
   top: number
   bottom: number
   label: string
-  direction: ZoneDirection
-  kind: ZoneKind
+  direction: 'bullish' | 'bearish' | 'neutral'
+  kind: string
 }
-
-type LiquidityKind =
-  | 'eqh'
-  | 'eql'
-  | 'internal_sweep'
-  | 'swing_sweep'
-  | 'liquidity_pool'
-  | 'inducement'
 
 type LiquidityEvent = {
   time: string
@@ -59,7 +46,7 @@ type LiquidityEvent = {
   price: number
   label: string
   direction: 'bullish' | 'bearish' | 'neutral'
-  kind: LiquidityKind
+  kind: string
   touches?: number
 }
 
@@ -68,7 +55,7 @@ type DlmConfluenceMarker = {
   price: number
   label: string
   direction: 'bullish' | 'bearish' | 'neutral'
-  kind: 'poc_touch' | 'liquidity_touch' | 'ob_confirm' | 'entry_confirm' | 'pressure'
+  kind: string
   pressurePct?: number
 }
 
@@ -77,15 +64,28 @@ type ScoreMarker = {
   price: number
   label: string
   direction: 'bullish' | 'bearish' | 'neutral'
-  kind:
-    | 'setup_score'
-    | 'institutional_score'
-    | 'execution_quality'
-    | 'trend_phase'
-    | 'htf_bias'
-    | 'session'
+  kind: string
   score?: number
   grade?: 'A' | 'B' | 'C'
+}
+
+type AlphaProfileBin = {
+  index: number
+  top: number
+  bottom: number
+  mid: number
+  volume?: number
+  buyVolume?: number
+  sellVolume?: number
+  widthPct: number
+  buyWidthPct?: number
+  sellWidthPct?: number
+  isPoc?: boolean
+  isBuyLiquidity?: boolean
+  isSellLiquidity?: boolean
+  direction?: 'bullish' | 'bearish' | 'neutral'
+  dominantSide?: 'bullish' | 'bearish' | 'neutral'
+  label?: string
 }
 
 type ChartOverlayPayload = {
@@ -95,6 +95,27 @@ type ChartOverlayPayload = {
   liquidityEvents?: LiquidityEvent[]
   dlmConfluenceMarkers?: DlmConfluenceMarker[]
   scoreMarkers?: ScoreMarker[]
+}
+
+type EngineState = ChartOverlayPayload & {
+  engine?: string
+  phase?: string
+  status?: string
+  candles?: any[]
+  heikinAshiCandles?: any[]
+  alphaProfileBins?: AlphaProfileBin[]
+  alphaProfileMeta?: any
+  alphaFvgs?: SmcZone[]
+  alphaSweeps?: LiquidityEvent[]
+  alphaBullPressure?: number
+  alphaBearPressure?: number
+  signal?: string
+  confidence?: number
+  bullScore?: number
+  bearScore?: number
+  netBias?: number
+  price?: number
+  source?: any
 }
 
 type EChartsCandlestickChartProps = {
@@ -120,6 +141,9 @@ const PINK = '#f472b6'
 const GRAY = '#94a3b8'
 
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
+
+const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1D']
+const candleModeOptions: CandleMode[] = ['Regular', 'Heikin Ashi']
 
 const sampleCandles: Candle[] = [
   { time: '5/20 09:00', open: 76450, close: 76680, low: 76380, high: 76750 },
@@ -190,6 +214,39 @@ function symbolsMatch(signalSymbolRaw: any, selectedSymbolRaw: any): boolean {
   return false
 }
 
+function toNumber(value: any): number | null {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function formatAxisTime(value: any, fallbackIndex: number): string {
+  if (typeof value === 'string' && value.length > 0) return value
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const timestamp = value > 1000000000000 ? value : value * 1000
+    const date = new Date(timestamp)
+
+    if (!Number.isNaN(date.getTime())) return date.toISOString()
+  }
+
+  return `Live ${fallbackIndex + 1}`
+}
+
+function shortAxisLabel(value: any): string {
+  const text = String(value ?? '')
+  const date = new Date(text)
+
+  if (!Number.isNaN(date.getTime())) {
+    const month = date.getMonth() + 1
+    const day = date.getDate()
+    const hour = date.getHours().toString().padStart(2, '0')
+    const minute = date.getMinutes().toString().padStart(2, '0')
+    return `${month}/${day} ${hour}:${minute}`
+  }
+
+  return text.replace('__profile_', '')
+}
+
 function scaleCandlesForSymbol(candles: Candle[], symbol: string): Candle[] {
   const normalized = normalizeSymbol(symbol)
 
@@ -231,327 +288,43 @@ function getSampleCandlesForSymbol(symbol: string): Candle[] {
   return scaleCandlesForSymbol(sampleCandles, symbol)
 }
 
-const sampleSmcEvents: SmcStructureEvent[] = [
-  {
-    time: '5/20 13:00',
-    fromTime: '5/20 11:00',
-    price: 77100,
-    tag: 'iBOS',
-    direction: 'bullish',
-    scope: 'internal',
-  },
-  {
-    time: '5/20 17:00',
-    fromTime: '5/20 14:00',
-    price: 77930,
-    tag: 'BOS',
-    direction: 'bullish',
-    scope: 'swing',
-  },
-  {
-    time: '5/20 21:00',
-    fromTime: '5/20 18:00',
-    price: 77090,
-    tag: 'iCHoCH',
-    direction: 'bearish',
-    scope: 'internal',
-  },
-  {
-    time: '5/20 23:00',
-    fromTime: '5/20 20:00',
-    price: 76120,
-    tag: 'CHoCH',
-    direction: 'bearish',
-    scope: 'swing',
-  },
-  {
-    time: '5/21 03:00',
-    price: 75350,
-    tag: 'LL',
-    direction: 'bearish',
-    scope: 'swing',
-  },
-  {
-    time: '5/21 06:00',
-    price: 76690,
-    tag: 'LH',
-    direction: 'bearish',
-    scope: 'swing',
-  },
-]
+function candleFromAny(raw: any, index: number): Candle | null {
+  const open = toNumber(raw?.open)
+  const high = toNumber(raw?.high)
+  const low = toNumber(raw?.low)
+  const close = toNumber(raw?.close)
 
-const sampleDlmLevels: DlmLevel[] = [
-  { label: 'AlphaX POC', price: 76580, direction: 'neutral' },
-  { label: 'DLM Buy Liquidity', price: 75840, direction: 'bullish' },
-  { label: 'DLM Sell Liquidity', price: 77840, direction: 'bearish' },
-]
+  if (open === null || high === null || low === null || close === null) return null
 
-const sampleZones: SmcZone[] = [
-  {
-    startTime: '5/20 12:00',
-    endTime: '5/20 18:00',
-    top: 77100,
-    bottom: 76720,
-    label: 'Internal Bullish OB',
-    direction: 'bullish',
-    kind: 'internal_ob',
-  },
-  {
-    startTime: '5/20 18:00',
-    endTime: '5/21 02:00',
-    top: 77910,
-    bottom: 77580,
-    label: 'Internal Bearish OB',
-    direction: 'bearish',
-    kind: 'internal_ob',
-  },
-  {
-    startTime: '5/20 14:00',
-    endTime: '5/21 06:00',
-    top: 77410,
-    bottom: 77090,
-    label: 'Swing Bullish OB',
-    direction: 'bullish',
-    kind: 'swing_ob',
-  },
-  {
-    startTime: '5/20 21:00',
-    endTime: '5/21 06:00',
-    top: 76980,
-    bottom: 76550,
-    label: 'Bearish FVG',
-    direction: 'bearish',
-    kind: 'fvg',
-  },
-  {
-    startTime: '5/21 01:00',
-    endTime: '5/21 06:00',
-    top: 76020,
-    bottom: 75840,
-    label: 'Bullish FVG',
-    direction: 'bullish',
-    kind: 'fvg',
-  },
-  {
-    startTime: '5/20 09:00',
-    endTime: '5/21 06:00',
-    top: 77930,
-    bottom: 77220,
-    label: 'Premium',
-    direction: 'bearish',
-    kind: 'premium',
-  },
-  {
-    startTime: '5/20 09:00',
-    endTime: '5/21 06:00',
-    top: 77220,
-    bottom: 76680,
-    label: 'Equilibrium',
-    direction: 'neutral',
-    kind: 'equilibrium',
-  },
-  {
-    startTime: '5/20 09:00',
-    endTime: '5/21 06:00',
-    top: 76680,
-    bottom: 75350,
-    label: 'Discount',
-    direction: 'bullish',
-    kind: 'discount',
-  },
-]
-
-const sampleLiquidityEvents: LiquidityEvent[] = [
-  {
-    time: '5/20 15:00',
-    fromTime: '5/20 12:00',
-    price: 77100,
-    label: 'EQH',
-    direction: 'bearish',
-    kind: 'eqh',
-    touches: 2,
-  },
-  {
-    time: '5/21 02:00',
-    fromTime: '5/20 23:00',
-    price: 75840,
-    label: 'EQL',
-    direction: 'bullish',
-    kind: 'eql',
-    touches: 2,
-  },
-  {
-    time: '5/20 18:00',
-    price: 77910,
-    label: 'LSH',
-    direction: 'bearish',
-    kind: 'swing_sweep',
-  },
-  {
-    time: '5/21 01:00',
-    price: 75590,
-    label: 'iLS',
-    direction: 'bullish',
-    kind: 'internal_sweep',
-  },
-  {
-    time: '5/21 03:00',
-    price: 75350,
-    label: 'Sell-Side Pool',
-    direction: 'bullish',
-    kind: 'liquidity_pool',
-    touches: 3,
-  },
-  {
-    time: '5/20 17:00',
-    price: 77930,
-    label: 'Buy-Side Pool',
-    direction: 'bearish',
-    kind: 'liquidity_pool',
-    touches: 3,
-  },
-  {
-    time: '5/20 20:00',
-    price: 77500,
-    label: 'Inducement',
-    direction: 'bearish',
-    kind: 'inducement',
-  },
-]
-
-const sampleDlmConfluenceMarkers: DlmConfluenceMarker[] = [
-  {
-    time: '5/20 13:00',
-    price: 76720,
-    label: 'DLM OB Confirm',
-    direction: 'bullish',
-    kind: 'ob_confirm',
-    pressurePct: 62,
-  },
-  {
-    time: '5/20 17:00',
-    price: 77840,
-    label: 'Sell Liquidity Hit',
-    direction: 'bearish',
-    kind: 'liquidity_touch',
-    pressurePct: 58,
-  },
-  {
-    time: '5/21 01:00',
-    price: 75840,
-    label: 'Buy Liquidity Hit',
-    direction: 'bullish',
-    kind: 'liquidity_touch',
-    pressurePct: 64,
-  },
-  {
-    time: '5/21 04:00',
-    price: 76580,
-    label: 'POC Touch',
-    direction: 'neutral',
-    kind: 'poc_touch',
-    pressurePct: 50,
-  },
-  {
-    time: '5/21 06:00',
-    price: 76690,
-    label: 'DLM Entry Confirm',
-    direction: 'bullish',
-    kind: 'entry_confirm',
-    pressurePct: 67,
-  },
-]
-
-const sampleScoreMarkers: ScoreMarker[] = [
-  {
-    time: '5/20 13:00',
-    price: 76840,
-    label: 'Setup Score',
-    direction: 'bullish',
-    kind: 'setup_score',
-    score: 6,
-    grade: 'A',
-  },
-  {
-    time: '5/20 17:00',
-    price: 77610,
-    label: 'Inst Score',
-    direction: 'bullish',
-    kind: 'institutional_score',
-    score: 12,
-    grade: 'A',
-  },
-  {
-    time: '5/20 21:00',
-    price: 77240,
-    label: 'Exec Q',
-    direction: 'bearish',
-    kind: 'execution_quality',
-    score: 8,
-    grade: 'B',
-  },
-  {
-    time: '5/20 23:00',
-    price: 76710,
-    label: 'Trend Phase',
-    direction: 'bearish',
-    kind: 'trend_phase',
-    score: 7,
-    grade: 'B',
-  },
-  {
-    time: '5/21 03:00',
-    price: 75590,
-    label: 'HTF Bias',
-    direction: 'bullish',
-    kind: 'htf_bias',
-    score: 5,
-    grade: 'B',
-  },
-  {
-    time: '5/21 05:00',
-    price: 76310,
-    label: 'NY AM',
-    direction: 'neutral',
-    kind: 'session',
-    score: 1,
-    grade: 'C',
-  },
-]
-
-const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1D']
-const candleModeOptions: CandleMode[] = ['Regular', 'Heikin Ashi']
-
-function toNumber(value: any): number | null {
-  const parsed = Number(value)
-
-  if (!Number.isFinite(parsed)) {
-    return null
+  return {
+    time: formatAxisTime(raw?.time ?? raw?.timestamp ?? raw?.createdAt, index),
+    open,
+    high,
+    low,
+    close,
+    volume: toNumber(raw?.volume) ?? undefined,
   }
-
-  return parsed
 }
 
-function formatSignalTime(value: any, fallbackIndex: number): string {
-  if (typeof value === 'string' && value.length > 0) {
-    return value
-  }
+function buildCandlesFromRecentCandles(
+  candlesInput: any[] | undefined,
+  selectedSymbol: string,
+  selectedTimeframe: string
+): Candle[] {
+  if (!Array.isArray(candlesInput) || candlesInput.length === 0) return []
 
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    const timestamp = value > 1000000000000 ? value : value * 1000
-    const date = new Date(timestamp)
+  const normalizedTimeframe = normalizeTimeframe(selectedTimeframe)
 
-    if (!Number.isNaN(date.getTime())) {
-      const month = date.getMonth() + 1
-      const day = date.getDate()
-      const hour = date.getHours().toString().padStart(2, '0')
-      const minute = date.getMinutes().toString().padStart(2, '0')
+  return candlesInput
+    .filter((candle) => {
+      const timeframeMatch =
+        normalizeTimeframe(candle.timeframe) === normalizedTimeframe ||
+        !candle.timeframe
 
-      return `${month}/${day} ${hour}:${minute}`
-    }
-  }
-
-  return `Live ${fallbackIndex + 1}`
+      return symbolsMatch(candle.symbol, selectedSymbol) && timeframeMatch
+    })
+    .map(candleFromAny)
+    .filter((candle): candle is Candle => candle !== null)
 }
 
 function buildCandlesFromSignals(
@@ -559,23 +332,18 @@ function buildCandlesFromSignals(
   selectedSymbol: string,
   selectedTimeframe: string
 ): Candle[] {
-  if (!Array.isArray(signals) || signals.length === 0) {
-    return []
-  }
+  if (!Array.isArray(signals) || signals.length === 0) return []
 
   const normalizedTimeframe = normalizeTimeframe(selectedTimeframe)
 
-  const filtered = signals.filter((signal) => {
-    const timeframeMatch =
-      normalizeTimeframe(signal.timeframe) === normalizedTimeframe ||
-      !signal.timeframe
+  return signals
+    .filter((signal) => {
+      const timeframeMatch =
+        normalizeTimeframe(signal.timeframe) === normalizedTimeframe ||
+        !signal.timeframe
 
-    return symbolsMatch(signal.symbol, selectedSymbol) && timeframeMatch
-  })
-
-  const source = filtered.length > 0 ? filtered : []
-
-  const candles = source
+      return symbolsMatch(signal.symbol, selectedSymbol) && timeframeMatch
+    })
     .map((signal, index) => {
       const open = toNumber(signal.open)
       const high = toNumber(signal.high)
@@ -590,50 +358,7 @@ function buildCandlesFromSignals(
       }
 
       return {
-        time: formatSignalTime(signal.time ?? signal.timestamp ?? signal.createdAt, index),
-        open,
-        high,
-        low,
-        close,
-      }
-    })
-    .filter((candle): candle is Candle => candle !== null)
-
-  return candles
-}
-
-function buildCandlesFromRecentCandles(
-  candlesInput: any[] | undefined,
-  selectedSymbol: string,
-  selectedTimeframe: string
-): Candle[] {
-  if (!Array.isArray(candlesInput) || candlesInput.length === 0) {
-    return []
-  }
-
-  const normalizedTimeframe = normalizeTimeframe(selectedTimeframe)
-
-  const filtered = candlesInput.filter((candle) => {
-    const timeframeMatch =
-      normalizeTimeframe(candle.timeframe) === normalizedTimeframe ||
-      !candle.timeframe
-
-    return symbolsMatch(candle.symbol, selectedSymbol) && timeframeMatch
-  })
-
-  return filtered
-    .map((candle, index) => {
-      const open = toNumber(candle.open)
-      const high = toNumber(candle.high)
-      const low = toNumber(candle.low)
-      const close = toNumber(candle.close)
-
-      if (open === null || high === null || low === null || close === null) {
-        return null
-      }
-
-      return {
-        time: formatSignalTime(candle.time ?? candle.timestamp ?? candle.createdAt, index),
+        time: formatAxisTime(signal.time ?? signal.timestamp ?? signal.createdAt, index),
         open,
         high,
         low,
@@ -642,7 +367,6 @@ function buildCandlesFromRecentCandles(
     })
     .filter((candle): candle is Candle => candle !== null)
 }
-
 
 function mergeCandlesByTime(candles: Candle[]): Candle[] {
   const merged = new Map<string, Candle>()
@@ -655,26 +379,16 @@ function mergeCandlesByTime(candles: Candle[]): Candle[] {
     const aTime = Date.parse(a.time)
     const bTime = Date.parse(b.time)
 
-    if (Number.isFinite(aTime) && Number.isFinite(bTime)) {
-      return aTime - bTime
-    }
+    if (Number.isFinite(aTime) && Number.isFinite(bTime)) return aTime - bTime
 
     return a.time.localeCompare(b.time)
   })
 }
 
 function safeParseJson(value: any): any {
-  if (!value) {
-    return null
-  }
-
-  if (typeof value === 'object') {
-    return value
-  }
-
-  if (typeof value !== 'string') {
-    return null
-  }
+  if (!value) return null
+  if (typeof value === 'object') return value
+  if (typeof value !== 'string') return null
 
   try {
     return JSON.parse(value)
@@ -715,14 +429,11 @@ function convertToHeikinAshi(candles: Candle[]): Candle[] {
 
   for (let i = 0; i < candles.length; i++) {
     const c = candles[i]
-
     const haClose = (c.open + c.high + c.low + c.close) / 4
-
     const haOpen =
       i === 0
         ? (c.open + c.close) / 2
         : (haCandles[i - 1].open + haCandles[i - 1].close) / 2
-
     const haHigh = Math.max(c.high, haOpen, haClose)
     const haLow = Math.min(c.low, haOpen, haClose)
 
@@ -732,13 +443,14 @@ function convertToHeikinAshi(candles: Candle[]): Candle[] {
       close: Number(haClose.toFixed(2)),
       low: Number(haLow.toFixed(2)),
       high: Number(haHigh.toFixed(2)),
+      volume: c.volume,
     })
   }
 
   return haCandles
 }
 
-function getStructureColor(direction: StructureDirection) {
+function getStructureColor(direction: 'bullish' | 'bearish') {
   return direction === 'bullish' ? GREEN : RED
 }
 
@@ -778,27 +490,18 @@ function getScoreColor(marker: ScoreMarker) {
 
 function getZoneStyle(zone: SmcZone, compact: boolean) {
   if (zone.kind === 'premium') {
-    return {
-      color: 'rgba(242, 54, 69, 0.06)',
-      borderColor: 'rgba(242, 54, 69, 0.18)',
-    }
+    return { color: 'rgba(242, 54, 69, 0.06)', borderColor: 'rgba(242, 54, 69, 0.18)' }
   }
 
   if (zone.kind === 'equilibrium') {
-    return {
-      color: 'rgba(135, 139, 148, 0.045)',
-      borderColor: 'rgba(135, 139, 148, 0.16)',
-    }
+    return { color: 'rgba(135, 139, 148, 0.045)', borderColor: 'rgba(135, 139, 148, 0.16)' }
   }
 
   if (zone.kind === 'discount') {
-    return {
-      color: 'rgba(8, 153, 129, 0.06)',
-      borderColor: 'rgba(8, 153, 129, 0.18)',
-    }
+    return { color: 'rgba(8, 153, 129, 0.06)', borderColor: 'rgba(8, 153, 129, 0.18)' }
   }
 
-  if (zone.kind === 'fvg') {
+  if (zone.kind === 'fvg' || zone.kind === 'alpha_fvg') {
     return zone.direction === 'bullish'
       ? {
           color: compact ? 'rgba(0, 255, 104, 0.08)' : 'rgba(0, 255, 104, 0.12)',
@@ -884,7 +587,7 @@ function buildSmcMarkPoints(events: SmcStructureEvent[], compact: boolean) {
       coord: [event.time, event.price],
       value: event.tag,
       symbol: 'pin',
-      symbolSize: compact ? 28 : 38,
+      symbolSize: compact ? 24 : 34,
       symbolRotate: isTopLabel ? 0 : 180,
       itemStyle: {
         color: 'rgba(15, 17, 21, 0.95)',
@@ -895,7 +598,7 @@ function buildSmcMarkPoints(events: SmcStructureEvent[], compact: boolean) {
         show: true,
         formatter: event.tag,
         color,
-        fontSize: compact ? 8 : 10,
+        fontSize: compact ? 8 : 9,
         fontWeight: 700,
       },
     }
@@ -945,7 +648,7 @@ function buildZoneMarkAreas(zones: SmcZone[], compact: boolean) {
           color: style.color,
           borderColor: style.borderColor,
           borderWidth: zone.kind === 'swing_ob' ? 1.4 : 1,
-          borderType: zone.kind === 'fvg' ? 'dashed' : 'solid',
+          borderType: zone.kind === 'fvg' || zone.kind === 'alpha_fvg' ? 'dashed' : 'solid',
         },
         label: {
           show: !compact,
@@ -1048,7 +751,9 @@ function buildLiquidityMarkPoints(events: LiquidityEvent[], compact: boolean) {
       (event) =>
         event.kind === 'internal_sweep' ||
         event.kind === 'swing_sweep' ||
-        event.kind === 'inducement'
+        event.kind === 'inducement' ||
+        event.kind === 'sweep' ||
+        event.kind === 'alpha_sweep'
     )
     .map((event) => {
       const color = getLiquidityColor(event)
@@ -1059,7 +764,7 @@ function buildLiquidityMarkPoints(events: LiquidityEvent[], compact: boolean) {
         coord: [event.time, event.price],
         value: event.label,
         symbol: event.kind === 'inducement' ? 'diamond' : 'pin',
-        symbolSize: compact ? 26 : event.kind === 'inducement' ? 34 : 38,
+        symbolSize: compact ? 24 : event.kind === 'inducement' ? 32 : 34,
         symbolRotate: isTopLabel ? 0 : 180,
         itemStyle: {
           color: 'rgba(15, 17, 21, 0.95)',
@@ -1070,7 +775,7 @@ function buildLiquidityMarkPoints(events: LiquidityEvent[], compact: boolean) {
           show: true,
           formatter: event.label,
           color,
-          fontSize: compact ? 8 : 10,
+          fontSize: compact ? 8 : 9,
           fontWeight: 700,
         },
       }
@@ -1092,7 +797,7 @@ function buildDlmConfluenceMarkPoints(
       coord: [marker.time, marker.price],
       value: `${marker.label}${pressureText}`,
       symbol: marker.kind === 'entry_confirm' ? 'triangle' : 'circle',
-      symbolSize: compact ? 18 : marker.kind === 'entry_confirm' ? 24 : 20,
+      symbolSize: compact ? 16 : marker.kind === 'entry_confirm' ? 22 : 18,
       symbolRotate: marker.direction === 'bearish' ? 180 : 0,
       itemStyle: {
         color,
@@ -1139,12 +844,12 @@ function buildScoreMarkPoints(markers: ScoreMarker[], compact: boolean) {
               : 'circle',
       symbolSize:
         compact
-          ? 20
+          ? 18
           : marker.kind === 'institutional_score'
-            ? 30
+            ? 28
             : marker.kind === 'trend_phase'
-              ? 28
-              : 24,
+              ? 26
+              : 22,
       itemStyle: {
         color: 'rgba(15, 17, 21, 0.96)',
         borderColor: color,
@@ -1167,6 +872,139 @@ function buildScoreMarkPoints(markers: ScoreMarker[], compact: boolean) {
   })
 }
 
+function buildAlphaProfileSeries(
+  alphaProfileBins: AlphaProfileBin[],
+  profileSlots: string[],
+  compact: boolean
+): any[] {
+  if (!Array.isArray(alphaProfileBins) || alphaProfileBins.length === 0 || profileSlots.length < 4) {
+    return []
+  }
+
+  const maxSlot = profileSlots.length - 1
+
+  const bars = alphaProfileBins
+    .map((bin) => {
+      const widthPct = Number(bin.widthPct ?? 0)
+      const top = Number(bin.top)
+      const bottom = Number(bin.bottom)
+      const mid = Number(bin.mid)
+
+      if (
+        !Number.isFinite(widthPct) ||
+        !Number.isFinite(top) ||
+        !Number.isFinite(bottom) ||
+        !Number.isFinite(mid)
+      ) {
+        return null
+      }
+
+      const widthSlots = Math.max(1, Math.min(maxSlot, Math.round((widthPct / 100) * maxSlot)))
+      const startSlot = profileSlots[0]
+      const endSlot = profileSlots[widthSlots]
+      const direction = bin.direction === 'bullish' ? 'bullish' : 'bearish'
+      const isPoc = Boolean(bin.isPoc)
+
+      return {
+        value: [
+          startSlot,
+          bottom,
+          endSlot,
+          top,
+          mid,
+          widthPct,
+          bin.label ?? `${Math.round(widthPct)}%`,
+        ],
+        itemStyle: {
+          color: isPoc
+            ? 'rgba(255, 152, 0, 0.38)'
+            : direction === 'bullish'
+              ? 'rgba(8, 153, 129, 0.30)'
+              : 'rgba(242, 54, 69, 0.30)',
+          borderColor: isPoc
+            ? 'rgba(255, 152, 0, 0.85)'
+            : direction === 'bullish'
+              ? 'rgba(8, 153, 129, 0.65)'
+              : 'rgba(242, 54, 69, 0.65)',
+          borderWidth: isPoc ? 1.5 : 0,
+        },
+        bin,
+      }
+    })
+    .filter(Boolean)
+
+  const labels = alphaProfileBins
+    .filter((bin) => Number(bin.widthPct ?? 0) >= (compact ? 18 : 8) || bin.isPoc)
+    .map((bin) => {
+      const widthPct = Number(bin.widthPct ?? 0)
+      const widthSlots = Math.max(1, Math.min(maxSlot, Math.round((widthPct / 100) * maxSlot)))
+      const labelSlot = profileSlots[Math.min(maxSlot, widthSlots + 1)]
+      const direction = bin.direction === 'bullish' ? 'bullish' : 'bearish'
+
+      return {
+        value: [labelSlot, Number(bin.mid), `${Math.round(widthPct)}%`],
+        label: {
+          show: !compact,
+          formatter: `${Math.round(widthPct)}%`,
+          color: bin.isPoc
+            ? '#ff9800'
+            : direction === 'bullish'
+              ? '#22c7a9'
+              : '#ff4d5e',
+          fontSize: 10,
+          fontWeight: 700,
+          position: 'right',
+        },
+        itemStyle: { color: 'transparent' },
+      }
+    })
+
+  return [
+    {
+      name: 'AlphaX DLM Profile',
+      type: 'custom',
+      coordinateSystem: 'cartesian2d',
+      silent: true,
+      z: 6,
+      data: bars,
+      renderItem: (_params: any, api: any) => {
+        const x1 = api.value(0)
+        const yBottom = api.value(1)
+        const x2 = api.value(2)
+        const yTop = api.value(3)
+
+        const p1 = api.coord([x1, yBottom])
+        const p2 = api.coord([x2, yTop])
+
+        const x = p1[0]
+        const y = p2[1]
+        const width = Math.max(1, p2[0] - p1[0])
+        const height = Math.max(1, p1[1] - p2[1])
+
+        return {
+          type: 'rect',
+          shape: { x, y, width, height },
+          style: api.style(),
+        }
+      },
+      encode: { x: [0, 2], y: [1, 3] },
+    },
+    {
+      name: 'AlphaX DLM Profile Labels',
+      type: 'scatter',
+      silent: true,
+      z: 9,
+      symbolSize: 1,
+      data: labels,
+      encode: { x: 0, y: 1 },
+      label: {
+        show: true,
+        formatter: (params: any) => params?.data?.value?.[2] ?? '',
+      },
+    },
+  ]
+}
+
 export default function EChartsCandlestickChart({
   heightClass = 'h-[650px]',
   compact = false,
@@ -1179,7 +1017,7 @@ export default function EChartsCandlestickChart({
   const chartRef = useRef<HTMLDivElement | null>(null)
   const chartInstance = useRef<echarts.ECharts | null>(null)
 
-  const [symbol, setSymbol] = useState('SPY')
+  const [symbol, setSymbol] = useState(() => (compact ? 'SPY' : 'BTCUSD'))
   const [timeframe, setTimeframe] = useState('1m')
   const [candleMode, setCandleMode] = useState<CandleMode>('Heikin Ashi')
   const [showSmc, setShowSmc] = useState(true)
@@ -1187,8 +1025,57 @@ export default function EChartsCandlestickChart({
   const [showZones, setShowZones] = useState(true)
   const [showLiquidity, setShowLiquidity] = useState(true)
   const [showScores, setShowScores] = useState(true)
+  const [engineState, setEngineState] = useState<EngineState | null>(null)
+  const [engineStatus, setEngineStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle')
   const [historicalCandles, setHistoricalCandles] = useState<any[]>([])
   const [historicalStatus, setHistoricalStatus] = useState<'idle' | 'loading' | 'loaded' | 'unavailable' | 'error'>('idle')
+
+  useEffect(() => {
+    let cancelled = false
+    let intervalId: ReturnType<typeof setInterval> | null = null
+
+    async function fetchEngineState() {
+      if (compact || !enableAdvancedOverlays) return
+
+      setEngineStatus((current) => (current === 'loaded' ? current : 'loading'))
+
+      try {
+        const params = new URLSearchParams({
+          symbol,
+          timeframe,
+          limit: '500',
+        })
+
+        const response = await fetch(`${API_BASE_URL}/api/engine-state?${params.toString()}`, {
+          cache: 'no-store',
+        })
+
+        if (!response.ok) {
+          if (!cancelled) setEngineStatus('error')
+          return
+        }
+
+        const json = await response.json()
+
+        if (!cancelled) {
+          setEngineState(json && typeof json === 'object' ? json : null)
+          setEngineStatus('loaded')
+        }
+      } catch (error) {
+        console.error('Engine-state fetch error:', error)
+
+        if (!cancelled) setEngineStatus('error')
+      }
+    }
+
+    fetchEngineState()
+    intervalId = setInterval(fetchEngineState, 15000)
+
+    return () => {
+      cancelled = true
+      if (intervalId) clearInterval(intervalId)
+    }
+  }, [symbol, timeframe, compact, enableAdvancedOverlays])
 
   useEffect(() => {
     let cancelled = false
@@ -1240,6 +1127,22 @@ export default function EChartsCandlestickChart({
     }
   }, [symbol, timeframe, compact])
 
+  const engineCandles = useMemo(
+    () =>
+      Array.isArray(engineState?.candles)
+        ? engineState.candles.map(candleFromAny).filter((candle): candle is Candle => candle !== null)
+        : [],
+    [engineState]
+  )
+
+  const engineHaCandles = useMemo(
+    () =>
+      Array.isArray(engineState?.heikinAshiCandles)
+        ? engineState.heikinAshiCandles.map(candleFromAny).filter((candle): candle is Candle => candle !== null)
+        : [],
+    [engineState]
+  )
+
   const liveCandlesFromCandlesEndpoint = useMemo(
     () => buildCandlesFromRecentCandles(recentCandles, symbol, timeframe),
     [recentCandles, symbol, timeframe]
@@ -1256,6 +1159,8 @@ export default function EChartsCandlestickChart({
   )
 
   const liveCandles = useMemo(() => {
+    if (engineCandles.length > 0) return engineCandles
+
     if (historicalCandlesFromAlpaca.length > 0 || liveCandlesFromCandlesEndpoint.length > 0) {
       return mergeCandlesByTime([
         ...historicalCandlesFromAlpaca,
@@ -1265,14 +1170,12 @@ export default function EChartsCandlestickChart({
 
     return liveCandlesFromSignalsEndpoint
   }, [
+    engineCandles,
     historicalCandlesFromAlpaca,
     liveCandlesFromCandlesEndpoint,
     liveCandlesFromSignalsEndpoint,
   ])
 
-  // Sticky live cache:
-  // If the API briefly returns [] because Render restarts, wakes from sleep, or the request races,
-  // keep the last valid live candles instead of jumping back to sample candles.
   const lastValidLiveCandlesRef = useRef<Candle[]>([])
 
   if (liveCandles.length > 0) {
@@ -1282,51 +1185,38 @@ export default function EChartsCandlestickChart({
   const stickyLiveCandles =
     liveCandles.length > 0 ? liveCandles : lastValidLiveCandlesRef.current
 
-  // Allow live mode with 1 candle. This prevents the chart from reverting to samples
-  // while waiting for the second or third webhook candle.
   const usingLiveCandles = stickyLiveCandles.length >= 1
-
-  const symbolSampleCandles = useMemo(() => {
-    return getSampleCandlesForSymbol(symbol)
-  }, [symbol])
-
+  const symbolSampleCandles = useMemo(() => getSampleCandlesForSymbol(symbol), [symbol])
   const baseCandles = usingLiveCandles ? stickyLiveCandles : symbolSampleCandles
 
-  const overlayPayload = useMemo(
-    () => extractOverlayPayload(latestSignal),
-    [latestSignal]
-  )
+  const overlayPayload = useMemo(() => extractOverlayPayload(latestSignal), [latestSignal])
 
-  const activeSmcEvents =
-    overlayPayload.smcEvents && overlayPayload.smcEvents.length > 0
-      ? overlayPayload.smcEvents
-      : sampleSmcEvents
-
-  const activeDlmLevels =
-    overlayPayload.dlmLevels && overlayPayload.dlmLevels.length > 0
-      ? overlayPayload.dlmLevels
-      : sampleDlmLevels
-
-  const activeZones =
-    overlayPayload.zones && overlayPayload.zones.length > 0
-      ? overlayPayload.zones
-      : sampleZones
-
-  const activeLiquidityEvents =
-    overlayPayload.liquidityEvents && overlayPayload.liquidityEvents.length > 0
-      ? overlayPayload.liquidityEvents
-      : sampleLiquidityEvents
-
-  const activeDlmConfluenceMarkers =
-    overlayPayload.dlmConfluenceMarkers &&
-    overlayPayload.dlmConfluenceMarkers.length > 0
-      ? overlayPayload.dlmConfluenceMarkers
-      : sampleDlmConfluenceMarkers
-
-  const activeScoreMarkers =
-    overlayPayload.scoreMarkers && overlayPayload.scoreMarkers.length > 0
-      ? overlayPayload.scoreMarkers
-      : sampleScoreMarkers
+  const engineAvailable = Boolean(engineState && engineStatus === 'loaded' && engineCandles.length > 0)
+  const activeSmcEvents = Array.isArray(engineState?.smcEvents)
+    ? engineState?.smcEvents ?? []
+    : overlayPayload.smcEvents ?? []
+  const activeDlmLevels = Array.isArray(engineState?.dlmLevels)
+    ? engineState?.dlmLevels ?? []
+    : overlayPayload.dlmLevels ?? []
+  const activeZones = [
+    ...(Array.isArray(engineState?.zones) ? engineState?.zones ?? [] : overlayPayload.zones ?? []),
+    ...(Array.isArray(engineState?.alphaFvgs) ? engineState?.alphaFvgs ?? [] : []),
+  ]
+  const activeLiquidityEvents = [
+    ...(Array.isArray(engineState?.liquidityEvents)
+      ? engineState?.liquidityEvents ?? []
+      : overlayPayload.liquidityEvents ?? []),
+    ...(Array.isArray(engineState?.alphaSweeps) ? engineState?.alphaSweeps ?? [] : []),
+  ]
+  const activeDlmConfluenceMarkers = Array.isArray(engineState?.dlmConfluenceMarkers)
+    ? engineState?.dlmConfluenceMarkers ?? []
+    : overlayPayload.dlmConfluenceMarkers ?? []
+  const activeScoreMarkers = Array.isArray(engineState?.scoreMarkers)
+    ? engineState?.scoreMarkers ?? []
+    : overlayPayload.scoreMarkers ?? []
+  const alphaProfileBins = Array.isArray(engineState?.alphaProfileBins)
+    ? engineState?.alphaProfileBins ?? []
+    : []
 
   useEffect(() => {
     if (!chartRef.current) return
@@ -1338,9 +1228,21 @@ export default function EChartsCandlestickChart({
     }
 
     const activeCandles =
-      candleMode === 'Heikin Ashi' ? convertToHeikinAshi(baseCandles) : baseCandles
+      candleMode === 'Heikin Ashi'
+        ? engineHaCandles.length > 0
+          ? engineHaCandles
+          : convertToHeikinAshi(baseCandles)
+        : baseCandles
 
-    const times = activeCandles.map((c) => c.time)
+    const candleTimes = activeCandles.map((c) => c.time)
+    const showRightProfile =
+      enableAdvancedOverlays && showDlm && !compact && alphaProfileBins.length > 0
+
+    const profileSlots = showRightProfile
+      ? Array.from({ length: 64 }, (_, index) => `__profile_${index + 1}`)
+      : []
+
+    const xAxisData = [...candleTimes, ...profileSlots]
 
     const candleData = activeCandles.map((c) => [
       c.open,
@@ -1349,13 +1251,32 @@ export default function EChartsCandlestickChart({
       c.high,
     ])
 
+    const markLineData = enableAdvancedOverlays
+      ? [
+          ...(showSmc ? buildSmcMarkLines(activeSmcEvents) : []),
+          ...(showDlm ? buildDlmMarkLines(activeDlmLevels, compact) : []),
+          ...(showLiquidity ? buildLiquidityMarkLines(activeLiquidityEvents, compact) : []),
+        ]
+      : []
+
+    const markPointData = enableAdvancedOverlays
+      ? [
+          ...(showSmc ? buildSmcMarkPoints(activeSmcEvents, compact) : []),
+          ...(showLiquidity ? buildLiquidityMarkPoints(activeLiquidityEvents, compact) : []),
+          ...(showDlm
+            ? buildDlmConfluenceMarkPoints(activeDlmConfluenceMarkers, compact)
+            : []),
+          ...(showScores ? buildScoreMarkPoints(activeScoreMarkers, compact) : []),
+        ]
+      : []
+
     const option: any = {
       backgroundColor: '#0f1115',
       animation: false,
 
       grid: {
         left: compact ? 4 : 10,
-        right: compact ? 48 : 86,
+        right: compact ? 48 : showRightProfile ? 28 : 86,
         top: compact ? 12 : 30,
         bottom: compact ? 20 : 35,
         containLabel: true,
@@ -1379,7 +1300,7 @@ export default function EChartsCandlestickChart({
         formatter: (params: any) => {
           const item = Array.isArray(params) ? params[0] : params
 
-          if (!item || !item.data) return ''
+          if (!item || !item.data || String(item.axisValue).startsWith('__profile_')) return ''
 
           const data = item.data as number[]
           const open = data[1]
@@ -1390,10 +1311,18 @@ export default function EChartsCandlestickChart({
           return `
             <div style="font-size:12px;">
               <div style="margin-bottom:4px;color:#e5e7eb;font-weight:700;">
-                ${item.axisValue}
+                ${shortAxisLabel(item.axisValue)}
               </div>
               <div style="color:#94a3b8;">${symbol} • ${timeframe} • ${candleMode}</div>
-              <div style="color:#64748b;">${usingLiveCandles ? (historicalCandlesFromAlpaca.length > 0 ? 'Alpaca history + live candles' : 'Live API candles') : 'Sample candles'}</div>
+              <div style="color:#64748b;">${
+                engineAvailable
+                  ? 'Python SMC + AlphaX engine'
+                  : usingLiveCandles
+                    ? historicalCandlesFromAlpaca.length > 0
+                      ? 'Alpaca history + live candles'
+                      : 'Live API candles'
+                    : 'Sample candles'
+              }</div>
               <div style="margin-top:6px;color:#e5e7eb;">O&nbsp;&nbsp;${open}</div>
               <div style="color:#e5e7eb;">H&nbsp;&nbsp;${high}</div>
               <div style="color:#e5e7eb;">L&nbsp;&nbsp;${low}</div>
@@ -1405,7 +1334,7 @@ export default function EChartsCandlestickChart({
 
       xAxis: {
         type: 'category',
-        data: times,
+        data: xAxisData,
         boundaryGap: true,
         axisLine: {
           lineStyle: {
@@ -1415,6 +1344,10 @@ export default function EChartsCandlestickChart({
         axisLabel: {
           color: '#94a3b8',
           fontSize: compact ? 8 : 11,
+          formatter: (value: string) => {
+            if (String(value).startsWith('__profile_')) return ''
+            return shortAxisLabel(value)
+          },
         },
         splitLine: {
           show: false,
@@ -1445,16 +1378,17 @@ export default function EChartsCandlestickChart({
         {
           type: 'inside',
           xAxisIndex: 0,
-          start: 0,
-          end: 100,
+          filterMode: 'none',
           zoomOnMouseWheel: true,
           moveOnMouseMove: true,
           moveOnMouseWheel: false,
+          throttle: 50,
         },
       ],
 
       series: [
         {
+          id: 'main-candles',
           name: `${symbol} ${candleMode}`,
           type: 'candlestick',
           data: candleData,
@@ -1477,42 +1411,25 @@ export default function EChartsCandlestickChart({
           markLine: {
             silent: true,
             symbol: 'none',
-            data: enableAdvancedOverlays
-              ? [
-                  ...(showSmc ? buildSmcMarkLines(activeSmcEvents) : []),
-                  ...(showDlm ? buildDlmMarkLines(activeDlmLevels, compact) : []),
-                  ...(showLiquidity
-                    ? buildLiquidityMarkLines(activeLiquidityEvents, compact)
-                    : []),
-                ]
-              : [],
+            data: markLineData,
           },
 
           markPoint: {
             silent: true,
-            data: enableAdvancedOverlays
-              ? [
-                  ...(showSmc ? buildSmcMarkPoints(activeSmcEvents, compact) : []),
-                  ...(showLiquidity
-                    ? buildLiquidityMarkPoints(activeLiquidityEvents, compact)
-                    : []),
-                  ...(showDlm
-                    ? buildDlmConfluenceMarkPoints(
-                        activeDlmConfluenceMarkers,
-                        compact
-                      )
-                    : []),
-                  ...(showScores
-                    ? buildScoreMarkPoints(activeScoreMarkers, compact)
-                    : []),
-                ]
-              : [],
+            data: markPointData,
           },
         },
+        ...(showRightProfile
+          ? buildAlphaProfileSeries(alphaProfileBins, profileSlots, compact)
+          : []),
       ],
     }
 
-    chartInstance.current.setOption(option, true)
+    chartInstance.current.setOption(option, {
+      notMerge: false,
+      replaceMerge: ['series'],
+      lazyUpdate: false,
+    })
 
     const resize = () => {
       chartInstance.current?.resize()
@@ -1535,15 +1452,17 @@ export default function EChartsCandlestickChart({
     showScores,
     enableAdvancedOverlays,
     baseCandles,
+    engineHaCandles,
     activeSmcEvents,
     activeDlmLevels,
     activeZones,
     activeLiquidityEvents,
     activeDlmConfluenceMarkers,
     activeScoreMarkers,
+    alphaProfileBins,
     usingLiveCandles,
-    recentCandles,
     historicalCandlesFromAlpaca,
+    engineAvailable,
   ])
 
   useEffect(() => {
@@ -1552,6 +1471,18 @@ export default function EChartsCandlestickChart({
       chartInstance.current = null
     }
   }, [])
+
+  const dataBadge = engineAvailable
+    ? 'Python SMC Engine'
+    : usingLiveCandles
+      ? historicalCandlesFromAlpaca.length > 0
+        ? 'Alpaca + Live Candles'
+        : 'Live API Candles'
+      : historicalStatus === 'loading'
+        ? 'Loading History'
+        : 'Sample Candles'
+
+  const liveBadge = engineAvailable ? 'Python SMC Live' : engineStatus === 'loading' ? 'Loading SMC' : 'Live SMC/AlphaX'
 
   return (
     <div
@@ -1578,6 +1509,7 @@ export default function EChartsCandlestickChart({
             <option value="ETHUSD">ETHUSD</option>
             <option value="SPY">SPY</option>
             <option value="ES1!">ES1!</option>
+            <option value="MES1!">MES1!</option>
           </select>
 
           <select
@@ -1673,16 +1605,26 @@ export default function EChartsCandlestickChart({
           <div className="flex items-center gap-2">
             <div
               className={`rounded-full border px-3 py-1 text-sm ${
-                usingLiveCandles
+                engineAvailable || usingLiveCandles
                   ? 'border-emerald-500/50 text-emerald-400'
                   : 'border-yellow-500/50 text-yellow-400'
               }`}
             >
-              {usingLiveCandles ? (historicalCandlesFromAlpaca.length > 0 ? 'Alpaca + Live Candles' : 'Live API Candles') : historicalStatus === 'loading' ? 'Loading History' : 'Sample Candles'}
+              {dataBadge}
+            </div>
+
+            <div
+              className={`rounded-full border px-3 py-1 text-sm ${
+                engineAvailable
+                  ? 'border-blue-500/50 text-blue-300'
+                  : 'border-slate-500/50 text-slate-300'
+              }`}
+            >
+              {liveBadge}
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3K' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3Q' : 'Chart Engine v2'}
             </div>
           </div>
         )}
