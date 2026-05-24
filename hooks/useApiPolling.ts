@@ -15,9 +15,21 @@ export type TradingSignal = {
   bearScore: number
   netBias: number
   price: number
+
+  // Candle / chart fields
+  time?: number | string
+  open?: number
+  high?: number
+  low?: number
+  close?: number
+  volume?: number
+
+  // Overlay payload strings or JSON strings
   smc: string
   alphax: string
   ghost: string
+  chartOverlays?: string
+
   openInterest: string
   footprint: string
   session: string
@@ -46,6 +58,21 @@ export type RecentSignal = {
   netBias?: number
   price?: number
   createdAt?: string
+
+  // Candle / chart fields
+  time?: number | string
+  open?: number
+  high?: number
+  low?: number
+  close?: number
+  volume?: number
+
+  // Overlay payload strings or JSON strings
+  smc?: string
+  alphax?: string
+  ghost?: string
+  chartOverlays?: string
+
   entry?: number
   current?: number
   pnl?: number
@@ -62,9 +89,18 @@ const fallbackSignal: TradingSignal = {
   bearScore: 50,
   netBias: 0,
   price: 0,
+
+  time: Date.now(),
+  open: 0,
+  high: 0,
+  low: 0,
+  close: 0,
+  volume: 0,
+
   smc: 'Awaiting signal',
   alphax: 'Awaiting signal',
   ghost: 'Awaiting signal',
+  chartOverlays: '',
   openInterest: 'Awaiting signal',
   footprint: 'Awaiting signal',
   session: 'Market awaiting alert',
@@ -80,30 +116,80 @@ const fallbackSignal: TradingSignal = {
   macroRisk: 0,
 }
 
+function toNumber(value: unknown, fallback = 0): number {
+  const parsed = Number(value)
+
+  if (!Number.isFinite(parsed)) {
+    return fallback
+  }
+
+  return parsed
+}
+
+function toOptionalNumber(value: unknown): number | undefined {
+  const parsed = Number(value)
+
+  if (!Number.isFinite(parsed)) {
+    return undefined
+  }
+
+  return parsed
+}
+
 function normalizeSignal(raw: Partial<TradingSignal>): TradingSignal {
-  const bullScore = Number(raw.bullScore ?? fallbackSignal.bullScore)
-  const bearScore = Number(raw.bearScore ?? fallbackSignal.bearScore)
-  const confidence = Number(raw.confidence ?? fallbackSignal.confidence)
+  const bullScore = toNumber(raw.bullScore, fallbackSignal.bullScore)
+  const bearScore = toNumber(raw.bearScore, fallbackSignal.bearScore)
+  const confidence = toNumber(raw.confidence, fallbackSignal.confidence)
+
+  const close =
+    toOptionalNumber(raw.close) ??
+    toOptionalNumber(raw.price) ??
+    toOptionalNumber(raw.current) ??
+    fallbackSignal.close
+
+  const price = toNumber(raw.price ?? close, fallbackSignal.price)
 
   return {
     ...fallbackSignal,
     ...raw,
+
     symbol: raw.symbol ?? fallbackSignal.symbol,
     timeframe: raw.timeframe ?? fallbackSignal.timeframe,
     signal: raw.signal ?? fallbackSignal.signal,
+
     confidence,
     bullScore,
     bearScore,
-    netBias: Number(raw.netBias ?? bullScore - bearScore),
-    price: Number(raw.price ?? fallbackSignal.price),
+    netBias: toNumber(raw.netBias, bullScore - bearScore),
+    price,
+
+    time: raw.time ?? raw.createdAt ?? fallbackSignal.time,
+    open: toNumber(raw.open, price),
+    high: toNumber(raw.high, price),
+    low: toNumber(raw.low, price),
+    close: toNumber(close, price),
+    volume: toNumber(raw.volume, 0),
+
+    smc: raw.smc ?? fallbackSignal.smc,
+    alphax: raw.alphax ?? fallbackSignal.alphax,
+    ghost: raw.ghost ?? fallbackSignal.ghost,
+    chartOverlays: raw.chartOverlays ?? fallbackSignal.chartOverlays,
+
+    openInterest: raw.openInterest ?? fallbackSignal.openInterest,
+    footprint: raw.footprint ?? fallbackSignal.footprint,
+    session: raw.session ?? fallbackSignal.session,
+    fredMacro: raw.fredMacro ?? fallbackSignal.fredMacro,
+    finraShortVolume: raw.finraShortVolume ?? fallbackSignal.finraShortVolume,
+    cot: raw.cot ?? fallbackSignal.cot,
+
     warnings: Array.isArray(raw.warnings) ? raw.warnings : fallbackSignal.warnings,
 
     // These keep your existing dashboard gauges working.
-    bullPressure: Number(raw.bullPressure ?? bullScore),
-    bearPressure: Number(raw.bearPressure ?? bearScore),
-    ghostConfidence: Number(raw.ghostConfidence ?? confidence),
-    chopRisk: Number(raw.chopRisk ?? 0),
-    macroRisk: Number(raw.macroRisk ?? 0),
+    bullPressure: toNumber(raw.bullPressure, bullScore),
+    bearPressure: toNumber(raw.bearPressure, bearScore),
+    ghostConfidence: toNumber(raw.ghostConfidence, confidence),
+    chopRisk: toNumber(raw.chopRisk, 0),
+    macroRisk: toNumber(raw.macroRisk, 0),
   }
 }
 
@@ -112,25 +198,48 @@ function normalizeRecentSignals(raw: unknown): RecentSignal[] {
 
   return raw.map((item: any, index: number) => {
     const signal = item.signal ?? item.type ?? 'NEUTRAL'
-    const price = Number(item.price ?? item.current ?? 0)
+
+    const close =
+      toOptionalNumber(item.close) ??
+      toOptionalNumber(item.current) ??
+      toOptionalNumber(item.price) ??
+      0
+
+    const price = toNumber(item.price ?? close, 0)
 
     return {
       symbol: item.symbol ?? 'WAITING',
       timeframe: item.timeframe ?? '1d',
       signal,
       type: signal,
-      confidence: Number(item.confidence ?? 0),
-      bullScore: Number(item.bullScore ?? 50),
-      bearScore: Number(item.bearScore ?? 50),
-      netBias: Number(item.netBias ?? 0),
+
+      confidence: toNumber(item.confidence, 0),
+      bullScore: toNumber(item.bullScore, 50),
+      bearScore: toNumber(item.bearScore, 50),
+      netBias: toNumber(item.netBias, 0),
       price,
+
       createdAt: item.createdAt ?? new Date().toISOString(),
 
+      // Candle / chart fields preserved for EChartsCandlestickChart
+      time: item.time ?? item.timestamp ?? item.createdAt ?? new Date().toISOString(),
+      open: toOptionalNumber(item.open),
+      high: toOptionalNumber(item.high),
+      low: toOptionalNumber(item.low),
+      close: toOptionalNumber(close),
+      volume: toOptionalNumber(item.volume),
+
+      // Overlay payloads preserved for EChartsCandlestickChart
+      smc: item.smc,
+      alphax: item.alphax,
+      ghost: item.ghost,
+      chartOverlays: item.chartOverlays,
+
       // Optional values for your existing table
-      entry: Number(item.entry ?? price),
-      current: Number(item.current ?? price),
-      pnl: Number(item.pnl ?? 0),
-      percent: Number(item.percent ?? 0),
+      entry: toNumber(item.entry ?? price, price),
+      current: toNumber(item.current ?? close ?? price, price),
+      pnl: toNumber(item.pnl, 0),
+      percent: toNumber(item.percent, 0),
       status: item.status ?? (index === 0 ? 'Open' : 'Closed'),
     }
   })
