@@ -1297,36 +1297,62 @@ export default function EChartsCandlestickChart({
     [latestSignal]
   )
 
+  const hasLiveOverlayPayload = Boolean(
+    (overlayPayload.smcEvents && overlayPayload.smcEvents.length > 0) ||
+      (overlayPayload.dlmLevels && overlayPayload.dlmLevels.length > 0) ||
+      (overlayPayload.zones && overlayPayload.zones.length > 0) ||
+      (overlayPayload.liquidityEvents && overlayPayload.liquidityEvents.length > 0) ||
+      (overlayPayload.dlmConfluenceMarkers && overlayPayload.dlmConfluenceMarkers.length > 0) ||
+      (overlayPayload.scoreMarkers && overlayPayload.scoreMarkers.length > 0)
+  )
+
+  // Important:
+  // Do not draw fake/sample SMC + AlphaX overlays on real BTCUSD/Alpaca/live candles.
+  // Sample overlays are only used when the chart itself is in sample-candle mode.
+  const shouldUseSampleOverlays = !usingLiveCandles
+
   const activeSmcEvents =
     overlayPayload.smcEvents && overlayPayload.smcEvents.length > 0
       ? overlayPayload.smcEvents
-      : sampleSmcEvents
+      : shouldUseSampleOverlays
+        ? sampleSmcEvents
+        : []
 
   const activeDlmLevels =
     overlayPayload.dlmLevels && overlayPayload.dlmLevels.length > 0
       ? overlayPayload.dlmLevels
-      : sampleDlmLevels
+      : shouldUseSampleOverlays
+        ? sampleDlmLevels
+        : []
 
   const activeZones =
     overlayPayload.zones && overlayPayload.zones.length > 0
       ? overlayPayload.zones
-      : sampleZones
+      : shouldUseSampleOverlays
+        ? sampleZones
+        : []
 
   const activeLiquidityEvents =
     overlayPayload.liquidityEvents && overlayPayload.liquidityEvents.length > 0
       ? overlayPayload.liquidityEvents
-      : sampleLiquidityEvents
+      : shouldUseSampleOverlays
+        ? sampleLiquidityEvents
+        : []
 
   const activeDlmConfluenceMarkers =
     overlayPayload.dlmConfluenceMarkers &&
     overlayPayload.dlmConfluenceMarkers.length > 0
       ? overlayPayload.dlmConfluenceMarkers
-      : sampleDlmConfluenceMarkers
+      : shouldUseSampleOverlays
+        ? sampleDlmConfluenceMarkers
+        : []
 
   const activeScoreMarkers =
     overlayPayload.scoreMarkers && overlayPayload.scoreMarkers.length > 0
       ? overlayPayload.scoreMarkers
-      : sampleScoreMarkers
+      : shouldUseSampleOverlays
+        ? sampleScoreMarkers
+        : []
 
   useEffect(() => {
     if (!chartRef.current) return
@@ -1681,8 +1707,24 @@ export default function EChartsCandlestickChart({
               {usingLiveCandles ? (historicalCandlesFromAlpaca.length > 0 ? 'Alpaca + Live Candles' : 'Live API Candles') : historicalStatus === 'loading' ? 'Loading History' : 'Sample Candles'}
             </div>
 
+            <div
+              className={`rounded-full border px-3 py-1 text-sm ${
+                hasLiveOverlayPayload
+                  ? 'border-blue-500/50 text-blue-300'
+                  : usingLiveCandles
+                    ? 'border-slate-500/50 text-slate-300'
+                    : 'border-purple-500/50 text-purple-300'
+              }`}
+            >
+              {hasLiveOverlayPayload
+                ? 'Live SMC/AlphaX'
+                : usingLiveCandles
+                  ? 'Awaiting SMC/AlphaX'
+                  : 'Sample Overlays'}
+            </div>
+
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3K' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3L' : 'Chart Engine v2'}
             </div>
           </div>
         )}
