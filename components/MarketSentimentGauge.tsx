@@ -23,6 +23,12 @@ type TradingSignal = {
   cot?: string
 }
 
+type SentimentIndicator = {
+  name: string
+  value: number
+  signal: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | string
+}
+
 type SentimentData = {
   eventType: string
   symbol: string
@@ -39,6 +45,7 @@ type SentimentData = {
   price?: number
   time?: number
   createdAt?: string
+  indicators?: SentimentIndicator[]
 }
 
 type MarketSentimentGaugeProps = {
@@ -216,7 +223,13 @@ export default function MarketSentimentGauge({ signal }: MarketSentimentGaugePro
   useEffect(() => {
     const fetchSentiment = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/latest-sentiment`, {
+        const params = new URLSearchParams({
+          symbol: String(signal?.symbol ?? 'BTCUSD'),
+          timeframe: String(signal?.timeframe ?? '1m'),
+          limit: '500',
+        })
+
+        const response = await fetch(`${API_BASE_URL}/api/latest-sentiment?${params.toString()}`, {
           cache: 'no-store',
         })
 
@@ -236,10 +249,17 @@ export default function MarketSentimentGauge({ signal }: MarketSentimentGaugePro
     return () => {
       window.clearInterval(interval)
     }
-  }, [])
+  }, [signal?.symbol, signal?.timeframe])
 
   const signalSentiment = useMemo(() => buildSentimentFromSignal(signal), [signal])
-  const sentiment = signalSentiment ?? apiSentiment
+  const hasTechnicalSentiment =
+    apiSentiment.eventType === 'PYTHON_TECHNICAL_SENTIMENT' &&
+    Array.isArray(apiSentiment.indicators) &&
+    apiSentiment.indicators.length > 0
+
+  // Prefer the full 12-indicator Python technical meter when available.
+  // Fallback to the lighter dashboard-signal sentiment only while Python is loading.
+  const sentiment = hasTechnicalSentiment ? apiSentiment : signalSentiment ?? apiSentiment
 
   const value = clamp(Number(sentiment.sentiment ?? 50))
   const needleRotation = -90 + (value / 100) * 180
@@ -375,6 +395,48 @@ export default function MarketSentimentGauge({ signal }: MarketSentimentGaugePro
         <p className="mt-3 text-xs text-gray-500">
           Active indicators: {sentiment.activeCount}
         </p>
+
+        {Array.isArray(sentiment.indicators) && sentiment.indicators.length > 0 && (
+          <div className="mt-4 rounded-lg border border-dark-600 bg-dark-900/35 p-3 text-left">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-xs font-bold uppercase tracking-wide text-gray-400">
+                Technical Meter
+              </p>
+              <p className="text-xs text-gray-500">
+                {sentiment.indicators.length} indicators
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 gap-1">
+              {sentiment.indicators.map((indicator) => {
+                const side = String(indicator.signal ?? '').toUpperCase()
+                const sideClass =
+                  side === 'BULLISH'
+                    ? 'text-blue-400'
+                    : side === 'BEARISH'
+                      ? 'text-red-400'
+                      : 'text-gray-300'
+
+                return (
+                  <div
+                    key={indicator.name}
+                    className="grid grid-cols-[1fr_auto_auto] items-center gap-2 text-[11px]"
+                  >
+                    <span className="truncate text-gray-400">
+                      {indicator.name}
+                    </span>
+                    <span className={`font-bold ${sideClass}`}>
+                      {side}
+                    </span>
+                    <span className="min-w-[42px] text-right font-bold text-white">
+                      {Math.round(Number(indicator.value ?? 0))}%
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
       </div>
     </motion.div>
   )
