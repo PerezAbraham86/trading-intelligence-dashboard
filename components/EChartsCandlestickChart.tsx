@@ -140,6 +140,13 @@ const ORANGE = '#fb923c'
 const PINK = '#f472b6'
 const GRAY = '#94a3b8'
 
+const MAX_INTERNAL_OB_ZONES = 5
+const MAX_SWING_OB_ZONES = 2
+const MAX_FVG_ZONES = 3
+const MAX_ALPHA_FVG_ZONES = 2
+const MAX_GENERIC_ZONES = 4
+const MAX_ZONE_LOOKBACK_CANDLES = 220
+
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
 
 const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1D']
@@ -488,51 +495,259 @@ function getScoreColor(marker: ScoreMarker) {
   return YELLOW
 }
 
+function zoneTimeValue(value: any): number {
+  const parsed = Date.parse(String(value ?? ''))
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function zonePriority(zone: SmcZone): number {
+  if (zone.kind === 'premium') return 100
+  if (zone.kind === 'equilibrium') return 99
+  if (zone.kind === 'discount') return 98
+  if (zone.kind === 'internal_ob') return 80
+  if (zone.kind === 'swing_ob') return 70
+  if (zone.kind === 'fvg') return 55
+  if (zone.kind === 'alpha_fvg') return 45
+  return 20
+}
+
+function normalizeZoneKind(kind: string): string {
+  const text = String(kind ?? '').toLowerCase()
+
+  if (text.includes('premium')) return 'premium'
+  if (text.includes('equilibrium') || text.includes('eq')) return 'equilibrium'
+  if (text.includes('discount')) return 'discount'
+  if (text.includes('swing') && text.includes('ob')) return 'swing_ob'
+  if (text.includes('internal') && text.includes('ob')) return 'internal_ob'
+  if (text.includes('alpha') && text.includes('fvg')) return 'alpha_fvg'
+  if (text.includes('fvg')) return 'fvg'
+  if (text.includes('ob')) return 'internal_ob'
+
+  return text
+}
+
+function normalizeZone(zone: SmcZone): SmcZone | null {
+  const top = Number(zone.top)
+  const bottom = Number(zone.bottom)
+
+  if (!Number.isFinite(top) || !Number.isFinite(bottom)) return null
+
+  const normalizedTop = Math.max(top, bottom)
+  const normalizedBottom = Math.min(top, bottom)
+
+  if (normalizedTop === normalizedBottom) return null
+
+  const kind = normalizeZoneKind(zone.kind)
+
+  return {
+    ...zone,
+    kind,
+    top: normalizedTop,
+    bottom: normalizedBottom,
+    direction:
+      zone.direction === 'bullish' || zone.direction === 'bearish'
+        ? zone.direction
+        : kind === 'premium'
+          ? 'bearish'
+          : kind === 'discount'
+            ? 'bullish'
+            : 'neutral',
+    label:
+      zone.label ||
+      (kind === 'premium'
+        ? 'Premium'
+        : kind === 'equilibrium'
+          ? 'Equilibrium'
+          : kind === 'discount'
+            ? 'Discount'
+            : kind === 'internal_ob'
+              ? zone.direction === 'bullish'
+                ? 'Internal Bullish OB'
+                : 'Internal Bearish OB'
+              : kind === 'swing_ob'
+                ? zone.direction === 'bullish'
+                  ? 'Swing Bullish OB'
+                  : 'Swing Bearish OB'
+                : kind === 'alpha_fvg'
+                  ? 'AlphaX FVG'
+                  : 'FVG'),
+  }
+}
+
+function getZoneEndTime(zone: SmcZone): number {
+  return zoneTimeValue(zone.endTime || zone.startTime)
+}
+
+function filterZonesPineStyle(zones: SmcZone[], candles: Candle[], compact: boolean): SmcZone[] {
+  if (!Array.isArray(zones) || zones.length === 0) return []
+
+  const normalized = zones
+    .map(normalizeZone)
+    .filter((zone): zone is SmcZone => zone !== null)
+
+  if (normalized.length === 0) return []
+
+  const candleTimes = candles.map((candle) => candle.time)
+  const visibleTimeSet = new Set(candleTimes)
+  const recentTimeSet = new Set(candleTimes.slice(Math.max(0, candleTimes.length - MAX_ZONE_LOOKBACK_CANDLES)))
+
+  const isCurrentEnough = (zone: SmcZone) => {
+    if (compact) return false
+
+    if (recentTimeSet.has(zone.startTime) || recentTimeSet.has(zone.endTime)) return true
+
+    const startMs = zoneTimeValue(zone.startTime)
+    const endMs = zoneTimeValue(zone.endTime)
+    const firstRecentMs = zoneTimeValue(candleTimes[Math.max(0, candleTimes.length - MAX_ZONE_LOOKBACK_CANDLES)])
+    const lastMs = zoneTimeValue(candleTimes[candleTimes.length - 1])
+
+    if (!firstRecentMs || !lastMs || !startMs || !endMs) {
+      return visibleTimeSet.has(zone.startTime) || visibleTimeSet.has(zone.endTime)
+    }
+
+    return endMs >= firstRecentMs && startMs <= lastMs
+  }
+
+  const currentZones = normalized.filter(isCurrentEnough)
+
+  const latestByKind = (kind: string, limit: number) =>
+    currentZones
+      .filter((zone) => zone.kind === kind)
+      .sort((a, b) => getZoneEndTime(b) - getZoneEndTime(a))
+      .slice(0, limit)
+
+  const latestDirectional = (kind: string, perDirectionLimit: number) => {
+    const bullish = currentZones
+      .filter((zone) => zone.kind === kind && zone.direction === 'bullish')
+      .sort((a, b) => getZoneEndTime(b) - getZoneEndTime(a))
+      .slice(0, perDirectionLimit)
+
+    const bearish = currentZones
+      .filter((zone) => zone.kind === kind && zone.direction === 'bearish')
+      .sort((a, b) => getZoneEndTime(b) - getZoneEndTime(a))
+      .slice(0, perDirectionLimit)
+
+    return [...bullish, ...bearish]
+  }
+
+  const pdZones = ['premium', 'equilibrium', 'discount']
+    .map((kind) =>
+      currentZones
+        .filter((zone) => zone.kind === kind)
+        .sort((a, b) => getZoneEndTime(b) - getZoneEndTime(a))[0]
+    )
+    .filter((zone): zone is SmcZone => Boolean(zone))
+
+  const selected = [
+    ...pdZones,
+    ...latestDirectional('internal_ob', Math.ceil(MAX_INTERNAL_OB_ZONES / 2)),
+    ...latestDirectional('swing_ob', Math.ceil(MAX_SWING_OB_ZONES / 2)),
+    ...latestByKind('fvg', MAX_FVG_ZONES),
+    ...latestByKind('alpha_fvg', MAX_ALPHA_FVG_ZONES),
+    ...currentZones
+      .filter(
+        (zone) =>
+          ![
+            'premium',
+            'equilibrium',
+            'discount',
+            'internal_ob',
+            'swing_ob',
+            'fvg',
+            'alpha_fvg',
+          ].includes(zone.kind)
+      )
+      .sort((a, b) => getZoneEndTime(b) - getZoneEndTime(a))
+      .slice(0, MAX_GENERIC_ZONES),
+  ]
+
+  const deduped = new Map<string, SmcZone>()
+
+  for (const zone of selected) {
+    const key = [
+      zone.kind,
+      zone.direction,
+      Math.round(zone.top * 100) / 100,
+      Math.round(zone.bottom * 100) / 100,
+      zone.startTime,
+    ].join('|')
+
+    if (!deduped.has(key)) deduped.set(key, zone)
+  }
+
+  return Array.from(deduped.values()).sort((a, b) => {
+    const priorityDiff = zonePriority(b) - zonePriority(a)
+    if (priorityDiff !== 0) return priorityDiff
+    return getZoneEndTime(a) - getZoneEndTime(b)
+  })
+}
+
+function shouldShowZoneLabel(zone: SmcZone, compact: boolean): boolean {
+  if (compact) return false
+
+  return (
+    zone.kind === 'premium' ||
+    zone.kind === 'equilibrium' ||
+    zone.kind === 'discount' ||
+    zone.kind === 'internal_ob' ||
+    zone.kind === 'swing_ob'
+  )
+}
+
 function getZoneStyle(zone: SmcZone, compact: boolean) {
   if (zone.kind === 'premium') {
-    return { color: 'rgba(242, 54, 69, 0.06)', borderColor: 'rgba(242, 54, 69, 0.18)' }
+    return {
+      color: compact ? 'rgba(242, 54, 69, 0.018)' : 'rgba(242, 54, 69, 0.035)',
+      borderColor: 'rgba(242, 54, 69, 0.18)',
+    }
   }
 
   if (zone.kind === 'equilibrium') {
-    return { color: 'rgba(135, 139, 148, 0.045)', borderColor: 'rgba(135, 139, 148, 0.16)' }
+    return {
+      color: compact ? 'rgba(135, 139, 148, 0.015)' : 'rgba(135, 139, 148, 0.03)',
+      borderColor: 'rgba(135, 139, 148, 0.14)',
+    }
   }
 
   if (zone.kind === 'discount') {
-    return { color: 'rgba(8, 153, 129, 0.06)', borderColor: 'rgba(8, 153, 129, 0.18)' }
+    return {
+      color: compact ? 'rgba(8, 153, 129, 0.018)' : 'rgba(8, 153, 129, 0.035)',
+      borderColor: 'rgba(8, 153, 129, 0.18)',
+    }
   }
 
   if (zone.kind === 'fvg' || zone.kind === 'alpha_fvg') {
     return zone.direction === 'bullish'
       ? {
-          color: compact ? 'rgba(0, 255, 104, 0.08)' : 'rgba(0, 255, 104, 0.12)',
-          borderColor: 'rgba(0, 255, 104, 0.32)',
+          color: compact ? 'rgba(0, 255, 104, 0.025)' : 'rgba(0, 255, 104, 0.045)',
+          borderColor: 'rgba(0, 255, 104, 0.20)',
         }
       : {
-          color: compact ? 'rgba(255, 0, 8, 0.08)' : 'rgba(255, 0, 8, 0.12)',
-          borderColor: 'rgba(255, 0, 8, 0.32)',
+          color: compact ? 'rgba(255, 0, 8, 0.025)' : 'rgba(255, 0, 8, 0.045)',
+          borderColor: 'rgba(255, 0, 8, 0.20)',
         }
   }
 
   if (zone.kind === 'swing_ob') {
     return zone.direction === 'bullish'
       ? {
-          color: compact ? 'rgba(24, 72, 204, 0.10)' : 'rgba(24, 72, 204, 0.16)',
-          borderColor: 'rgba(24, 72, 204, 0.42)',
+          color: compact ? 'rgba(24, 72, 204, 0.045)' : 'rgba(24, 72, 204, 0.07)',
+          borderColor: 'rgba(24, 72, 204, 0.34)',
         }
       : {
-          color: compact ? 'rgba(178, 40, 51, 0.10)' : 'rgba(178, 40, 51, 0.16)',
-          borderColor: 'rgba(178, 40, 51, 0.42)',
+          color: compact ? 'rgba(178, 40, 51, 0.045)' : 'rgba(178, 40, 51, 0.07)',
+          borderColor: 'rgba(178, 40, 51, 0.34)',
         }
   }
 
   return zone.direction === 'bullish'
     ? {
-        color: compact ? 'rgba(49, 121, 245, 0.10)' : 'rgba(49, 121, 245, 0.16)',
-        borderColor: 'rgba(49, 121, 245, 0.42)',
+        color: compact ? 'rgba(49, 121, 245, 0.045)' : 'rgba(49, 121, 245, 0.07)',
+        borderColor: 'rgba(49, 121, 245, 0.34)',
       }
     : {
-        color: compact ? 'rgba(247, 124, 128, 0.10)' : 'rgba(247, 124, 128, 0.16)',
-        borderColor: 'rgba(247, 124, 128, 0.42)',
+        color: compact ? 'rgba(247, 124, 128, 0.045)' : 'rgba(247, 124, 128, 0.07)',
+        borderColor: 'rgba(247, 124, 128, 0.34)',
       }
 }
 
@@ -639,6 +854,7 @@ function buildDlmMarkLines(levels: DlmLevel[], compact: boolean) {
 function buildZoneMarkAreas(zones: SmcZone[], compact: boolean) {
   return zones.map((zone) => {
     const style = getZoneStyle(zone, compact)
+    const showLabel = shouldShowZoneLabel(zone, compact)
 
     return [
       {
@@ -647,17 +863,24 @@ function buildZoneMarkAreas(zones: SmcZone[], compact: boolean) {
         itemStyle: {
           color: style.color,
           borderColor: style.borderColor,
-          borderWidth: zone.kind === 'swing_ob' ? 1.4 : 1,
+          borderWidth: zone.kind === 'swing_ob' ? 1.2 : zone.kind === 'internal_ob' ? 1 : 0.8,
           borderType: zone.kind === 'fvg' || zone.kind === 'alpha_fvg' ? 'dashed' : 'solid',
         },
         label: {
-          show: !compact,
+          show: showLabel,
           formatter: zone.label,
           color: style.borderColor,
-          fontSize: 10,
+          fontSize: 9,
           fontWeight: 700,
-          position: 'insideTopLeft',
-          backgroundColor: 'rgba(15, 17, 21, 0.60)',
+          position:
+            zone.kind === 'premium'
+              ? 'insideTop'
+              : zone.kind === 'discount'
+                ? 'insideBottom'
+                : zone.kind === 'equilibrium'
+                  ? 'inside'
+                  : 'insideTopLeft',
+          backgroundColor: 'rgba(15, 17, 21, 0.45)',
           borderRadius: 4,
           padding: [2, 5],
         },
@@ -1198,10 +1421,15 @@ export default function EChartsCandlestickChart({
   const activeDlmLevels = Array.isArray(engineState?.dlmLevels)
     ? engineState?.dlmLevels ?? []
     : overlayPayload.dlmLevels ?? []
-  const activeZones = [
+  const rawActiveZones = [
     ...(Array.isArray(engineState?.zones) ? engineState?.zones ?? [] : overlayPayload.zones ?? []),
     ...(Array.isArray(engineState?.alphaFvgs) ? engineState?.alphaFvgs ?? [] : []),
   ]
+
+  const activeZones = useMemo(
+    () => filterZonesPineStyle(rawActiveZones, baseCandles, compact),
+    [rawActiveZones, baseCandles, compact]
+  )
   const activeLiquidityEvents = [
     ...(Array.isArray(engineState?.liquidityEvents)
       ? engineState?.liquidityEvents ?? []
@@ -1624,7 +1852,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3Q' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3R' : 'Chart Engine v2'}
             </div>
           </div>
         )}
