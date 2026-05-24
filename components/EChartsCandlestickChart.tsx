@@ -1194,6 +1194,8 @@ export default function EChartsCandlestickChart({
   const [showScores, setShowScores] = useState(true)
   const [historicalCandles, setHistoricalCandles] = useState<any[]>([])
   const [historicalStatus, setHistoricalStatus] = useState<'idle' | 'loading' | 'loaded' | 'unavailable' | 'error'>('idle')
+  const [engineState, setEngineState] = useState<any | null>(null)
+  const [engineStatus, setEngineStatus] = useState<'idle' | 'loading' | 'loaded' | 'unavailable' | 'error'>('idle')
 
   useEffect(() => {
     let cancelled = false
@@ -1245,6 +1247,66 @@ export default function EChartsCandlestickChart({
     }
   }, [symbol, timeframe, compact])
 
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function fetchEngineState() {
+      if (compact) return
+
+      setEngineStatus('loading')
+
+      try {
+        const params = new URLSearchParams({
+          symbol,
+          timeframe,
+          limit: '500',
+        })
+
+        const response = await fetch(`${API_BASE_URL}/api/engine-state?${params.toString()}`, {
+          cache: 'no-store',
+        })
+
+        if (!response.ok) {
+          if (!cancelled) {
+            setEngineState(null)
+            setEngineStatus(response.status === 404 ? 'unavailable' : 'error')
+          }
+          return
+        }
+
+        const json = await response.json()
+
+        if (!cancelled) {
+          setEngineState(json && typeof json === 'object' ? json : null)
+          setEngineStatus(
+            json && Array.isArray(json.candles) && json.candles.length > 0
+              ? 'loaded'
+              : 'unavailable'
+          )
+        }
+      } catch (error) {
+        console.error('Python engine-state fetch error:', error)
+
+        if (!cancelled) {
+          setEngineState(null)
+          setEngineStatus('error')
+        }
+      }
+    }
+
+    fetchEngineState()
+
+    const interval = window.setInterval(() => {
+      fetchEngineState()
+    }, 10000)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [symbol, timeframe, compact])
+
   const liveCandlesFromCandlesEndpoint = useMemo(
     () => buildCandlesFromRecentCandles(recentCandles, symbol, timeframe),
     [recentCandles, symbol, timeframe]
@@ -1260,7 +1322,37 @@ export default function EChartsCandlestickChart({
     [historicalCandles, symbol, timeframe]
   )
 
+  const engineCandlesFromPython = useMemo(
+    () => buildCandlesFromRecentCandles(engineState?.candles, symbol, timeframe),
+    [engineState, symbol, timeframe]
+  )
+
+  const engineOverlayPayload: ChartOverlayPayload = useMemo(
+    () => ({
+      smcEvents: Array.isArray(engineState?.smcEvents) ? engineState.smcEvents : undefined,
+      dlmLevels: Array.isArray(engineState?.dlmLevels) ? engineState.dlmLevels : undefined,
+      zones: Array.isArray(engineState?.zones) ? engineState.zones : undefined,
+      liquidityEvents: Array.isArray(engineState?.liquidityEvents)
+        ? engineState.liquidityEvents
+        : undefined,
+      dlmConfluenceMarkers: Array.isArray(engineState?.dlmConfluenceMarkers)
+        ? engineState.dlmConfluenceMarkers
+        : undefined,
+      scoreMarkers: Array.isArray(engineState?.scoreMarkers)
+        ? engineState.scoreMarkers
+        : undefined,
+    }),
+    [engineState]
+  )
+
   const liveCandles = useMemo(() => {
+    if (engineCandlesFromPython.length > 0 || liveCandlesFromCandlesEndpoint.length > 0) {
+      return mergeCandlesByTime([
+        ...engineCandlesFromPython,
+        ...liveCandlesFromCandlesEndpoint,
+      ])
+    }
+
     if (historicalCandlesFromAlpaca.length > 0 || liveCandlesFromCandlesEndpoint.length > 0) {
       return mergeCandlesByTime([
         ...historicalCandlesFromAlpaca,
@@ -1270,6 +1362,7 @@ export default function EChartsCandlestickChart({
 
     return liveCandlesFromSignalsEndpoint
   }, [
+    engineCandlesFromPython,
     historicalCandlesFromAlpaca,
     liveCandlesFromCandlesEndpoint,
     liveCandlesFromSignalsEndpoint,
@@ -1290,6 +1383,7 @@ export default function EChartsCandlestickChart({
   // Allow live mode with 1 candle. This prevents the chart from reverting to samples
   // while waiting for the second or third webhook candle.
   const usingLiveCandles = stickyLiveCandles.length >= 1
+  const usingPythonEngine = engineCandlesFromPython.length > 0 && engineStatus === 'loaded'
 
   const symbolSampleCandles = useMemo(() => {
     return getSampleCandlesForSymbol(symbol)
@@ -1297,9 +1391,40 @@ export default function EChartsCandlestickChart({
 
   const baseCandles = usingLiveCandles ? stickyLiveCandles : symbolSampleCandles
 
-  const overlayPayload = useMemo(
+  const webhookOverlayPayload = useMemo(
     () => extractOverlayPayload(latestSignal),
     [latestSignal]
+  )
+
+  const overlayPayload: ChartOverlayPayload = useMemo(
+    () => ({
+      smcEvents:
+        engineOverlayPayload.smcEvents && engineOverlayPayload.smcEvents.length > 0
+          ? engineOverlayPayload.smcEvents
+          : webhookOverlayPayload.smcEvents,
+      dlmLevels:
+        engineOverlayPayload.dlmLevels && engineOverlayPayload.dlmLevels.length > 0
+          ? engineOverlayPayload.dlmLevels
+          : webhookOverlayPayload.dlmLevels,
+      zones:
+        engineOverlayPayload.zones && engineOverlayPayload.zones.length > 0
+          ? engineOverlayPayload.zones
+          : webhookOverlayPayload.zones,
+      liquidityEvents:
+        engineOverlayPayload.liquidityEvents && engineOverlayPayload.liquidityEvents.length > 0
+          ? engineOverlayPayload.liquidityEvents
+          : webhookOverlayPayload.liquidityEvents,
+      dlmConfluenceMarkers:
+        engineOverlayPayload.dlmConfluenceMarkers &&
+        engineOverlayPayload.dlmConfluenceMarkers.length > 0
+          ? engineOverlayPayload.dlmConfluenceMarkers
+          : webhookOverlayPayload.dlmConfluenceMarkers,
+      scoreMarkers:
+        engineOverlayPayload.scoreMarkers && engineOverlayPayload.scoreMarkers.length > 0
+          ? engineOverlayPayload.scoreMarkers
+          : webhookOverlayPayload.scoreMarkers,
+    }),
+    [engineOverlayPayload, webhookOverlayPayload]
   )
 
   const hasLiveOverlayPayload = Boolean(
@@ -1424,7 +1549,7 @@ export default function EChartsCandlestickChart({
                 ${item.axisValue}
               </div>
               <div style="color:#94a3b8;">${symbol} • ${timeframe} • ${candleMode}</div>
-              <div style="color:#64748b;">${usingLiveCandles ? (historicalCandlesFromAlpaca.length > 0 ? 'Alpaca history + live candles' : 'Live API candles') : 'Sample candles'}</div>
+              <div style="color:#64748b;">${usingLiveCandles ? (usingPythonEngine ? 'Python engine candles + live candles' : historicalCandlesFromAlpaca.length > 0 ? 'Alpaca history + live candles' : 'Live API candles') : 'Sample candles'}</div>
               <div style="margin-top:6px;color:#e5e7eb;">O&nbsp;&nbsp;${open}</div>
               <div style="color:#e5e7eb;">H&nbsp;&nbsp;${high}</div>
               <div style="color:#e5e7eb;">L&nbsp;&nbsp;${low}</div>
@@ -1591,6 +1716,7 @@ export default function EChartsCandlestickChart({
     activeDlmConfluenceMarkers,
     activeScoreMarkers,
     usingLiveCandles,
+    usingPythonEngine,
     recentCandles,
     historicalCandlesFromAlpaca,
   ])
@@ -1727,7 +1853,7 @@ export default function EChartsCandlestickChart({
                   : 'border-yellow-500/50 text-yellow-400'
               }`}
             >
-              {usingLiveCandles ? (historicalCandlesFromAlpaca.length > 0 ? 'Alpaca + Live Candles' : 'Live API Candles') : historicalStatus === 'loading' ? 'Loading History' : 'Sample Candles'}
+              {usingLiveCandles ? (usingPythonEngine ? 'Python SMC Engine' : historicalCandlesFromAlpaca.length > 0 ? 'Alpaca + Live Candles' : 'Live API Candles') : engineStatus === 'loading' ? 'Loading Engine' : historicalStatus === 'loading' ? 'Loading History' : 'Sample Candles'}
             </div>
 
             <div
@@ -1740,14 +1866,18 @@ export default function EChartsCandlestickChart({
               }`}
             >
               {hasLiveOverlayPayload
-                ? 'Live SMC/AlphaX'
+                ? usingPythonEngine
+                  ? 'Python SMC Live'
+                  : 'Live SMC/AlphaX'
                 : usingLiveCandles
-                  ? 'Awaiting SMC/AlphaX'
+                  ? usingPythonEngine
+                    ? 'Python SMC Empty'
+                    : 'Awaiting SMC/AlphaX'
                   : 'Sample Overlays'}
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3L' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3N' : 'Chart Engine v2'}
             </div>
           </div>
         )}
