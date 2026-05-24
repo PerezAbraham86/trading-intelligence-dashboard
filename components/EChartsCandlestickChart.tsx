@@ -204,6 +204,125 @@ function getSampleCandlesForSymbol(symbol: string): Candle[] {
   return spySampleCandles
 }
 
+
+const referenceOverlayTimes = [
+  '5/20 09:00',
+  '5/20 10:00',
+  '5/20 11:00',
+  '5/20 12:00',
+  '5/20 13:00',
+  '5/20 14:00',
+  '5/20 15:00',
+  '5/20 16:00',
+  '5/20 17:00',
+  '5/20 18:00',
+  '5/20 19:00',
+  '5/20 20:00',
+  '5/20 21:00',
+  '5/20 22:00',
+  '5/20 23:00',
+  '5/21 00:00',
+  '5/21 01:00',
+  '5/21 02:00',
+  '5/21 03:00',
+  '5/21 04:00',
+  '5/21 05:00',
+  '5/21 06:00',
+]
+
+const REFERENCE_OVERLAY_LOW = 75350
+const REFERENCE_OVERLAY_HIGH = 77930
+
+function getCandlePriceRange(candles: Candle[]) {
+  if (candles.length === 0) {
+    return {
+      low: REFERENCE_OVERLAY_LOW,
+      high: REFERENCE_OVERLAY_HIGH,
+    }
+  }
+
+  const lows = candles.map((candle) => candle.low)
+  const highs = candles.map((candle) => candle.high)
+  const low = Math.min(...lows)
+  const high = Math.max(...highs)
+  const range = Math.max(high - low, 0.00001)
+  const padding = range * 0.04
+
+  return {
+    low: low - padding,
+    high: high + padding,
+  }
+}
+
+function remapReferencePrice(price: number, candles: Candle[]) {
+  const range = getCandlePriceRange(candles)
+  const referenceRange = REFERENCE_OVERLAY_HIGH - REFERENCE_OVERLAY_LOW
+  const normalized = (price - REFERENCE_OVERLAY_LOW) / referenceRange
+  const mapped = range.low + normalized * (range.high - range.low)
+
+  return Number(mapped.toFixed(5))
+}
+
+function remapReferenceTime(time: string, candles: Candle[]) {
+  if (candles.length === 0) return time
+
+  const referenceIndex = referenceOverlayTimes.indexOf(time)
+
+  if (referenceIndex === -1) {
+    return candles[Math.min(candles.length - 1, Math.floor(candles.length / 2))].time
+  }
+
+  const targetIndex = Math.round(
+    (referenceIndex / Math.max(referenceOverlayTimes.length - 1, 1)) *
+      Math.max(candles.length - 1, 0)
+  )
+
+  return candles[Math.min(Math.max(targetIndex, 0), candles.length - 1)].time
+}
+
+function buildDemoOverlayPayload(candles: Candle[]): Required<ChartOverlayPayload> {
+  return {
+    smcEvents: sampleSmcEvents.map((event) => ({
+      ...event,
+      time: remapReferenceTime(event.time, candles),
+      fromTime: event.fromTime ? remapReferenceTime(event.fromTime, candles) : undefined,
+      price: remapReferencePrice(event.price, candles),
+    })),
+
+    dlmLevels: sampleDlmLevels.map((level) => ({
+      ...level,
+      price: remapReferencePrice(level.price, candles),
+    })),
+
+    zones: sampleZones.map((zone) => ({
+      ...zone,
+      startTime: remapReferenceTime(zone.startTime, candles),
+      endTime: remapReferenceTime(zone.endTime, candles),
+      top: remapReferencePrice(zone.top, candles),
+      bottom: remapReferencePrice(zone.bottom, candles),
+    })),
+
+    liquidityEvents: sampleLiquidityEvents.map((event) => ({
+      ...event,
+      time: remapReferenceTime(event.time, candles),
+      fromTime: event.fromTime ? remapReferenceTime(event.fromTime, candles) : undefined,
+      price: remapReferencePrice(event.price, candles),
+    })),
+
+    dlmConfluenceMarkers: sampleDlmConfluenceMarkers.map((marker) => ({
+      ...marker,
+      time: remapReferenceTime(marker.time, candles),
+      price: remapReferencePrice(marker.price, candles),
+    })),
+
+    scoreMarkers: sampleScoreMarkers.map((marker) => ({
+      ...marker,
+      time: remapReferenceTime(marker.time, candles),
+      price: remapReferencePrice(marker.price, candles),
+    })),
+  }
+}
+
 const sampleSmcEvents: SmcStructureEvent[] = [
   {
     time: '5/20 13:00',
@@ -1120,6 +1239,10 @@ export default function EChartsCandlestickChart({
 
   const baseCandles = usingLiveCandles ? liveCandles : symbolSampleCandles
 
+  const demoOverlayPayload = useMemo(() => {
+    return buildDemoOverlayPayload(baseCandles)
+  }, [baseCandles])
+
   const overlayPayload = useMemo(
     () => extractOverlayPayload(latestSignal),
     [latestSignal]
@@ -1128,33 +1251,33 @@ export default function EChartsCandlestickChart({
   const activeSmcEvents =
     overlayPayload.smcEvents && overlayPayload.smcEvents.length > 0
       ? overlayPayload.smcEvents
-      : sampleSmcEvents
+      : demoOverlayPayload.smcEvents
 
   const activeDlmLevels =
     overlayPayload.dlmLevels && overlayPayload.dlmLevels.length > 0
       ? overlayPayload.dlmLevels
-      : sampleDlmLevels
+      : demoOverlayPayload.dlmLevels
 
   const activeZones =
     overlayPayload.zones && overlayPayload.zones.length > 0
       ? overlayPayload.zones
-      : sampleZones
+      : demoOverlayPayload.zones
 
   const activeLiquidityEvents =
     overlayPayload.liquidityEvents && overlayPayload.liquidityEvents.length > 0
       ? overlayPayload.liquidityEvents
-      : sampleLiquidityEvents
+      : demoOverlayPayload.liquidityEvents
 
   const activeDlmConfluenceMarkers =
     overlayPayload.dlmConfluenceMarkers &&
     overlayPayload.dlmConfluenceMarkers.length > 0
       ? overlayPayload.dlmConfluenceMarkers
-      : sampleDlmConfluenceMarkers
+      : demoOverlayPayload.dlmConfluenceMarkers
 
   const activeScoreMarkers =
     overlayPayload.scoreMarkers && overlayPayload.scoreMarkers.length > 0
       ? overlayPayload.scoreMarkers
-      : sampleScoreMarkers
+      : demoOverlayPayload.scoreMarkers
 
   useEffect(() => {
     if (!chartRef.current) return
@@ -1508,7 +1631,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3G' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3G.1' : 'Chart Engine v2'}
             </div>
           </div>
         )}
