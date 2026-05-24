@@ -627,6 +627,26 @@ const sampleScoreMarkers: ScoreMarker[] = [
 const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1D']
 const candleModeOptions: CandleMode[] = ['Regular', 'Heikin Ashi']
 
+function normalizeTimeframe(value: any): string {
+  const tf = String(value ?? '').trim().toLowerCase()
+
+  if (tf === '1') return '1m'
+  if (tf === '3') return '3m'
+  if (tf === '5') return '5m'
+  if (tf === '15') return '15m'
+  if (tf === '30') return '30m'
+  if (tf === '45') return '45m'
+  if (tf === '60') return '1h'
+  if (tf === '120') return '2h'
+  if (tf === '180') return '3h'
+  if (tf === '240') return '4h'
+  if (tf === 'd' || tf === '1d') return '1d'
+  if (tf === 'w' || tf === '1w') return '1w'
+  if (tf === 'm' || tf === '1mo') return '1mo'
+
+  return tf
+}
+
 function toNumber(value: any): number | null {
   const parsed = Number(value)
 
@@ -669,12 +689,12 @@ function buildCandlesFromSignals(
   }
 
   const normalizedSymbol = String(selectedSymbol ?? '').toUpperCase()
-  const normalizedTimeframe = String(selectedTimeframe ?? '').toLowerCase()
+  const normalizedTimeframe = normalizeTimeframe(selectedTimeframe)
   const canonicalSelectedSymbol = getCanonicalSymbol(normalizedSymbol)
 
   const filtered = signals.filter((signal) => {
     const signalSymbol = String(signal.symbol ?? '').toUpperCase()
-    const signalTimeframe = String(signal.timeframe ?? '').toLowerCase()
+    const signalTimeframe = normalizeTimeframe(signal.timeframe)
     const canonicalSignalSymbol = getCanonicalSymbol(signalSymbol)
 
     const symbolMatch =
@@ -715,6 +735,16 @@ function buildCandlesFromSignals(
       }
     })
     .filter((candle): candle is Candle => candle !== null)
+    .sort((a, b) => {
+      const aTime = new Date(a.time).getTime()
+      const bTime = new Date(b.time).getTime()
+
+      if (Number.isNaN(aTime) || Number.isNaN(bTime)) {
+        return 0
+      }
+
+      return aTime - bTime
+    })
 
   return candles
 }
