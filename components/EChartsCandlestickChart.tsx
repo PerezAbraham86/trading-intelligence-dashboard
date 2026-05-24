@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 
 type Candle = {
@@ -88,11 +88,22 @@ type ScoreMarker = {
   grade?: 'A' | 'B' | 'C'
 }
 
+type ChartOverlayPayload = {
+  smcEvents?: SmcStructureEvent[]
+  dlmLevels?: DlmLevel[]
+  zones?: SmcZone[]
+  liquidityEvents?: LiquidityEvent[]
+  dlmConfluenceMarkers?: DlmConfluenceMarker[]
+  scoreMarkers?: ScoreMarker[]
+}
+
 type EChartsCandlestickChartProps = {
   heightClass?: string
   compact?: boolean
   chartTitle?: string
   enableAdvancedOverlays?: boolean
+  latestSignal?: any
+  recentSignals?: any[]
 }
 
 const GREEN = '#089981'
@@ -422,6 +433,115 @@ const sampleScoreMarkers: ScoreMarker[] = [
 
 const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1D']
 const candleModeOptions: CandleMode[] = ['Regular', 'Heikin Ashi']
+
+function toNumber(value: any): number | null {
+  const parsed = Number(value)
+
+  if (!Number.isFinite(parsed)) {
+    return null
+  }
+
+  return parsed
+}
+
+function formatSignalTime(value: any, fallbackIndex: number): string {
+  if (typeof value === 'string' && value.length > 0) {
+    return value
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const timestamp = value > 1000000000000 ? value : value * 1000
+    const date = new Date(timestamp)
+
+    if (!Number.isNaN(date.getTime())) {
+      const month = date.getMonth() + 1
+      const day = date.getDate()
+      const hour = date.getHours().toString().padStart(2, '0')
+      const minute = date.getMinutes().toString().padStart(2, '0')
+
+      return `${month}/${day} ${hour}:${minute}`
+    }
+  }
+
+  return `Live ${fallbackIndex + 1}`
+}
+
+function buildCandlesFromSignals(signals?: any[]): Candle[] {
+  if (!Array.isArray(signals) || signals.length === 0) {
+    return []
+  }
+
+  const candles = signals
+    .map((signal, index) => {
+      const open = toNumber(signal.open)
+      const high = toNumber(signal.high)
+      const low = toNumber(signal.low)
+      const close =
+        toNumber(signal.close) ??
+        toNumber(signal.current) ??
+        toNumber(signal.price)
+
+      if (open === null || high === null || low === null || close === null) {
+        return null
+      }
+
+      return {
+        time: formatSignalTime(signal.time ?? signal.timestamp ?? signal.createdAt, index),
+        open,
+        high,
+        low,
+        close,
+      }
+    })
+    .filter((candle): candle is Candle => candle !== null)
+
+  return candles
+}
+
+function safeParseJson(value: any): any {
+  if (!value) {
+    return null
+  }
+
+  if (typeof value === 'object') {
+    return value
+  }
+
+  if (typeof value !== 'string') {
+    return null
+  }
+
+  try {
+    return JSON.parse(value)
+  } catch {
+    return null
+  }
+}
+
+function extractOverlayPayload(latestSignal?: any): ChartOverlayPayload {
+  const smcPayload = safeParseJson(latestSignal?.smc)
+  const alphaxPayload = safeParseJson(latestSignal?.alphax)
+  const chartPayload = safeParseJson(latestSignal?.chartOverlays)
+
+  const merged = {
+    ...(chartPayload && typeof chartPayload === 'object' ? chartPayload : {}),
+    ...(smcPayload && typeof smcPayload === 'object' ? smcPayload : {}),
+    ...(alphaxPayload && typeof alphaxPayload === 'object' ? alphaxPayload : {}),
+  }
+
+  return {
+    smcEvents: Array.isArray(merged.smcEvents) ? merged.smcEvents : undefined,
+    dlmLevels: Array.isArray(merged.dlmLevels) ? merged.dlmLevels : undefined,
+    zones: Array.isArray(merged.zones) ? merged.zones : undefined,
+    liquidityEvents: Array.isArray(merged.liquidityEvents)
+      ? merged.liquidityEvents
+      : undefined,
+    dlmConfluenceMarkers: Array.isArray(merged.dlmConfluenceMarkers)
+      ? merged.dlmConfluenceMarkers
+      : undefined,
+    scoreMarkers: Array.isArray(merged.scoreMarkers) ? merged.scoreMarkers : undefined,
+  }
+}
 
 function convertToHeikinAshi(candles: Candle[]): Candle[] {
   if (candles.length === 0) return []
@@ -887,6 +1007,8 @@ export default function EChartsCandlestickChart({
   compact = false,
   chartTitle,
   enableAdvancedOverlays = true,
+  latestSignal,
+  recentSignals,
 }: EChartsCandlestickChartProps) {
   const chartRef = useRef<HTMLDivElement | null>(null)
   const chartInstance = useRef<echarts.ECharts | null>(null)
@@ -900,6 +1022,46 @@ export default function EChartsCandlestickChart({
   const [showLiquidity, setShowLiquidity] = useState(true)
   const [showScores, setShowScores] = useState(true)
 
+  const liveCandles = useMemo(() => buildCandlesFromSignals(recentSignals), [recentSignals])
+  const usingLiveCandles = liveCandles.length >= 3
+  const baseCandles = usingLiveCandles ? liveCandles : sampleCandles
+
+  const overlayPayload = useMemo(
+    () => extractOverlayPayload(latestSignal),
+    [latestSignal]
+  )
+
+  const activeSmcEvents =
+    overlayPayload.smcEvents && overlayPayload.smcEvents.length > 0
+      ? overlayPayload.smcEvents
+      : sampleSmcEvents
+
+  const activeDlmLevels =
+    overlayPayload.dlmLevels && overlayPayload.dlmLevels.length > 0
+      ? overlayPayload.dlmLevels
+      : sampleDlmLevels
+
+  const activeZones =
+    overlayPayload.zones && overlayPayload.zones.length > 0
+      ? overlayPayload.zones
+      : sampleZones
+
+  const activeLiquidityEvents =
+    overlayPayload.liquidityEvents && overlayPayload.liquidityEvents.length > 0
+      ? overlayPayload.liquidityEvents
+      : sampleLiquidityEvents
+
+  const activeDlmConfluenceMarkers =
+    overlayPayload.dlmConfluenceMarkers &&
+    overlayPayload.dlmConfluenceMarkers.length > 0
+      ? overlayPayload.dlmConfluenceMarkers
+      : sampleDlmConfluenceMarkers
+
+  const activeScoreMarkers =
+    overlayPayload.scoreMarkers && overlayPayload.scoreMarkers.length > 0
+      ? overlayPayload.scoreMarkers
+      : sampleScoreMarkers
+
   useEffect(() => {
     if (!chartRef.current) return
 
@@ -910,9 +1072,7 @@ export default function EChartsCandlestickChart({
     }
 
     const activeCandles =
-      candleMode === 'Heikin Ashi'
-        ? convertToHeikinAshi(sampleCandles)
-        : sampleCandles
+      candleMode === 'Heikin Ashi' ? convertToHeikinAshi(baseCandles) : baseCandles
 
     const times = activeCandles.map((c) => c.time)
 
@@ -967,6 +1127,7 @@ export default function EChartsCandlestickChart({
                 ${item.axisValue}
               </div>
               <div style="color:#94a3b8;">${symbol} • ${timeframe} • ${candleMode}</div>
+              <div style="color:#64748b;">${usingLiveCandles ? 'Live API candles' : 'Sample candles'}</div>
               <div style="margin-top:6px;color:#e5e7eb;">O&nbsp;&nbsp;${open}</div>
               <div style="color:#e5e7eb;">H&nbsp;&nbsp;${high}</div>
               <div style="color:#e5e7eb;">L&nbsp;&nbsp;${low}</div>
@@ -1043,7 +1204,7 @@ export default function EChartsCandlestickChart({
             silent: true,
             data:
               enableAdvancedOverlays && showZones
-                ? buildZoneMarkAreas(sampleZones, compact)
+                ? buildZoneMarkAreas(activeZones, compact)
                 : [],
           },
 
@@ -1052,10 +1213,10 @@ export default function EChartsCandlestickChart({
             symbol: 'none',
             data: enableAdvancedOverlays
               ? [
-                  ...(showSmc ? buildSmcMarkLines(sampleSmcEvents) : []),
-                  ...(showDlm ? buildDlmMarkLines(sampleDlmLevels, compact) : []),
+                  ...(showSmc ? buildSmcMarkLines(activeSmcEvents) : []),
+                  ...(showDlm ? buildDlmMarkLines(activeDlmLevels, compact) : []),
                   ...(showLiquidity
-                    ? buildLiquidityMarkLines(sampleLiquidityEvents, compact)
+                    ? buildLiquidityMarkLines(activeLiquidityEvents, compact)
                     : []),
                 ]
               : [],
@@ -1065,18 +1226,18 @@ export default function EChartsCandlestickChart({
             silent: true,
             data: enableAdvancedOverlays
               ? [
-                  ...(showSmc ? buildSmcMarkPoints(sampleSmcEvents, compact) : []),
+                  ...(showSmc ? buildSmcMarkPoints(activeSmcEvents, compact) : []),
                   ...(showLiquidity
-                    ? buildLiquidityMarkPoints(sampleLiquidityEvents, compact)
+                    ? buildLiquidityMarkPoints(activeLiquidityEvents, compact)
                     : []),
                   ...(showDlm
                     ? buildDlmConfluenceMarkPoints(
-                        sampleDlmConfluenceMarkers,
+                        activeDlmConfluenceMarkers,
                         compact
                       )
                     : []),
                   ...(showScores
-                    ? buildScoreMarkPoints(sampleScoreMarkers, compact)
+                    ? buildScoreMarkPoints(activeScoreMarkers, compact)
                     : []),
                 ]
               : [],
@@ -1107,6 +1268,14 @@ export default function EChartsCandlestickChart({
     showLiquidity,
     showScores,
     enableAdvancedOverlays,
+    baseCandles,
+    activeSmcEvents,
+    activeDlmLevels,
+    activeZones,
+    activeLiquidityEvents,
+    activeDlmConfluenceMarkers,
+    activeScoreMarkers,
+    usingLiveCandles,
   ])
 
   useEffect(() => {
@@ -1233,8 +1402,20 @@ export default function EChartsCandlestickChart({
         </div>
 
         {!compact && (
-          <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-            {enableAdvancedOverlays ? 'Chart Engine v3E' : 'Chart Engine v2'}
+          <div className="flex items-center gap-2">
+            <div
+              className={`rounded-full border px-3 py-1 text-sm ${
+                usingLiveCandles
+                  ? 'border-emerald-500/50 text-emerald-400'
+                  : 'border-yellow-500/50 text-yellow-400'
+              }`}
+            >
+              {usingLiveCandles ? 'Live API Candles' : 'Sample Candles'}
+            </div>
+
+            <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
+              {enableAdvancedOverlays ? 'Chart Engine v3F' : 'Chart Engine v2'}
+            </div>
           </div>
         )}
       </div>
