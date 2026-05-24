@@ -45,6 +45,24 @@ type SmcZone = {
   kind: ZoneKind
 }
 
+type LiquidityKind =
+  | 'eqh'
+  | 'eql'
+  | 'internal_sweep'
+  | 'swing_sweep'
+  | 'liquidity_pool'
+  | 'inducement'
+
+type LiquidityEvent = {
+  time: string
+  fromTime?: string
+  price: number
+  label: string
+  direction: 'bullish' | 'bearish' | 'neutral'
+  kind: LiquidityKind
+  touches?: number
+}
+
 type EChartsCandlestickChartProps = {
   heightClass?: string
   compact?: boolean
@@ -57,6 +75,8 @@ const RED = '#F23645'
 const BLUE = '#2157f3'
 const TEAL = '#26a69a'
 const LIGHT_RED = '#ff4d5e'
+const YELLOW = '#facc15'
+const PURPLE = '#a855f7'
 
 const sampleCandles: Candle[] = [
   { time: '5/20 09:00', open: 76450, close: 76680, low: 76380, high: 76750 },
@@ -213,6 +233,64 @@ const sampleZones: SmcZone[] = [
   },
 ]
 
+const sampleLiquidityEvents: LiquidityEvent[] = [
+  {
+    time: '5/20 15:00',
+    fromTime: '5/20 12:00',
+    price: 77100,
+    label: 'EQH',
+    direction: 'bearish',
+    kind: 'eqh',
+    touches: 2,
+  },
+  {
+    time: '5/21 02:00',
+    fromTime: '5/20 23:00',
+    price: 75840,
+    label: 'EQL',
+    direction: 'bullish',
+    kind: 'eql',
+    touches: 2,
+  },
+  {
+    time: '5/20 18:00',
+    price: 77910,
+    label: 'LSH',
+    direction: 'bearish',
+    kind: 'swing_sweep',
+  },
+  {
+    time: '5/21 01:00',
+    price: 75590,
+    label: 'iLS',
+    direction: 'bullish',
+    kind: 'internal_sweep',
+  },
+  {
+    time: '5/21 03:00',
+    price: 75350,
+    label: 'Sell-Side Pool',
+    direction: 'bullish',
+    kind: 'liquidity_pool',
+    touches: 3,
+  },
+  {
+    time: '5/20 17:00',
+    price: 77930,
+    label: 'Buy-Side Pool',
+    direction: 'bearish',
+    kind: 'liquidity_pool',
+    touches: 3,
+  },
+  {
+    time: '5/20 20:00',
+    price: 77500,
+    label: 'Inducement',
+    direction: 'bearish',
+    kind: 'inducement',
+  },
+]
+
 const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1D']
 const candleModeOptions: CandleMode[] = ['Regular', 'Heikin Ashi']
 
@@ -253,6 +331,14 @@ function getStructureColor(direction: StructureDirection) {
 function getDlmColor(direction: DlmLevel['direction']) {
   if (direction === 'bullish') return GREEN
   if (direction === 'bearish') return RED
+  return BLUE
+}
+
+function getLiquidityColor(event: LiquidityEvent) {
+  if (event.kind === 'inducement') return YELLOW
+  if (event.kind === 'liquidity_pool') return PURPLE
+  if (event.direction === 'bullish') return GREEN
+  if (event.direction === 'bearish') return RED
   return BLUE
 }
 
@@ -447,6 +533,116 @@ function buildZoneMarkAreas(zones: SmcZone[], compact: boolean) {
   })
 }
 
+function buildLiquidityMarkLines(events: LiquidityEvent[], compact: boolean) {
+  return events
+    .filter(
+      (event) =>
+        event.kind === 'eqh' ||
+        event.kind === 'eql' ||
+        event.kind === 'liquidity_pool'
+    )
+    .map((event) => {
+      const color = getLiquidityColor(event)
+
+      if (event.fromTime) {
+        return [
+          {
+            coord: [event.fromTime, event.price],
+            lineStyle: {
+              color,
+              width: event.kind === 'liquidity_pool' ? 2 : 1,
+              type: event.kind === 'liquidity_pool' ? 'dashed' : 'dotted',
+              opacity: event.kind === 'liquidity_pool' ? 0.7 : 0.85,
+            },
+            symbol: 'none',
+          },
+          {
+            coord: [event.time, event.price],
+            symbol: 'none',
+            label: {
+              show: !compact,
+              formatter:
+                event.touches && event.touches > 1
+                  ? `${event.label} x${event.touches}`
+                  : event.label,
+              color,
+              fontSize: 10,
+              fontWeight: 700,
+              backgroundColor: 'rgba(15, 17, 21, 0.88)',
+              borderColor: color,
+              borderWidth: 1,
+              borderRadius: 4,
+              padding: [3, 6],
+            },
+          },
+        ]
+      }
+
+      return {
+        yAxis: event.price,
+        name: event.label,
+        symbol: 'none',
+        lineStyle: {
+          color,
+          width: 1.5,
+          type: 'dashed',
+          opacity: 0.65,
+        },
+        label: {
+          show: !compact,
+          formatter:
+            event.touches && event.touches > 1
+              ? `${event.label} x${event.touches}`
+              : event.label,
+          color,
+          fontSize: 10,
+          fontWeight: 700,
+          position: 'end',
+          backgroundColor: 'rgba(15, 17, 21, 0.88)',
+          borderColor: color,
+          borderWidth: 1,
+          borderRadius: 4,
+          padding: [3, 6],
+        },
+      }
+    })
+}
+
+function buildLiquidityMarkPoints(events: LiquidityEvent[], compact: boolean) {
+  return events
+    .filter(
+      (event) =>
+        event.kind === 'internal_sweep' ||
+        event.kind === 'swing_sweep' ||
+        event.kind === 'inducement'
+    )
+    .map((event) => {
+      const color = getLiquidityColor(event)
+      const isTopLabel = event.direction === 'bearish'
+
+      return {
+        name: event.label,
+        coord: [event.time, event.price],
+        value: event.label,
+        symbol: event.kind === 'inducement' ? 'diamond' : 'pin',
+        symbolSize: compact ? 26 : event.kind === 'inducement' ? 34 : 38,
+        symbolRotate: isTopLabel ? 0 : 180,
+        itemStyle: {
+          color: 'rgba(15, 17, 21, 0.95)',
+          borderColor: color,
+          borderWidth: 1,
+        },
+        label: {
+          show: true,
+          formatter: event.label,
+          color,
+          fontSize: compact ? 8 : 10,
+          fontWeight: 700,
+        },
+      }
+    })
+}
+
 export default function EChartsCandlestickChart({
   heightClass = 'h-[650px]',
   compact = false,
@@ -462,6 +658,7 @@ export default function EChartsCandlestickChart({
   const [showSmc, setShowSmc] = useState(true)
   const [showDlm, setShowDlm] = useState(true)
   const [showZones, setShowZones] = useState(true)
+  const [showLiquidity, setShowLiquidity] = useState(true)
 
   useEffect(() => {
     if (!chartRef.current) return
@@ -617,16 +814,23 @@ export default function EChartsCandlestickChart({
               ? [
                   ...(showSmc ? buildSmcMarkLines(sampleSmcEvents) : []),
                   ...(showDlm ? buildDlmMarkLines(sampleDlmLevels, compact) : []),
+                  ...(showLiquidity
+                    ? buildLiquidityMarkLines(sampleLiquidityEvents, compact)
+                    : []),
                 ]
               : [],
           },
 
           markPoint: {
             silent: true,
-            data:
-              enableAdvancedOverlays && showSmc
-                ? buildSmcMarkPoints(sampleSmcEvents, compact)
-                : [],
+            data: enableAdvancedOverlays
+              ? [
+                  ...(showSmc ? buildSmcMarkPoints(sampleSmcEvents, compact) : []),
+                  ...(showLiquidity
+                    ? buildLiquidityMarkPoints(sampleLiquidityEvents, compact)
+                    : []),
+                ]
+              : [],
           },
         },
       ],
@@ -651,6 +855,7 @@ export default function EChartsCandlestickChart({
     showSmc,
     showDlm,
     showZones,
+    showLiquidity,
     enableAdvancedOverlays,
   ])
 
@@ -740,6 +945,18 @@ export default function EChartsCandlestickChart({
 
               <button
                 type="button"
+                onClick={() => setShowLiquidity((value) => !value)}
+                className={`rounded-md border px-3 py-1.5 text-sm font-semibold ${
+                  showLiquidity
+                    ? 'border-yellow-500/50 bg-yellow-500/10 text-yellow-300'
+                    : 'border-dark-700 bg-[#151922] text-gray-400'
+                }`}
+              >
+                Liquidity
+              </button>
+
+              <button
+                type="button"
                 onClick={() => setShowDlm((value) => !value)}
                 className={`rounded-md border px-3 py-1.5 text-sm font-semibold ${
                   showDlm
@@ -755,7 +972,7 @@ export default function EChartsCandlestickChart({
 
         {!compact && (
           <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-            {enableAdvancedOverlays ? 'Chart Engine v3B' : 'Chart Engine v2'}
+            {enableAdvancedOverlays ? 'Chart Engine v3C' : 'Chart Engine v2'}
           </div>
         )}
       </div>
