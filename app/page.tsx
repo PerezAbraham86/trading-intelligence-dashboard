@@ -19,6 +19,7 @@ export default function Dashboard() {
   const {
     latestSignal,
     recentSignals,
+    recentCandles,
     connectionStatus,
     lastUpdateTime,
     apiBaseUrl,
@@ -71,6 +72,7 @@ export default function Dashboard() {
             enableAdvancedOverlays
             latestSignal={latestSignal}
             recentSignals={recentSignals}
+            recentCandles={recentCandles}
           />
 
           {/* Two Smaller Charts */}
@@ -82,6 +84,7 @@ export default function Dashboard() {
               enableAdvancedOverlays={false}
               latestSignal={latestSignal}
               recentSignals={recentSignals}
+              recentCandles={recentCandles}
             />
 
             <EChartsCandlestickChart
@@ -91,6 +94,7 @@ export default function Dashboard() {
               enableAdvancedOverlays={false}
               latestSignal={latestSignal}
               recentSignals={recentSignals}
+              recentCandles={recentCandles}
             />
           </div>
         </div>
