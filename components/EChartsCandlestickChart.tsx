@@ -139,6 +139,10 @@ type EChartsCandlestickChartProps = {
   compact?: boolean
   chartTitle?: string
   enableAdvancedOverlays?: boolean
+  defaultSymbol?: string
+  defaultTimeframe?: string
+  defaultCandleMode?: CandleMode
+  allowCompactHistory?: boolean
   latestSignal?: any
   recentSignals?: any[]
   recentCandles?: any[]
@@ -178,7 +182,7 @@ const SHOW_LIVE_PRICE_LINE = true
 
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
 
-const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1D']
+const timeframeOptions = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1D']
 const candleModeOptions: CandleMode[] = ['Regular', 'Heikin Ashi']
 
 const sampleCandles: Candle[] = [
@@ -221,6 +225,25 @@ function normalizeTimeframe(value: any): string {
   if (tf === 'w' || tf === '1w') return '1w'
 
   return tf
+}
+
+function normalizeDefaultSymbol(value: any, fallback = 'BTCUSD'): string {
+  const normalized = normalizeSymbol(value || fallback)
+
+  if (normalized === 'MES1' || normalized === 'MES1!') return 'MES1!'
+  if (normalized === 'ES1' || normalized === 'ES1!') return 'ES1!'
+  if (normalized.includes('MES')) return 'MES1!'
+  if (normalized.includes('ES') && !normalized.includes('MES')) return 'ES1!'
+  if (normalized.includes('SPY')) return 'SPY'
+  if (normalized.includes('ETH')) return 'ETHUSD'
+  if (normalized.includes('BTC')) return 'BTCUSD'
+
+  return normalized || fallback
+}
+
+function normalizeDefaultTimeframe(value: any, fallback = '1m'): string {
+  const normalized = normalizeTimeframe(value || fallback)
+  return timeframeOptions.includes(normalized) ? normalized : fallback
 }
 
 function normalizeSymbol(value: any): string {
@@ -1707,6 +1730,10 @@ export default function EChartsCandlestickChart({
   compact = false,
   chartTitle,
   enableAdvancedOverlays = true,
+  defaultSymbol,
+  defaultTimeframe = '1m',
+  defaultCandleMode = 'Heikin Ashi',
+  allowCompactHistory = true,
   latestSignal,
   recentSignals,
   recentCandles,
@@ -1714,9 +1741,18 @@ export default function EChartsCandlestickChart({
   const chartRef = useRef<HTMLDivElement | null>(null)
   const chartInstance = useRef<echarts.ECharts | null>(null)
 
-  const [symbol, setSymbol] = useState(() => (compact ? 'SPY' : 'BTCUSD'))
-  const [timeframe, setTimeframe] = useState('1m')
-  const [candleMode, setCandleMode] = useState<CandleMode>('Heikin Ashi')
+  const initialSymbol = normalizeDefaultSymbol(
+    defaultSymbol ?? (compact ? 'SPY' : latestSignal?.symbol),
+    compact ? 'SPY' : 'BTCUSD'
+  )
+  const initialTimeframe = normalizeDefaultTimeframe(defaultTimeframe ?? latestSignal?.timeframe, '1m')
+  const initialCandleMode = candleModeOptions.includes(defaultCandleMode)
+    ? defaultCandleMode
+    : 'Heikin Ashi'
+
+  const [symbol, setSymbol] = useState(initialSymbol)
+  const [timeframe, setTimeframe] = useState(initialTimeframe)
+  const [candleMode, setCandleMode] = useState<CandleMode>(initialCandleMode)
   const [showSmc, setShowSmc] = useState(true)
   const [showDlm, setShowDlm] = useState(true)
   const [showZones, setShowZones] = useState(true)
@@ -1728,6 +1764,28 @@ export default function EChartsCandlestickChart({
   const [engineStatus, setEngineStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle')
   const [historicalCandles, setHistoricalCandles] = useState<any[]>([])
   const [historicalStatus, setHistoricalStatus] = useState<'idle' | 'loading' | 'loaded' | 'unavailable' | 'error'>('idle')
+
+  useEffect(() => {
+    const nextSymbol = normalizeDefaultSymbol(
+      defaultSymbol ?? (compact ? symbol : latestSignal?.symbol),
+      compact ? symbol : 'BTCUSD'
+    )
+
+    if (nextSymbol && nextSymbol !== symbol) {
+      setSymbol(nextSymbol)
+    }
+  }, [defaultSymbol, latestSignal?.symbol])
+
+  useEffect(() => {
+    const nextTimeframe = normalizeDefaultTimeframe(
+      defaultTimeframe ?? (compact ? timeframe : latestSignal?.timeframe),
+      timeframe || '1m'
+    )
+
+    if (nextTimeframe && nextTimeframe !== timeframe) {
+      setTimeframe(nextTimeframe)
+    }
+  }, [defaultTimeframe, latestSignal?.timeframe])
 
   useEffect(() => {
     let cancelled = false
@@ -1780,7 +1838,7 @@ export default function EChartsCandlestickChart({
     let cancelled = false
 
     async function fetchHistoricalCandles() {
-      if (compact) return
+      if (compact && !allowCompactHistory) return
 
       setHistoricalStatus('loading')
 
@@ -1824,7 +1882,7 @@ export default function EChartsCandlestickChart({
     return () => {
       cancelled = true
     }
-  }, [symbol, timeframe, compact])
+  }, [symbol, timeframe, compact, allowCompactHistory])
 
   const engineCandles = useMemo(
     () =>
