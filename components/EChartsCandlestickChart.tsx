@@ -154,6 +154,11 @@ const MAX_FULL_LIQUIDITY_EVENTS = 40
 const MAX_CLEAN_SCORE_MARKERS = 2
 const MAX_FULL_SCORE_MARKERS = 12
 
+// Reserved empty x-axis space between live candles and the right liquidity profile.
+// This keeps future Ghost Candles from colliding with AlphaX / liquidity profile bars.
+const GHOST_CANDLE_RESERVED_SLOTS = 14
+const RIGHT_PROFILE_SLOT_COUNT = 56
+
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
 
 const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1D']
@@ -1579,11 +1584,15 @@ export default function EChartsCandlestickChart({
     const showRightProfile =
       enableAdvancedOverlays && showDlm && !compact && alphaProfileBins.length > 0
 
-    const profileSlots = showRightProfile
-      ? Array.from({ length: 64 }, (_, index) => `__profile_${index + 1}`)
+    const ghostGapSlots = !compact
+      ? Array.from({ length: GHOST_CANDLE_RESERVED_SLOTS }, (_, index) => `__ghost_gap_${index + 1}`)
       : []
 
-    const xAxisData = [...candleTimes, ...profileSlots]
+    const profileSlots = showRightProfile
+      ? Array.from({ length: RIGHT_PROFILE_SLOT_COUNT }, (_, index) => `__profile_${index + 1}`)
+      : []
+
+    const xAxisData = [...candleTimes, ...ghostGapSlots, ...profileSlots]
 
     const candleData = activeCandles.map((c) => [
       c.open,
@@ -1646,7 +1655,12 @@ export default function EChartsCandlestickChart({
         formatter: (params: any) => {
           const item = Array.isArray(params) ? params[0] : params
 
-          if (!item || !item.data || String(item.axisValue).startsWith('__profile_')) return ''
+          if (
+            !item ||
+            !item.data ||
+            String(item.axisValue).startsWith('__profile_') ||
+            String(item.axisValue).startsWith('__ghost_gap_')
+          ) return ''
 
           const data = item.data as number[]
           const open = data[1]
@@ -1691,7 +1705,8 @@ export default function EChartsCandlestickChart({
           color: '#94a3b8',
           fontSize: compact ? 8 : 11,
           formatter: (value: string) => {
-            if (String(value).startsWith('__profile_')) return ''
+            const text = String(value)
+            if (text.startsWith('__profile_') || text.startsWith('__ghost_gap_')) return ''
             return shortAxisLabel(value)
           },
         },
@@ -1984,7 +1999,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3S' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3T' : 'Chart Engine v2'}
             </div>
           </div>
         )}
