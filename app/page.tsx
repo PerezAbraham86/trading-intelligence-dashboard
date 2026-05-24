@@ -32,6 +32,9 @@ export default function Dashboard() {
     return null
   }
 
+  const maxSignalsToShow = 25
+  const visibleRecentSignals = recentSignals.slice(0, maxSignalsToShow)
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-dark-900 via-dark-800 to-dark-900 p-6">
       {/* Header */}
@@ -109,7 +112,7 @@ export default function Dashboard() {
         <GhostCandleProjection signal={latestSignal} />
       </div>
 
-      <RecentSignalsTable signals={recentSignals} />
+      <RecentSignalsTable signals={visibleRecentSignals} />
 
       {/* Footer */}
       <motion.div
