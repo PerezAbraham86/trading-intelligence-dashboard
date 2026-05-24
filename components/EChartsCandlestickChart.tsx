@@ -1179,6 +1179,11 @@ export default function EChartsCandlestickChart({
   const chartRef = useRef<HTMLDivElement | null>(null)
   const chartInstance = useRef<echarts.ECharts | null>(null)
 
+  const zoomStateRef = useRef({
+    start: 0,
+    end: 100,
+  })
+
   const [symbol, setSymbol] = useState('SPY')
   const [timeframe, setTimeframe] = useState('1m')
   const [candleMode, setCandleMode] = useState<CandleMode>('Heikin Ashi')
@@ -1471,8 +1476,8 @@ export default function EChartsCandlestickChart({
         {
           type: 'inside',
           xAxisIndex: 0,
-          start: 0,
-          end: 100,
+          start: zoomStateRef.current.start,
+          end: zoomStateRef.current.end,
           zoomOnMouseWheel: true,
           moveOnMouseMove: true,
           moveOnMouseWheel: false,
@@ -1538,7 +1543,25 @@ export default function EChartsCandlestickChart({
       ],
     }
 
-    chartInstance.current.setOption(option, true)
+    chartInstance.current.off('dataZoom')
+
+    chartInstance.current.on('dataZoom', (event: any) => {
+      const batch = event?.batch?.[0]
+      const start = batch?.start ?? event?.start
+      const end = batch?.end ?? event?.end
+
+      if (typeof start === 'number' && typeof end === 'number') {
+        zoomStateRef.current = {
+          start,
+          end,
+        }
+      }
+    })
+
+    chartInstance.current.setOption(option, {
+      notMerge: false,
+      replaceMerge: ['series'],
+    })
 
     const resize = () => {
       chartInstance.current?.resize()
