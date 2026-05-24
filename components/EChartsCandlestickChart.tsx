@@ -104,6 +104,7 @@ type EChartsCandlestickChartProps = {
   enableAdvancedOverlays?: boolean
   latestSignal?: any
   recentSignals?: any[]
+  recentCandles?: any[]
 }
 
 const GREEN = '#089981'
@@ -118,222 +119,114 @@ const ORANGE = '#fb923c'
 const PINK = '#f472b6'
 const GRAY = '#94a3b8'
 
-const spySampleCandles: Candle[] = [
-  { time: '5/20 09:00', open: 529.1, close: 529.8, low: 528.8, high: 530.2 },
-  { time: '5/20 10:00', open: 529.8, close: 530.4, low: 529.5, high: 530.9 },
-  { time: '5/20 11:00', open: 530.4, close: 529.7, low: 529.2, high: 530.6 },
-  { time: '5/20 12:00', open: 529.7, close: 531.1, low: 529.6, high: 531.4 },
-  { time: '5/20 13:00', open: 531.1, close: 531.9, low: 530.8, high: 532.2 },
-  { time: '5/20 14:00', open: 531.9, close: 531.3, low: 530.9, high: 532.1 },
-  { time: '5/20 15:00', open: 531.3, close: 532.6, low: 531.0, high: 533.0 },
-  { time: '5/20 16:00', open: 532.6, close: 532.2, low: 531.7, high: 532.9 },
-  { time: '5/20 17:00', open: 532.2, close: 533.5, low: 531.9, high: 533.8 },
-  { time: '5/20 18:00', open: 533.5, close: 532.8, low: 532.4, high: 533.9 },
-  { time: '5/20 19:00', open: 532.8, close: 531.6, low: 531.2, high: 533.0 },
-  { time: '5/20 20:00', open: 531.6, close: 530.7, low: 530.2, high: 531.9 },
-  { time: '5/20 21:00', open: 530.7, close: 529.9, low: 529.4, high: 531.0 },
-  { time: '5/20 22:00', open: 529.9, close: 530.8, low: 529.6, high: 531.2 },
-  { time: '5/20 23:00', open: 530.8, close: 531.7, low: 530.5, high: 532.0 },
-  { time: '5/21 00:00', open: 531.7, close: 532.4, low: 531.3, high: 532.7 },
+const sampleCandles: Candle[] = [
+  { time: '5/20 09:00', open: 76450, close: 76680, low: 76380, high: 76750 },
+  { time: '5/20 10:00', open: 76680, close: 76520, low: 76420, high: 76720 },
+  { time: '5/20 11:00', open: 76520, close: 76810, low: 76490, high: 76890 },
+  { time: '5/20 12:00', open: 76810, close: 77020, low: 76720, high: 77100 },
+  { time: '5/20 13:00', open: 77020, close: 76910, low: 76840, high: 77140 },
+  { time: '5/20 14:00', open: 76910, close: 77280, low: 76860, high: 77340 },
+  { time: '5/20 15:00', open: 77280, close: 77150, low: 77090, high: 77410 },
+  { time: '5/20 16:00', open: 77150, close: 77520, low: 77080, high: 77610 },
+  { time: '5/20 17:00', open: 77520, close: 77840, low: 77480, high: 77930 },
+  { time: '5/20 18:00', open: 77840, close: 77660, low: 77580, high: 77910 },
+  { time: '5/20 19:00', open: 77660, close: 77420, low: 77360, high: 77740 },
+  { time: '5/20 20:00', open: 77420, close: 77180, low: 77090, high: 77500 },
+  { time: '5/20 21:00', open: 77180, close: 76900, low: 76820, high: 77240 },
+  { time: '5/20 22:00', open: 76900, close: 76640, low: 76550, high: 76980 },
+  { time: '5/20 23:00', open: 76640, close: 76280, low: 76120, high: 76710 },
+  { time: '5/21 00:00', open: 76280, close: 75940, low: 75840, high: 76320 },
+  { time: '5/21 01:00', open: 75940, close: 75680, low: 75590, high: 76020 },
+  { time: '5/21 02:00', open: 75680, close: 75420, low: 75380, high: 75760 },
+  { time: '5/21 03:00', open: 75420, close: 75880, low: 75350, high: 75960 },
+  { time: '5/21 04:00', open: 75880, close: 76240, low: 75810, high: 76380 },
+  { time: '5/21 05:00', open: 76240, close: 76060, low: 75940, high: 76310 },
+  { time: '5/21 06:00', open: 76060, close: 76580, low: 76020, high: 76690 },
 ]
 
-const btcSampleCandles: Candle[] = [
-  { time: '5/20 09:00', open: 106250, close: 106780, low: 105950, high: 107100 },
-  { time: '5/20 10:00', open: 106780, close: 106420, low: 106100, high: 107020 },
-  { time: '5/20 11:00', open: 106420, close: 107350, low: 106260, high: 107820 },
-  { time: '5/20 12:00', open: 107350, close: 108120, low: 107000, high: 108450 },
-  { time: '5/20 13:00', open: 108120, close: 107780, low: 107300, high: 108700 },
-  { time: '5/20 14:00', open: 107780, close: 108950, low: 107550, high: 109240 },
-  { time: '5/20 15:00', open: 108950, close: 108300, low: 107980, high: 109400 },
-  { time: '5/20 16:00', open: 108300, close: 109180, low: 108020, high: 109620 },
-  { time: '5/20 17:00', open: 109180, close: 110020, low: 108900, high: 110450 },
-  { time: '5/20 18:00', open: 110020, close: 109300, low: 108850, high: 110200 },
-  { time: '5/20 19:00', open: 109300, close: 108450, low: 108100, high: 109640 },
-  { time: '5/20 20:00', open: 108450, close: 107620, low: 107250, high: 108900 },
-  { time: '5/20 21:00', open: 107620, close: 106980, low: 106500, high: 108000 },
-  { time: '5/20 22:00', open: 106980, close: 107850, low: 106700, high: 108220 },
-  { time: '5/20 23:00', open: 107850, close: 108670, low: 107400, high: 109100 },
-  { time: '5/21 00:00', open: 108670, close: 109420, low: 108200, high: 109850 },
-]
+function normalizeTimeframe(value: any): string {
+  const tf = String(value ?? '').trim().toLowerCase()
 
-const ethSampleCandles: Candle[] = [
-  { time: '5/20 09:00', open: 3850, close: 3884, low: 3825, high: 3902 },
-  { time: '5/20 10:00', open: 3884, close: 3862, low: 3848, high: 3896 },
-  { time: '5/20 11:00', open: 3862, close: 3915, low: 3850, high: 3938 },
-  { time: '5/20 12:00', open: 3915, close: 3952, low: 3902, high: 3970 },
-  { time: '5/20 13:00', open: 3952, close: 3936, low: 3918, high: 3968 },
-  { time: '5/20 14:00', open: 3936, close: 3984, low: 3920, high: 4004 },
-  { time: '5/20 15:00', open: 3984, close: 3962, low: 3945, high: 3998 },
-  { time: '5/20 16:00', open: 3962, close: 4012, low: 3950, high: 4035 },
-  { time: '5/20 17:00', open: 4012, close: 4055, low: 4005, high: 4078 },
-  { time: '5/20 18:00', open: 4055, close: 4020, low: 4002, high: 4064 },
-  { time: '5/20 19:00', open: 4020, close: 3988, low: 3970, high: 4033 },
-  { time: '5/20 20:00', open: 3988, close: 3950, low: 3934, high: 4001 },
-  { time: '5/20 21:00', open: 3950, close: 3924, low: 3908, high: 3962 },
-  { time: '5/20 22:00', open: 3924, close: 3968, low: 3912, high: 3984 },
-  { time: '5/20 23:00', open: 3968, close: 4005, low: 3955, high: 4022 },
-  { time: '5/21 00:00', open: 4005, close: 4040, low: 3992, high: 4060 },
-]
+  if (tf === '1') return '1m'
+  if (tf === '3') return '3m'
+  if (tf === '5') return '5m'
+  if (tf === '15') return '15m'
+  if (tf === '30') return '30m'
+  if (tf === '60') return '1h'
+  if (tf === '120') return '2h'
+  if (tf === '240') return '4h'
+  if (tf === 'd' || tf === '1d') return '1d'
+  if (tf === 'w' || tf === '1w') return '1w'
 
-const esSampleCandles: Candle[] = [
-  { time: '5/20 09:00', open: 5940.25, close: 5948.5, low: 5936.25, high: 5952.25 },
-  { time: '5/20 10:00', open: 5948.5, close: 5955.75, low: 5944.5, high: 5959.25 },
-  { time: '5/20 11:00', open: 5955.75, close: 5949.25, low: 5945.0, high: 5958.0 },
-  { time: '5/20 12:00', open: 5949.25, close: 5961.5, low: 5948.0, high: 5965.25 },
-  { time: '5/20 13:00', open: 5961.5, close: 5968.75, low: 5958.25, high: 5972.0 },
-  { time: '5/20 14:00', open: 5968.75, close: 5962.25, low: 5957.75, high: 5970.5 },
-  { time: '5/20 15:00', open: 5962.25, close: 5976.0, low: 5959.0, high: 5980.0 },
-  { time: '5/20 16:00', open: 5976.0, close: 5971.25, low: 5966.0, high: 5979.25 },
-  { time: '5/20 17:00', open: 5971.25, close: 5984.75, low: 5969.5, high: 5988.25 },
-  { time: '5/20 18:00', open: 5984.75, close: 5977.25, low: 5972.25, high: 5987.5 },
-  { time: '5/20 19:00', open: 5977.25, close: 5965.5, low: 5960.25, high: 5980.0 },
-  { time: '5/20 20:00', open: 5965.5, close: 5956.75, low: 5952.0, high: 5969.25 },
-  { time: '5/20 21:00', open: 5956.75, close: 5948.25, low: 5944.5, high: 5960.25 },
-  { time: '5/20 22:00', open: 5948.25, close: 5957.5, low: 5945.75, high: 5961.0 },
-  { time: '5/20 23:00', open: 5957.5, close: 5966.75, low: 5954.25, high: 5970.0 },
-  { time: '5/21 00:00', open: 5966.75, close: 5974.25, low: 5962.25, high: 5978.0 },
-]
+  return tf
+}
 
-function getCanonicalSymbol(symbol: string): string {
-  const normalized = String(symbol ?? '').toUpperCase().replace(/^.*:/, '')
+function normalizeSymbol(value: any): string {
+  return String(value ?? '')
+    .trim()
+    .toUpperCase()
+    .replace('CME_MINI:', '')
+    .replace('CME:', '')
+    .replace('BINANCE:', '')
+    .replace('COINBASE:', '')
+    .replace('CRYPTO:', '')
+}
 
-  if (normalized.includes('MES')) return 'MES'
-  if (normalized.includes('ES')) return 'ES'
-  if (normalized.includes('BTC')) return 'BTC'
-  if (normalized.includes('ETH')) return 'ETH'
-  if (normalized.includes('SPY')) return 'SPY'
+function symbolsMatch(signalSymbolRaw: any, selectedSymbolRaw: any): boolean {
+  const signalSymbol = normalizeSymbol(signalSymbolRaw)
+  const selectedSymbol = normalizeSymbol(selectedSymbolRaw)
 
-  return normalized
+  if (!signalSymbol || !selectedSymbol) return false
+  if (signalSymbol === selectedSymbol) return true
+
+  if (selectedSymbol === 'MES1!' && signalSymbol.includes('MES')) return true
+  if (selectedSymbol === 'ES1!' && signalSymbol.includes('ES')) return true
+  if (selectedSymbol === 'BTCUSD' && signalSymbol.includes('BTC')) return true
+  if (selectedSymbol === 'ETHUSD' && signalSymbol.includes('ETH')) return true
+  if (selectedSymbol === 'SPY' && signalSymbol.includes('SPY')) return true
+
+  return false
+}
+
+function scaleCandlesForSymbol(candles: Candle[], symbol: string): Candle[] {
+  const normalized = normalizeSymbol(symbol)
+
+  if (normalized.includes('BTC')) return candles
+
+  let targetBase = 6000
+  let rangeMult = 0.002
+
+  if (normalized.includes('ETH')) {
+    targetBase = 3800
+    rangeMult = 0.003
+  } else if (normalized.includes('MES') || normalized.includes('ES')) {
+    targetBase = 6000
+    rangeMult = 0.0012
+  } else if (normalized.includes('SPY')) {
+    targetBase = 530
+    rangeMult = 0.0018
+  }
+
+  const firstClose = candles[0]?.close ?? 1
+
+  return candles.map((candle) => {
+    const openRatio = (candle.open - firstClose) / firstClose
+    const highRatio = (candle.high - firstClose) / firstClose
+    const lowRatio = (candle.low - firstClose) / firstClose
+    const closeRatio = (candle.close - firstClose) / firstClose
+
+    return {
+      time: candle.time,
+      open: Number((targetBase * (1 + openRatio * rangeMult * 100)).toFixed(2)),
+      high: Number((targetBase * (1 + highRatio * rangeMult * 100)).toFixed(2)),
+      low: Number((targetBase * (1 + lowRatio * rangeMult * 100)).toFixed(2)),
+      close: Number((targetBase * (1 + closeRatio * rangeMult * 100)).toFixed(2)),
+    }
+  })
 }
 
 function getSampleCandlesForSymbol(symbol: string): Candle[] {
-  const canonical = getCanonicalSymbol(symbol)
-
-  if (canonical === 'BTC') return btcSampleCandles
-  if (canonical === 'ETH') return ethSampleCandles
-  if (canonical === 'MES') return esSampleCandles
-  if (canonical === 'ES') return esSampleCandles
-
-  return spySampleCandles
-}
-
-
-const referenceOverlayTimes = [
-  '5/20 09:00',
-  '5/20 10:00',
-  '5/20 11:00',
-  '5/20 12:00',
-  '5/20 13:00',
-  '5/20 14:00',
-  '5/20 15:00',
-  '5/20 16:00',
-  '5/20 17:00',
-  '5/20 18:00',
-  '5/20 19:00',
-  '5/20 20:00',
-  '5/20 21:00',
-  '5/20 22:00',
-  '5/20 23:00',
-  '5/21 00:00',
-  '5/21 01:00',
-  '5/21 02:00',
-  '5/21 03:00',
-  '5/21 04:00',
-  '5/21 05:00',
-  '5/21 06:00',
-]
-
-const REFERENCE_OVERLAY_LOW = 75350
-const REFERENCE_OVERLAY_HIGH = 77930
-
-function getCandlePriceRange(candles: Candle[]) {
-  if (candles.length === 0) {
-    return {
-      low: REFERENCE_OVERLAY_LOW,
-      high: REFERENCE_OVERLAY_HIGH,
-    }
-  }
-
-  const lows = candles.map((candle) => candle.low)
-  const highs = candles.map((candle) => candle.high)
-  const low = Math.min(...lows)
-  const high = Math.max(...highs)
-  const range = Math.max(high - low, 0.00001)
-  const padding = range * 0.04
-
-  return {
-    low: low - padding,
-    high: high + padding,
-  }
-}
-
-function remapReferencePrice(price: number, candles: Candle[]) {
-  const range = getCandlePriceRange(candles)
-  const referenceRange = REFERENCE_OVERLAY_HIGH - REFERENCE_OVERLAY_LOW
-  const normalized = (price - REFERENCE_OVERLAY_LOW) / referenceRange
-  const mapped = range.low + normalized * (range.high - range.low)
-
-  return Number(mapped.toFixed(5))
-}
-
-function remapReferenceTime(time: string, candles: Candle[]) {
-  if (candles.length === 0) return time
-
-  const referenceIndex = referenceOverlayTimes.indexOf(time)
-
-  if (referenceIndex === -1) {
-    return candles[Math.min(candles.length - 1, Math.floor(candles.length / 2))].time
-  }
-
-  const targetIndex = Math.round(
-    (referenceIndex / Math.max(referenceOverlayTimes.length - 1, 1)) *
-      Math.max(candles.length - 1, 0)
-  )
-
-  return candles[Math.min(Math.max(targetIndex, 0), candles.length - 1)].time
-}
-
-function buildDemoOverlayPayload(candles: Candle[]): Required<ChartOverlayPayload> {
-  return {
-    smcEvents: sampleSmcEvents.map((event) => ({
-      ...event,
-      time: remapReferenceTime(event.time, candles),
-      fromTime: event.fromTime ? remapReferenceTime(event.fromTime, candles) : undefined,
-      price: remapReferencePrice(event.price, candles),
-    })),
-
-    dlmLevels: sampleDlmLevels.map((level) => ({
-      ...level,
-      price: remapReferencePrice(level.price, candles),
-    })),
-
-    zones: sampleZones.map((zone) => ({
-      ...zone,
-      startTime: remapReferenceTime(zone.startTime, candles),
-      endTime: remapReferenceTime(zone.endTime, candles),
-      top: remapReferencePrice(zone.top, candles),
-      bottom: remapReferencePrice(zone.bottom, candles),
-    })),
-
-    liquidityEvents: sampleLiquidityEvents.map((event) => ({
-      ...event,
-      time: remapReferenceTime(event.time, candles),
-      fromTime: event.fromTime ? remapReferenceTime(event.fromTime, candles) : undefined,
-      price: remapReferencePrice(event.price, candles),
-    })),
-
-    dlmConfluenceMarkers: sampleDlmConfluenceMarkers.map((marker) => ({
-      ...marker,
-      time: remapReferenceTime(marker.time, candles),
-      price: remapReferencePrice(marker.price, candles),
-    })),
-
-    scoreMarkers: sampleScoreMarkers.map((marker) => ({
-      ...marker,
-      time: remapReferenceTime(marker.time, candles),
-      price: remapReferencePrice(marker.price, candles),
-    })),
-  }
+  return scaleCandlesForSymbol(sampleCandles, symbol)
 }
 
 const sampleSmcEvents: SmcStructureEvent[] = [
@@ -627,26 +520,6 @@ const sampleScoreMarkers: ScoreMarker[] = [
 const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1D']
 const candleModeOptions: CandleMode[] = ['Regular', 'Heikin Ashi']
 
-function normalizeTimeframe(value: any): string {
-  const tf = String(value ?? '').trim().toLowerCase()
-
-  if (tf === '1') return '1m'
-  if (tf === '3') return '3m'
-  if (tf === '5') return '5m'
-  if (tf === '15') return '15m'
-  if (tf === '30') return '30m'
-  if (tf === '45') return '45m'
-  if (tf === '60') return '1h'
-  if (tf === '120') return '2h'
-  if (tf === '180') return '3h'
-  if (tf === '240') return '4h'
-  if (tf === 'd' || tf === '1d') return '1d'
-  if (tf === 'w' || tf === '1w') return '1w'
-  if (tf === 'm' || tf === '1mo') return '1mo'
-
-  return tf
-}
-
 function toNumber(value: any): number | null {
   const parsed = Number(value)
 
@@ -688,29 +561,17 @@ function buildCandlesFromSignals(
     return []
   }
 
-  const normalizedSymbol = String(selectedSymbol ?? '').toUpperCase()
   const normalizedTimeframe = normalizeTimeframe(selectedTimeframe)
-  const canonicalSelectedSymbol = getCanonicalSymbol(normalizedSymbol)
 
   const filtered = signals.filter((signal) => {
-    const signalSymbol = String(signal.symbol ?? '').toUpperCase()
-    const signalTimeframe = normalizeTimeframe(signal.timeframe)
-    const canonicalSignalSymbol = getCanonicalSymbol(signalSymbol)
-
-    const symbolMatch =
-      signalSymbol === normalizedSymbol ||
-      signalSymbol.includes(normalizedSymbol) ||
-      normalizedSymbol.includes(signalSymbol) ||
-      canonicalSignalSymbol === canonicalSelectedSymbol
-
     const timeframeMatch =
-      !signalTimeframe ||
-      signalTimeframe === normalizedTimeframe
+      normalizeTimeframe(signal.timeframe) === normalizedTimeframe ||
+      !signal.timeframe
 
-    return symbolMatch && timeframeMatch
+    return symbolsMatch(signal.symbol, selectedSymbol) && timeframeMatch
   })
 
-  const source = filtered
+  const source = filtered.length > 0 ? filtered : []
 
   const candles = source
     .map((signal, index) => {
@@ -735,18 +596,49 @@ function buildCandlesFromSignals(
       }
     })
     .filter((candle): candle is Candle => candle !== null)
-    .sort((a, b) => {
-      const aTime = new Date(a.time).getTime()
-      const bTime = new Date(b.time).getTime()
-
-      if (Number.isNaN(aTime) || Number.isNaN(bTime)) {
-        return 0
-      }
-
-      return aTime - bTime
-    })
 
   return candles
+}
+
+function buildCandlesFromRecentCandles(
+  candlesInput: any[] | undefined,
+  selectedSymbol: string,
+  selectedTimeframe: string
+): Candle[] {
+  if (!Array.isArray(candlesInput) || candlesInput.length === 0) {
+    return []
+  }
+
+  const normalizedTimeframe = normalizeTimeframe(selectedTimeframe)
+
+  const filtered = candlesInput.filter((candle) => {
+    const timeframeMatch =
+      normalizeTimeframe(candle.timeframe) === normalizedTimeframe ||
+      !candle.timeframe
+
+    return symbolsMatch(candle.symbol, selectedSymbol) && timeframeMatch
+  })
+
+  return filtered
+    .map((candle, index) => {
+      const open = toNumber(candle.open)
+      const high = toNumber(candle.high)
+      const low = toNumber(candle.low)
+      const close = toNumber(candle.close)
+
+      if (open === null || high === null || low === null || close === null) {
+        return null
+      }
+
+      return {
+        time: formatSignalTime(candle.time ?? candle.timestamp ?? candle.createdAt, index),
+        open,
+        high,
+        low,
+        close,
+      }
+    })
+    .filter((candle): candle is Candle => candle !== null)
 }
 
 function safeParseJson(value: any): any {
@@ -1260,11 +1152,12 @@ export default function EChartsCandlestickChart({
   enableAdvancedOverlays = true,
   latestSignal,
   recentSignals,
+  recentCandles,
 }: EChartsCandlestickChartProps) {
   const chartRef = useRef<HTMLDivElement | null>(null)
   const chartInstance = useRef<echarts.ECharts | null>(null)
 
-  const [symbol, setSymbol] = useState('MES1!')
+  const [symbol, setSymbol] = useState('SPY')
   const [timeframe, setTimeframe] = useState('1m')
   const [candleMode, setCandleMode] = useState<CandleMode>('Heikin Ashi')
   const [showSmc, setShowSmc] = useState(true)
@@ -1273,21 +1166,28 @@ export default function EChartsCandlestickChart({
   const [showLiquidity, setShowLiquidity] = useState(true)
   const [showScores, setShowScores] = useState(true)
 
-  const liveCandles = useMemo(
+  const liveCandlesFromCandlesEndpoint = useMemo(
+    () => buildCandlesFromRecentCandles(recentCandles, symbol, timeframe),
+    [recentCandles, symbol, timeframe]
+  )
+
+  const liveCandlesFromSignalsEndpoint = useMemo(
     () => buildCandlesFromSignals(recentSignals, symbol, timeframe),
     [recentSignals, symbol, timeframe]
   )
-  const usingLiveCandles = liveCandles.length >= 3
+
+  const liveCandles =
+    liveCandlesFromCandlesEndpoint.length > 0
+      ? liveCandlesFromCandlesEndpoint
+      : liveCandlesFromSignalsEndpoint
+
+  const usingLiveCandles = liveCandles.length >= 2
 
   const symbolSampleCandles = useMemo(() => {
     return getSampleCandlesForSymbol(symbol)
   }, [symbol])
 
   const baseCandles = usingLiveCandles ? liveCandles : symbolSampleCandles
-
-  const demoOverlayPayload = useMemo(() => {
-    return buildDemoOverlayPayload(baseCandles)
-  }, [baseCandles])
 
   const overlayPayload = useMemo(
     () => extractOverlayPayload(latestSignal),
@@ -1297,33 +1197,33 @@ export default function EChartsCandlestickChart({
   const activeSmcEvents =
     overlayPayload.smcEvents && overlayPayload.smcEvents.length > 0
       ? overlayPayload.smcEvents
-      : demoOverlayPayload.smcEvents
+      : sampleSmcEvents
 
   const activeDlmLevels =
     overlayPayload.dlmLevels && overlayPayload.dlmLevels.length > 0
       ? overlayPayload.dlmLevels
-      : demoOverlayPayload.dlmLevels
+      : sampleDlmLevels
 
   const activeZones =
     overlayPayload.zones && overlayPayload.zones.length > 0
       ? overlayPayload.zones
-      : demoOverlayPayload.zones
+      : sampleZones
 
   const activeLiquidityEvents =
     overlayPayload.liquidityEvents && overlayPayload.liquidityEvents.length > 0
       ? overlayPayload.liquidityEvents
-      : demoOverlayPayload.liquidityEvents
+      : sampleLiquidityEvents
 
   const activeDlmConfluenceMarkers =
     overlayPayload.dlmConfluenceMarkers &&
     overlayPayload.dlmConfluenceMarkers.length > 0
       ? overlayPayload.dlmConfluenceMarkers
-      : demoOverlayPayload.dlmConfluenceMarkers
+      : sampleDlmConfluenceMarkers
 
   const activeScoreMarkers =
     overlayPayload.scoreMarkers && overlayPayload.scoreMarkers.length > 0
       ? overlayPayload.scoreMarkers
-      : demoOverlayPayload.scoreMarkers
+      : sampleScoreMarkers
 
   useEffect(() => {
     if (!chartRef.current) return
@@ -1539,6 +1439,7 @@ export default function EChartsCandlestickChart({
     activeDlmConfluenceMarkers,
     activeScoreMarkers,
     usingLiveCandles,
+    recentCandles,
   ])
 
   useEffect(() => {
@@ -1569,11 +1470,10 @@ export default function EChartsCandlestickChart({
             onChange={(e) => setSymbol(e.target.value)}
             className="rounded-md border border-dark-700 bg-[#151922] px-3 py-1.5 text-sm text-gray-100 outline-none"
           >
-            <option value="MES1!">MES1!</option>
-            <option value="ES1!">ES1!</option>
             <option value="BTCUSD">BTCUSD</option>
             <option value="ETHUSD">ETHUSD</option>
             <option value="SPY">SPY</option>
+            <option value="ES1!">ES1!</option>
           </select>
 
           <select
@@ -1678,7 +1578,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3G.1' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3I' : 'Chart Engine v2'}
             </div>
           </div>
         )}
