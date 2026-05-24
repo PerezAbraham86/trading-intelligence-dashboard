@@ -6,7 +6,21 @@ const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
 
 export type ConnectionStatus = 'Connected' | 'Waiting' | 'Error'
 
+export type CandleData = {
+  time: number | string
+  open: number
+  high: number
+  low: number
+  close: number
+  volume?: number
+  symbol: string
+  timeframe: string
+  createdAt?: string
+}
+
 export type TradingSignal = {
+  eventType?: string
+  status?: string
   symbol: string
   timeframe: string
   signal: 'BUY' | 'SELL' | 'NEUTRAL' | string
@@ -16,7 +30,6 @@ export type TradingSignal = {
   netBias: number
   price: number
 
-  // Candle / chart fields
   time?: number | string
   timestamp?: number | string
   open?: number
@@ -25,14 +38,11 @@ export type TradingSignal = {
   close?: number
   volume?: number
 
-  // Optional trade/table fields
   entry?: number
   current?: number
   pnl?: number
   percent?: number
-  status?: string
 
-  // Overlay payload strings or JSON strings
   smc: string
   alphax: string
   ghost: string
@@ -47,7 +57,6 @@ export type TradingSignal = {
   warnings: string[]
   createdAt?: string
 
-  // Optional dashboard fields for existing components
   bullPressure?: number
   bearPressure?: number
   ghostConfidence?: number
@@ -56,6 +65,8 @@ export type TradingSignal = {
 }
 
 export type RecentSignal = {
+  eventType?: string
+  status?: string
   symbol: string
   timeframe?: string
   signal?: string
@@ -67,7 +78,6 @@ export type RecentSignal = {
   price?: number
   createdAt?: string
 
-  // Candle / chart fields
   time?: number | string
   timestamp?: number | string
   open?: number
@@ -76,23 +86,22 @@ export type RecentSignal = {
   close?: number
   volume?: number
 
-  // Overlay payload strings or JSON strings
   smc?: string
   alphax?: string
   ghost?: string
   chartOverlays?: string
 
-  // Table fields
   entry?: number
   current?: number
   pnl?: number
   percent?: number
-  status?: string
 }
 
 const fallbackSignal: TradingSignal = {
+  eventType: 'WAITING',
+  status: 'Waiting',
   symbol: 'WAITING',
-  timeframe: '1d',
+  timeframe: 'Waiting',
   signal: 'NEUTRAL',
   confidence: 0,
   bullScore: 50,
@@ -112,7 +121,6 @@ const fallbackSignal: TradingSignal = {
   current: 0,
   pnl: 0,
   percent: 0,
-  status: 'Waiting',
 
   smc: 'Awaiting signal',
   alphax: 'Awaiting signal',
@@ -137,22 +145,12 @@ const fallbackSignal: TradingSignal = {
 
 function toNumber(value: unknown, fallback = 0): number {
   const parsed = Number(value)
-
-  if (!Number.isFinite(parsed)) {
-    return fallback
-  }
-
-  return parsed
+  return Number.isFinite(parsed) ? parsed : fallback
 }
 
 function toOptionalNumber(value: unknown): number | undefined {
   const parsed = Number(value)
-
-  if (!Number.isFinite(parsed)) {
-    return undefined
-  }
-
-  return parsed
+  return Number.isFinite(parsed) ? parsed : undefined
 }
 
 function normalizeSignal(rawInput: Partial<TradingSignal> | any): TradingSignal {
@@ -175,6 +173,8 @@ function normalizeSignal(rawInput: Partial<TradingSignal> | any): TradingSignal 
     ...fallbackSignal,
     ...raw,
 
+    eventType: raw.eventType ?? fallbackSignal.eventType,
+    status: raw.status ?? fallbackSignal.status,
     symbol: raw.symbol ?? fallbackSignal.symbol,
     timeframe: raw.timeframe ?? fallbackSignal.timeframe,
     signal: raw.signal ?? fallbackSignal.signal,
@@ -198,7 +198,6 @@ function normalizeSignal(rawInput: Partial<TradingSignal> | any): TradingSignal 
     current: toNumber(raw.current ?? close, price),
     pnl: toNumber(raw.pnl, 0),
     percent: toNumber(raw.percent, 0),
-    status: raw.status ?? fallbackSignal.status,
 
     smc: raw.smc ?? fallbackSignal.smc,
     alphax: raw.alphax ?? fallbackSignal.alphax,
@@ -237,8 +236,10 @@ function normalizeRecentSignals(raw: unknown): RecentSignal[] {
     const price = toNumber(item.price ?? close, 0)
 
     return {
+      eventType: item.eventType,
+      status: item.status ?? (index === 0 ? 'Live' : 'Live'),
       symbol: item.symbol ?? 'WAITING',
-      timeframe: item.timeframe ?? '1d',
+      timeframe: item.timeframe ?? '1',
       signal,
       type: signal,
 
@@ -250,7 +251,6 @@ function normalizeRecentSignals(raw: unknown): RecentSignal[] {
 
       createdAt: item.createdAt ?? new Date().toISOString(),
 
-      // Candle / chart fields preserved for EChartsCandlestickChart
       time: item.time ?? item.timestamp ?? item.createdAt ?? new Date().toISOString(),
       timestamp: item.timestamp ?? item.time ?? item.createdAt ?? new Date().toISOString(),
       open: toOptionalNumber(item.open),
@@ -259,36 +259,71 @@ function normalizeRecentSignals(raw: unknown): RecentSignal[] {
       close: toOptionalNumber(close),
       volume: toOptionalNumber(item.volume),
 
-      // Overlay payloads preserved for EChartsCandlestickChart
       smc: item.smc,
       alphax: item.alphax,
       ghost: item.ghost,
       chartOverlays: item.chartOverlays,
 
-      // Optional values for your existing table
       entry: toNumber(item.entry ?? price, price),
       current: toNumber(item.current ?? close ?? price, price),
       pnl: toNumber(item.pnl, 0),
       percent: toNumber(item.percent, 0),
-      status: item.status ?? (index === 0 ? 'Open' : 'Closed'),
     }
   })
+}
+
+function normalizeRecentCandles(raw: unknown): CandleData[] {
+  if (!Array.isArray(raw)) return []
+
+  return raw
+    .map((item: any) => {
+      const open = toOptionalNumber(item.open)
+      const high = toOptionalNumber(item.high)
+      const low = toOptionalNumber(item.low)
+      const close = toOptionalNumber(item.close)
+
+      if (
+        open === undefined ||
+        high === undefined ||
+        low === undefined ||
+        close === undefined
+      ) {
+        return null
+      }
+
+      return {
+        time: item.time ?? item.timestamp ?? item.createdAt ?? new Date().toISOString(),
+        open,
+        high,
+        low,
+        close,
+        volume: toNumber(item.volume, 0),
+        symbol: item.symbol ?? 'UNKNOWN',
+        timeframe: item.timeframe ?? '1',
+        createdAt: item.createdAt,
+      }
+    })
+    .filter((item): item is CandleData => item !== null)
 }
 
 export function useApiPolling() {
   const [latestSignal, setLatestSignal] = useState<TradingSignal>(fallbackSignal)
   const [recentSignals, setRecentSignals] = useState<RecentSignal[]>([])
+  const [recentCandles, setRecentCandles] = useState<CandleData[]>([])
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('Waiting')
   const [lastUpdateTime, setLastUpdateTime] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   const fetchDashboardData = useCallback(async () => {
     try {
-      const [latestRes, recentRes] = await Promise.all([
+      const [latestRes, recentRes, candlesRes] = await Promise.all([
         fetch(`${API_BASE_URL}/api/latest-signal`, {
           cache: 'no-store',
         }),
         fetch(`${API_BASE_URL}/api/recent-signals`, {
+          cache: 'no-store',
+        }),
+        fetch(`${API_BASE_URL}/api/recent-candles`, {
           cache: 'no-store',
         }),
       ])
@@ -301,11 +336,17 @@ export function useApiPolling() {
         throw new Error(`Recent signals request failed: ${recentRes.status}`)
       }
 
+      if (!candlesRes.ok) {
+        throw new Error(`Recent candles request failed: ${candlesRes.status}`)
+      }
+
       const latestJson = await latestRes.json()
       const recentJson = await recentRes.json()
+      const candlesJson = await candlesRes.json()
 
       setLatestSignal(normalizeSignal(latestJson))
       setRecentSignals(normalizeRecentSignals(recentJson))
+      setRecentCandles(normalizeRecentCandles(candlesJson))
       setConnectionStatus('Connected')
       setLastUpdateTime(new Date().toLocaleTimeString())
       setErrorMessage(null)
@@ -314,7 +355,6 @@ export function useApiPolling() {
 
       setConnectionStatus('Error')
       setErrorMessage(error instanceof Error ? error.message : 'Unknown API polling error')
-
       setLatestSignal((prev) => prev ?? fallbackSignal)
     }
   }, [])
@@ -336,6 +376,7 @@ export function useApiPolling() {
   return {
     latestSignal,
     recentSignals,
+    recentCandles,
     connectionStatus,
     lastUpdateTime,
     errorMessage,
