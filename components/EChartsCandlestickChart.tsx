@@ -1318,9 +1318,11 @@ function buildGhostCandlesFromEngine(engineState: EngineState | null, ghostSlots
 
   if (rawGhosts.length === 0) return []
 
-  return rawGhosts
+  const normalizedGhosts: GhostCandle[] = []
+
+  rawGhosts
     .slice(0, Math.min(GHOST_CANDLE_COUNT, ghostSlots.length))
-    .map((ghost: any, index: number) => {
+    .forEach((ghost: any, index: number) => {
       const open =
         toFiniteNumber(ghost.open) ??
         toFiniteNumber(ghost.o) ??
@@ -1345,7 +1347,7 @@ function buildGhostCandlesFromEngine(engineState: EngineState | null, ghostSlots
         toFiniteNumber(ghost.ghostClose) ??
         toFiniteNumber(ghost.projectedClose)
 
-      if (open === null || high === null || low === null || close === null) return null
+      if (open === null || high === null || low === null || close === null) return
 
       const confidenceRaw =
         toFiniteNumber(ghost.confidence) ??
@@ -1357,7 +1359,7 @@ function buildGhostCandlesFromEngine(engineState: EngineState | null, ghostSlots
       const confidence = Math.round(clampNumber(confidenceRaw, 0, 100))
       const direction = normalizeGhostDirection(ghost.direction ?? ghost.dir ?? ghost.signal, open, close)
 
-      return {
+      normalizedGhosts.push({
         slot: ghostSlots[index],
         label: String(ghost.label ?? `Python Ghost #${index + 1}`),
         open,
@@ -1366,10 +1368,11 @@ function buildGhostCandlesFromEngine(engineState: EngineState | null, ghostSlots
         close,
         confidence,
         direction,
-        source: 'python' as const,
-      }
+        source: 'python',
+      })
     })
-    .filter((ghost): ghost is GhostCandle => Boolean(ghost))
+
+  return normalizedGhosts
 }
 
 function buildGhostCandles(engineState: EngineState | null, candles: Candle[], ghostSlots: string[]): GhostCandle[] {
