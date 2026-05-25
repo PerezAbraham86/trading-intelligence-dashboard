@@ -24,7 +24,6 @@ type TradingSignal = {
 type FactorConfirmationTableProps = {
   signal?: TradingSignal
   technicalSentiment?: TechnicalSentiment | null
-  onTechnicalSentimentUpdate?: (sentiment: TechnicalSentiment | null) => void
 }
 
 type FactorStatus = 'bullish' | 'bearish' | 'neutral' | 'active' | 'inactive'
@@ -380,7 +379,6 @@ function TechnicalChip({ indicator }: { indicator: TechnicalIndicator }) {
 export default function FactorConfirmationTable({
   signal,
   technicalSentiment: technicalSentimentOverride,
-  onTechnicalSentimentUpdate,
 }: FactorConfirmationTableProps) {
   const [fetchedTechnicalSentiment, setFetchedTechnicalSentiment] =
     useState<TechnicalSentiment | null>(null)
@@ -437,38 +435,47 @@ export default function FactorConfirmationTable({
     [technicalSentiment]
   )
 
-  useEffect(() => {
-    if (!onTechnicalSentimentUpdate) return
+  // Use the exact 12 indicators shown in the grid as the source of truth.
+  // This prevents the header/summary from showing stale sentiment values like 0%
+  // while the technical meter grid is already populated.
+  const activeTechnicalCount = technicalIndicators.length
 
-    if (!technicalSentiment || technicalIndicators.length === 0) {
-      onTechnicalSentimentUpdate(null)
-      return
-    }
+  const bullTechnicalCount = technicalIndicators.filter(
+    (indicator) => statusFromTechnical(indicator.signal) === 'bullish'
+  ).length
 
-    // Factor Confirmation is the principal source.
-    // Emit the exact technical meter this component is rendering.
-    onTechnicalSentimentUpdate({
-      ...technicalSentiment,
-      indicators: technicalIndicators,
-      technicalIndicators,
-      technicalMeter: technicalIndicators,
-      factors: technicalIndicators,
-      activeCount: technicalIndicators.length,
-    })
-  }, [onTechnicalSentimentUpdate, technicalSentiment, technicalIndicators])
+  const bearTechnicalCount = technicalIndicators.filter(
+    (indicator) => statusFromTechnical(indicator.signal) === 'bearish'
+  ).length
 
-  const activeTechnicalCount =
-    technicalSentiment?.activeCount ?? technicalIndicators.length
-  const bullTechnicalCount =
-    technicalSentiment?.bullCount ??
-    technicalIndicators.filter((indicator) => statusFromTechnical(indicator.signal) === 'bullish').length
-  const bearTechnicalCount =
-    technicalSentiment?.bearCount ??
-    technicalIndicators.filter((indicator) => statusFromTechnical(indicator.signal) === 'bearish').length
-  const neutralTechnicalCount =
-    technicalSentiment?.neutralCount ??
-    technicalIndicators.filter((indicator) => statusFromTechnical(indicator.signal) === 'neutral').length
-  const technicalValue = clamp(Number(technicalSentiment?.sentiment ?? 50))
+  const neutralTechnicalCount = technicalIndicators.filter(
+    (indicator) => statusFromTechnical(indicator.signal) === 'neutral'
+  ).length
+
+  const technicalValue =
+    activeTechnicalCount > 0
+      ? clamp(
+          technicalIndicators.reduce(
+            (sum, indicator) => sum + Number(indicator.value ?? 0),
+            0
+          ) / activeTechnicalCount
+        )
+      : 0
+
+  const technicalSentimentStatus =
+    activeTechnicalCount === 0
+      ? 'Waiting'
+      : bullTechnicalCount > bearTechnicalCount && bullTechnicalCount > neutralTechnicalCount
+        ? 'Mostly Bullish'
+        : bearTechnicalCount > bullTechnicalCount && bearTechnicalCount > neutralTechnicalCount
+          ? 'Mostly Bearish'
+          : neutralTechnicalCount > bullTechnicalCount && neutralTechnicalCount > bearTechnicalCount
+            ? 'Mostly Neutral'
+            : technicalValue > 60
+              ? 'Bullish Lean'
+              : technicalValue < 40
+                ? 'Bearish Lean'
+                : 'Mixed'
 
   return (
     <motion.div
@@ -567,7 +574,7 @@ export default function FactorConfirmationTable({
 
       <div className="mt-4 border-t border-dark-700 pt-3 text-xs text-gray-500">
         Bull/Bear balance: {bullScore}% / {bearScore}% • Technical sentiment:{' '}
-        {technicalSentiment?.sentimentStatus ?? 'Waiting'}
+        {technicalSentimentStatus}
       </div>
     </motion.div>
   )
