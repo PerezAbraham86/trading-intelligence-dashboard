@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -39,6 +39,12 @@ ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
 DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "my_trading_secret_123")
 
+# InsightSentry / RapidAPI futures data.
+# IMPORTANT: Store the key in Render Environment Variables, never in GitHub.
+INSIGHTSENTRY_RAPIDAPI_KEY = os.getenv("INSIGHTSENTRY_RAPIDAPI_KEY", "")
+INSIGHTSENTRY_RAPIDAPI_HOST = os.getenv("INSIGHTSENTRY_RAPIDAPI_HOST", "insightsentry.p.rapidapi.com")
+INSIGHTSENTRY_BASE_URL = f"https://{INSIGHTSENTRY_RAPIDAPI_HOST}"
+
 ALPACA_STOCKS_BASE_URL = "https://data.alpaca.markets/v2"
 ALPACA_CRYPTO_BASE_URL = "https://data.alpaca.markets/v1beta3"
 
@@ -52,7 +58,6 @@ ALPACA_CRYPTO_BASE_URL = "https://data.alpaca.markets/v1beta3"
 LATEST_SIGNAL: Dict[str, Any] = {}
 RECENT_SIGNALS: List[Dict[str, Any]] = []
 RECENT_CANDLES: List[Dict[str, Any]] = []
-LIVE_CANDLES: Dict[str, Dict[str, Any]] = {}
 
 MAX_RECENT_SIGNALS = 50
 MAX_RECENT_CANDLES = 1000
@@ -184,52 +189,6 @@ def alpaca_timeframe(timeframe: str) -> str:
     return mapping.get(tf, "1Min")
 
 
-
-
-def timeframe_seconds(timeframe: str) -> int:
-    tf = normalize_timeframe(timeframe)
-    mapping = {
-        "1m": 60,
-        "3m": 180,
-        "5m": 300,
-        "15m": 900,
-        "30m": 1800,
-        "1h": 3600,
-        "2h": 7200,
-        "4h": 14400,
-        "1d": 86400,
-        "1w": 604800,
-    }
-    return mapping.get(tf, 60)
-
-
-def historical_start_time(timeframe: str, limit: int, *, is_crypto: bool) -> str:
-    """
-    Alpaca only returned the current session when no explicit start time was sent.
-    For a normal chart, request a real lookback window based on timeframe × limit.
-
-    Crypto trades 24/7, so it needs only a small buffer.
-    Stocks have nights/weekends/holidays, so they need a much bigger calendar buffer.
-    """
-    safe_limit = max(1, min(int(limit or 5000), 10000))
-    seconds = timeframe_seconds(timeframe)
-
-    # Extra calendar time so missing stock market hours/weekends still return enough bars.
-    buffer_mult = 1.35 if is_crypto else 6.0
-    lookback_seconds = int(seconds * safe_limit * buffer_mult)
-
-    # Protect against too-small windows on higher timeframes.
-    minimum_days = 5 if is_crypto else 45
-    start_dt = datetime.now(timezone.utc) - max(
-        timedelta(seconds=lookback_seconds),
-        timedelta(days=minimum_days if normalize_timeframe(timeframe) in {"1m", "3m", "5m", "15m", "30m"} else 1),
-    )
-    return start_dt.isoformat().replace("+00:00", "Z")
-
-
-def historical_end_time() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
 def is_crypto_symbol(symbol: str) -> bool:
     normalized = normalize_symbol(symbol)
     return normalized in {"BTCUSD", "ETHUSD"}
@@ -244,6 +203,242 @@ def to_alpaca_crypto_symbol(symbol: str) -> str:
         return "ETH/USD"
 
     return normalized
+
+
+def is_futures_symbol(symbol: str) -> bool:
+    normalized = normalize_symbol(symbol)
+
+    return normalized in {
+        "MES1!",
+        "ES1!",
+        "MNQ1!",
+        "NQ1!",
+        "M2K1!",
+        "RTY1!",
+        "MYM1!",
+        "YM1!",
+        "MGC1!",
+        "GC1!",
+        "MCL1!",
+        "CL1!",
+    }
+
+
+def to_insightsentry_symbol(symbol: str) -> str:
+    """
+    Converts dashboard symbols into InsightSentry/RapidAPI symbols.
+
+    First target for your workflow:
+    MES1! -> CME_MINI:MES1!
+    ES1!  -> CME_MINI:ES1!
+
+    If InsightSentry symbol search shows a different exchange prefix, only update this map.
+    """
+    normalized = normalize_symbol(symbol)
+
+    mapping = {
+        "MES1!": "CME_MINI:MES1!",
+        "ES1!": "CME_MINI:ES1!",
+        "MNQ1!": "CME_MINI:MNQ1!",
+        "NQ1!": "CME_MINI:NQ1!",
+        "M2K1!": "CME_MINI:M2K1!",
+        "RTY1!": "CME_MINI:RTY1!",
+        "MYM1!": "CBOT_MINI:MYM1!",
+        "YM1!": "CBOT_MINI:YM1!",
+        "MGC1!": "COMEX:MGC1!",
+        "GC1!": "COMEX:GC1!",
+        "MCL1!": "NYMEX:MCL1!",
+        "CL1!": "NYMEX:CL1!",
+    }
+
+    return mapping.get(normalized, normalized)
+
+
+def insightsentry_headers() -> Dict[str, str]:
+    if not INSIGHTSENTRY_RAPIDAPI_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Missing Render environment variable INSIGHTSENTRY_RAPIDAPI_KEY. "
+                "Create/rotate the key in RapidAPI, then add it in Render > Environment."
+            ),
+        )
+
+    return {
+        "x-rapidapi-host": INSIGHTSENTRY_RAPIDAPI_HOST,
+        "x-rapidapi-key": INSIGHTSENTRY_RAPIDAPI_KEY,
+    }
+
+
+def insightsentry_bar_params(timeframe: str) -> Dict[str, Any]:
+    tf = normalize_timeframe(timeframe)
+
+    mapping = {
+        "1m": ("minute", 1),
+        "3m": ("minute", 3),
+        "5m": ("minute", 5),
+        "15m": ("minute", 15),
+        "30m": ("minute", 30),
+        "1h": ("hour", 1),
+        "2h": ("hour", 2),
+        "4h": ("hour", 4),
+        "1d": ("day", 1),
+        "1w": ("week", 1),
+    }
+
+    bar_type, bar_interval = mapping.get(tf, ("minute", 1))
+
+    return {
+        "bar_type": bar_type,
+        "bar_interval": bar_interval,
+    }
+
+
+def month_strings_back(month_count: int = 3) -> List[str]:
+    """
+    InsightSentry historical endpoint uses start_ym/end_ym style params.
+    Querying the current and previous months gives enough 1m candles for dashboard history.
+    """
+    today = datetime.now(timezone.utc).replace(day=1)
+    months: List[str] = []
+
+    year = today.year
+    month = today.month
+
+    for _ in range(max(1, month_count)):
+        months.append(f"{year:04d}-{month:02d}")
+        month -= 1
+        if month <= 0:
+            month = 12
+            year -= 1
+
+    return months
+
+
+def extract_bar_list(payload: Any) -> List[Dict[str, Any]]:
+    """Flexible extraction because RapidAPI wrappers vary by endpoint/version."""
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+
+    if not isinstance(payload, dict):
+        return []
+
+    for key in [
+        "data",
+        "bars",
+        "candles",
+        "history",
+        "results",
+        "series",
+        "values",
+        "items",
+    ]:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, dict):
+            nested = extract_bar_list(value)
+            if nested:
+                return nested
+
+    # Some APIs return {"symbol": {"bars": [...]}} or {"CME_MINI:MES1!": [...]}.
+    for value in payload.values():
+        nested = extract_bar_list(value)
+        if nested:
+            return nested
+
+    return []
+
+
+def normalize_insightsentry_bar(raw: Dict[str, Any], symbol: str, timeframe: str) -> Dict[str, Any]:
+    raw_time = (
+        raw.get("t")
+        or raw.get("time")
+        or raw.get("timestamp")
+        or raw.get("date")
+        or raw.get("datetime")
+        or raw.get("dt")
+    )
+
+    open_value = raw.get("o", raw.get("open"))
+    high_value = raw.get("h", raw.get("high"))
+    low_value = raw.get("l", raw.get("low"))
+    close_value = raw.get("c", raw.get("close"))
+    volume_value = raw.get("v", raw.get("volume", raw.get("vol", 0)))
+
+    formatted_time = format_bar_time(raw_time)
+    epoch = to_epoch_seconds(formatted_time)
+
+    return {
+        "time": formatted_time,
+        "timestamp": formatted_time,
+        "epoch": epoch,
+        "open": to_float(open_value),
+        "high": to_float(high_value),
+        "low": to_float(low_value),
+        "close": to_float(close_value),
+        "volume": to_float(volume_value),
+        "symbol": normalize_symbol(symbol),
+        "timeframe": normalize_timeframe(timeframe),
+        "createdAt": now_iso(),
+        "provider": "insightsentry",
+    }
+
+
+def fetch_insightsentry_futures_candles(
+    symbol: str,
+    timeframe: str = "1m",
+    limit: int = 300,
+) -> List[Dict[str, Any]]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    insightsentry_symbol = to_insightsentry_symbol(normalized_symbol)
+    encoded_symbol = quote(insightsentry_symbol, safe="")
+    safe_limit = max(1, min(int(limit or 300), 5000))
+
+    headers = insightsentry_headers()
+    bar_params = insightsentry_bar_params(normalized_timeframe)
+
+    candles: List[Dict[str, Any]] = []
+
+    # Historical endpoint from RapidAPI screenshot:
+    # /v3/symbols/{symbol}/history?bar_type=minute&bar_interval=1&extended=true&badj=true&dadj=false&start_ym=YYYY-MM&end_ym=&continuation=false
+    for start_ym in month_strings_back(3):
+        params = urlencode(
+            {
+                **bar_params,
+                "extended": "true",
+                "badj": "true",
+                "dadj": "false",
+                "start_ym": start_ym,
+                "end_ym": "",
+                "continuation": "false",
+            }
+        )
+
+        url = f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_symbol}/history?{params}"
+        data = http_get_json(url, headers=headers, provider="InsightSentry")
+        bars = extract_bar_list(data)
+
+        candles.extend(
+            normalize_insightsentry_bar(bar, normalized_symbol, normalized_timeframe)
+            for bar in bars
+        )
+
+        if len(candles) >= safe_limit:
+            break
+
+    candles = [
+        candle
+        for candle in candles
+        if candle.get("open") is not None
+        and candle.get("high") is not None
+        and candle.get("low") is not None
+        and candle.get("close") is not None
+        and to_epoch_seconds(candle.get("time") or candle.get("timestamp")) > 0
+    ]
+
+    return merge_candles_by_time(candles)[-safe_limit:]
 
 
 def to_float(value: Any, fallback: float = 0.0) -> float:
@@ -414,7 +609,11 @@ def alpaca_headers() -> Dict[str, str]:
     }
 
 
-def http_get_json(url: str, headers: Optional[Dict[str, str]] = None) -> Any:
+def http_get_json(
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+    provider: str = "Data provider",
+) -> Any:
     request = Request(url, headers=headers or {})
 
     try:
@@ -425,17 +624,17 @@ def http_get_json(url: str, headers: Optional[Dict[str, str]] = None) -> Any:
         body = error.read().decode("utf-8", errors="ignore")
         raise HTTPException(
             status_code=error.code,
-            detail=f"Alpaca request failed: {body or error.reason}",
+            detail=f"{provider} request failed: {body or error.reason}",
         )
     except URLError as error:
         raise HTTPException(
             status_code=502,
-            detail=f"Alpaca connection failed: {error.reason}",
+            detail=f"{provider} connection failed: {error.reason}",
         )
     except Exception as error:
         raise HTTPException(
             status_code=500,
-            detail=f"Request failed: {str(error)}",
+            detail=f"{provider} request failed: {str(error)}",
         )
 
 
@@ -461,76 +660,16 @@ def normalize_alpaca_bar(raw: Dict[str, Any], symbol: str, timeframe: str) -> Di
 def fetch_alpaca_historical_candles(
     symbol: str,
     timeframe: str = "1m",
-    limit: int = 5000,
+    limit: int = 300,
 ) -> List[Dict[str, Any]]:
-    """
-    Fetch a real historical window for chart scrolling.
-
-    Root fix:
-    Previous versions sent only `limit` without an explicit `start` / `end`.
-    Alpaca can then return only the current/latest window, which is why BTCUSD
-    showed around 80 candles even when the frontend asked for 5000.
-
-    This version calculates `start = now - timeframe * limit`, sends start/end,
-    and paginates until enough bars are collected.
-    """
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     alpaca_tf = alpaca_timeframe(normalized_timeframe)
+    safe_limit = max(1, min(int(limit or 300), 1000))
 
-    requested_limit = int(limit or 5000)
-    safe_limit = max(1, min(requested_limit, 10000))
-    per_request_limit = min(safe_limit, 1000)
-    crypto = is_crypto_symbol(normalized_symbol)
-
-    start = historical_start_time(normalized_timeframe, safe_limit, is_crypto=crypto)
-    end = historical_end_time()
     headers = alpaca_headers()
 
-    def paged_get_bars(
-        url_base: str,
-        base_params: Dict[str, Any],
-        lookup_symbols: List[str],
-    ) -> List[Dict[str, Any]]:
-        all_bars: List[Dict[str, Any]] = []
-        page_token: Optional[str] = None
-        guard = 0
-
-        while len(all_bars) < safe_limit and guard < 30:
-            guard += 1
-
-            params_dict = dict(base_params)
-            params_dict["limit"] = min(per_request_limit, safe_limit - len(all_bars))
-            if page_token:
-                params_dict["page_token"] = page_token
-
-            url = f"{url_base}?{urlencode(params_dict)}"
-            data = http_get_json(url, headers=headers)
-
-            bars_by_symbol = data.get("bars", {})
-            page_bars: List[Dict[str, Any]] = []
-
-            if isinstance(bars_by_symbol, dict):
-                for lookup_symbol in lookup_symbols:
-                    value = bars_by_symbol.get(lookup_symbol)
-                    if isinstance(value, list) and value:
-                        page_bars = value
-                        break
-            elif isinstance(bars_by_symbol, list):
-                page_bars = bars_by_symbol
-
-            if not page_bars:
-                break
-
-            all_bars.extend(page_bars)
-
-            page_token = data.get("next_page_token")
-            if not page_token:
-                break
-
-        return all_bars[-safe_limit:]
-
-    if crypto:
+    if is_crypto_symbol(normalized_symbol):
         slash_symbol = to_alpaca_crypto_symbol(normalized_symbol)
 
         symbol_candidates = [
@@ -539,49 +678,79 @@ def fetch_alpaca_historical_candles(
         ]
 
         for candidate_symbol in symbol_candidates:
-            raw_bars = paged_get_bars(
-                f"{ALPACA_CRYPTO_BASE_URL}/crypto/us/bars",
+            params = urlencode(
                 {
                     "symbols": candidate_symbol,
                     "timeframe": alpaca_tf,
-                    "start": start,
-                    "end": end,
+                    "limit": safe_limit,
                     "sort": "asc",
-                },
-                [candidate_symbol, slash_symbol, normalized_symbol],
+                }
             )
 
-            if raw_bars:
-                normalized_bars = [
+            url = f"{ALPACA_CRYPTO_BASE_URL}/crypto/us/bars?{params}"
+            data = http_get_json(url, headers=headers)
+
+            bars_by_symbol = data.get("bars", {})
+
+            bars = (
+                bars_by_symbol.get(candidate_symbol)
+                or bars_by_symbol.get(slash_symbol)
+                or bars_by_symbol.get(normalized_symbol)
+                or []
+            )
+
+            if bars:
+                return [
                     normalize_alpaca_bar(bar, normalized_symbol, normalized_timeframe)
-                    for bar in raw_bars
+                    for bar in bars
                 ]
-                return merge_candles_by_time(normalized_bars)[-safe_limit:]
 
         return []
 
     # Stocks/ETFs. This is for SPY and similar.
     # Futures like ES1!/MES1! are not covered by Alpaca data.
-    raw_bars = paged_get_bars(
-        f"{ALPACA_STOCKS_BASE_URL}/stocks/bars",
+    params = urlencode(
         {
             "symbols": normalized_symbol,
             "timeframe": alpaca_tf,
-            "start": start,
-            "end": end,
+            "limit": safe_limit,
             "adjustment": "raw",
             "feed": "iex",
             "sort": "asc",
-        },
-        [normalized_symbol],
+        }
     )
 
-    normalized_bars = [
+    url = f"{ALPACA_STOCKS_BASE_URL}/stocks/bars?{params}"
+    data = http_get_json(url, headers=headers)
+
+    bars_by_symbol = data.get("bars", {})
+    bars = bars_by_symbol.get(normalized_symbol, [])
+
+    return [
         normalize_alpaca_bar(bar, normalized_symbol, normalized_timeframe)
-        for bar in raw_bars
+        for bar in bars
     ]
 
-    return merge_candles_by_time(normalized_bars)[-safe_limit:]
+
+def fetch_historical_candles(
+    symbol: str,
+    timeframe: str = "1m",
+    limit: int = 300,
+) -> List[Dict[str, Any]]:
+    """
+    Unified historical candle router:
+    - Futures -> InsightSentry/RapidAPI
+    - BTCUSD/ETHUSD/SPY/etc. -> existing Alpaca logic
+
+    This is the key function that starts removing the need for TradingView alerts for MES/ES.
+    """
+    normalized_symbol = normalize_symbol(symbol)
+
+    if is_futures_symbol(normalized_symbol):
+        return fetch_insightsentry_futures_candles(normalized_symbol, timeframe, limit)
+
+    return fetch_alpaca_historical_candles(normalized_symbol, timeframe, limit)
+
 
 def get_live_recent_candles(symbol: str, timeframe: str) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
@@ -593,167 +762,6 @@ def get_live_recent_candles(symbol: str, timeframe: str) -> List[Dict[str, Any]]
         if normalize_symbol(str(candle.get("symbol", ""))) == normalized_symbol
         and normalize_timeframe(str(candle.get("timeframe", ""))) == normalized_timeframe
     ]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# LIVE CURRENT CANDLE BUILDER — PHASE 4B / 1-SECOND POLLING
-# ─────────────────────────────────────────────────────────────────────────────
-
-def timeframe_seconds(timeframe: str) -> int:
-    tf = normalize_timeframe(timeframe)
-
-    mapping = {
-        "1m": 60,
-        "3m": 180,
-        "5m": 300,
-        "15m": 900,
-        "30m": 1800,
-        "1h": 3600,
-        "2h": 7200,
-        "4h": 14400,
-        "1d": 86400,
-        "1w": 604800,
-    }
-
-    return mapping.get(tf, 60)
-
-
-def candle_bucket_epoch(epoch_seconds: float, timeframe: str) -> int:
-    seconds = timeframe_seconds(timeframe)
-    return int(epoch_seconds // seconds * seconds)
-
-
-def pick_latest_candle_source(symbol: str, timeframe: str) -> Dict[str, Any]:
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-
-    candidates: List[Dict[str, Any]] = []
-
-    # 1) Prefer newest Alpaca candle/bar when available.
-    # This keeps BTCUSD/ETHUSD moving from the provider even if no webhook candle arrives.
-    try:
-        alpaca_candles = fetch_alpaca_historical_candles(
-            normalized_symbol,
-            normalized_timeframe,
-            limit=2,
-        )
-        candidates.extend(alpaca_candles)
-    except Exception:
-        pass
-
-    # 2) Then use recent live webhook candles.
-    candidates.extend(get_live_recent_candles(normalized_symbol, normalized_timeframe)[-5:])
-
-    # 3) Then use latest signal price as fallback.
-    if LATEST_SIGNAL:
-        latest_symbol = normalize_symbol(str(LATEST_SIGNAL.get("symbol") or normalized_symbol))
-        latest_timeframe = normalize_timeframe(str(LATEST_SIGNAL.get("timeframe") or normalized_timeframe))
-
-        if latest_symbol == normalized_symbol and latest_timeframe == normalized_timeframe:
-            price = to_float(
-                LATEST_SIGNAL.get("current"),
-                to_float(LATEST_SIGNAL.get("price"), to_float(LATEST_SIGNAL.get("close"), 0.0)),
-            )
-
-            if price > 0:
-                now_epoch = time.time()
-                candidates.append(
-                    {
-                        "time": int(now_epoch),
-                        "timestamp": int(now_epoch),
-                        "epoch": now_epoch,
-                        "open": price,
-                        "high": price,
-                        "low": price,
-                        "close": price,
-                        "volume": to_float(LATEST_SIGNAL.get("volume"), 0.0),
-                        "symbol": normalized_symbol,
-                        "timeframe": normalized_timeframe,
-                        "createdAt": now_iso(),
-                        "source": "latest_signal",
-                    }
-                )
-
-    valid = [
-        candidate
-        for candidate in candidates
-        if to_float(candidate.get("close"), 0.0) > 0
-    ]
-
-    if not valid:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No live candle source available for {normalized_symbol} {normalized_timeframe}",
-        )
-
-    return sorted(
-        valid,
-        key=lambda item: to_epoch_seconds(item.get("epoch") or item.get("time") or item.get("timestamp")),
-    )[-1]
-
-
-def update_live_candle_cache(symbol: str, timeframe: str, source: Dict[str, Any]) -> Dict[str, Any]:
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-    key = f"{normalized_symbol}:{normalized_timeframe}"
-
-    source_epoch = to_epoch_seconds(source.get("epoch") or source.get("time") or source.get("timestamp"))
-    if source_epoch <= 0:
-        source_epoch = time.time()
-
-    bucket = candle_bucket_epoch(source_epoch, normalized_timeframe)
-
-    price = to_float(source.get("close"), 0.0)
-    source_open = to_float(source.get("open"), price)
-    source_high = to_float(source.get("high"), price)
-    source_low = to_float(source.get("low"), price)
-    source_close = to_float(source.get("close"), price)
-    source_volume = to_float(source.get("volume"), 0.0)
-
-    cached = LIVE_CANDLES.get(key)
-
-    if not cached or int(cached.get("bucket", 0)) != bucket:
-        # New candle bucket. Open should be the first available price for this timeframe.
-        live = {
-            "time": bucket,
-            "timestamp": bucket,
-            "epoch": bucket,
-            "bucket": bucket,
-            "open": source_open if source_open > 0 else source_close,
-            "high": max(source_high, source_open, source_close),
-            "low": min(source_low, source_open, source_close),
-            "close": source_close,
-            "volume": source_volume,
-            "symbol": normalized_symbol,
-            "timeframe": normalized_timeframe,
-            "createdAt": now_iso(),
-            "source": source.get("source") or "live_candle_builder",
-            "isLive": True,
-            "pollingMs": 1000,
-        }
-    else:
-        live = dict(cached)
-        live["high"] = max(to_float(live.get("high"), source_close), source_high, source_close)
-        live["low"] = min(to_float(live.get("low"), source_close), source_low, source_close)
-        live["close"] = source_close
-        live["volume"] = max(to_float(live.get("volume"), 0.0), source_volume)
-        live["createdAt"] = now_iso()
-        live["source"] = source.get("source") or live.get("source") or "live_candle_builder"
-        live["isLive"] = True
-        live["pollingMs"] = 1000
-
-    LIVE_CANDLES[key] = live
-    return live
-
-
-def get_cached_or_build_live_candle(symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
-    try:
-        source = pick_latest_candle_source(symbol, timeframe)
-        return update_live_candle_cache(symbol, timeframe, source)
-    except HTTPException:
-        return None
-    except Exception:
-        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1720,14 +1728,14 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "phase_4C_large_history_live_candle_polling",
+        "engine": "phase_4A_python_technical_sentiment",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
             "/api/recent-candles",
             "/api/historical-candles",
+            "/api/futures-test",
             "/api/merged-candles",
-            "/api/live-candle",
             "/api/engine-state",
             "/api/latest-sentiment",
             "/webhook/tradingview",
@@ -1742,6 +1750,8 @@ def health() -> Dict[str, Any]:
         "time": now_iso(),
         "alpacaKeyPresent": bool(ALPACA_API_KEY),
         "alpacaSecretPresent": bool(ALPACA_SECRET_KEY),
+        "insightSentryKeyPresent": bool(INSIGHTSENTRY_RAPIDAPI_KEY),
+        "insightSentryHost": INSIGHTSENTRY_RAPIDAPI_HOST,
     }
 
 
@@ -1857,54 +1867,58 @@ def recent_candles(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ALPACA ROUTES
+# DATA ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/futures-test")
+def futures_test(
+    symbol: str = "MES1!",
+    timeframe: str = "1m",
+    limit: int = 20,
+) -> Dict[str, Any]:
+    """
+    Quick browser test for InsightSentry futures candles.
+
+    Example:
+    /api/futures-test?symbol=MES1!&timeframe=1m&limit=20
+    """
+    candles = fetch_insightsentry_futures_candles(symbol, timeframe, limit)
+
+    return {
+        "ok": len(candles) > 0,
+        "provider": "insightsentry",
+        "symbol": normalize_symbol(symbol),
+        "insightsentrySymbol": to_insightsentry_symbol(symbol),
+        "timeframe": normalize_timeframe(timeframe),
+        "limit": limit,
+        "count": len(candles),
+        "latest": candles[-1] if candles else None,
+        "candles": candles,
+    }
+
 
 @app.get("/api/historical-candles")
 def historical_candles(
     symbol: str = "BTCUSD",
     timeframe: str = "1m",
-    limit: int = 5000,
+    limit: int = 300,
 ) -> List[Dict[str, Any]]:
-    return fetch_alpaca_historical_candles(symbol, timeframe, limit)
+    return fetch_historical_candles(symbol, timeframe, limit)
 
 
 @app.get("/api/merged-candles")
 def merged_candles(
     symbol: str = "BTCUSD",
     timeframe: str = "1m",
-    limit: int = 5000,
+    limit: int = 300,
 ) -> List[Dict[str, Any]]:
-    historical = fetch_alpaca_historical_candles(symbol, timeframe, limit)
+    historical = fetch_historical_candles(symbol, timeframe, limit)
     live = get_live_recent_candles(symbol, timeframe)
-    live_current = get_cached_or_build_live_candle(symbol, timeframe)
 
-    merged = merge_candles_by_time([
-        *historical,
-        *live,
-        *([live_current] if live_current else []),
-    ])
-    safe_limit = max(1, min(int(limit or 5000), 10000))
+    merged = merge_candles_by_time([*historical, *live])
+    safe_limit = max(1, min(int(limit or 300), 1000))
 
     return merged[-safe_limit:]
-
-
-@app.get("/api/live-candle")
-def live_candle(
-    symbol: str = "BTCUSD",
-    timeframe: str = "1m",
-) -> Dict[str, Any]:
-    """
-    Returns one mutable current candle for the selected symbol/timeframe.
-
-    Frontend polls this every 1 second and replaces only the last candle.
-    Historical candles remain stable. This creates the live moving candle effect.
-    """
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-
-    source = pick_latest_candle_source(normalized_symbol, normalized_timeframe)
-    return update_live_candle_cache(normalized_symbol, normalized_timeframe, source)
 
 
 
@@ -1913,7 +1927,7 @@ def live_candle(
 def latest_sentiment(
     symbol: Optional[str] = None,
     timeframe: Optional[str] = None,
-    limit: int = 5000,
+    limit: int = 500,
 ) -> Dict[str, Any]:
     """
     Phase 4A technical sentiment endpoint.
@@ -1922,16 +1936,11 @@ def latest_sentiment(
 
     selected_symbol = normalize_symbol(symbol or str(LATEST_SIGNAL.get("symbol") or "BTCUSD"))
     selected_timeframe = normalize_timeframe(timeframe or str(LATEST_SIGNAL.get("timeframe") or "1m"))
-    safe_limit = max(100, min(int(limit or 5000), 10000))
+    safe_limit = max(100, min(int(limit or 500), 1000))
 
-    historical = fetch_alpaca_historical_candles(selected_symbol, selected_timeframe, safe_limit)
+    historical = fetch_historical_candles(selected_symbol, selected_timeframe, safe_limit)
     live = get_live_recent_candles(selected_symbol, selected_timeframe)
-    live_current = get_cached_or_build_live_candle(selected_symbol, selected_timeframe)
-    candles = merge_candles_by_time([
-        *historical,
-        *live,
-        *([live_current] if live_current else []),
-    ])[-safe_limit:]
+    candles = merge_candles_by_time([*historical, *live])[-safe_limit:]
 
     sentiment = calculate_technical_sentiment(candles)
     sentiment["symbol"] = selected_symbol
@@ -1950,13 +1959,13 @@ def latest_sentiment(
 def engine_state(
     symbol: str = "BTCUSD",
     timeframe: str = "1m",
-    limit: int = 5000,
+    limit: int = 500,
 ) -> Dict[str, Any]:
     """
     Phase 3X endpoint.
 
     Browser test:
-    https://trading-intelligence-dashboard.onrender.com/api/engine-state?symbol=BTCUSD&timeframe=1m&limit=5000
+    https://trading-intelligence-dashboard.onrender.com/api/engine-state?symbol=BTCUSD&timeframe=1m&limit=500
 
     What it does:
     1. Gets historical candles from Alpaca.
@@ -1966,16 +1975,11 @@ def engine_state(
     5. Returns candles + heikinAshiCandles + smcEvents + zones + liquidityEvents + ghostCandles.
     """
 
-    safe_limit = max(100, min(int(limit or 5000), 10000))
+    safe_limit = max(100, min(int(limit or 500), 1000))
 
-    historical = fetch_alpaca_historical_candles(symbol, timeframe, safe_limit)
+    historical = fetch_historical_candles(symbol, timeframe, safe_limit)
     live = get_live_recent_candles(symbol, timeframe)
-    live_current = get_cached_or_build_live_candle(symbol, timeframe)
-    candles = merge_candles_by_time([
-        *historical,
-        *live,
-        *([live_current] if live_current else []),
-    ])[-safe_limit:]
+    candles = merge_candles_by_time([*historical, *live])[-safe_limit:]
 
     result = run_phase1_engine(
         candles,
@@ -2026,9 +2030,8 @@ def engine_state(
         "limit": safe_limit,
         "historicalCandles": len(historical),
         "liveCandles": len(live),
-        "liveCurrentCandle": live_current is not None,
         "mergedCandles": len(candles),
-        "dataProvider": "alpaca",
+        "dataProvider": "insightsentry" if is_futures_symbol(symbol) else "alpaca",
     }
 
     return result
