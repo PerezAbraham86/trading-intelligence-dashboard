@@ -829,6 +829,30 @@ def fetch_historical_candles(
     return fetch_alpaca_historical_candles(normalized_symbol, timeframe, limit)
 
 
+def get_dashboard_candles(
+    symbol: str,
+    timeframe: str = "1m",
+    limit: int = 300,
+) -> List[Dict[str, Any]]:
+    """
+    Main candle source router for dashboard calculations.
+
+    Futures must not merge TradingView/webhook RECENT_CANDLES.
+    A stale BTC webhook/live candle can contaminate MES/ES and push the chart scale to 70,000+.
+    """
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    safe_limit = max(1, min(int(limit or 300), 5000))
+
+    historical = fetch_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
+
+    if is_futures_symbol(normalized_symbol):
+        return merge_candles_by_time(historical)[-safe_limit:]
+
+    live = get_live_recent_candles(normalized_symbol, normalized_timeframe)
+    return merge_candles_by_time([*historical, *live])[-safe_limit:]
+
+
 def get_live_recent_candles(symbol: str, timeframe: str) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
@@ -1805,7 +1829,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "phase_4B_latest_alpaca_candles",
+        "engine": "phase_4C_futures_isolated_candles",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
@@ -1989,13 +2013,8 @@ def merged_candles(
     timeframe: str = "1m",
     limit: int = 300,
 ) -> List[Dict[str, Any]]:
-    historical = fetch_historical_candles(symbol, timeframe, limit)
-    live = get_live_recent_candles(symbol, timeframe)
-
-    merged = merge_candles_by_time([*historical, *live])
     safe_limit = max(1, min(int(limit or 300), 1000))
-
-    return merged[-safe_limit:]
+    return get_dashboard_candles(symbol, timeframe, safe_limit)
 
 
 
@@ -2015,9 +2034,7 @@ def latest_sentiment(
     selected_timeframe = normalize_timeframe(timeframe or str(LATEST_SIGNAL.get("timeframe") or "1m"))
     safe_limit = max(100, min(int(limit or 500), 1000))
 
-    historical = fetch_historical_candles(selected_symbol, selected_timeframe, safe_limit)
-    live = get_live_recent_candles(selected_symbol, selected_timeframe)
-    candles = merge_candles_by_time([*historical, *live])[-safe_limit:]
+    candles = get_dashboard_candles(selected_symbol, selected_timeframe, safe_limit)
 
     sentiment = calculate_technical_sentiment(candles)
     sentiment["symbol"] = selected_symbol
@@ -2054,9 +2071,12 @@ def engine_state(
 
     safe_limit = max(100, min(int(limit or 500), 1000))
 
-    historical = fetch_historical_candles(symbol, timeframe, safe_limit)
-    live = get_live_recent_candles(symbol, timeframe)
-    candles = merge_candles_by_time([*historical, *live])[-safe_limit:]
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    historical = fetch_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
+    live = [] if is_futures_symbol(normalized_symbol) else get_live_recent_candles(normalized_symbol, normalized_timeframe)
+    candles = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit)
 
     result = run_phase1_engine(
         candles,
@@ -2101,9 +2121,12 @@ def engine_state(
         ],
     }
 
+    result["symbol"] = normalized_symbol
+    result["timeframe"] = normalized_timeframe
+
     result["source"] = {
-        "symbol": normalize_symbol(symbol),
-        "timeframe": normalize_timeframe(timeframe),
+        "symbol": normalized_symbol,
+        "timeframe": normalized_timeframe,
         "limit": safe_limit,
         "historicalCandles": len(historical),
         "liveCandles": len(live),
