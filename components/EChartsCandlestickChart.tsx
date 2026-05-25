@@ -1757,10 +1757,17 @@ function preserveAxisZoom(option: any, chart: echarts.ECharts | null) {
 
     const preserved = { ...zoom }
 
-    if (typeof previousZoom.start === 'number') preserved.start = previousZoom.start
-    if (typeof previousZoom.end === 'number') preserved.end = previousZoom.end
-    if (previousZoom.startValue !== undefined) preserved.startValue = previousZoom.startValue
-    if (previousZoom.endValue !== undefined) preserved.endValue = previousZoom.endValue
+    if (previousZoom.startValue !== undefined) {
+      preserved.startValue = previousZoom.startValue
+    } else if (typeof previousZoom.start === 'number' && zoom?.id !== 'main-x-scroll') {
+      preserved.start = previousZoom.start
+    }
+
+    if (previousZoom.endValue !== undefined) {
+      preserved.endValue = previousZoom.endValue
+    } else if (typeof previousZoom.end === 'number' && zoom?.id !== 'main-x-scroll') {
+      preserved.end = previousZoom.end
+    }
 
     return preserved
   })
@@ -2309,10 +2316,12 @@ export default function EChartsCandlestickChart({
           type: 'inside',
           xAxisIndex: 0,
           filterMode: 'none',
-          start: compact ? 72 : 68,
-          end: 100,
-          minSpan: 5,
-          maxSpan: 100,
+          // 5000 candles are loaded, but we only show the latest window first.
+          // All older candles remain available by dragging/scrolling left.
+          startValue: Math.max(0, xAxisData.length - (compact ? 90 : 260)),
+          endValue: Math.max(0, lastLiveCandleIndex),
+          minValueSpan: compact ? 25 : 60,
+          maxValueSpan: xAxisData.length,
           zoomOnMouseWheel: true,
           moveOnMouseMove: true,
           moveOnMouseWheel: true,
