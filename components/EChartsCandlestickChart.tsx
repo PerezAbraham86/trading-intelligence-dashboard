@@ -33,82 +33,6 @@ function buildInitialDataZoom(count: number, symbol: string) {
   }
 }
 
-type VisibleWindow = {
-  startIndex: number
-  endIndex: number
-}
-
-function clampIndex(value: number, maxIndex: number) {
-  if (!Number.isFinite(value)) return 0
-  return Math.max(0, Math.min(maxIndex, Math.round(value)))
-}
-
-function resolveVisibleWindow(count: number, symbol: string, window?: VisibleWindow | null) {
-  const maxIndex = Math.max(0, count - 1)
-
-  if (window && count > 0) {
-    const startIndex = clampIndex(window.startIndex, maxIndex)
-    const endIndex = clampIndex(window.endIndex, maxIndex)
-
-    return {
-      startIndex: Math.min(startIndex, endIndex),
-      endIndex: Math.max(startIndex, endIndex),
-    }
-  }
-
-  const initial = buildInitialDataZoom(count, symbol)
-
-  return {
-    startIndex: clampIndex(Number(initial.startValue), maxIndex),
-    endIndex: clampIndex(Number(initial.endValue), maxIndex),
-  }
-}
-
-function getVisibleCandleScale(
-  candles: Array<{ open?: number; high?: number; low?: number; close?: number }>,
-  symbol: string,
-  window?: VisibleWindow | null
-) {
-  if (!candles.length) {
-    return {
-      min: undefined as number | undefined,
-      max: undefined as number | undefined,
-    }
-  }
-
-  const resolved = resolveVisibleWindow(candles.length, symbol, window)
-  const visibleCandles = candles.slice(resolved.startIndex, resolved.endIndex + 1)
-
-  let minPrice = Number.POSITIVE_INFINITY
-  let maxPrice = Number.NEGATIVE_INFINITY
-
-  for (const candle of visibleCandles) {
-    const values = [candle.open, candle.high, candle.low, candle.close]
-      .map(Number)
-      .filter((value) => Number.isFinite(value))
-
-    for (const value of values) {
-      minPrice = Math.min(minPrice, value)
-      maxPrice = Math.max(maxPrice, value)
-    }
-  }
-
-  if (!Number.isFinite(minPrice) || !Number.isFinite(maxPrice)) {
-    return {
-      min: undefined as number | undefined,
-      max: undefined as number | undefined,
-    }
-  }
-
-  const range = Math.max(maxPrice - minPrice, Math.abs(maxPrice) * 0.0008, 1)
-  const padding = range * 0.18
-
-  return {
-    min: minPrice - padding,
-    max: maxPrice + padding,
-  }
-}
-
 
 type Candle = {
   time: string
@@ -1083,8 +1007,6 @@ function buildDlmMarkLines(levels: DlmLevel[], compact: boolean) {
       name: level.label,
       symbol: 'none',
       lineStyle: {
-          min: visibleCandleScale.min,
-          max: visibleCandleScale.max,
         color,
         width: level.direction === 'neutral' ? 2 : 1,
         type: level.direction === 'neutral' ? 'solid' : 'dashed',
@@ -1910,38 +1832,6 @@ export default function EChartsCandlestickChart({
     : 'Heikin Ashi'
 
   const [symbol, setSymbol] = useState(initialSymbol)
-  const [visibleWindow, setVisibleWindow] = useState<VisibleWindow | null>(null)
-
-  useEffect(() => {
-    setVisibleWindow(null)
-  }, [symbol, timeframe])
-
-
-  useEffect(() => {
-    const chartInstance = chartRef.current?.getEchartsInstance?.()
-    if (!chartInstance) return
-
-    const handleDataZoom = () => {
-      const option = chartInstance.getOption()
-      const dataZoom = Array.isArray(option.dataZoom) ? option.dataZoom[0] : null
-      const startValue = Number(dataZoom?.startValue)
-      const endValue = Number(dataZoom?.endValue)
-
-      if (Number.isFinite(startValue) && Number.isFinite(endValue)) {
-        setVisibleWindow({
-          startIndex: startValue,
-          endIndex: endValue,
-        })
-      }
-    }
-
-    chartInstance.on('dataZoom', handleDataZoom)
-
-    return () => {
-      chartInstance.off('dataZoom', handleDataZoom)
-    }
-  }, [chartRef.current])
-
   const [timeframe, setTimeframe] = useState(initialTimeframe)
   const [candleMode, setCandleMode] = useState<CandleMode>(initialCandleMode)
 
@@ -2357,9 +2247,7 @@ export default function EChartsCandlestickChart({
           ]
         : []
 
-    const visibleCandleScale = getVisibleCandleScale(candles, symbol, visibleWindow)
-
-  const option: any = {
+    const option: any = {
       backgroundColor: '#0f1115',
       animation: false,
 
@@ -2782,7 +2670,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3AC' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3AE' : 'Chart Engine v2'}
             </div>
           </div>
         )}
