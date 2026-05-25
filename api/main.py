@@ -233,6 +233,52 @@ def is_stock_symbol(symbol: str) -> bool:
     return normalize_symbol(symbol) == "SPY"
 
 
+def valid_price_range_for_symbol(symbol: str) -> tuple[float, float]:
+    normalized = normalize_symbol(symbol)
+
+    # Hard safety rails. These prevent BTC/ETH candles or ghost projections
+    # from contaminating MES/ES/SPY if a webhook/provider returns the wrong symbol scale.
+    if normalized == "BTCUSD":
+        return 10000.0, 300000.0
+    if normalized == "ETHUSD":
+        return 100.0, 30000.0
+    if normalized == "SPY":
+        return 50.0, 2000.0
+    if normalized in {"ES1!", "MES1!"}:
+        return 1000.0, 20000.0
+
+    return 0.000001, 1_000_000_000.0
+
+
+def is_price_valid_for_symbol(value: Any, symbol: str) -> bool:
+    price = to_float(value, 0.0)
+    low, high = valid_price_range_for_symbol(symbol)
+    return low <= price <= high
+
+
+def is_candle_valid_for_symbol(candle: Dict[str, Any], symbol: str) -> bool:
+    if not isinstance(candle, dict):
+        return False
+
+    normalized = normalize_symbol(symbol)
+    candle_symbol = normalize_symbol(str(candle.get("symbol") or normalized))
+
+    if candle_symbol and candle_symbol != normalized:
+        return False
+
+    return (
+        is_price_valid_for_symbol(candle.get("open"), normalized)
+        and is_price_valid_for_symbol(candle.get("high"), normalized)
+        and is_price_valid_for_symbol(candle.get("low"), normalized)
+        and is_price_valid_for_symbol(candle.get("close"), normalized)
+    )
+
+
+def filter_valid_candles_for_symbol(candles: List[Dict[str, Any]], symbol: str) -> List[Dict[str, Any]]:
+    normalized = normalize_symbol(symbol)
+    return [candle for candle in candles if is_candle_valid_for_symbol(candle, normalized)]
+
+
 def to_alpaca_crypto_symbol(symbol: str) -> str:
     normalized = normalize_symbol(symbol)
     if normalized == "BTCUSD":
@@ -332,7 +378,7 @@ def candle_from_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     candle_time = payload.get("time") or payload.get("timestamp") or payload.get("createdAt") or now_iso()
     normalized_time = format_bar_time(candle_time)
 
-    return {
+    candle = {
         "time": normalized_time,
         "timestamp": normalized_time,
         "epoch": to_epoch_seconds(normalized_time),
@@ -346,6 +392,12 @@ def candle_from_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "createdAt": payload.get("createdAt") or now_iso(),
         "provider": "tradingview_webhook",
     }
+
+    # Never store BTC-scale candles under MES/ES/SPY symbols.
+    if not is_candle_valid_for_symbol(candle, symbol):
+        return None
+
+    return candle
 
 
 def merge_candles_by_time(candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -570,11 +622,13 @@ def get_live_recent_candles(symbol: str, timeframe: str) -> List[Dict[str, Any]]
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
 
-    return [
+    candles = [
         candle for candle in RECENT_CANDLES
         if normalize_symbol(str(candle.get("symbol", ""))) == normalized_symbol
         and normalize_timeframe(str(candle.get("timeframe", ""))) == normalized_timeframe
     ]
+
+    return filter_valid_candles_for_symbol(candles, normalized_symbol)
 
 
 def get_dashboard_candles(symbol: str, timeframe: str = "1m", limit: int = 300) -> List[Dict[str, Any]]:
@@ -582,11 +636,19 @@ def get_dashboard_candles(symbol: str, timeframe: str = "1m", limit: int = 300) 
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = max(1, min(int(limit or 300), 5000))
 
-    historical = fetch_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
+    historical = filter_valid_candles_for_symbol(
+        fetch_historical_candles(normalized_symbol, normalized_timeframe, safe_limit),
+        normalized_symbol,
+    )
 
     # Do not let BTC/ETH TradingView webhook candles contaminate ES/MES/SPY scales.
-    live = get_live_recent_candles(normalized_symbol, normalized_timeframe)
-    return merge_candles_by_time([*historical, *live])[-safe_limit:]
+    live = filter_valid_candles_for_symbol(
+        get_live_recent_candles(normalized_symbol, normalized_timeframe),
+        normalized_symbol,
+    )
+
+    merged = merge_candles_by_time([*historical, *live])[-safe_limit:]
+    return filter_valid_candles_for_symbol(merged, normalized_symbol)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -683,7 +745,7 @@ def build_python_ghost_candles(candles: List[Dict[str, Any]], count: int = 3) ->
         prev_open = ghost_open
         prev_close = ghost_close
 
-    return ghosts
+    return [ghost for ghost in ghosts if is_candle_valid_for_symbol({**ghost, "symbol": normalize_symbol(str(candles[-1].get("symbol") or ""))}, str(candles[-1].get("symbol") or ""))]
 
 
 def calculate_latest_sentiment(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -779,7 +841,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_spy_es_mes_true_candle_replacement",
+        "engine": "main_v4f_hard_symbol_price_guard",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
@@ -969,8 +1031,8 @@ def engine_state(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 300
     latest = candles[-1] if candles else {}
 
     return {
-        "engine": "main_spy_es_mes_true_candle_replacement",
-        "phase": "SPY_ES_MES_true_history_yfinance_fallback",
+        "engine": "main_v4f_hard_symbol_price_guard",
+        "phase": "hard_symbol_price_guard_no_btc_contamination",
         "status": "Live" if candles else "Waiting",
         "symbol": normalized_symbol,
         "timeframe": normalized_timeframe,
