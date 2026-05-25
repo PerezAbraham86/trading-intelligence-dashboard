@@ -401,8 +401,8 @@ export default function FactorConfirmationTable({
 
   const hasValidTechnicalOverride = overrideTechnicalIndicators.length > 0
 
-  const technicalSentiment = hasValidTechnicalOverride
-    ? technicalSentimentOverride
+  const technicalSentiment: TechnicalSentiment | null = hasValidTechnicalOverride
+    ? technicalSentimentOverride ?? null
     : fetchedTechnicalSentiment
 
   useEffect(() => {
@@ -447,7 +447,7 @@ export default function FactorConfirmationTable({
   const coreRows = useMemo(() => buildCoreRows(signal), [signal])
   const externalRows = useMemo(() => buildExternalRows(signal), [signal])
   const technicalIndicators = useMemo(
-    () => extractTechnicalIndicators(technicalSentiment),
+    () => extractTechnicalIndicators(technicalSentiment ?? null),
     [technicalSentiment]
   )
 
