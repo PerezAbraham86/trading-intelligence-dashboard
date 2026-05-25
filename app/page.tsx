@@ -61,7 +61,7 @@ type TechnicalSentiment = {
   factors?: TechnicalIndicator[]
 }
 
-function countTechnicalIndicatorsPayload(value: unknown) {
+function countTechnicalIndicatorsPayload(value: unknown): number {
   if (!value || typeof value !== 'object') return 0
 
   const data = value as {
