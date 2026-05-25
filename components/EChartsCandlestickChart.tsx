@@ -1732,6 +1732,56 @@ function buildAlphaProfileSeries(
   ]
 }
 
+function preserveUserDataZoom(option: any, chart: echarts.ECharts | null, compact: boolean) {
+  const previousOption = chart?.getOption?.() as any
+  const previousZooms = Array.isArray(previousOption?.dataZoom)
+    ? previousOption.dataZoom
+    : []
+
+  const findPreviousZoom = (id: string, index: number) => {
+    return (
+      previousZooms.find((zoom: any) => zoom?.id === id) ??
+      previousZooms[index] ??
+      null
+    )
+  }
+
+  option.dataZoom = (option.dataZoom ?? []).map((zoom: any, index: number) => {
+    const previousZoom = findPreviousZoom(zoom.id, index)
+
+    if (!previousZoom) return zoom
+
+    const preserved: any = { ...zoom }
+
+    if (typeof previousZoom.start === 'number') preserved.start = previousZoom.start
+    if (typeof previousZoom.end === 'number') preserved.end = previousZoom.end
+    if (previousZoom.startValue !== undefined) preserved.startValue = previousZoom.startValue
+    if (previousZoom.endValue !== undefined) preserved.endValue = previousZoom.endValue
+
+    return preserved
+  })
+
+  if (!previousZooms.length) {
+    option.dataZoom = (option.dataZoom ?? []).map((zoom: any) => {
+      if (zoom.id === 'x-axis-inside-zoom') {
+        return {
+          ...zoom,
+        }
+      }
+
+      if (zoom.id === 'y-axis-inside-zoom') {
+        return {
+          ...zoom,
+        }
+      }
+
+      return zoom
+    })
+  }
+
+  return option
+}
+
 export default function EChartsCandlestickChart({
   heightClass = 'h-[650px]',
   compact = false,
@@ -1748,6 +1798,7 @@ export default function EChartsCandlestickChart({
 }: EChartsCandlestickChartProps) {
   const chartRef = useRef<HTMLDivElement | null>(null)
   const chartInstance = useRef<echarts.ECharts | null>(null)
+  const hasInitializedZoom = useRef(false)
 
   const initialSymbol = normalizeDefaultSymbol(
     defaultSymbol ?? (compact ? 'SPY' : latestSignal?.symbol),
@@ -2334,8 +2385,6 @@ export default function EChartsCandlestickChart({
           type: 'inside',
           xAxisIndex: 0,
           filterMode: 'none',
-          start: compact ? 65 : 70,
-          end: 100,
           minSpan: 5,
           maxSpan: 100,
           zoomOnMouseWheel: true,
@@ -2349,8 +2398,6 @@ export default function EChartsCandlestickChart({
           type: 'inside',
           yAxisIndex: 0,
           filterMode: 'none',
-          start: 0,
-          end: 100,
           zoomOnMouseWheel: 'shift',
           moveOnMouseMove: false,
           moveOnMouseWheel: false,
@@ -2403,11 +2450,19 @@ export default function EChartsCandlestickChart({
       ],
     }
 
-    chartInstance.current.setOption(option, {
+    const optionWithPreservedZoom = preserveUserDataZoom(
+      option,
+      chartInstance.current,
+      compact
+    )
+
+    chartInstance.current.setOption(optionWithPreservedZoom, {
       notMerge: false,
       replaceMerge: ['series'],
       lazyUpdate: false,
     })
+
+    hasInitializedZoom.current = true
 
     const resize = () => {
       chartInstance.current?.resize()
