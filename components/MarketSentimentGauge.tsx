@@ -21,6 +21,15 @@ type TradingSignal = {
   fredMacro?: string
   finraShortVolume?: string
   cot?: string
+
+  // Python technical meter payload. This lets Market Sentiment use the same
+  // 12-indicator source that Factor Confirmation already shows for ES1!/MES1!.
+  indicators?: SentimentIndicator[]
+  technicalIndicators?: SentimentIndicator[]
+  technicalMeter?: SentimentIndicator[]
+  factors?: SentimentIndicator[]
+  technicalSentiment?: Partial<SentimentData>
+  sentiment?: Partial<SentimentData>
 }
 
 type SentimentIndicator = {
@@ -186,6 +195,50 @@ function extractTechnicalIndicators(data: SentimentData | null | undefined): Sen
   }
 
   return sorted
+}
+
+function buildTechnicalSentimentFromSignal(
+  signal: TradingSignal | undefined,
+  selectedSymbol: string,
+  selectedTimeframe: string
+): SentimentData | null {
+  if (!signal) return null
+
+  const signalRecord = signal as unknown as Record<string, unknown>
+  const nestedTechnical =
+    signalRecord.technicalSentiment && typeof signalRecord.technicalSentiment === 'object'
+      ? (signalRecord.technicalSentiment as Partial<SentimentData>)
+      : signalRecord.sentiment && typeof signalRecord.sentiment === 'object'
+        ? (signalRecord.sentiment as Partial<SentimentData>)
+        : null
+
+  const candidate: SentimentData = {
+    eventType: 'PYTHON_TECHNICAL_SENTIMENT',
+    symbol: selectedSymbol,
+    timeframe: selectedTimeframe,
+    sentiment: Number(nestedTechnical?.sentiment ?? signalRecord.sentiment ?? 50),
+    sentimentStatus: String(nestedTechnical?.sentimentStatus ?? signalRecord.sentimentStatus ?? 'Mixed'),
+    bearCount: Number(nestedTechnical?.bearCount ?? signalRecord.bearCount ?? 0),
+    neutralCount: Number(nestedTechnical?.neutralCount ?? signalRecord.neutralCount ?? 0),
+    bullCount: Number(nestedTechnical?.bullCount ?? signalRecord.bullCount ?? 0),
+    bearPct: Number(nestedTechnical?.bearPct ?? signalRecord.bearPct ?? 0),
+    neutralPct: Number(nestedTechnical?.neutralPct ?? signalRecord.neutralPct ?? 0),
+    bullPct: Number(nestedTechnical?.bullPct ?? signalRecord.bullPct ?? 0),
+    activeCount: Number(nestedTechnical?.activeCount ?? signalRecord.activeCount ?? 0),
+    price: Number(signalRecord.price ?? signalRecord.current ?? 0),
+    indicators: [
+      ...asIndicatorArray(signal.indicators),
+      ...asIndicatorArray(signal.technicalIndicators),
+      ...asIndicatorArray(signal.technicalMeter),
+      ...asIndicatorArray(signal.factors),
+      ...asIndicatorArray(nestedTechnical?.indicators),
+      ...asIndicatorArray(nestedTechnical?.technicalIndicators),
+      ...asIndicatorArray(nestedTechnical?.technicalMeter),
+      ...asIndicatorArray(nestedTechnical?.factors),
+    ],
+  }
+
+  return extractTechnicalIndicators(candidate).length > 0 ? candidate : null
 }
 
 function clamp(value: number) {
@@ -468,16 +521,34 @@ export default function MarketSentimentGauge({ signal }: MarketSentimentGaugePro
     apiSymbol === selectedSymbol && apiTimeframe === selectedTimeframe
 
   const apiTechnicalIndicators = extractTechnicalIndicators(apiSentiment)
+  const signalTechnicalSentiment = buildTechnicalSentimentFromSignal(
+    signal,
+    selectedSymbol,
+    selectedTimeframe
+  )
+  const signalTechnicalIndicators = extractTechnicalIndicators(signalTechnicalSentiment)
 
-  const hasTechnicalSentiment =
+  const apiHasTechnicalSentiment =
     apiMatchesMainChart &&
     apiSentiment.eventType === 'PYTHON_TECHNICAL_SENTIMENT' &&
     apiTechnicalIndicators.length > 0
 
   // Market Sentiment should match the PineScript meter:
   // activeCount = number of technical indicators, not dashboard factor votes.
-  const sentiment = hasTechnicalSentiment
-    ? normalizeTechnicalSentiment(apiSentiment, selectedSymbol, selectedTimeframe)
+  //
+  // ES1!/MES1! often receive the full 12-indicator payload through the same
+  // latestSignal object that FactorConfirmationTable uses, while /api/latest-sentiment
+  // may still return a smaller/simple futures sentiment. Prefer the source with
+  // the most technical indicators so ES1!/MES1! display the same full meter as SPY/BTC/ETH.
+  const bestTechnicalSentiment =
+    signalTechnicalIndicators.length > apiTechnicalIndicators.length
+      ? signalTechnicalSentiment
+      : apiHasTechnicalSentiment
+        ? apiSentiment
+        : signalTechnicalSentiment
+
+  const sentiment = bestTechnicalSentiment
+    ? normalizeTechnicalSentiment(bestTechnicalSentiment, selectedSymbol, selectedTimeframe)
     : {
         ...(signalSentiment ?? apiSentiment),
         symbol: selectedSymbol,
