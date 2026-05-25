@@ -62,6 +62,7 @@ type SentimentData = {
 
 type MarketSentimentGaugeProps = {
   signal?: TradingSignal
+  technicalSentiment?: SentimentData | null
 }
 
 function normalizeSymbol(value: unknown) {
@@ -475,7 +476,10 @@ function normalizeTechnicalSentiment(
 }
 
 
-export default function MarketSentimentGauge({ signal }: MarketSentimentGaugeProps) {
+export default function MarketSentimentGauge({
+  signal,
+  technicalSentiment: sharedTechnicalSentiment,
+}: MarketSentimentGaugeProps) {
   const [apiSentiment, setApiSentiment] = useState<SentimentData>(DEFAULT_SENTIMENT)
   const [engineSentiment, setEngineSentiment] = useState<SentimentData | null>(null)
 
@@ -596,6 +600,7 @@ export default function MarketSentimentGauge({ signal }: MarketSentimentGaugePro
 
   const apiTechnicalIndicators = extractTechnicalIndicators(apiSentiment)
   const engineTechnicalIndicators = extractTechnicalIndicators(engineSentiment)
+  const sharedTechnicalIndicators = extractTechnicalIndicators(sharedTechnicalSentiment)
   const signalTechnicalSentiment = buildTechnicalSentimentFromSignal(
     signal,
     selectedSymbol,
@@ -609,6 +614,10 @@ export default function MarketSentimentGauge({ signal }: MarketSentimentGaugePro
     apiTechnicalIndicators.length > 0
 
   const candidates = [
+    {
+      sentiment: sharedTechnicalSentiment,
+      count: sharedTechnicalIndicators.length,
+    },
     {
       sentiment: apiHasTechnicalSentiment ? apiSentiment : null,
       count: apiHasTechnicalSentiment ? apiTechnicalIndicators.length : 0,
