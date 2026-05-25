@@ -2062,7 +2062,24 @@ export default function EChartsCandlestickChart({
   const usingLiveCandles = stickyLiveCandles.length >= 1
   const symbolSampleCandles = useMemo(() => getSampleCandlesForSymbol(symbol), [symbol])
 
-  const baseCandles = usingLiveCandles ? stickyLiveCandles : symbolSampleCandles
+  // Candle source priority:
+  // 1. Python engine candles from /api/engine-state
+  // 2. Historical candles from /api/historical-candles
+  // 3. Live/recent webhook candles only as fallback
+  // 4. Sample candles only as final fallback
+  //
+  // This prevents BTCUSD from being drawn from stale sticky live candles
+  // while the backend has valid historical/engine candles available.
+  const hasEngineCandles = engineCandles.length > 0
+  const hasHistoricalCandles = historicalCandlesFromAlpaca.length > 0
+
+  const baseCandles = hasEngineCandles
+    ? engineCandles
+    : hasHistoricalCandles
+      ? historicalCandlesFromAlpaca
+      : usingLiveCandles
+        ? stickyLiveCandles
+        : symbolSampleCandles
 
   const overlayPayload = useMemo(() => extractOverlayPayload(latestSignal), [latestSignal])
 
@@ -2672,7 +2689,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3AK' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3AL' : 'Chart Engine v2'}
             </div>
           </div>
         )}
