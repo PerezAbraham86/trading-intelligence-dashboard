@@ -517,6 +517,10 @@ export default function MarketSentimentGauge({
   useEffect(() => {
     setEngineSentiment(null)
 
+    // Shared app/page.tsx technical sentiment is the source of truth.
+    // Only fetch engine sentiment as a fallback if no shared sentiment exists.
+    if (sharedTechnicalSentiment) return
+
     const fetchEngineSentiment = async () => {
       try {
         const selectedSymbol = normalizeSymbol(signal?.symbol ?? 'BTCUSD')
@@ -585,7 +589,7 @@ export default function MarketSentimentGauge({
     return () => {
       window.clearInterval(interval)
     }
-  }, [signal?.symbol, signal?.timeframe])
+  }, [signal?.symbol, signal?.timeframe, sharedTechnicalSentiment])
 
   const signalSentiment = useMemo(() => buildSentimentFromSignal(signal), [signal])
 
@@ -613,31 +617,20 @@ export default function MarketSentimentGauge({
     apiSentiment.eventType === 'PYTHON_TECHNICAL_SENTIMENT' &&
     apiTechnicalIndicators.length > 0
 
-  const candidates = [
-    {
-      sentiment: sharedTechnicalSentiment,
-      count: sharedTechnicalIndicators.length,
-    },
-    {
-      sentiment: apiHasTechnicalSentiment ? apiSentiment : null,
-      count: apiHasTechnicalSentiment ? apiTechnicalIndicators.length : 0,
-    },
-    {
-      sentiment: engineSentiment,
-      count: engineTechnicalIndicators.length,
-    },
-    {
-      sentiment: signalTechnicalSentiment,
-      count: signalTechnicalIndicators.length,
-    },
-  ].filter((candidate): candidate is { sentiment: SentimentData; count: number } =>
-    Boolean(candidate.sentiment) && candidate.count > 0
-  )
-
+  // HARD RULE:
+  // If app/page.tsx provides sharedTechnicalSentiment, use that exact object.
+  // Do not compare it against /api/latest-sentiment, /api/engine-state, or signal fallback.
+  // This keeps Market Sentiment and Factor Confirmation perfectly synced.
   const bestTechnicalSentiment =
-    candidates.length > 0
-      ? candidates.reduce((best, current) => current.count > best.count ? current : best).sentiment
-      : null
+    sharedTechnicalIndicators.length > 0
+      ? sharedTechnicalSentiment
+      : apiHasTechnicalSentiment
+        ? apiSentiment
+        : engineTechnicalIndicators.length > 0
+          ? engineSentiment
+          : signalTechnicalIndicators.length > 0
+            ? signalTechnicalSentiment
+            : null
 
   const sentiment = bestTechnicalSentiment
     ? normalizeTechnicalSentiment(bestTechnicalSentiment, selectedSymbol, selectedTimeframe)
