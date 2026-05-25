@@ -300,6 +300,61 @@ function shouldUseSampleFallback(symbol: string): boolean {
   return !['BTCUSD', 'ETHUSD', 'SPY', 'ES1!', 'MES1!'].includes(normalized)
 }
 
+function getValidPriceRangeForSymbol(symbol: string): [number, number] {
+  const normalized = normalizeDefaultSymbol(symbol, '')
+
+  // Hard safety rails to prevent BTC/ETH-scale candles or ghost projections
+  // from rendering on MES/ES/SPY charts.
+  if (normalized === 'BTCUSD') return [10000, 300000]
+  if (normalized === 'ETHUSD') return [100, 30000]
+  if (normalized === 'SPY') return [50, 2000]
+  if (normalized === 'ES1!' || normalized === 'MES1!') return [1000, 20000]
+
+  return [0.000001, 1000000000]
+}
+
+function isPriceValidForSymbol(value: any, symbol: string): boolean {
+  const price = Number(value)
+  if (!Number.isFinite(price)) return false
+
+  const [low, high] = getValidPriceRangeForSymbol(symbol)
+  return price >= low && price <= high
+}
+
+function isCandlePriceValidForSymbol(candle: Candle | null | undefined, symbol: string): boolean {
+  if (!candle) return false
+
+  return (
+    isPriceValidForSymbol(candle.open, symbol) &&
+    isPriceValidForSymbol(candle.high, symbol) &&
+    isPriceValidForSymbol(candle.low, symbol) &&
+    isPriceValidForSymbol(candle.close, symbol)
+  )
+}
+
+function isGhostPriceValidForSymbol(ghost: GhostCandle | null | undefined, symbol: string): boolean {
+  if (!ghost) return false
+
+  return (
+    isPriceValidForSymbol(ghost.open, symbol) &&
+    isPriceValidForSymbol(ghost.high, symbol) &&
+    isPriceValidForSymbol(ghost.low, symbol) &&
+    isPriceValidForSymbol(ghost.close, symbol)
+  )
+}
+
+function latestSignalMatchesSelection(latestSignal: any, symbol: string, timeframe: string): boolean {
+  if (!latestSignal) return false
+
+  const signalSymbol = latestSignal?.symbol ?? latestSignal?.source?.symbol
+  const signalTimeframe = latestSignal?.timeframe ?? latestSignal?.source?.timeframe
+
+  if (!symbolsMatch(signalSymbol, symbol)) return false
+  if (signalTimeframe && normalizeTimeframe(signalTimeframe) !== normalizeTimeframe(timeframe)) return false
+
+  return true
+}
+
 async function fetchJsonWithSymbolFallback(path: string, symbol: string, timeframe: string, limit: string) {
   const candidates = getApiSymbolCandidates(symbol)
   let lastStatus = 0
@@ -2473,20 +2528,31 @@ export default function EChartsCandlestickChart({
   const symbolSampleCandles = useMemo(() => getSampleCandlesForSymbol(symbol), [symbol])
   const allowSampleFallbackForSymbol = shouldUseSampleFallback(symbol)
 
-  const baseCandles = usingLiveCandles
+  const rawBaseCandles = usingLiveCandles
     ? stickyLiveCandles
     : allowSampleFallbackForSymbol
       ? symbolSampleCandles
       : []
 
-  const overlayPayload = useMemo(() => extractOverlayPayload(latestSignal), [latestSignal])
+  const baseCandles = useMemo(
+    () => rawBaseCandles.filter((candle) => isCandlePriceValidForSymbol(candle, symbol)),
+    [rawBaseCandles, symbol]
+  )
+
+  const signalMatchesSelection = latestSignalMatchesSelection(latestSignal, symbol, timeframe)
+  const overlayPayload = useMemo(
+    () => signalMatchesSelection ? extractOverlayPayload(latestSignal) : ({} as ChartOverlayPayload),
+    [latestSignal, signalMatchesSelection]
+  )
+
+  const selectedEngineState = engineMatchesSelection ? engineState : null
 
   const engineAvailable = Boolean(
     engineMatchesSelection && engineStatus === 'loaded' && engineCandles.length > 0
   )
 
-  const rawSmcEvents = engineMatchesSelection && Array.isArray(engineState?.smcEvents)
-    ? engineState?.smcEvents ?? []
+  const rawSmcEvents = selectedEngineState && Array.isArray(selectedEngineState?.smcEvents)
+    ? selectedEngineState?.smcEvents ?? []
     : overlayPayload.smcEvents ?? []
 
   const activeSmcEvents = useMemo(
@@ -2494,13 +2560,13 @@ export default function EChartsCandlestickChart({
     [rawSmcEvents, smcDisplayMode, compact]
   )
 
-  const activeDlmLevels = Array.isArray(engineState?.dlmLevels)
-    ? engineState?.dlmLevels ?? []
+  const activeDlmLevels = selectedEngineState && Array.isArray(selectedEngineState?.dlmLevels)
+    ? selectedEngineState?.dlmLevels ?? []
     : overlayPayload.dlmLevels ?? []
 
   const rawActiveZones = [
-    ...(Array.isArray(engineState?.zones) ? engineState?.zones ?? [] : overlayPayload.zones ?? []),
-    ...(Array.isArray(engineState?.alphaFvgs) ? engineState?.alphaFvgs ?? [] : []),
+    ...(selectedEngineState && Array.isArray(selectedEngineState?.zones) ? selectedEngineState?.zones ?? [] : overlayPayload.zones ?? []),
+    ...(selectedEngineState && Array.isArray(selectedEngineState?.alphaFvgs) ? selectedEngineState?.alphaFvgs ?? [] : []),
   ]
 
   const activeZones = useMemo(
@@ -2509,10 +2575,10 @@ export default function EChartsCandlestickChart({
   )
 
   const rawLiquidityEvents = [
-    ...(Array.isArray(engineState?.liquidityEvents)
-      ? engineState?.liquidityEvents ?? []
+    ...(selectedEngineState && Array.isArray(selectedEngineState?.liquidityEvents)
+      ? selectedEngineState?.liquidityEvents ?? []
       : overlayPayload.liquidityEvents ?? []),
-    ...(Array.isArray(engineState?.alphaSweeps) ? engineState?.alphaSweeps ?? [] : []),
+    ...(selectedEngineState && Array.isArray(selectedEngineState?.alphaSweeps) ? selectedEngineState?.alphaSweeps ?? [] : []),
   ]
 
   const activeLiquidityEvents = useMemo(
@@ -2520,12 +2586,12 @@ export default function EChartsCandlestickChart({
     [rawLiquidityEvents, smcDisplayMode, compact]
   )
 
-  const activeDlmConfluenceMarkers = Array.isArray(engineState?.dlmConfluenceMarkers)
-    ? engineState?.dlmConfluenceMarkers ?? []
+  const activeDlmConfluenceMarkers = selectedEngineState && Array.isArray(selectedEngineState?.dlmConfluenceMarkers)
+    ? selectedEngineState?.dlmConfluenceMarkers ?? []
     : overlayPayload.dlmConfluenceMarkers ?? []
 
-  const rawScoreMarkers = Array.isArray(engineState?.scoreMarkers)
-    ? engineState?.scoreMarkers ?? []
+  const rawScoreMarkers = selectedEngineState && Array.isArray(selectedEngineState?.scoreMarkers)
+    ? selectedEngineState?.scoreMarkers ?? []
     : overlayPayload.scoreMarkers ?? []
 
   const activeScoreMarkers = useMemo(
@@ -2533,8 +2599,8 @@ export default function EChartsCandlestickChart({
     [rawScoreMarkers, smcDisplayMode, compact]
   )
 
-  const alphaProfileBins = Array.isArray(engineState?.alphaProfileBins)
-    ? engineState?.alphaProfileBins ?? []
+  const alphaProfileBins = selectedEngineState && Array.isArray(selectedEngineState?.alphaProfileBins)
+    ? selectedEngineState?.alphaProfileBins ?? []
     : []
 
   useEffect(() => {
@@ -2563,8 +2629,9 @@ export default function EChartsCandlestickChart({
       ? Array.from({ length: RIGHT_PROFILE_SLOT_COUNT }, (_, index) => `__profile_${index + 1}`)
       : []
 
-    const ghostCandles = enableAdvancedOverlays && showGhost
-      ? buildGhostCandles(engineState, activeCandles, ghostGapSlots)
+    const ghostCandles = enableAdvancedOverlays && showGhost && activeCandles.length > 0
+      ? buildGhostCandles(selectedEngineState, activeCandles, ghostGapSlots)
+          .filter((ghost) => isGhostPriceValidForSymbol(ghost, symbol))
       : []
 
     const xAxisData = [...candleTimes, ...ghostGapSlots, ...profileSlots]
@@ -2729,7 +2796,7 @@ export default function EChartsCandlestickChart({
                   ? 'InsightSentry futures + Python SMC engine'
                   : engineAvailable
                     ? 'Python SMC + AlphaX engine'
-                    : usingLiveCandles
+                    : baseCandles.length > 0
                       ? historicalCandlesFromAlpaca.length > 0
                         ? 'Alpaca history + live candles'
                         : 'Live API candles'
@@ -2824,7 +2891,7 @@ export default function EChartsCandlestickChart({
         },
       ],
 
-      graphic: usingLiveCandles
+      graphic: baseCandles.length > 0
         ? []
         : [
             {
