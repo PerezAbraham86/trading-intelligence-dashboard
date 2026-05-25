@@ -2397,9 +2397,6 @@ export default function EChartsCandlestickChart({
           id: 'main-candles',
           name: `${symbol} ${candleMode}`,
           type: 'candlestick',
-        barWidth: '55%',
-        barMinWidth: 3,
-        barMaxWidth: 14,
           data: candleData,
           itemStyle: {
             color: TEAL,
@@ -2408,6 +2405,8 @@ export default function EChartsCandlestickChart({
             borderColor0: LIGHT_RED,
           },
           barWidth: compact ? '48%' : '58%',
+          barMinWidth: 3,
+          barMaxWidth: 14,
 
           markArea: {
             silent: true,
@@ -2671,7 +2670,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3AA' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3AB' : 'Chart Engine v2'}
             </div>
           </div>
         )}
