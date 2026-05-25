@@ -618,7 +618,8 @@ export default function MarketSentimentGauge({
     apiTechnicalIndicators.length > 0
 
   // HARD RULE:
-  // If app/page.tsx provides sharedTechnicalSentiment, use that exact object.
+  // If app/page.tsx provides technicalSentiment from FactorConfirmationTable,
+  // use that exact 12-indicator object.
   // Do not compare it against /api/latest-sentiment, /api/engine-state, or signal fallback.
   // This keeps Market Sentiment and Factor Confirmation perfectly synced.
   const bestTechnicalSentiment =
