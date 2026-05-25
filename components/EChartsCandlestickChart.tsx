@@ -318,21 +318,52 @@ async function fetchJsonWithSymbolFallback(path: string, symbol: string, timefra
 
       lastStatus = response.status
 
-      if (!response.ok) continue
+      if (!response.ok) {
+        console.warn(`[candles] ${path} ${candidate} returned status ${response.status}`)
+        continue
+      }
 
       const json = await response.json()
       const candles = extractCandleArray(json)
 
-      // For historical candles we only accept a candidate if it actually returns bars.
-      if (path.includes('historical-candles') && candles.length === 0) continue
+      if (candles.length === 0) {
+        console.warn(`[candles] ${path} ${candidate} returned 0 candles`, json)
+        continue
+      }
 
-      return { json, candles, symbol: candidate, status: response.status, ok: true }
+      console.info(`[candles] ${path} loaded ${candles.length} candles for ${candidate}`)
+      return { json, candles, symbol: candidate, status: response.status, ok: true, path }
     } catch (error) {
       console.error(`Fetch error for ${path} ${candidate}:`, error)
     }
   }
 
-  return { json: null, candles: [], symbol: candidates[0] ?? symbol, status: lastStatus, ok: false }
+  return { json: null, candles: [], symbol: candidates[0] ?? symbol, status: lastStatus, ok: false, path }
+}
+
+async function fetchCandlesFromAnyAvailableEndpoint(symbol: string, timeframe: string, limit: string) {
+  // Try the historical route first, then common live/recent routes.
+  // This keeps BTC/ETH working while giving SPY/ES1!/MES1! another chance
+  // if your backend exposes their true candles through a different route.
+  const endpointCandidates = [
+    '/api/historical-candles',
+    '/api/candles',
+    '/api/recent-candles',
+    '/api/live-candles',
+  ]
+
+  let lastResult: any = null
+
+  for (const path of endpointCandidates) {
+    const result = await fetchJsonWithSymbolFallback(path, symbol, timeframe, limit)
+    lastResult = result
+
+    if (result.ok && result.candles.length > 0) {
+      return result
+    }
+  }
+
+  return lastResult ?? { json: null, candles: [], symbol, status: 0, ok: false, path: endpointCandidates[0] }
 }
 
 const timeframeOptions = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1D']
@@ -2317,8 +2348,7 @@ export default function EChartsCandlestickChart({
       setHistoricalStatus('loading')
 
       try {
-        const result = await fetchJsonWithSymbolFallback(
-          '/api/historical-candles',
+        const result = await fetchCandlesFromAnyAvailableEndpoint(
           symbol,
           timeframe,
           candleFetchLimit
@@ -2793,6 +2823,38 @@ export default function EChartsCandlestickChart({
           throttle: 35,
         },
       ],
+
+      graphic: usingLiveCandles
+        ? []
+        : [
+            {
+              type: 'group',
+              left: 'center',
+              top: 'middle',
+              silent: true,
+              children: [
+                {
+                  type: 'text',
+                  style: {
+                    text: `${symbol} ${timeframe}: no real candles returned`,
+                    fill: '#facc15',
+                    font: '700 14px sans-serif',
+                    align: 'center',
+                  },
+                },
+                {
+                  type: 'text',
+                  top: 24,
+                  style: {
+                    text: 'Frontend is ready. Backend/API returned zero OHLC bars. Check Network console for [candles] logs.',
+                    fill: '#94a3b8',
+                    font: '500 11px sans-serif',
+                    align: 'center',
+                  },
+                },
+              ],
+            },
+          ],
 
       series: [
         {
