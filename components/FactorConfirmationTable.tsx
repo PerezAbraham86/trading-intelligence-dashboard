@@ -389,14 +389,28 @@ export default function FactorConfirmationTable({
   const timeframe = normalizeTimeframe(signal?.timeframe)
   const bullScore = clamp(Number(signal?.bullScore ?? 50))
   const bearScore = clamp(Number(signal?.bearScore ?? 50))
-  const technicalSentiment = technicalSentimentOverride ?? fetchedTechnicalSentiment
+
+  // Important:
+  // app/page.tsx can pass a lightweight/shared sentiment object before the real
+  // 12-indicator array arrives. Do NOT let that empty override block this component's
+  // own /api/latest-sentiment fetch, or the table shows "Waiting for technical meter data".
+  const overrideTechnicalIndicators = useMemo(
+    () => extractTechnicalIndicators(technicalSentimentOverride ?? null),
+    [technicalSentimentOverride]
+  )
+
+  const hasValidTechnicalOverride = overrideTechnicalIndicators.length > 0
+
+  const technicalSentiment = hasValidTechnicalOverride
+    ? technicalSentimentOverride
+    : fetchedTechnicalSentiment
 
   useEffect(() => {
     let cancelled = false
     let intervalId: ReturnType<typeof setInterval> | null = null
 
     async function fetchTechnicalSentiment() {
-      if (technicalSentimentOverride) return
+      if (hasValidTechnicalOverride) return
 
       try {
         const params = new URLSearchParams({
@@ -428,7 +442,7 @@ export default function FactorConfirmationTable({
       cancelled = true
       if (intervalId) clearInterval(intervalId)
     }
-  }, [symbol, timeframe, technicalSentimentOverride])
+  }, [symbol, timeframe, hasValidTechnicalOverride])
 
   const coreRows = useMemo(() => buildCoreRows(signal), [signal])
   const externalRows = useMemo(() => buildExternalRows(signal), [signal])
