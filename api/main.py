@@ -390,6 +390,18 @@ def fetch_insightsentry_futures_candles(
     timeframe: str = "1m",
     limit: int = 300,
 ) -> List[Dict[str, Any]]:
+    """
+    Fetch futures candles from InsightSentry/RapidAPI.
+
+    IMPORTANT:
+    RapidAPI may disable the /history endpoint on some plans. For the dashboard,
+    we only need recent rolling candles, so use the regular Time Series OHLCV
+    endpoint first:
+
+        /v3/symbols/{symbol}/series
+
+    The /history endpoint is kept as a fallback only for paid plans that allow it.
+    """
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     insightsentry_symbol = to_insightsentry_symbol(normalized_symbol)
@@ -399,10 +411,51 @@ def fetch_insightsentry_futures_candles(
     headers = insightsentry_headers()
     bar_params = insightsentry_bar_params(normalized_timeframe)
 
+    # 1) Preferred endpoint for your current RapidAPI screen:
+    # General → Time Series (OHLCV)
+    # /v3/symbols/{symbol}/series?bar_type=minute&bar_interval=1&extended=true&badj=false&dadj=false&dp=300
+    series_params = urlencode(
+        {
+            **bar_params,
+            "extended": "true",
+            "badj": "false",
+            "dadj": "false",
+            "dp": str(safe_limit),
+        }
+    )
+
+    series_url = f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_symbol}/series?{series_params}"
+
+    series_error: Optional[str] = None
+    try:
+        data = http_get_json(series_url, headers=headers, provider="InsightSentry")
+        bars = extract_bar_list(data)
+        candles = [
+            normalize_insightsentry_bar(bar, normalized_symbol, normalized_timeframe)
+            for bar in bars
+        ]
+        candles = [
+            candle
+            for candle in candles
+            if candle.get("open") is not None
+            and candle.get("high") is not None
+            and candle.get("low") is not None
+            and candle.get("close") is not None
+            and to_epoch_seconds(candle.get("time") or candle.get("timestamp")) > 0
+        ]
+
+        merged = merge_candles_by_time(candles)[-safe_limit:]
+        if merged:
+            return merged
+
+        series_error = "InsightSentry /series returned no candles. Check the exact futures symbol in the Search endpoint."
+    except HTTPException as exc:
+        series_error = str(exc.detail)
+
+    # 2) Fallback only. Some RapidAPI plans disable this endpoint.
+    historical_errors: List[str] = []
     candles: List[Dict[str, Any]] = []
 
-    # Historical endpoint from RapidAPI screenshot:
-    # /v3/symbols/{symbol}/history?bar_type=minute&bar_interval=1&extended=true&badj=true&dadj=false&start_ym=YYYY-MM&end_ym=&continuation=false
     for start_ym in month_strings_back(3):
         params = urlencode(
             {
@@ -416,16 +469,20 @@ def fetch_insightsentry_futures_candles(
             }
         )
 
-        url = f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_symbol}/history?{params}"
-        data = http_get_json(url, headers=headers, provider="InsightSentry")
-        bars = extract_bar_list(data)
+        history_url = f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_symbol}/history?{params}"
 
-        candles.extend(
-            normalize_insightsentry_bar(bar, normalized_symbol, normalized_timeframe)
-            for bar in bars
-        )
+        try:
+            data = http_get_json(history_url, headers=headers, provider="InsightSentry")
+            bars = extract_bar_list(data)
+            candles.extend(
+                normalize_insightsentry_bar(bar, normalized_symbol, normalized_timeframe)
+                for bar in bars
+            )
 
-        if len(candles) >= safe_limit:
+            if len(candles) >= safe_limit:
+                break
+        except HTTPException as exc:
+            historical_errors.append(str(exc.detail))
             break
 
     candles = [
@@ -438,7 +495,23 @@ def fetch_insightsentry_futures_candles(
         and to_epoch_seconds(candle.get("time") or candle.get("timestamp")) > 0
     ]
 
-    return merge_candles_by_time(candles)[-safe_limit:]
+    merged = merge_candles_by_time(candles)[-safe_limit:]
+    if merged:
+        return merged
+
+    raise HTTPException(
+        status_code=502,
+        detail={
+            "message": "InsightSentry returned no futures candles from enabled endpoints.",
+            "symbol": normalized_symbol,
+            "insightsentrySymbol": insightsentry_symbol,
+            "timeframe": normalized_timeframe,
+            "tried": ["/v3/symbols/{symbol}/series", "/v3/symbols/{symbol}/history"],
+            "seriesError": series_error,
+            "historyErrors": historical_errors,
+            "nextStep": "In RapidAPI, test General → Time Series (OHLCV), not Historical Time Series. If /series is also disabled, upgrade/enable that endpoint or try the Search endpoint to confirm the futures symbol.",
+        },
+    )
 
 
 def to_float(value: Any, fallback: float = 0.0) -> float:
