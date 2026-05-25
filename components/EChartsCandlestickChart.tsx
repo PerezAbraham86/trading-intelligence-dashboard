@@ -1863,8 +1863,8 @@ export default function EChartsCandlestickChart({
           symbol,
           timeframe,
           // Keep Python SMC/AlphaX/Ghost lightweight.
-          // Full 5000-candle history is loaded separately from /api/historical-candles.
-          limit: compact ? '250' : '750',
+          // Chart history is intentionally limited again for faster loading.
+          limit: compact ? '120' : '300',
         })
 
         const response = await fetch(`${API_BASE_URL}/api/engine-state?${params.toString()}`, {
@@ -1910,7 +1910,7 @@ export default function EChartsCandlestickChart({
         const params = new URLSearchParams({
           symbol,
           timeframe,
-          limit: '5000',
+          limit: '300',
         })
 
         const response = await fetch(`${API_BASE_URL}/api/historical-candles?${params.toString()}`, {
@@ -2320,7 +2320,7 @@ export default function EChartsCandlestickChart({
           filterMode: 'none',
           // 5000 candles are loaded, but we only show the latest window first.
           // All older candles remain available by dragging/scrolling left.
-          startValue: Math.max(0, activeCandles.length - (compact ? 90 : 260)),
+          startValue: Math.max(0, activeCandles.length - (compact ? 80 : 180)),
           endValue: Math.max(0, activeCandles.length - 1),
           minValueSpan: compact ? 25 : 60,
           maxValueSpan: xAxisData.length,
