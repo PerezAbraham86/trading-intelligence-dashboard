@@ -24,6 +24,7 @@ type TradingSignal = {
 type FactorConfirmationTableProps = {
   signal?: TradingSignal
   technicalSentiment?: TechnicalSentiment | null
+  onTechnicalSentimentUpdate?: (sentiment: TechnicalSentiment | null) => void
 }
 
 type FactorStatus = 'bullish' | 'bearish' | 'neutral' | 'active' | 'inactive'
@@ -379,6 +380,7 @@ function TechnicalChip({ indicator }: { indicator: TechnicalIndicator }) {
 export default function FactorConfirmationTable({
   signal,
   technicalSentiment: technicalSentimentOverride,
+  onTechnicalSentimentUpdate,
 }: FactorConfirmationTableProps) {
   const [fetchedTechnicalSentiment, setFetchedTechnicalSentiment] =
     useState<TechnicalSentiment | null>(null)
@@ -476,6 +478,45 @@ export default function FactorConfirmationTable({
               : technicalValue < 40
                 ? 'Bearish Lean'
                 : 'Mixed'
+
+  useEffect(() => {
+    if (!onTechnicalSentimentUpdate) return
+
+    if (!technicalSentiment || technicalIndicators.length === 0) {
+      onTechnicalSentimentUpdate(null)
+      return
+    }
+
+    // Factor Confirmation is the principal source.
+    // Emit the exact 12-indicator technical meter that this component renders,
+    // so Market Sentiment can display the same values.
+    onTechnicalSentimentUpdate({
+      ...technicalSentiment,
+      indicators: technicalIndicators,
+      technicalIndicators,
+      technicalMeter: technicalIndicators,
+      factors: technicalIndicators,
+      activeCount: activeTechnicalCount,
+      sentiment: technicalValue,
+      sentimentStatus: technicalSentimentStatus,
+      bullCount: bullTechnicalCount,
+      bearCount: bearTechnicalCount,
+      neutralCount: neutralTechnicalCount,
+      bullPct: activeTechnicalCount > 0 ? (bullTechnicalCount / activeTechnicalCount) * 100 : 0,
+      bearPct: activeTechnicalCount > 0 ? (bearTechnicalCount / activeTechnicalCount) * 100 : 0,
+      neutralPct: activeTechnicalCount > 0 ? (neutralTechnicalCount / activeTechnicalCount) * 100 : 0,
+    })
+  }, [
+    onTechnicalSentimentUpdate,
+    technicalSentiment,
+    technicalIndicators,
+    activeTechnicalCount,
+    technicalValue,
+    technicalSentimentStatus,
+    bullTechnicalCount,
+    bearTechnicalCount,
+    neutralTechnicalCount,
+  ])
 
   return (
     <motion.div
