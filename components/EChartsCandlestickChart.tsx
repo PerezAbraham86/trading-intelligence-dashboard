@@ -1732,6 +1732,32 @@ function buildAlphaProfileSeries(
   ]
 }
 
+function preserveXAxisZoom(option: any, chart: echarts.ECharts | null) {
+  const previousOption = chart?.getOption?.() as any
+  const previousZoom = Array.isArray(previousOption?.dataZoom)
+    ? previousOption.dataZoom.find((zoom: any) => zoom?.id === 'main-x-scroll')
+    : null
+
+  if (!previousZoom || !Array.isArray(option.dataZoom)) {
+    return option
+  }
+
+  option.dataZoom = option.dataZoom.map((zoom: any) => {
+    if (zoom?.id !== 'main-x-scroll') return zoom
+
+    const preserved = { ...zoom }
+
+    if (typeof previousZoom.start === 'number') preserved.start = previousZoom.start
+    if (typeof previousZoom.end === 'number') preserved.end = previousZoom.end
+    if (previousZoom.startValue !== undefined) preserved.startValue = previousZoom.startValue
+    if (previousZoom.endValue !== undefined) preserved.endValue = previousZoom.endValue
+
+    return preserved
+  })
+
+  return option
+}
+
 export default function EChartsCandlestickChart({
   heightClass = 'h-[650px]',
   compact = false,
@@ -2094,9 +2120,7 @@ export default function EChartsCandlestickChart({
 
     const activeCandles =
       candleMode === 'Heikin Ashi'
-        ? engineHaCandles.length > 0
-          ? engineHaCandles
-          : convertToHeikinAshi(baseCandles)
+        ? convertToHeikinAshi(baseCandles)
         : baseCandles
 
     const candleTimes = activeCandles.map((c) => c.time)
@@ -2326,13 +2350,19 @@ export default function EChartsCandlestickChart({
 
       dataZoom: [
         {
+          id: 'main-x-scroll',
           type: 'inside',
           xAxisIndex: 0,
           filterMode: 'none',
+          start: compact ? 72 : 68,
+          end: 100,
+          minSpan: 5,
+          maxSpan: 100,
           zoomOnMouseWheel: true,
           moveOnMouseMove: true,
-          moveOnMouseWheel: false,
-          throttle: 50,
+          moveOnMouseWheel: true,
+          preventDefaultMouseMove: true,
+          throttle: 35,
         },
       ],
 
@@ -2380,7 +2410,9 @@ export default function EChartsCandlestickChart({
       ],
     }
 
-    chartInstance.current.setOption(option, {
+    const optionWithPreservedZoom = preserveXAxisZoom(option, chartInstance.current)
+
+    chartInstance.current.setOption(optionWithPreservedZoom, {
       notMerge: false,
       replaceMerge: ['series'],
       lazyUpdate: false,
