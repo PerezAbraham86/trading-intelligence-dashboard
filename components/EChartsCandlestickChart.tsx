@@ -324,15 +324,17 @@ function engineStateMatchesSelection(
 ): boolean {
   if (!engineState) return false
 
+  const state = engineState as Record<string, any>
+
   const sourceSymbol =
-    engineState?.source?.symbol ??
-    engineState?.symbol ??
-    engineState?.candles?.[0]?.symbol
+    state?.source?.symbol ??
+    state?.symbol ??
+    state?.candles?.[0]?.symbol
 
   const sourceTimeframe =
-    engineState?.source?.timeframe ??
-    engineState?.timeframe ??
-    engineState?.candles?.[0]?.timeframe
+    state?.source?.timeframe ??
+    state?.timeframe ??
+    state?.candles?.[0]?.timeframe
 
   const symbolOk = symbolsMatch(sourceSymbol, selectedSymbol)
   const timeframeOk =
@@ -2709,7 +2711,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3AN' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3AO' : 'Chart Engine v2'}
             </div>
           </div>
         )}
