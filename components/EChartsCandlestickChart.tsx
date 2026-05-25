@@ -1732,38 +1732,6 @@ function buildAlphaProfileSeries(
   ]
 }
 
-function applyPreservedDataZoom(option: any, chart: echarts.ECharts | null) {
-  const previousOption = chart?.getOption?.() as any
-  const previousZooms = Array.isArray(previousOption?.dataZoom)
-    ? previousOption.dataZoom
-    : []
-
-  const getPreviousZoom = (id: string, index: number) => {
-    return (
-      previousZooms.find((zoom: any) => zoom?.id === id) ??
-      previousZooms[index] ??
-      null
-    )
-  }
-
-  option.dataZoom = (option.dataZoom ?? []).map((zoom: any, index: number) => {
-    const previousZoom = getPreviousZoom(zoom.id, index)
-
-    if (!previousZoom) return zoom
-
-    const preservedZoom: any = { ...zoom }
-
-    if (typeof previousZoom.start === 'number') preservedZoom.start = previousZoom.start
-    if (typeof previousZoom.end === 'number') preservedZoom.end = previousZoom.end
-    if (previousZoom.startValue !== undefined) preservedZoom.startValue = previousZoom.startValue
-    if (previousZoom.endValue !== undefined) preservedZoom.endValue = previousZoom.endValue
-
-    return preservedZoom
-  })
-
-  return option
-}
-
 export default function EChartsCandlestickChart({
   heightClass = 'h-[650px]',
   compact = false,
@@ -1898,7 +1866,7 @@ export default function EChartsCandlestickChart({
         const params = new URLSearchParams({
           symbol,
           timeframe,
-          limit: '300',
+          limit: '500',
         })
 
         const response = await fetch(`${API_BASE_URL}/api/historical-candles?${params.toString()}`, {
@@ -2019,23 +1987,19 @@ export default function EChartsCandlestickChart({
   }, [livePolledCandle, symbol, timeframe])
 
   const liveCandles = useMemo(() => {
-    if (engineCandles.length > 0) {
-      return mergeCandlesByTime([
-        ...engineCandles,
-        ...livePolledCandles,
-      ])
-    }
+    // IMPORTANT:
+    // Historical candles must remain the base source.
+    // Engine candles / live polling should update or append to that history,
+    // not replace the full historical chart with only the latest engine window.
+    const primaryCandles = mergeCandlesByTime([
+      ...historicalCandlesFromAlpaca,
+      ...engineCandles,
+      ...liveCandlesFromCandlesEndpoint,
+      ...livePolledCandles,
+    ])
 
-    if (
-      historicalCandlesFromAlpaca.length > 0 ||
-      liveCandlesFromCandlesEndpoint.length > 0 ||
-      livePolledCandles.length > 0
-    ) {
-      return mergeCandlesByTime([
-        ...historicalCandlesFromAlpaca,
-        ...liveCandlesFromCandlesEndpoint,
-        ...livePolledCandles,
-      ])
+    if (primaryCandles.length > 0) {
+      return primaryCandles
     }
 
     return mergeCandlesByTime([
@@ -2362,32 +2326,13 @@ export default function EChartsCandlestickChart({
 
       dataZoom: [
         {
-          id: 'main-x-zoom',
           type: 'inside',
           xAxisIndex: 0,
           filterMode: 'none',
-          start: compact ? 58 : 62,
-          end: 100,
-          minSpan: 4,
-          maxSpan: 100,
           zoomOnMouseWheel: true,
           moveOnMouseMove: true,
-          moveOnMouseWheel: true,
-          preventDefaultMouseMove: true,
-          throttle: 35,
-        },
-        {
-          id: 'main-y-zoom',
-          type: 'inside',
-          yAxisIndex: 0,
-          filterMode: 'none',
-          start: 0,
-          end: 100,
-          zoomOnMouseWheel: 'shift',
-          moveOnMouseMove: false,
           moveOnMouseWheel: false,
-          preventDefaultMouseMove: false,
-          throttle: 35,
+          throttle: 50,
         },
       ],
 
@@ -2435,12 +2380,7 @@ export default function EChartsCandlestickChart({
       ],
     }
 
-    const optionWithPreservedZoom = applyPreservedDataZoom(
-      option,
-      chartInstance.current
-    )
-
-    chartInstance.current.setOption(optionWithPreservedZoom, {
+    chartInstance.current.setOption(option, {
       notMerge: false,
       replaceMerge: ['series'],
       lazyUpdate: false,
