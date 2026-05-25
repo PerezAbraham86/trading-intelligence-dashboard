@@ -1923,6 +1923,24 @@ function preserveAxisZoom(option: any, chart: echarts.ECharts | null) {
     return option
   }
 
+  const previousXAxisData = Array.isArray(previousOption?.xAxis?.[0]?.data)
+    ? previousOption.xAxis[0].data
+    : []
+  const nextXAxisData = Array.isArray(option?.xAxis?.data) ? option.xAxis.data : []
+
+  const xAxisStillCompatible = (() => {
+    if (previousXAxisData.length === 0 || nextXAxisData.length === 0) return false
+
+    const nextSet = new Set(nextXAxisData.map((value: any) => String(value)))
+    const sample = previousXAxisData.slice(-30)
+    const overlap = sample.filter((value: any) => nextSet.has(String(value))).length
+
+    // Live refreshes usually append/replace the newest candle, but the recent
+    // axis labels still overlap. A symbol/timeframe switch has little/no overlap,
+    // so it should use the new default zoom instead of an old saved window.
+    return overlap >= Math.min(5, sample.length)
+  })()
+
   const getPreviousZoom = (id: string, index: number) => {
     return (
       previousZooms.find((zoom: any) => zoom?.id === id) ??
@@ -1932,18 +1950,33 @@ function preserveAxisZoom(option: any, chart: echarts.ECharts | null) {
   }
 
   option.dataZoom = option.dataZoom.map((zoom: any, index: number) => {
-    // Keep the BTCUSD 1m x-axis category window from being overwritten by a stale
-    // percentage zoom from another timeframe. That stale percent zoom was the reason
-    // 1-minute candles kept collapsing into thin lines.
-    if (zoom?.id === 'main-x-scroll' && typeof zoom.startValue === 'number') {
-      return zoom
-    }
-
     const previousZoom = getPreviousZoom(zoom?.id, index)
 
     if (!previousZoom) return zoom
 
     const preserved = { ...zoom }
+
+    if (zoom?.id === 'main-x-scroll') {
+      if (!xAxisStillCompatible) return zoom
+
+      const hasCategoryWindow =
+        previousZoom.startValue !== undefined || previousZoom.endValue !== undefined
+
+      if (hasCategoryWindow) {
+        if (previousZoom.startValue !== undefined) preserved.startValue = previousZoom.startValue
+        if (previousZoom.endValue !== undefined) preserved.endValue = previousZoom.endValue
+
+        // Avoid mixing percent zoom with category zoom. Mixing both was causing
+        // the chart to jump back to the default window after every live refresh.
+        delete preserved.start
+        delete preserved.end
+      } else {
+        if (typeof previousZoom.start === 'number') preserved.start = previousZoom.start
+        if (typeof previousZoom.end === 'number') preserved.end = previousZoom.end
+      }
+
+      return preserved
+    }
 
     if (typeof previousZoom.start === 'number') preserved.start = previousZoom.start
     if (typeof previousZoom.end === 'number') preserved.end = previousZoom.end
