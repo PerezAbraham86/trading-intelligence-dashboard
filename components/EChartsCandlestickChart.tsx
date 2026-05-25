@@ -341,7 +341,7 @@ function symbolsMatch(signalSymbolRaw: any, selectedSymbolRaw: any): boolean {
   if (signalSymbol === selectedSymbol) return true
 
   if (selectedSymbol === 'MES1!' && signalSymbol.includes('MES')) return true
-  if (selectedSymbol === 'ES1!' && signalSymbol.includes('ES')) return true
+  if (selectedSymbol === 'ES1!' && signalSymbol.includes('ES') && !signalSymbol.includes('MES')) return true
   if (selectedSymbol === 'BTCUSD' && signalSymbol.includes('BTC')) return true
   if (selectedSymbol === 'ETHUSD' && signalSymbol.includes('ETH')) return true
   if (selectedSymbol === 'SPY' && signalSymbol.includes('SPY')) return true
@@ -450,21 +450,77 @@ function getSampleCandlesForSymbol(symbol: string): Candle[] {
 }
 
 function candleFromAny(raw: any, index: number): Candle | null {
-  const open = toNumber(raw?.open)
-  const high = toNumber(raw?.high)
-  const low = toNumber(raw?.low)
-  const close = toNumber(raw?.close)
+  // Different feeds return different candle shapes:
+  // - Python/engine: open/high/low/close/time
+  // - Alpaca style: o/h/l/c/t/v
+  // - Some APIs: Open/High/Low/Close/Timestamp/Volume
+  // This parser keeps SPY/ES1!/MES1! from falling back to scaled sample candles
+  // just because the backend used short OHLC keys.
+  const open =
+    toNumber(raw?.open) ??
+    toNumber(raw?.o) ??
+    toNumber(raw?.Open) ??
+    toNumber(raw?.OPEN)
+
+  const high =
+    toNumber(raw?.high) ??
+    toNumber(raw?.h) ??
+    toNumber(raw?.High) ??
+    toNumber(raw?.HIGH)
+
+  const low =
+    toNumber(raw?.low) ??
+    toNumber(raw?.l) ??
+    toNumber(raw?.Low) ??
+    toNumber(raw?.LOW)
+
+  const close =
+    toNumber(raw?.close) ??
+    toNumber(raw?.c) ??
+    toNumber(raw?.Close) ??
+    toNumber(raw?.CLOSE) ??
+    toNumber(raw?.price) ??
+    toNumber(raw?.last)
 
   if (open === null || high === null || low === null || close === null) return null
 
   return {
-    time: formatAxisTime(raw?.time ?? raw?.timestamp ?? raw?.createdAt, index),
+    time: formatAxisTime(
+      raw?.time ??
+        raw?.timestamp ??
+        raw?.createdAt ??
+        raw?.t ??
+        raw?.T ??
+        raw?.date ??
+        raw?.datetime ??
+        raw?.Timestamp,
+      index
+    ),
     open,
     high,
     low,
     close,
-    volume: toNumber(raw?.volume) ?? undefined,
+    volume:
+      toNumber(raw?.volume) ??
+      toNumber(raw?.v) ??
+      toNumber(raw?.Volume) ??
+      undefined,
   }
+}
+
+function extractCandleArray(payload: any): any[] {
+  if (Array.isArray(payload)) return payload
+
+  if (payload && typeof payload === 'object') {
+    if (Array.isArray(payload.candles)) return payload.candles
+    if (Array.isArray(payload.bars)) return payload.bars
+    if (Array.isArray(payload.data)) return payload.data
+    if (Array.isArray(payload.items)) return payload.items
+    if (Array.isArray(payload.results)) return payload.results
+    if (Array.isArray(payload.historicalCandles)) return payload.historicalCandles
+  }
+
+  return []
 }
 
 function buildCandlesFromRecentCandles(
@@ -478,11 +534,56 @@ function buildCandlesFromRecentCandles(
 
   return candlesInput
     .filter((candle) => {
-      const timeframeMatch =
-        normalizeTimeframe(candle.timeframe) === normalizedTimeframe ||
-        !candle.timeframe
+      const candleSymbol =
+        candle?.symbol ??
+        candle?.ticker ??
+        candle?.S ??
+        candle?.s ??
+        candle?.contract ??
+        candle?.instrument
 
-      return symbolsMatch(candle.symbol, selectedSymbol) && timeframeMatch
+      const candleTimeframe = candle?.timeframe ?? candle?.tf ?? candle?.interval
+
+      const timeframeMatch =
+        normalizeTimeframe(candleTimeframe) === normalizedTimeframe ||
+        !candleTimeframe
+
+      return symbolsMatch(candleSymbol, selectedSymbol) && timeframeMatch
+    })
+    .map(candleFromAny)
+    .filter((candle): candle is Candle => candle !== null)
+}
+
+function buildCandlesFromHistoricalResponse(
+  candlesInput: any[] | undefined,
+  selectedSymbol: string,
+  selectedTimeframe: string
+): Candle[] {
+  if (!Array.isArray(candlesInput) || candlesInput.length === 0) return []
+
+  const normalizedTimeframe = normalizeTimeframe(selectedTimeframe)
+
+  return candlesInput
+    .filter((candle) => {
+      const candleSymbol =
+        candle?.symbol ??
+        candle?.ticker ??
+        candle?.S ??
+        candle?.s ??
+        candle?.contract ??
+        candle?.instrument
+
+      const candleTimeframe = candle?.timeframe ?? candle?.tf ?? candle?.interval
+
+      const symbolMatch = candleSymbol ? symbolsMatch(candleSymbol, selectedSymbol) : true
+      const timeframeMatch = candleTimeframe
+        ? normalizeTimeframe(candleTimeframe) === normalizedTimeframe
+        : true
+
+      // Historical endpoint is already requested with symbol/timeframe query params.
+      // Many feeds return bare OHLC bars without symbol/timeframe fields, so do not
+      // reject those bars or SPY/ES1!/MES1! will fall back to sample candles.
+      return symbolMatch && timeframeMatch
     })
     .map(candleFromAny)
     .filter((candle): candle is Candle => candle !== null)
@@ -2041,7 +2142,7 @@ export default function EChartsCandlestickChart({
   const [historicalStatus, setHistoricalStatus] = useState<'idle' | 'loading' | 'loaded' | 'unavailable' | 'error'>('idle')
 
   const isFuturesChart = isFuturesDashboardSymbol(symbol)
-  const candleFetchLimit = isFuturesChart ? '300' : '5000'
+  const candleFetchLimit = isFuturesChart ? '1500' : '5000'
   const engineMatchesSelection = engineStateMatchesSelection(engineState, symbol, timeframe)
 
   useEffect(() => {
@@ -2141,10 +2242,11 @@ export default function EChartsCandlestickChart({
         }
 
         const json = await response.json()
+        const candles = extractCandleArray(json)
 
         if (!cancelled) {
-          setHistoricalCandles(Array.isArray(json) ? json : [])
-          setHistoricalStatus(Array.isArray(json) && json.length > 0 ? 'loaded' : 'unavailable')
+          setHistoricalCandles(candles)
+          setHistoricalStatus(candles.length > 0 ? 'loaded' : 'unavailable')
         }
       } catch (error) {
         console.error('Historical candle fetch error:', error)
@@ -2190,7 +2292,7 @@ export default function EChartsCandlestickChart({
   )
 
   const historicalCandlesFromAlpaca = useMemo(
-    () => buildCandlesFromRecentCandles(historicalCandles, symbol, timeframe),
+    () => buildCandlesFromHistoricalResponse(historicalCandles, symbol, timeframe),
     [historicalCandles, symbol, timeframe]
   )
 
@@ -2341,7 +2443,8 @@ export default function EChartsCandlestickChart({
       : []
 
     const xAxisData = [...candleTimes, ...ghostGapSlots, ...profileSlots]
-    const useBtcOneMinuteVisualFix = isBtcOneMinuteChart(symbol, timeframe)
+    const useBtcOneMinuteVisualFix =
+      normalizeTimeframe(timeframe) === '1m' && activeCandles.length >= 120
     const initialXAxisZoom = buildInitialXAxisZoom(
       candleTimes.length,
       xAxisData.length,
