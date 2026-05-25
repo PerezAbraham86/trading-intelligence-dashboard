@@ -33,6 +33,38 @@ function buildInitialDataZoom(count: number, symbol: string) {
   }
 }
 
+function isBtcOneMinuteChart(symbol: string, timeframe: string) {
+  return normalizeSymbol(symbol).includes('BTC') && normalizeTimeframe(timeframe) === '1m'
+}
+
+function buildInitialXAxisZoom(
+  candleCount: number,
+  xAxisCount: number,
+  symbol: string,
+  timeframe: string,
+  compact: boolean
+) {
+  const normalizedSymbol = normalizeSymbol(symbol)
+  const normalizedTimeframe = normalizeTimeframe(timeframe)
+  const isBtcOneMinute = normalizedSymbol.includes('BTC') && normalizedTimeframe === '1m'
+
+  // BTCUSD 1m can load thousands of candles. Percent zoom squeezes them into vertical lines.
+  // Lock the x-axis to the latest candle window by category index so bodies stay visible.
+  const candleWindow = compact
+    ? 70
+    : isBtcOneMinute
+      ? 85
+      : getDefaultVisibleCandleCount(symbol)
+
+  const extraRightSlots = Math.max(0, xAxisCount - candleCount)
+  const visible = Math.min(xAxisCount, Math.max(1, candleWindow + extraRightSlots))
+
+  return {
+    startValue: Math.max(0, xAxisCount - visible),
+    endValue: Math.max(0, xAxisCount - 1),
+  }
+}
+
 
 type Candle = {
   time: string
@@ -1795,6 +1827,92 @@ function buildAlphaProfileSeries(
   ]
 }
 
+function buildBtcOneMinuteVisualCandleSeries(
+  candles: Candle[],
+  compact: boolean,
+  symbol: string,
+  candleMode: CandleMode
+): any[] {
+  if (!Array.isArray(candles) || candles.length === 0) return []
+
+  const visualData = candles.map((candle) => ({
+    value: [candle.time, candle.open, candle.close, candle.low, candle.high],
+  }))
+
+  return [
+    {
+      id: 'btc-1m-visual-candles',
+      name: `${symbol} ${candleMode} Visual Fix`,
+      type: 'custom',
+      coordinateSystem: 'cartesian2d',
+      silent: true,
+      z: 18,
+      data: visualData,
+      renderItem: (_params: any, api: any) => {
+        const time = api.value(0)
+        const open = Number(api.value(1))
+        const close = Number(api.value(2))
+        const low = Number(api.value(3))
+        const high = Number(api.value(4))
+
+        const xPoint = api.coord([time, close])
+        const highPoint = api.coord([time, high])
+        const lowPoint = api.coord([time, low])
+        const openPoint = api.coord([time, open])
+        const closePoint = api.coord([time, close])
+        const slotSize = api.size([1, 0])?.[0] ?? 10
+
+        const candleWidth = Math.max(compact ? 5 : 7, Math.min(compact ? 11 : 16, slotSize * 0.72))
+        const rawBodyHeight = Math.abs(openPoint[1] - closePoint[1])
+        const minBodyHeight = compact ? 3 : 5
+        const bodyHeight = Math.max(minBodyHeight, rawBodyHeight)
+        const bodyCenterY = (openPoint[1] + closePoint[1]) / 2
+        const bodyY = bodyCenterY - bodyHeight / 2
+        const bodyX = xPoint[0] - candleWidth / 2
+        const bullish = close >= open
+
+        const fill = bullish ? 'rgba(38, 166, 154, 0.92)' : 'rgba(255, 77, 94, 0.92)'
+        const stroke = bullish ? 'rgba(38, 166, 154, 1)' : 'rgba(255, 77, 94, 1)'
+
+        return {
+          type: 'group',
+          children: [
+            {
+              type: 'line',
+              shape: {
+                x1: xPoint[0],
+                y1: highPoint[1],
+                x2: xPoint[0],
+                y2: lowPoint[1],
+              },
+              style: {
+                stroke,
+                lineWidth: compact ? 1.1 : 1.35,
+              },
+            },
+            {
+              type: 'rect',
+              shape: {
+                x: bodyX,
+                y: bodyY,
+                width: candleWidth,
+                height: bodyHeight,
+                r: 1,
+              },
+              style: {
+                fill,
+                stroke,
+                lineWidth: 1,
+              },
+            },
+          ],
+        }
+      },
+      encode: { x: 0, y: [1, 2, 3, 4] },
+    },
+  ]
+}
+
 function preserveAxisZoom(option: any, chart: echarts.ECharts | null) {
   const previousOption = chart?.getOption?.() as any
   const previousZooms = Array.isArray(previousOption?.dataZoom)
@@ -1814,6 +1932,13 @@ function preserveAxisZoom(option: any, chart: echarts.ECharts | null) {
   }
 
   option.dataZoom = option.dataZoom.map((zoom: any, index: number) => {
+    // Keep the BTCUSD 1m x-axis category window from being overwritten by a stale
+    // percentage zoom from another timeframe. That stale percent zoom was the reason
+    // 1-minute candles kept collapsing into thin lines.
+    if (zoom?.id === 'main-x-scroll' && typeof zoom.startValue === 'number') {
+      return zoom
+    }
+
     const previousZoom = getPreviousZoom(zoom?.id, index)
 
     if (!previousZoom) return zoom
@@ -1822,15 +1947,13 @@ function preserveAxisZoom(option: any, chart: echarts.ECharts | null) {
 
     if (typeof previousZoom.start === 'number') preserved.start = previousZoom.start
     if (typeof previousZoom.end === 'number') preserved.end = previousZoom.end
-    // Do not preserve startValue/endValue.
-    // Those categorical locks caused the chart to stay pinned to a tiny live window
-    // after MES1!/ES1! loaded the full InsightSentry historical array.
 
     return preserved
   })
 
   return option
 }
+
 
 export default function EChartsCandlestickChart({
   heightClass = 'h-[650px]',
@@ -2185,6 +2308,14 @@ export default function EChartsCandlestickChart({
       : []
 
     const xAxisData = [...candleTimes, ...ghostGapSlots, ...profileSlots]
+    const useBtcOneMinuteVisualFix = isBtcOneMinuteChart(symbol, timeframe)
+    const initialXAxisZoom = buildInitialXAxisZoom(
+      candleTimes.length,
+      xAxisData.length,
+      symbol,
+      timeframe,
+      compact
+    )
 
     const candleData = activeCandles.map((c) => [
       c.open,
@@ -2401,12 +2532,13 @@ export default function EChartsCandlestickChart({
           type: 'inside',
           xAxisIndex: 0,
           filterMode: 'none',
-          // BTCUSD 1m was loading thousands of candles, so a percentage-based zoom
-          // made each candle too thin and they rendered like vertical lines.
-          // Lock the initial x-window to the last visible candle count instead.
-          ...buildInitialDataZoom(xAxisData.length, symbol),
-          minValueSpan: compact ? 20 : 45,
-          maxValueSpan: Math.max(60, xAxisData.length),
+          ...initialXAxisZoom,
+
+          minValueSpan: 12,
+          maxValueSpan: Math.max(30, xAxisData.length),
+          
+          minSpan: 5,
+          maxSpan: 100,
           zoomOnMouseWheel: true,
           moveOnMouseMove: true,
           moveOnMouseWheel: true,
@@ -2420,6 +2552,7 @@ export default function EChartsCandlestickChart({
           filterMode: 'none',
           start: 0,
           end: 100,
+          
           minSpan: 5,
           maxSpan: 100,
           zoomOnMouseWheel: 'shift',
@@ -2437,15 +2570,14 @@ export default function EChartsCandlestickChart({
           type: 'candlestick',
           data: candleData,
           itemStyle: {
-            color: TEAL,
-            color0: LIGHT_RED,
-            borderColor: TEAL,
-            borderColor0: LIGHT_RED,
+            color: useBtcOneMinuteVisualFix ? 'rgba(38, 166, 154, 0)' : TEAL,
+            color0: useBtcOneMinuteVisualFix ? 'rgba(255, 77, 94, 0)' : LIGHT_RED,
+            borderColor: useBtcOneMinuteVisualFix ? 'rgba(38, 166, 154, 0)' : TEAL,
+            borderColor0: useBtcOneMinuteVisualFix ? 'rgba(255, 77, 94, 0)' : LIGHT_RED,
           },
-          barWidth: compact ? '52%' : '68%',
-          // Keep 1-minute BTCUSD candles visible after long history loads.
-          barMinWidth: compact ? 2 : 5,
-          barMaxWidth: compact ? 12 : 18,
+          barWidth: compact ? '56%' : useBtcOneMinuteVisualFix ? '72%' : '58%',
+          barMinWidth: useBtcOneMinuteVisualFix ? 7 : 3,
+          barMaxWidth: useBtcOneMinuteVisualFix ? 18 : 14,
 
           markArea: {
             silent: true,
@@ -2468,6 +2600,9 @@ export default function EChartsCandlestickChart({
             data: markPointData,
           },
         },
+        ...(useBtcOneMinuteVisualFix
+          ? buildBtcOneMinuteVisualCandleSeries(activeCandles, compact, symbol, candleMode)
+          : []),
         ...(enableAdvancedOverlays && showGhost
           ? buildGhostCandleSeries(ghostCandles, compact)
           : []),
