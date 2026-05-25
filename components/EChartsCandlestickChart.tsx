@@ -317,6 +317,30 @@ function symbolsMatch(signalSymbolRaw: any, selectedSymbolRaw: any): boolean {
   return false
 }
 
+function engineStateMatchesSelection(
+  engineState: EngineState | null,
+  selectedSymbol: string,
+  selectedTimeframe: string
+): boolean {
+  if (!engineState) return false
+
+  const sourceSymbol =
+    engineState?.source?.symbol ??
+    engineState?.symbol ??
+    engineState?.candles?.[0]?.symbol
+
+  const sourceTimeframe =
+    engineState?.source?.timeframe ??
+    engineState?.timeframe ??
+    engineState?.candles?.[0]?.timeframe
+
+  const symbolOk = symbolsMatch(sourceSymbol, selectedSymbol)
+  const timeframeOk =
+    normalizeTimeframe(sourceTimeframe || selectedTimeframe) === normalizeTimeframe(selectedTimeframe)
+
+  return symbolOk && timeframeOk
+}
+
 function toNumber(value: any): number | null {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : null
@@ -1860,6 +1884,7 @@ export default function EChartsCandlestickChart({
 
   const isFuturesChart = isFuturesDashboardSymbol(symbol)
   const candleFetchLimit = isFuturesChart ? '300' : '5000'
+  const engineMatchesSelection = engineStateMatchesSelection(engineState, symbol, timeframe)
 
   useEffect(() => {
     const nextSymbol = normalizeDefaultSymbol(
@@ -1982,18 +2007,18 @@ export default function EChartsCandlestickChart({
 
   const engineCandles = useMemo(
     () =>
-      Array.isArray(engineState?.candles)
+      engineMatchesSelection && Array.isArray(engineState?.candles)
         ? engineState.candles.map(candleFromAny).filter((candle): candle is Candle => candle !== null)
         : [],
-    [engineState]
+    [engineState, engineMatchesSelection]
   )
 
   const engineHaCandles = useMemo(
     () =>
-      Array.isArray(engineState?.heikinAshiCandles)
+      engineMatchesSelection && Array.isArray(engineState?.heikinAshiCandles)
         ? engineState.heikinAshiCandles.map(candleFromAny).filter((candle): candle is Candle => candle !== null)
         : [],
-    [engineState]
+    [engineState, engineMatchesSelection]
   )
 
   const liveCandlesFromCandlesEndpoint = useMemo(
@@ -2013,17 +2038,14 @@ export default function EChartsCandlestickChart({
 
   const liveCandles = useMemo(() => {
     // Futures route rule:
-    // MES1!/ES1! should come from InsightSentry-backed Python engine/history only.
-    // Do not let TradingView alert candles or recent signal candles replace the historical array.
+    // MES1!/ES1! must come from InsightSentry-backed Python engine/history only.
+    // Do not let TradingView alert candles, recent signal candles, or stale sticky candles
+    // replace the InsightSentry historical array.
     if (isFuturesChart) {
-      const futuresCandles = mergeCandlesByTime([
+      return mergeCandlesByTime([
         ...historicalCandlesFromAlpaca,
         ...engineCandles,
       ])
-
-      if (futuresCandles.length > 0) {
-        return futuresCandles
-      }
     }
 
     // Normal route rule:
@@ -2052,12 +2074,20 @@ export default function EChartsCandlestickChart({
 
   const lastValidLiveCandlesRef = useRef<Candle[]>([])
 
+  useEffect(() => {
+    lastValidLiveCandlesRef.current = []
+  }, [symbol, timeframe])
+
   if (liveCandles.length > 0) {
     lastValidLiveCandlesRef.current = liveCandles
   }
 
   const stickyLiveCandles =
-    liveCandles.length > 0 ? liveCandles : lastValidLiveCandlesRef.current
+    liveCandles.length > 0
+      ? liveCandles
+      : isFuturesChart
+        ? []
+        : lastValidLiveCandlesRef.current
 
   const usingLiveCandles = stickyLiveCandles.length >= 1
   const symbolSampleCandles = useMemo(() => getSampleCandlesForSymbol(symbol), [symbol])
@@ -2066,9 +2096,11 @@ export default function EChartsCandlestickChart({
 
   const overlayPayload = useMemo(() => extractOverlayPayload(latestSignal), [latestSignal])
 
-  const engineAvailable = Boolean(engineState && engineStatus === 'loaded' && engineCandles.length > 0)
+  const engineAvailable = Boolean(
+    engineMatchesSelection && engineStatus === 'loaded' && engineCandles.length > 0
+  )
 
-  const rawSmcEvents = Array.isArray(engineState?.smcEvents)
+  const rawSmcEvents = engineMatchesSelection && Array.isArray(engineState?.smcEvents)
     ? engineState?.smcEvents ?? []
     : overlayPayload.smcEvents ?? []
 
@@ -2482,6 +2514,7 @@ export default function EChartsCandlestickChart({
     usingLiveCandles,
     historicalCandlesFromAlpaca,
     engineAvailable,
+    engineMatchesSelection,
     engineState,
     isFuturesChart,
   ])
@@ -2493,8 +2526,12 @@ export default function EChartsCandlestickChart({
     }
   }, [])
 
-  const dataBadge = isFuturesChart && (engineAvailable || historicalCandlesFromAlpaca.length > 0)
-    ? 'InsightSentry Futures'
+  const dataBadge = isFuturesChart
+    ? historicalCandlesFromAlpaca.length > 0 || engineAvailable
+      ? 'InsightSentry Futures'
+      : historicalStatus === 'loading' || engineStatus === 'loading'
+        ? 'Loading InsightSentry'
+        : 'InsightSentry Waiting'
     : engineAvailable
       ? 'Python SMC Engine'
       : usingLiveCandles
@@ -2672,7 +2709,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3AM' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3AN' : 'Chart Engine v2'}
             </div>
           </div>
         )}
