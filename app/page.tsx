@@ -381,7 +381,7 @@ export default function Dashboard() {
 
         {/* Right Column */}
         <div className="space-y-6">
-          <MarketSentimentGauge signal={augmentedLatestSignal} technicalSentiment={sharedTechnicalSentiment} />
+          <MarketSentimentGauge signal={augmentedLatestSignal} technicalSentiment={sharedTechnicalSentiment as any} />
 
           <PressureGauges signal={augmentedLatestSignal} />
 
@@ -391,7 +391,7 @@ export default function Dashboard() {
 
       {/* Second Row */}
       <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <FactorConfirmationTable signal={augmentedLatestSignal} technicalSentiment={sharedTechnicalSentiment} />
+        <FactorConfirmationTable signal={augmentedLatestSignal} technicalSentiment={sharedTechnicalSentiment as any} />
 
         <GhostCandleProjection signal={augmentedLatestSignal} />
       </div>
