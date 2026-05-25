@@ -46,6 +46,9 @@ type SentimentData = {
   time?: number
   createdAt?: string
   indicators?: SentimentIndicator[]
+  technicalIndicators?: SentimentIndicator[]
+  technicalMeter?: SentimentIndicator[]
+  factors?: SentimentIndicator[]
 }
 
 type MarketSentimentGaugeProps = {
@@ -98,6 +101,91 @@ const DEFAULT_SENTIMENT: SentimentData = {
   bullPct: 0,
   activeCount: 0,
   price: 0,
+}
+
+const TECHNICAL_ORDER = [
+  'RSI',
+  'Stochastic',
+  'Stoch RSI',
+  'CCI',
+  'Bull Bear Power',
+  'Momentum',
+  'Moving Average',
+  'VWAP',
+  'Bollinger Bands',
+  'Supertrend',
+  'Linear Regression',
+  'Market Structure',
+]
+
+function asIndicatorArray(value: unknown): SentimentIndicator[] {
+  if (!Array.isArray(value)) return []
+
+  return value
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null
+
+      const raw = item as Record<string, unknown>
+      const name = String(raw.name ?? raw.factor ?? raw.label ?? raw.indicator ?? '').trim()
+
+      if (!name) return null
+
+      const value = Number(raw.value ?? raw.strength ?? raw.score ?? 50)
+      const rawSignal = String(raw.signal ?? raw.status ?? raw.side ?? '').toUpperCase()
+      const signal =
+        rawSignal === 'BULLISH' || rawSignal === 'BEARISH' || rawSignal === 'NEUTRAL'
+          ? rawSignal
+          : value > 60
+            ? 'BULLISH'
+            : value < 40
+              ? 'BEARISH'
+              : 'NEUTRAL'
+
+      return {
+        name,
+        value: clamp(value),
+        signal,
+      }
+    })
+    .filter((item): item is SentimentIndicator => Boolean(item))
+}
+
+function extractTechnicalIndicators(data: SentimentData | null | undefined): SentimentIndicator[] {
+  if (!data) return []
+
+  const merged = [
+    ...asIndicatorArray(data.indicators),
+    ...asIndicatorArray(data.technicalIndicators),
+    ...asIndicatorArray(data.technicalMeter),
+    ...asIndicatorArray(data.factors),
+  ]
+
+  const byName = new Map<string, SentimentIndicator>()
+
+  for (const indicator of merged) {
+    const key = indicator.name.trim().toLowerCase()
+    if (!byName.has(key)) {
+      byName.set(key, indicator)
+    }
+  }
+
+  const sorted: SentimentIndicator[] = []
+
+  for (const expectedName of TECHNICAL_ORDER) {
+    const found = Array.from(byName.values()).find(
+      (indicator) => indicator.name.trim().toLowerCase() === expectedName.toLowerCase()
+    )
+
+    if (found) sorted.push(found)
+  }
+
+  for (const indicator of byName.values()) {
+    if (!sorted.some((item) => item.name.toLowerCase() === indicator.name.toLowerCase())) {
+      sorted.push(indicator)
+    }
+  }
+
+  return sorted
 }
 
 function clamp(value: number) {
@@ -251,9 +339,7 @@ function normalizeTechnicalSentiment(
   selectedSymbol: string,
   selectedTimeframe: string
 ): SentimentData {
-  const indicators = Array.isArray(sentiment.indicators)
-    ? sentiment.indicators
-    : []
+  const indicators = extractTechnicalIndicators(sentiment)
 
   if (indicators.length === 0) {
     return {
@@ -381,11 +467,12 @@ export default function MarketSentimentGauge({ signal }: MarketSentimentGaugePro
   const apiMatchesMainChart =
     apiSymbol === selectedSymbol && apiTimeframe === selectedTimeframe
 
+  const apiTechnicalIndicators = extractTechnicalIndicators(apiSentiment)
+
   const hasTechnicalSentiment =
     apiMatchesMainChart &&
     apiSentiment.eventType === 'PYTHON_TECHNICAL_SENTIMENT' &&
-    Array.isArray(apiSentiment.indicators) &&
-    apiSentiment.indicators.length > 0
+    apiTechnicalIndicators.length > 0
 
   // Market Sentiment should match the PineScript meter:
   // activeCount = number of technical indicators, not dashboard factor votes.
@@ -529,24 +616,24 @@ export default function MarketSentimentGauge({ signal }: MarketSentimentGaugePro
         </div>
 
         <p className="mt-3 text-xs text-gray-500">
-          Technical indicators: {Array.isArray(sentiment.indicators) && sentiment.indicators.length > 0
-            ? sentiment.indicators.length
+          Technical indicators: {extractTechnicalIndicators(sentiment).length > 0
+            ? extractTechnicalIndicators(sentiment).length
             : sentiment.activeCount}
         </p>
 
-        {Array.isArray(sentiment.indicators) && sentiment.indicators.length > 0 && (
+        {extractTechnicalIndicators(sentiment).length > 0 && (
           <div className="mt-4 rounded-lg border border-dark-600 bg-dark-900/35 p-3 text-left">
             <div className="mb-2 flex items-center justify-between">
               <p className="text-xs font-bold uppercase tracking-wide text-gray-400">
                 Technical Meter
               </p>
               <p className="text-xs text-gray-500">
-                {sentiment.indicators.length} indicators
+                {extractTechnicalIndicators(sentiment).length} indicators
               </p>
             </div>
 
             <div className="grid grid-cols-1 gap-1">
-              {sentiment.indicators.map((indicator) => {
+              {extractTechnicalIndicators(sentiment).map((indicator) => {
                 const side = String(indicator.signal ?? '').toUpperCase()
                 const sideClass =
                   side === 'BULLISH'
