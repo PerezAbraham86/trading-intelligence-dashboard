@@ -108,6 +108,12 @@ type ChartOverlayPayload = {
   liquidityEvents?: LiquidityEvent[]
   dlmConfluenceMarkers?: DlmConfluenceMarker[]
   scoreMarkers?: ScoreMarker[]
+  alphaProfileBins?: AlphaProfileBin[]
+  alphaFvgs?: SmcZone[]
+  alphaSweeps?: LiquidityEvent[]
+  ghostCandles?: any[]
+  ghostProjections?: any[]
+  projections?: any[]
 }
 
 type EngineState = ChartOverlayPayload & {
@@ -485,6 +491,12 @@ function extractOverlayPayload(latestSignal?: any): ChartOverlayPayload {
       ? merged.dlmConfluenceMarkers
       : undefined,
     scoreMarkers: Array.isArray(merged.scoreMarkers) ? merged.scoreMarkers : undefined,
+    alphaProfileBins: Array.isArray(merged.alphaProfileBins) ? merged.alphaProfileBins : undefined,
+    alphaFvgs: Array.isArray(merged.alphaFvgs) ? merged.alphaFvgs : undefined,
+    alphaSweeps: Array.isArray(merged.alphaSweeps) ? merged.alphaSweeps : undefined,
+    ghostCandles: Array.isArray(merged.ghostCandles) ? merged.ghostCandles : undefined,
+    ghostProjections: Array.isArray(merged.ghostProjections) ? merged.ghostProjections : undefined,
+    projections: Array.isArray(merged.projections) ? merged.projections : undefined,
   }
 }
 
@@ -1417,6 +1429,16 @@ function buildGhostCandlesFromEngine(engineState: EngineState | null, ghostSlots
   return normalizedGhosts
 }
 
+function buildGhostCandlesFromOverlayPayload(overlayPayload: ChartOverlayPayload, ghostSlots: string[]): GhostCandle[] {
+  const pseudoEngineState: EngineState = {
+    ghostCandles: overlayPayload.ghostCandles,
+    ghostProjections: overlayPayload.ghostProjections,
+    projections: overlayPayload.projections,
+  }
+
+  return buildGhostCandlesFromEngine(pseudoEngineState, ghostSlots)
+}
+
 function buildGhostCandles(engineState: EngineState | null, candles: Candle[], ghostSlots: string[]): GhostCandle[] {
   const pythonGhosts = buildGhostCandlesFromEngine(engineState, ghostSlots)
 
@@ -1827,6 +1849,17 @@ export default function EChartsCandlestickChart({
   const [historicalCandles, setHistoricalCandles] = useState<any[]>([])
   const [historicalStatus, setHistoricalStatus] = useState<'idle' | 'loading' | 'loaded' | 'unavailable' | 'error'>('idle')
 
+  const isTradingViewFuturesSymbol = useMemo(() => {
+    const normalizedSymbol = normalizeSymbol(symbol)
+
+    return (
+      normalizedSymbol.includes('MES') ||
+      normalizedSymbol.includes('ES1') ||
+      normalizedSymbol.includes('MNQ') ||
+      normalizedSymbol.includes('NQ1')
+    )
+  }, [symbol])
+
   useEffect(() => {
     const nextSymbol = normalizeDefaultSymbol(
       defaultSymbol ?? (compact ? symbol : latestSignal?.symbol),
@@ -1855,6 +1888,16 @@ export default function EChartsCandlestickChart({
 
     async function fetchEngineState() {
       if (compact || !enableAdvancedOverlays) return
+
+      // MES/ES futures are controlled by TradingView webhook alerts only.
+      // Do not mix in backend engine candles/overlays because they can inject bad fallback futures candles.
+      if (isTradingViewFuturesSymbol) {
+        if (!cancelled) {
+          setEngineState(null)
+          setEngineStatus('idle')
+        }
+        return
+      }
 
       setEngineStatus((current) => (current === 'loaded' ? current : 'loading'))
 
@@ -1896,7 +1939,7 @@ export default function EChartsCandlestickChart({
       cancelled = true
       if (intervalId) clearInterval(intervalId)
     }
-  }, [symbol, timeframe, compact, enableAdvancedOverlays])
+  }, [symbol, timeframe, compact, enableAdvancedOverlays, isTradingViewFuturesSymbol])
 
   useEffect(() => {
     let cancelled = false
@@ -1997,21 +2040,12 @@ export default function EChartsCandlestickChart({
   )
 
   const liveCandles = useMemo(() => {
-    const normalizedSymbol = normalizeSymbol(symbol)
-    const isTradingViewFuturesSymbol =
-      normalizedSymbol.includes('MES') ||
-      normalizedSymbol.includes('ES1') ||
-      normalizedSymbol.includes('MNQ') ||
-      normalizedSymbol.includes('NQ1')
-
-    // Futures symbols like MES1!/ES1! should use TradingView webhook candles first.
-    // Backend historical routes are reliable for crypto/equities, but not for CME futures
-    // unless a true futures data provider is connected.
+    // Futures symbols like MES1!/ES1! should use the same TradingView webhook candles
+    // that feed the mini charts. No backend historical and no backend engine candles.
     if (isTradingViewFuturesSymbol) {
       const tradingViewCandles = mergeCandlesByTime([
         ...liveCandlesFromCandlesEndpoint,
         ...liveCandlesFromSignalsEndpoint,
-        ...engineCandles,
       ])
 
       if (tradingViewCandles.length > 0) {
@@ -2035,7 +2069,7 @@ export default function EChartsCandlestickChart({
       ...liveCandlesFromSignalsEndpoint,
     ])
   }, [
-    symbol,
+    isTradingViewFuturesSymbol,
     engineCandles,
     historicalCandlesFromAlpaca,
     liveCandlesFromCandlesEndpoint,
@@ -2057,24 +2091,37 @@ export default function EChartsCandlestickChart({
 
   const overlayPayload = useMemo(() => extractOverlayPayload(latestSignal), [latestSignal])
 
-  const engineAvailable = Boolean(engineState && engineStatus === 'loaded' && engineCandles.length > 0)
+  const engineAvailable = Boolean(
+    !isTradingViewFuturesSymbol &&
+      engineState &&
+      engineStatus === 'loaded' &&
+      engineCandles.length > 0
+  )
 
-  const rawSmcEvents = Array.isArray(engineState?.smcEvents)
-    ? engineState?.smcEvents ?? []
-    : overlayPayload.smcEvents ?? []
+  const overlaySource = isTradingViewFuturesSymbol ? overlayPayload : engineState
+
+  const rawSmcEvents =
+    !isTradingViewFuturesSymbol && Array.isArray(engineState?.smcEvents)
+      ? engineState?.smcEvents ?? []
+      : overlayPayload.smcEvents ?? []
 
   const activeSmcEvents = useMemo(
     () => filterSmcEventsForDisplay(rawSmcEvents, smcDisplayMode, compact),
     [rawSmcEvents, smcDisplayMode, compact]
   )
 
-  const activeDlmLevels = Array.isArray(engineState?.dlmLevels)
-    ? engineState?.dlmLevels ?? []
-    : overlayPayload.dlmLevels ?? []
+  const activeDlmLevels =
+    !isTradingViewFuturesSymbol && Array.isArray(engineState?.dlmLevels)
+      ? engineState?.dlmLevels ?? []
+      : overlayPayload.dlmLevels ?? []
 
   const rawActiveZones = [
-    ...(Array.isArray(engineState?.zones) ? engineState?.zones ?? [] : overlayPayload.zones ?? []),
-    ...(Array.isArray(engineState?.alphaFvgs) ? engineState?.alphaFvgs ?? [] : []),
+    ...(!isTradingViewFuturesSymbol && Array.isArray(engineState?.zones)
+      ? engineState?.zones ?? []
+      : overlayPayload.zones ?? []),
+    ...(!isTradingViewFuturesSymbol && Array.isArray(engineState?.alphaFvgs)
+      ? engineState?.alphaFvgs ?? []
+      : overlayPayload.alphaFvgs ?? []),
   ]
 
   const activeZones = useMemo(
@@ -2083,10 +2130,12 @@ export default function EChartsCandlestickChart({
   )
 
   const rawLiquidityEvents = [
-    ...(Array.isArray(engineState?.liquidityEvents)
+    ...(!isTradingViewFuturesSymbol && Array.isArray(engineState?.liquidityEvents)
       ? engineState?.liquidityEvents ?? []
       : overlayPayload.liquidityEvents ?? []),
-    ...(Array.isArray(engineState?.alphaSweeps) ? engineState?.alphaSweeps ?? [] : []),
+    ...(!isTradingViewFuturesSymbol && Array.isArray(engineState?.alphaSweeps)
+      ? engineState?.alphaSweeps ?? []
+      : overlayPayload.alphaSweeps ?? []),
   ]
 
   const activeLiquidityEvents = useMemo(
@@ -2094,22 +2143,25 @@ export default function EChartsCandlestickChart({
     [rawLiquidityEvents, smcDisplayMode, compact]
   )
 
-  const activeDlmConfluenceMarkers = Array.isArray(engineState?.dlmConfluenceMarkers)
-    ? engineState?.dlmConfluenceMarkers ?? []
-    : overlayPayload.dlmConfluenceMarkers ?? []
+  const activeDlmConfluenceMarkers =
+    !isTradingViewFuturesSymbol && Array.isArray(engineState?.dlmConfluenceMarkers)
+      ? engineState?.dlmConfluenceMarkers ?? []
+      : overlayPayload.dlmConfluenceMarkers ?? []
 
-  const rawScoreMarkers = Array.isArray(engineState?.scoreMarkers)
-    ? engineState?.scoreMarkers ?? []
-    : overlayPayload.scoreMarkers ?? []
+  const rawScoreMarkers =
+    !isTradingViewFuturesSymbol && Array.isArray(engineState?.scoreMarkers)
+      ? engineState?.scoreMarkers ?? []
+      : overlayPayload.scoreMarkers ?? []
 
   const activeScoreMarkers = useMemo(
     () => filterScoreMarkersForDisplay(rawScoreMarkers, smcDisplayMode, compact),
     [rawScoreMarkers, smcDisplayMode, compact]
   )
 
-  const alphaProfileBins = Array.isArray(engineState?.alphaProfileBins)
-    ? engineState?.alphaProfileBins ?? []
-    : []
+  const alphaProfileBins =
+    !isTradingViewFuturesSymbol && Array.isArray(engineState?.alphaProfileBins)
+      ? engineState?.alphaProfileBins ?? []
+      : overlayPayload.alphaProfileBins ?? []
 
   useEffect(() => {
     if (!chartRef.current) return
@@ -2138,7 +2190,11 @@ export default function EChartsCandlestickChart({
       : []
 
     const ghostCandles = enableAdvancedOverlays && showGhost
-      ? buildGhostCandles(engineState, activeCandles, ghostGapSlots)
+      ? isTradingViewFuturesSymbol
+        ? buildGhostCandlesFromOverlayPayload(overlayPayload, ghostGapSlots).length > 0
+          ? buildGhostCandlesFromOverlayPayload(overlayPayload, ghostGapSlots)
+          : buildGhostCandles(null, activeCandles, ghostGapSlots)
+        : buildGhostCandles(engineState, activeCandles, ghostGapSlots)
       : []
 
     const xAxisData = [...candleTimes, ...ghostGapSlots, ...profileSlots]
