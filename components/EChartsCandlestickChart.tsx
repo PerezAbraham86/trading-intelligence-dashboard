@@ -2401,10 +2401,12 @@ export default function EChartsCandlestickChart({
           type: 'inside',
           xAxisIndex: 0,
           filterMode: 'none',
-          start: compact ? 72 : isFuturesChart ? 0 : 68,
-          
-          minSpan: 5,
-          maxSpan: 100,
+          // BTCUSD 1m was loading thousands of candles, so a percentage-based zoom
+          // made each candle too thin and they rendered like vertical lines.
+          // Lock the initial x-window to the last visible candle count instead.
+          ...buildInitialDataZoom(xAxisData.length, symbol),
+          minValueSpan: compact ? 20 : 45,
+          maxValueSpan: Math.max(60, xAxisData.length),
           zoomOnMouseWheel: true,
           moveOnMouseMove: true,
           moveOnMouseWheel: true,
@@ -2416,8 +2418,8 @@ export default function EChartsCandlestickChart({
           type: 'inside',
           yAxisIndex: 0,
           filterMode: 'none',
-          ...buildInitialDataZoom(xAxisData.length, symbol),
-          
+          start: 0,
+          end: 100,
           minSpan: 5,
           maxSpan: 100,
           zoomOnMouseWheel: 'shift',
@@ -2440,9 +2442,10 @@ export default function EChartsCandlestickChart({
             borderColor: TEAL,
             borderColor0: LIGHT_RED,
           },
-          barWidth: compact ? '48%' : '58%',
-          barMinWidth: 3,
-          barMaxWidth: 14,
+          barWidth: compact ? '52%' : '68%',
+          // Keep 1-minute BTCUSD candles visible after long history loads.
+          barMinWidth: compact ? 2 : 5,
+          barMaxWidth: compact ? 12 : 18,
 
           markArea: {
             silent: true,
