@@ -415,14 +415,64 @@ def normalize_alpaca_bar(raw: Dict[str, Any], symbol: str, timeframe: str) -> Di
 def fetch_alpaca_historical_candles(
     symbol: str,
     timeframe: str = "1m",
-    limit: int = 300,
+    limit: int = 5000,
 ) -> List[Dict[str, Any]]:
+    """
+    Fetch a larger historical candle window.
+
+    Important:
+    The frontend can request 5000 candles, but it only works if the backend does
+    not cap the request back down to 1000. This function pages Alpaca in chunks
+    so the dashboard can scroll farther back like a normal chart.
+    """
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     alpaca_tf = alpaca_timeframe(normalized_timeframe)
-    safe_limit = max(1, min(int(limit or 300), 1000))
+
+    requested_limit = int(limit or 5000)
+    safe_limit = max(1, min(requested_limit, 10000))
+    per_request_limit = min(safe_limit, 1000)
 
     headers = alpaca_headers()
+
+    def paged_get_bars(url_base: str, base_params: Dict[str, Any], lookup_symbols: List[str]) -> List[Dict[str, Any]]:
+        all_bars: List[Dict[str, Any]] = []
+        page_token: Optional[str] = None
+        guard = 0
+
+        while len(all_bars) < safe_limit and guard < 20:
+            guard += 1
+
+            params_dict = dict(base_params)
+            params_dict["limit"] = min(per_request_limit, safe_limit - len(all_bars))
+            if page_token:
+                params_dict["page_token"] = page_token
+
+            url = f"{url_base}?{urlencode(params_dict)}"
+            data = http_get_json(url, headers=headers)
+
+            bars_by_symbol = data.get("bars", {})
+            page_bars: List[Dict[str, Any]] = []
+
+            if isinstance(bars_by_symbol, dict):
+                for lookup_symbol in lookup_symbols:
+                    value = bars_by_symbol.get(lookup_symbol)
+                    if isinstance(value, list) and value:
+                        page_bars = value
+                        break
+            elif isinstance(bars_by_symbol, list):
+                page_bars = bars_by_symbol
+
+            if not page_bars:
+                break
+
+            all_bars.extend(page_bars)
+
+            page_token = data.get("next_page_token")
+            if not page_token:
+                break
+
+        return all_bars[-safe_limit:]
 
     if is_crypto_symbol(normalized_symbol):
         slash_symbol = to_alpaca_crypto_symbol(normalized_symbol)
@@ -433,59 +483,45 @@ def fetch_alpaca_historical_candles(
         ]
 
         for candidate_symbol in symbol_candidates:
-            params = urlencode(
+            raw_bars = paged_get_bars(
+                f"{ALPACA_CRYPTO_BASE_URL}/crypto/us/bars",
                 {
                     "symbols": candidate_symbol,
                     "timeframe": alpaca_tf,
-                    "limit": safe_limit,
                     "sort": "asc",
-                }
+                },
+                [candidate_symbol, slash_symbol, normalized_symbol],
             )
 
-            url = f"{ALPACA_CRYPTO_BASE_URL}/crypto/us/bars?{params}"
-            data = http_get_json(url, headers=headers)
-
-            bars_by_symbol = data.get("bars", {})
-
-            bars = (
-                bars_by_symbol.get(candidate_symbol)
-                or bars_by_symbol.get(slash_symbol)
-                or bars_by_symbol.get(normalized_symbol)
-                or []
-            )
-
-            if bars:
-                return [
+            if raw_bars:
+                normalized_bars = [
                     normalize_alpaca_bar(bar, normalized_symbol, normalized_timeframe)
-                    for bar in bars
+                    for bar in raw_bars
                 ]
+                return merge_candles_by_time(normalized_bars)[-safe_limit:]
 
         return []
 
     # Stocks/ETFs. This is for SPY and similar.
     # Futures like ES1!/MES1! are not covered by Alpaca data.
-    params = urlencode(
+    raw_bars = paged_get_bars(
+        f"{ALPACA_STOCKS_BASE_URL}/stocks/bars",
         {
             "symbols": normalized_symbol,
             "timeframe": alpaca_tf,
-            "limit": safe_limit,
             "adjustment": "raw",
             "feed": "iex",
             "sort": "asc",
-        }
+        },
+        [normalized_symbol],
     )
 
-    url = f"{ALPACA_STOCKS_BASE_URL}/stocks/bars?{params}"
-    data = http_get_json(url, headers=headers)
-
-    bars_by_symbol = data.get("bars", {})
-    bars = bars_by_symbol.get(normalized_symbol, [])
-
-    return [
+    normalized_bars = [
         normalize_alpaca_bar(bar, normalized_symbol, normalized_timeframe)
-        for bar in bars
+        for bar in raw_bars
     ]
 
+    return merge_candles_by_time(normalized_bars)[-safe_limit:]
 
 def get_live_recent_candles(symbol: str, timeframe: str) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
@@ -1624,7 +1660,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "phase_4B_1_second_live_candle_polling",
+        "engine": "phase_4C_large_history_live_candle_polling",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
@@ -1768,7 +1804,7 @@ def recent_candles(
 def historical_candles(
     symbol: str = "BTCUSD",
     timeframe: str = "1m",
-    limit: int = 300,
+    limit: int = 5000,
 ) -> List[Dict[str, Any]]:
     return fetch_alpaca_historical_candles(symbol, timeframe, limit)
 
@@ -1777,7 +1813,7 @@ def historical_candles(
 def merged_candles(
     symbol: str = "BTCUSD",
     timeframe: str = "1m",
-    limit: int = 300,
+    limit: int = 5000,
 ) -> List[Dict[str, Any]]:
     historical = fetch_alpaca_historical_candles(symbol, timeframe, limit)
     live = get_live_recent_candles(symbol, timeframe)
@@ -1788,7 +1824,7 @@ def merged_candles(
         *live,
         *([live_current] if live_current else []),
     ])
-    safe_limit = max(1, min(int(limit or 300), 1000))
+    safe_limit = max(1, min(int(limit or 5000), 10000))
 
     return merged[-safe_limit:]
 
@@ -1817,7 +1853,7 @@ def live_candle(
 def latest_sentiment(
     symbol: Optional[str] = None,
     timeframe: Optional[str] = None,
-    limit: int = 500,
+    limit: int = 5000,
 ) -> Dict[str, Any]:
     """
     Phase 4A technical sentiment endpoint.
@@ -1826,7 +1862,7 @@ def latest_sentiment(
 
     selected_symbol = normalize_symbol(symbol or str(LATEST_SIGNAL.get("symbol") or "BTCUSD"))
     selected_timeframe = normalize_timeframe(timeframe or str(LATEST_SIGNAL.get("timeframe") or "1m"))
-    safe_limit = max(100, min(int(limit or 500), 1000))
+    safe_limit = max(100, min(int(limit or 5000), 10000))
 
     historical = fetch_alpaca_historical_candles(selected_symbol, selected_timeframe, safe_limit)
     live = get_live_recent_candles(selected_symbol, selected_timeframe)
@@ -1854,13 +1890,13 @@ def latest_sentiment(
 def engine_state(
     symbol: str = "BTCUSD",
     timeframe: str = "1m",
-    limit: int = 500,
+    limit: int = 5000,
 ) -> Dict[str, Any]:
     """
     Phase 3X endpoint.
 
     Browser test:
-    https://trading-intelligence-dashboard.onrender.com/api/engine-state?symbol=BTCUSD&timeframe=1m&limit=500
+    https://trading-intelligence-dashboard.onrender.com/api/engine-state?symbol=BTCUSD&timeframe=1m&limit=5000
 
     What it does:
     1. Gets historical candles from Alpaca.
@@ -1870,7 +1906,7 @@ def engine_state(
     5. Returns candles + heikinAshiCandles + smcEvents + zones + liquidityEvents + ghostCandles.
     """
 
-    safe_limit = max(100, min(int(limit or 500), 1000))
+    safe_limit = max(100, min(int(limit or 5000), 10000))
 
     historical = fetch_alpaca_historical_candles(symbol, timeframe, safe_limit)
     live = get_live_recent_candles(symbol, timeframe)
