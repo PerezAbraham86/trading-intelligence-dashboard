@@ -245,6 +245,97 @@ function buildSentimentFromSignal(signal?: TradingSignal): SentimentData | null 
   }
 }
 
+
+function normalizeTechnicalSentiment(
+  sentiment: SentimentData,
+  selectedSymbol: string,
+  selectedTimeframe: string
+): SentimentData {
+  const indicators = Array.isArray(sentiment.indicators)
+    ? sentiment.indicators
+    : []
+
+  if (indicators.length === 0) {
+    return {
+      ...sentiment,
+      symbol: selectedSymbol,
+      timeframe: selectedTimeframe,
+    }
+  }
+
+  let bullCount = 0
+  let bearCount = 0
+  let neutralCount = 0
+
+  const cleanedIndicators = indicators.map((indicator) => {
+    const value = clamp(Number(indicator.value ?? 50))
+    const side = String(indicator.signal ?? '').toUpperCase()
+    const normalizedSide =
+      side === 'BULLISH' || side === 'BEARISH' || side === 'NEUTRAL'
+        ? side
+        : value > 60
+          ? 'BULLISH'
+          : value < 40
+            ? 'BEARISH'
+            : 'NEUTRAL'
+
+    if (normalizedSide === 'BULLISH') bullCount += 1
+    else if (normalizedSide === 'BEARISH') bearCount += 1
+    else neutralCount += 1
+
+    return {
+      ...indicator,
+      value,
+      signal: normalizedSide,
+    }
+  })
+
+  const activeCount = cleanedIndicators.length
+  const safeActiveCount = Math.max(activeCount, 1)
+
+  const bullPct = (bullCount / safeActiveCount) * 100
+  const bearPct = (bearCount / safeActiveCount) * 100
+  const neutralPct = (neutralCount / safeActiveCount) * 100
+  const technicalAverage =
+    cleanedIndicators.reduce((sum, indicator) => sum + Number(indicator.value ?? 50), 0) /
+    safeActiveCount
+
+  const sentimentStatus =
+    bullCount > bearCount && bullCount > neutralCount
+      ? bullPct >= 70
+        ? 'Strong Bullish'
+        : 'Mostly Bullish'
+      : bearCount > bullCount && bearCount > neutralCount
+        ? bearPct >= 70
+          ? 'Strong Bearish'
+          : 'Mostly Bearish'
+        : neutralCount > bullCount && neutralCount > bearCount
+          ? 'Mostly Neutral'
+          : technicalAverage > 60
+            ? 'Bullish Lean'
+            : technicalAverage < 40
+              ? 'Bearish Lean'
+              : 'Mixed'
+
+  return {
+    ...sentiment,
+    eventType: 'PYTHON_TECHNICAL_SENTIMENT',
+    symbol: selectedSymbol,
+    timeframe: selectedTimeframe,
+    sentiment: clamp(technicalAverage),
+    sentimentStatus,
+    bearCount,
+    neutralCount,
+    bullCount,
+    bearPct,
+    neutralPct,
+    bullPct,
+    activeCount,
+    indicators: cleanedIndicators,
+  }
+}
+
+
 export default function MarketSentimentGauge({ signal }: MarketSentimentGaugeProps) {
   const [apiSentiment, setApiSentiment] = useState<SentimentData>(DEFAULT_SENTIMENT)
 
@@ -296,16 +387,15 @@ export default function MarketSentimentGauge({ signal }: MarketSentimentGaugePro
     Array.isArray(apiSentiment.indicators) &&
     apiSentiment.indicators.length > 0
 
-  // Prefer the full 12-indicator Python technical meter only when it matches
-  // the selected main chart symbol/timeframe. Otherwise, do not let stale BTCUSD
-  // sentiment override MES1!/ES1! main chart state.
-  const rawSentiment = hasTechnicalSentiment ? apiSentiment : signalSentiment ?? apiSentiment
-
-  const sentiment: SentimentData = {
-    ...rawSentiment,
-    symbol: selectedSymbol,
-    timeframe: selectedTimeframe,
-  }
+  // Market Sentiment should match the PineScript meter:
+  // activeCount = number of technical indicators, not dashboard factor votes.
+  const sentiment = hasTechnicalSentiment
+    ? normalizeTechnicalSentiment(apiSentiment, selectedSymbol, selectedTimeframe)
+    : {
+        ...(signalSentiment ?? apiSentiment),
+        symbol: selectedSymbol,
+        timeframe: selectedTimeframe,
+      }
 
   const value = clamp(Number(sentiment.sentiment ?? 50))
   const needleRotation = -90 + (value / 100) * 180
@@ -439,7 +529,9 @@ export default function MarketSentimentGauge({ signal }: MarketSentimentGaugePro
         </div>
 
         <p className="mt-3 text-xs text-gray-500">
-          Active indicators: {sentiment.activeCount}
+          Technical indicators: {Array.isArray(sentiment.indicators) && sentiment.indicators.length > 0
+            ? sentiment.indicators.length
+            : sentiment.activeCount}
         </p>
 
         {Array.isArray(sentiment.indicators) && sentiment.indicators.length > 0 && (
