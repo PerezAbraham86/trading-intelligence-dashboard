@@ -249,11 +249,6 @@ const sampleCandles: Candle[] = [
 ]
 
 
-function isCleanBaselineBtc(symbol: string) {
-  const normalized = normalizeSymbol(symbol)
-  return normalized === 'BTCUSD' || normalized === 'BTCUSDT'
-}
-
 function normalizeTimeframe(value: any): string {
   const tf = String(value ?? '').trim().toLowerCase()
 
@@ -1838,7 +1833,6 @@ export default function EChartsCandlestickChart({
     : 'Heikin Ashi'
 
   const [symbol, setSymbol] = useState(initialSymbol)
-  const cleanBaselineBtc = isCleanBaselineBtc(symbol)
   const [timeframe, setTimeframe] = useState(initialTimeframe)
   const [candleMode, setCandleMode] = useState<CandleMode>(initialCandleMode)
 
@@ -2068,15 +2062,7 @@ export default function EChartsCandlestickChart({
   const usingLiveCandles = stickyLiveCandles.length >= 1
   const symbolSampleCandles = useMemo(() => getSampleCandlesForSymbol(symbol), [symbol])
 
-  // BTC clean baseline:
-  // Use the backend historical/engine candles first, not the sticky latest live array.
-  // This makes BTC behave like a newly added normal chart before we re-add overlays.
-  const baseCandles =
-    cleanBaselineBtc && engineCandles.length > 0
-      ? engineCandles
-      : usingLiveCandles
-        ? stickyLiveCandles
-        : symbolSampleCandles
+  const baseCandles = usingLiveCandles ? stickyLiveCandles : symbolSampleCandles
 
   const overlayPayload = useMemo(() => extractOverlayPayload(latestSignal), [latestSignal])
 
@@ -2144,15 +2130,13 @@ export default function EChartsCandlestickChart({
     }
 
     const activeCandles =
-      cleanBaselineBtc
-        ? baseCandles
-        : candleMode === 'Heikin Ashi'
-          ? convertToHeikinAshi(baseCandles)
-          : baseCandles
+      candleMode === 'Heikin Ashi'
+        ? convertToHeikinAshi(baseCandles)
+        : baseCandles
 
     const candleTimes = activeCandles.map((c) => c.time)
     const showRightProfile =
-      !cleanBaselineBtc && enableAdvancedOverlays && showDlm && !compact && alphaProfileBins.length > 0
+      enableAdvancedOverlays && showDlm && !compact && alphaProfileBins.length > 0
 
     const ghostGapSlots = !compact
       ? Array.from({ length: GHOST_CANDLE_RESERVED_SLOTS }, (_, index) => `__ghost_gap_${index + 1}`)
@@ -2426,7 +2410,7 @@ export default function EChartsCandlestickChart({
           barMinWidth: 3,
           barMaxWidth: 14,
 
-          markArea: cleanBaselineBtc ? undefined : {
+          markArea: {
             silent: true,
             data: [
               ...(enableAdvancedOverlays && effectiveShowZones
@@ -2436,13 +2420,13 @@ export default function EChartsCandlestickChart({
             ],
           },
 
-          markLine: cleanBaselineBtc ? undefined : {
+          markLine: {
             silent: true,
             symbol: 'none',
             data: [...markLineData, ...livePriceLineData],
           },
 
-          markPoint: cleanBaselineBtc ? undefined : {
+          markPoint: {
             silent: true,
             data: markPointData,
           },
@@ -2688,7 +2672,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3AJ' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3AK' : 'Chart Engine v2'}
             </div>
           </div>
         )}
