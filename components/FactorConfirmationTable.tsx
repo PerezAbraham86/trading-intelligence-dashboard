@@ -23,6 +23,7 @@ type TradingSignal = {
 
 type FactorConfirmationTableProps = {
   signal?: TradingSignal
+  technicalSentiment?: TechnicalSentiment | null
 }
 
 type FactorStatus = 'bullish' | 'bearish' | 'neutral' | 'active' | 'inactive'
@@ -375,20 +376,26 @@ function TechnicalChip({ indicator }: { indicator: TechnicalIndicator }) {
   )
 }
 
-export default function FactorConfirmationTable({ signal }: FactorConfirmationTableProps) {
-  const [technicalSentiment, setTechnicalSentiment] =
+export default function FactorConfirmationTable({
+  signal,
+  technicalSentiment: technicalSentimentOverride,
+}: FactorConfirmationTableProps) {
+  const [fetchedTechnicalSentiment, setFetchedTechnicalSentiment] =
     useState<TechnicalSentiment | null>(null)
 
   const symbol = normalizeSymbol(signal?.symbol)
   const timeframe = normalizeTimeframe(signal?.timeframe)
   const bullScore = clamp(Number(signal?.bullScore ?? 50))
   const bearScore = clamp(Number(signal?.bearScore ?? 50))
+  const technicalSentiment = technicalSentimentOverride ?? fetchedTechnicalSentiment
 
   useEffect(() => {
     let cancelled = false
     let intervalId: ReturnType<typeof setInterval> | null = null
 
     async function fetchTechnicalSentiment() {
+      if (technicalSentimentOverride) return
+
       try {
         const params = new URLSearchParams({
           symbol,
@@ -405,7 +412,7 @@ export default function FactorConfirmationTable({ signal }: FactorConfirmationTa
         const json = await response.json()
 
         if (!cancelled) {
-          setTechnicalSentiment(json && typeof json === 'object' ? json : null)
+          setFetchedTechnicalSentiment(json && typeof json === 'object' ? json : null)
         }
       } catch (error) {
         console.error('Factor confirmation technical sentiment fetch error:', error)
@@ -419,7 +426,7 @@ export default function FactorConfirmationTable({ signal }: FactorConfirmationTa
       cancelled = true
       if (intervalId) clearInterval(intervalId)
     }
-  }, [symbol, timeframe])
+  }, [symbol, timeframe, technicalSentimentOverride])
 
   const coreRows = useMemo(() => buildCoreRows(signal), [signal])
   const externalRows = useMemo(() => buildExternalRows(signal), [signal])
