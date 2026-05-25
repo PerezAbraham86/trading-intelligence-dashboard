@@ -251,6 +251,7 @@ const RIGHT_PROFILE_SLOT_COUNT = 56
 const SHOW_LIVE_PRICE_LINE = true
 
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
+const CHART_BUILD_VERSION = 'v4G_historical_payload_object_parser'
 
 
 function getApiSymbolCandidates(symbol: string): string[] {
@@ -404,6 +405,9 @@ async function fetchCandlesFromAnyAvailableEndpoint(symbol: string, timeframe: s
     '/api/historical-candles',
     '/api/candles',
     '/api/recent-candles',
+    '/api/merged-candles',
+    '/api/engine-state',
+    '/api/live-candle',
     '/api/live-candles',
   ]
 
@@ -677,6 +681,22 @@ function candleFromAny(raw: any, index: number): Candle | null {
   }
 }
 
+function looksLikeSingleCandle(value: any): boolean {
+  if (!value || typeof value !== 'object') return false
+
+  const open = value.open ?? value.o
+  const high = value.high ?? value.h
+  const low = value.low ?? value.l
+  const close = value.close ?? value.c ?? value.price
+
+  return (
+    Number.isFinite(Number(open)) &&
+    Number.isFinite(Number(high)) &&
+    Number.isFinite(Number(low)) &&
+    Number.isFinite(Number(close))
+  )
+}
+
 function extractCandleArray(payload: any): any[] {
   if (Array.isArray(payload)) return payload
 
@@ -687,10 +707,17 @@ function extractCandleArray(payload: any): any[] {
     if (Array.isArray(payload.items)) return payload.items
     if (Array.isArray(payload.results)) return payload.results
     if (Array.isArray(payload.historicalCandles)) return payload.historicalCandles
+    if (Array.isArray(payload.heikinAshiCandles)) return payload.heikinAshiCandles
+    if (Array.isArray(payload.ohlc)) return payload.ohlc
+
+    // /api/live-candle returns { candle: {...} } instead of an array.
+    if (looksLikeSingleCandle(payload.candle)) return [payload.candle]
+    if (looksLikeSingleCandle(payload.latest)) return [payload.latest]
+    if (looksLikeSingleCandle(payload.bar)) return [payload.bar]
 
     // Some futures/stock endpoints wrap the bars one level deeper:
     // { data: { bars: [...] } }, { result: { candles: [...] } }, etc.
-    const nestedSources = [payload.data, payload.result, payload.payload, payload.response]
+    const nestedSources = [payload.data, payload.result, payload.payload, payload.response, payload.body]
 
     for (const nested of nestedSources) {
       if (!nested || typeof nested !== 'object') continue
@@ -700,7 +727,14 @@ function extractCandleArray(payload: any): any[] {
       if (Array.isArray(nested.items)) return nested.items
       if (Array.isArray(nested.results)) return nested.results
       if (Array.isArray(nested.historicalCandles)) return nested.historicalCandles
+      if (Array.isArray(nested.heikinAshiCandles)) return nested.heikinAshiCandles
+      if (Array.isArray(nested.ohlc)) return nested.ohlc
+      if (looksLikeSingleCandle(nested.candle)) return [nested.candle]
+      if (looksLikeSingleCandle(nested.latest)) return [nested.latest]
+      if (looksLikeSingleCandle(nested.bar)) return [nested.bar]
     }
+
+    if (looksLikeSingleCandle(payload)) return [payload]
   }
 
   return []
