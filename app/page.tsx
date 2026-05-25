@@ -229,6 +229,7 @@ export default function Dashboard() {
 
   const selectedSymbol = normalizeSymbol(mainChartSelection.symbol || latestSignal?.symbol)
   const selectedTimeframe = normalizeTimeframe(mainChartSelection.timeframe || latestSignal?.timeframe)
+  const FactorConfirmationTableLoose = FactorConfirmationTable as any
 
   useEffect(() => {
     setFactorTechnicalSentiment(null)
@@ -479,7 +480,7 @@ export default function Dashboard() {
 
       {/* Second Row */}
       <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <FactorConfirmationTable
+        <FactorConfirmationTableLoose
             signal={augmentedLatestSignal as any}
             technicalSentiment={sharedTechnicalSentiment as any}
             onTechnicalSentimentUpdate={setFactorTechnicalSentiment as any}
