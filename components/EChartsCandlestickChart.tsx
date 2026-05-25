@@ -1863,8 +1863,8 @@ export default function EChartsCandlestickChart({
           symbol,
           timeframe,
           // Keep Python SMC/AlphaX/Ghost lightweight.
-          // Chart history is intentionally limited again for faster loading.
-          limit: compact ? '120' : '300',
+          // Chart history is intentionally limited again for faster loading. Engine overlays use an even smaller window.
+          limit: compact ? '80' : '120',
         })
 
         const response = await fetch(`${API_BASE_URL}/api/engine-state?${params.toString()}`, {
@@ -1904,7 +1904,24 @@ export default function EChartsCandlestickChart({
     async function fetchHistoricalCandles() {
       if (compact && !allowCompactHistory) return
 
-      setHistoricalStatus('loading')
+      const normalizedSymbol = normalizeSymbol(symbol)
+      const isTradingViewFuturesSymbol =
+        normalizedSymbol.includes('MES') ||
+        normalizedSymbol.includes('ES1') ||
+        normalizedSymbol.includes('MNQ') ||
+        normalizedSymbol.includes('NQ1')
+
+      // MES/ES futures are coming from TradingView alerts, not the backend historical route.
+      // Do not fetch backend historical for futures because it can inject incorrect scaled/fallback candles.
+      if (isTradingViewFuturesSymbol) {
+        if (!cancelled) {
+          setHistoricalCandles([])
+          setHistoricalStatus('unavailable')
+        }
+        return
+      }
+
+      setHistoricalStatus((current) => (current === 'loaded' ? current : 'loading'))
 
       try {
         const params = new URLSearchParams({
@@ -1980,10 +1997,30 @@ export default function EChartsCandlestickChart({
   )
 
   const liveCandles = useMemo(() => {
-    // IMPORTANT:
-    // Historical candles must remain the base source.
-    // Engine candles and normal dashboard candles should update/append to that history,
-    // not replace the full historical chart with only the latest live window.
+    const normalizedSymbol = normalizeSymbol(symbol)
+    const isTradingViewFuturesSymbol =
+      normalizedSymbol.includes('MES') ||
+      normalizedSymbol.includes('ES1') ||
+      normalizedSymbol.includes('MNQ') ||
+      normalizedSymbol.includes('NQ1')
+
+    // Futures symbols like MES1!/ES1! should use TradingView webhook candles first.
+    // Backend historical routes are reliable for crypto/equities, but not for CME futures
+    // unless a true futures data provider is connected.
+    if (isTradingViewFuturesSymbol) {
+      const tradingViewCandles = mergeCandlesByTime([
+        ...liveCandlesFromCandlesEndpoint,
+        ...liveCandlesFromSignalsEndpoint,
+        ...engineCandles,
+      ])
+
+      if (tradingViewCandles.length > 0) {
+        return tradingViewCandles
+      }
+    }
+
+    // Crypto/equity flow: historical candles remain the base source.
+    // Engine candles and normal dashboard candles update/append to that history.
     const primaryCandles = mergeCandlesByTime([
       ...historicalCandlesFromAlpaca,
       ...engineCandles,
@@ -1998,6 +2035,7 @@ export default function EChartsCandlestickChart({
       ...liveCandlesFromSignalsEndpoint,
     ])
   }, [
+    symbol,
     engineCandles,
     historicalCandlesFromAlpaca,
     liveCandlesFromCandlesEndpoint,
