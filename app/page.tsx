@@ -61,6 +61,59 @@ type TechnicalSentiment = {
   factors?: TechnicalIndicator[]
 }
 
+function countTechnicalIndicatorsPayload(value: unknown) {
+  if (!value || typeof value !== 'object') return 0
+
+  const data = value as {
+    indicators?: unknown
+    technicalIndicators?: unknown
+    technicalMeter?: unknown
+    factors?: unknown
+    technicalSentiment?: unknown
+    sentiment?: unknown
+  }
+
+  const directCount =
+    (Array.isArray(data.indicators) ? data.indicators.length : 0) +
+    (Array.isArray(data.technicalIndicators) ? data.technicalIndicators.length : 0) +
+    (Array.isArray(data.technicalMeter) ? data.technicalMeter.length : 0) +
+    (Array.isArray(data.factors) ? data.factors.length : 0)
+
+  const nestedTechnicalCount = countTechnicalIndicatorsPayload(data.technicalSentiment)
+  const nestedSentimentCount = countTechnicalIndicatorsPayload(data.sentiment)
+
+  return Math.max(directCount, nestedTechnicalCount, nestedSentimentCount)
+}
+
+function normalizeSharedTechnicalSentimentPayload(value: unknown): TechnicalSentiment | null {
+  if (!value || typeof value !== 'object') return null
+
+  const raw = value as Record<string, unknown>
+  const nestedTechnical =
+    raw.technicalSentiment && typeof raw.technicalSentiment === 'object'
+      ? raw.technicalSentiment as Record<string, unknown>
+      : raw.sentiment && typeof raw.sentiment === 'object'
+        ? raw.sentiment as Record<string, unknown>
+        : null
+
+  const candidate: TechnicalSentiment = {
+    ...(nestedTechnical ?? {}),
+    ...(raw as TechnicalSentiment),
+    indicators: [
+      ...(Array.isArray(raw.indicators) ? raw.indicators as TechnicalIndicator[] : []),
+      ...(Array.isArray(raw.technicalIndicators) ? raw.technicalIndicators as TechnicalIndicator[] : []),
+      ...(Array.isArray(raw.technicalMeter) ? raw.technicalMeter as TechnicalIndicator[] : []),
+      ...(Array.isArray(raw.factors) ? raw.factors as TechnicalIndicator[] : []),
+      ...(nestedTechnical && Array.isArray(nestedTechnical.indicators) ? nestedTechnical.indicators as TechnicalIndicator[] : []),
+      ...(nestedTechnical && Array.isArray(nestedTechnical.technicalIndicators) ? nestedTechnical.technicalIndicators as TechnicalIndicator[] : []),
+      ...(nestedTechnical && Array.isArray(nestedTechnical.technicalMeter) ? nestedTechnical.technicalMeter as TechnicalIndicator[] : []),
+      ...(nestedTechnical && Array.isArray(nestedTechnical.factors) ? nestedTechnical.factors as TechnicalIndicator[] : []),
+    ],
+  }
+
+  return countTechnicalIndicatorsPayload(candidate) > 0 ? candidate : null
+}
+
 function normalizeSymbol(value: unknown) {
   return String(value ?? 'BTCUSD')
     .trim()
@@ -228,16 +281,42 @@ export default function Dashboard() {
           limit: '500',
         })
 
-        const response = await fetch(`${apiBaseUrl}/api/latest-sentiment?${params.toString()}`, {
-          cache: 'no-store',
-        })
+        const [latestResponse, engineResponse] = await Promise.allSettled([
+          fetch(`${apiBaseUrl}/api/latest-sentiment?${params.toString()}`, {
+            cache: 'no-store',
+          }),
+          fetch(`${apiBaseUrl}/api/engine-state?${params.toString()}`, {
+            cache: 'no-store',
+          }),
+        ])
 
-        if (!response.ok) return
+        const payloads: unknown[] = []
 
-        const json = await response.json()
+        if (latestResponse.status === 'fulfilled' && latestResponse.value.ok) {
+          payloads.push(await latestResponse.value.json())
+        }
+
+        if (engineResponse.status === 'fulfilled' && engineResponse.value.ok) {
+          payloads.push(await engineResponse.value.json())
+        }
+
+        const candidates = payloads
+          .map(normalizeSharedTechnicalSentimentPayload)
+          .filter((item): item is TechnicalSentiment => Boolean(item))
+
+        const best =
+          candidates.length > 0
+            ? candidates.reduce((currentBest, current) =>
+                countTechnicalIndicatorsPayload(current) > countTechnicalIndicatorsPayload(currentBest)
+                  ? current
+                  : currentBest
+              )
+            : null
 
         if (!cancelled) {
-          setSharedTechnicalSentiment(json && typeof json === 'object' ? json : null)
+          // Only set sharedTechnicalSentiment when the payload actually has indicator arrays.
+          // Do not let simple futures sentiment override the shared technical meter.
+          setSharedTechnicalSentiment(best)
         }
       } catch (error) {
         console.error('Dashboard shared technical sentiment sync error:', error)
@@ -278,7 +357,7 @@ export default function Dashboard() {
       // Shared 12-indicator technical meter.
       // This is the single source passed into Market Sentiment and Factor Confirmation,
       // so MES1!/ES1!/BTCUSD/ETHUSD/SPY all display the exact same technical array.
-      technicalSentiment: sharedTechnicalSentiment,
+      technicalSentiment: sharedTechnicalSentiment ?? undefined,
       indicators: sharedTechnicalSentiment?.indicators,
       technicalIndicators: sharedTechnicalSentiment?.technicalIndicators,
       technicalMeter: sharedTechnicalSentiment?.technicalMeter,
