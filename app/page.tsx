@@ -205,6 +205,8 @@ export default function Dashboard() {
     useState<PythonEngineState | null>(null)
   const [sharedTechnicalSentiment, setSharedTechnicalSentiment] =
     useState<TechnicalSentiment | null>(null)
+  const [factorTechnicalSentiment, setFactorTechnicalSentiment] =
+    useState<TechnicalSentiment | null>(null)
 
   const [mainChartSelection, setMainChartSelection] = useState<ChartSelection>({
     symbol: 'BTCUSD',
@@ -227,6 +229,10 @@ export default function Dashboard() {
 
   const selectedSymbol = normalizeSymbol(mainChartSelection.symbol || latestSignal?.symbol)
   const selectedTimeframe = normalizeTimeframe(mainChartSelection.timeframe || latestSignal?.timeframe)
+
+  useEffect(() => {
+    setFactorTechnicalSentiment(null)
+  }, [selectedSymbol, selectedTimeframe])
 
   useEffect(() => {
     if (!isClient || !apiBaseUrl) return
@@ -460,7 +466,10 @@ export default function Dashboard() {
 
         {/* Right Column */}
         <div className="space-y-6">
-          <MarketSentimentGauge signal={augmentedLatestSignal as any} technicalSentiment={sharedTechnicalSentiment as any} />
+          <MarketSentimentGauge
+            signal={augmentedLatestSignal as any}
+            technicalSentiment={(factorTechnicalSentiment ?? sharedTechnicalSentiment) as any}
+          />
 
           <PressureGauges signal={augmentedLatestSignal} />
 
@@ -470,7 +479,11 @@ export default function Dashboard() {
 
       {/* Second Row */}
       <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <FactorConfirmationTable signal={augmentedLatestSignal as any} technicalSentiment={sharedTechnicalSentiment as any} />
+        <FactorConfirmationTable
+            signal={augmentedLatestSignal as any}
+            technicalSentiment={sharedTechnicalSentiment as any}
+            onTechnicalSentimentUpdate={setFactorTechnicalSentiment as any}
+          />
 
         <GhostCandleProjection signal={augmentedLatestSignal} />
       </div>
