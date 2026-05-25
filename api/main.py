@@ -756,7 +756,7 @@ def fetch_alpaca_historical_candles(
                     "symbols": candidate_symbol,
                     "timeframe": alpaca_tf,
                     "limit": safe_limit,
-                    "sort": "asc",
+                    "sort": "desc",
                 }
             )
 
@@ -773,10 +773,12 @@ def fetch_alpaca_historical_candles(
             )
 
             if bars:
-                return [
+                normalized_bars = [
                     normalize_alpaca_bar(bar, normalized_symbol, normalized_timeframe)
                     for bar in bars
                 ]
+
+                return list(reversed(normalized_bars))
 
         return []
 
@@ -789,7 +791,7 @@ def fetch_alpaca_historical_candles(
             "limit": safe_limit,
             "adjustment": "raw",
             "feed": "iex",
-            "sort": "asc",
+            "sort": "desc",
         }
     )
 
@@ -799,10 +801,12 @@ def fetch_alpaca_historical_candles(
     bars_by_symbol = data.get("bars", {})
     bars = bars_by_symbol.get(normalized_symbol, [])
 
-    return [
+    normalized_bars = [
         normalize_alpaca_bar(bar, normalized_symbol, normalized_timeframe)
         for bar in bars
     ]
+
+    return list(reversed(normalized_bars))
 
 
 def fetch_historical_candles(
@@ -1801,7 +1805,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "phase_4A_python_technical_sentiment",
+        "engine": "phase_4B_latest_alpaca_candles",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
