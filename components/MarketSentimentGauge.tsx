@@ -52,6 +52,34 @@ type MarketSentimentGaugeProps = {
   signal?: TradingSignal
 }
 
+function normalizeSymbol(value: unknown) {
+  return String(value ?? 'WAITING')
+    .trim()
+    .toUpperCase()
+    .replace('BINANCE:', '')
+    .replace('COINBASE:', '')
+    .replace('CRYPTO:', '')
+    .replace('CME_MINI:', '')
+    .replace('CME:', '')
+}
+
+function normalizeTimeframe(value: unknown) {
+  const tf = String(value ?? '1m').trim().toLowerCase()
+
+  if (tf === '1') return '1m'
+  if (tf === '3') return '3m'
+  if (tf === '5') return '5m'
+  if (tf === '15') return '15m'
+  if (tf === '30') return '30m'
+  if (tf === '60') return '1h'
+  if (tf === '120') return '2h'
+  if (tf === '240') return '4h'
+  if (tf === 'd' || tf === '1d') return '1d'
+  if (tf === 'w' || tf === '1w') return '1w'
+
+  return tf || '1m'
+}
+
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ||
   'https://trading-intelligence-dashboard.onrender.com'
@@ -224,8 +252,8 @@ export default function MarketSentimentGauge({ signal }: MarketSentimentGaugePro
     const fetchSentiment = async () => {
       try {
         const params = new URLSearchParams({
-          symbol: String(signal?.symbol ?? 'BTCUSD'),
-          timeframe: String(signal?.timeframe ?? '1m'),
+          symbol: normalizeSymbol(signal?.symbol ?? 'BTCUSD'),
+          timeframe: normalizeTimeframe(signal?.timeframe ?? '1m'),
           limit: '500',
         })
 
@@ -252,14 +280,32 @@ export default function MarketSentimentGauge({ signal }: MarketSentimentGaugePro
   }, [signal?.symbol, signal?.timeframe])
 
   const signalSentiment = useMemo(() => buildSentimentFromSignal(signal), [signal])
+
+  const selectedSymbol = normalizeSymbol(signal?.symbol ?? signalSentiment?.symbol ?? 'WAITING')
+  const selectedTimeframe = normalizeTimeframe(signal?.timeframe ?? signalSentiment?.timeframe ?? '1m')
+
+  const apiSymbol = normalizeSymbol(apiSentiment.symbol)
+  const apiTimeframe = normalizeTimeframe(apiSentiment.timeframe)
+
+  const apiMatchesMainChart =
+    apiSymbol === selectedSymbol && apiTimeframe === selectedTimeframe
+
   const hasTechnicalSentiment =
+    apiMatchesMainChart &&
     apiSentiment.eventType === 'PYTHON_TECHNICAL_SENTIMENT' &&
     Array.isArray(apiSentiment.indicators) &&
     apiSentiment.indicators.length > 0
 
-  // Prefer the full 12-indicator Python technical meter when available.
-  // Fallback to the lighter dashboard-signal sentiment only while Python is loading.
-  const sentiment = hasTechnicalSentiment ? apiSentiment : signalSentiment ?? apiSentiment
+  // Prefer the full 12-indicator Python technical meter only when it matches
+  // the selected main chart symbol/timeframe. Otherwise, do not let stale BTCUSD
+  // sentiment override MES1!/ES1! main chart state.
+  const rawSentiment = hasTechnicalSentiment ? apiSentiment : signalSentiment ?? apiSentiment
+
+  const sentiment: SentimentData = {
+    ...rawSentiment,
+    symbol: selectedSymbol,
+    timeframe: selectedTimeframe,
+  }
 
   const value = clamp(Number(sentiment.sentiment ?? 50))
   const needleRotation = -90 + (value / 100) * 180
