@@ -1732,18 +1732,28 @@ function buildAlphaProfileSeries(
   ]
 }
 
-function preserveXAxisZoom(option: any, chart: echarts.ECharts | null) {
+function preserveAxisZoom(option: any, chart: echarts.ECharts | null) {
   const previousOption = chart?.getOption?.() as any
-  const previousZoom = Array.isArray(previousOption?.dataZoom)
-    ? previousOption.dataZoom.find((zoom: any) => zoom?.id === 'main-x-scroll')
-    : null
+  const previousZooms = Array.isArray(previousOption?.dataZoom)
+    ? previousOption.dataZoom
+    : []
 
-  if (!previousZoom || !Array.isArray(option.dataZoom)) {
+  if (!Array.isArray(option.dataZoom) || previousZooms.length === 0) {
     return option
   }
 
-  option.dataZoom = option.dataZoom.map((zoom: any) => {
-    if (zoom?.id !== 'main-x-scroll') return zoom
+  const getPreviousZoom = (id: string, index: number) => {
+    return (
+      previousZooms.find((zoom: any) => zoom?.id === id) ??
+      previousZooms[index] ??
+      null
+    )
+  }
+
+  option.dataZoom = option.dataZoom.map((zoom: any, index: number) => {
+    const previousZoom = getPreviousZoom(zoom?.id, index)
+
+    if (!previousZoom) return zoom
 
     const preserved = { ...zoom }
 
@@ -2364,6 +2374,21 @@ export default function EChartsCandlestickChart({
           preventDefaultMouseMove: true,
           throttle: 35,
         },
+        {
+          id: 'main-y-scale',
+          type: 'inside',
+          yAxisIndex: 0,
+          filterMode: 'none',
+          start: 0,
+          end: 100,
+          minSpan: 5,
+          maxSpan: 100,
+          zoomOnMouseWheel: 'shift',
+          moveOnMouseMove: false,
+          moveOnMouseWheel: false,
+          preventDefaultMouseMove: false,
+          throttle: 35,
+        },
       ],
 
       series: [
@@ -2410,7 +2435,7 @@ export default function EChartsCandlestickChart({
       ],
     }
 
-    const optionWithPreservedZoom = preserveXAxisZoom(option, chartInstance.current)
+    const optionWithPreservedZoom = preserveAxisZoom(option, chartInstance.current)
 
     chartInstance.current.setOption(optionWithPreservedZoom, {
       notMerge: false,
