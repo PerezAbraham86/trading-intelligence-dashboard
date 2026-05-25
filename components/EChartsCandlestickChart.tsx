@@ -3,6 +3,37 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 
+
+const DEFAULT_VISIBLE_CANDLES = 90
+const FUTURES_DEFAULT_VISIBLE_CANDLES = 120
+
+function getDefaultVisibleCandleCount(symbol: string) {
+  const normalized = normalizeSymbol(symbol)
+
+  if (
+    normalized.includes('MES') ||
+    normalized.includes('ES1') ||
+    normalized.includes('MNQ') ||
+    normalized.includes('NQ1')
+  ) {
+    return FUTURES_DEFAULT_VISIBLE_CANDLES
+  }
+
+  return DEFAULT_VISIBLE_CANDLES
+}
+
+function buildInitialDataZoom(count: number, symbol: string) {
+  const visible = Math.min(getDefaultVisibleCandleCount(symbol), Math.max(count, 1))
+  const startValue = Math.max(0, count - visible)
+  const endValue = Math.max(0, count - 1)
+
+  return {
+    startValue,
+    endValue,
+  }
+}
+
+
 type Candle = {
   time: string
   open: number
@@ -2335,7 +2366,7 @@ export default function EChartsCandlestickChart({
           xAxisIndex: 0,
           filterMode: 'none',
           start: compact ? 72 : isFuturesChart ? 0 : 68,
-          end: 100,
+          
           minSpan: 5,
           maxSpan: 100,
           zoomOnMouseWheel: true,
@@ -2349,8 +2380,8 @@ export default function EChartsCandlestickChart({
           type: 'inside',
           yAxisIndex: 0,
           filterMode: 'none',
-          start: 0,
-          end: 100,
+          ...buildInitialDataZoom(xAxisData.length, symbol),
+          
           minSpan: 5,
           maxSpan: 100,
           zoomOnMouseWheel: 'shift',
@@ -2366,6 +2397,9 @@ export default function EChartsCandlestickChart({
           id: 'main-candles',
           name: `${symbol} ${candleMode}`,
           type: 'candlestick',
+        barWidth: '55%',
+        barMinWidth: 3,
+        barMaxWidth: 14,
           data: candleData,
           itemStyle: {
             color: TEAL,
@@ -2637,7 +2671,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3Z' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3AA' : 'Chart Engine v2'}
             </div>
           </div>
         )}
