@@ -108,12 +108,6 @@ type ChartOverlayPayload = {
   liquidityEvents?: LiquidityEvent[]
   dlmConfluenceMarkers?: DlmConfluenceMarker[]
   scoreMarkers?: ScoreMarker[]
-  alphaProfileBins?: AlphaProfileBin[]
-  alphaFvgs?: SmcZone[]
-  alphaSweeps?: LiquidityEvent[]
-  ghostCandles?: any[]
-  ghostProjections?: any[]
-  projections?: any[]
 }
 
 type EngineState = ChartOverlayPayload & {
@@ -252,6 +246,11 @@ function normalizeDefaultSymbol(value: any, fallback = 'BTCUSD'): string {
   if (normalized.includes('BTC')) return 'BTCUSD'
 
   return normalized || fallback
+}
+
+function isFuturesDashboardSymbol(value: any): boolean {
+  const normalized = normalizeDefaultSymbol(value, '')
+  return normalized === 'MES1!' || normalized === 'ES1!'
 }
 
 function normalizeDefaultTimeframe(value: any, fallback = '1m'): string {
@@ -491,12 +490,6 @@ function extractOverlayPayload(latestSignal?: any): ChartOverlayPayload {
       ? merged.dlmConfluenceMarkers
       : undefined,
     scoreMarkers: Array.isArray(merged.scoreMarkers) ? merged.scoreMarkers : undefined,
-    alphaProfileBins: Array.isArray(merged.alphaProfileBins) ? merged.alphaProfileBins : undefined,
-    alphaFvgs: Array.isArray(merged.alphaFvgs) ? merged.alphaFvgs : undefined,
-    alphaSweeps: Array.isArray(merged.alphaSweeps) ? merged.alphaSweeps : undefined,
-    ghostCandles: Array.isArray(merged.ghostCandles) ? merged.ghostCandles : undefined,
-    ghostProjections: Array.isArray(merged.ghostProjections) ? merged.ghostProjections : undefined,
-    projections: Array.isArray(merged.projections) ? merged.projections : undefined,
   }
 }
 
@@ -1429,16 +1422,6 @@ function buildGhostCandlesFromEngine(engineState: EngineState | null, ghostSlots
   return normalizedGhosts
 }
 
-function buildGhostCandlesFromOverlayPayload(overlayPayload: ChartOverlayPayload, ghostSlots: string[]): GhostCandle[] {
-  const pseudoEngineState: EngineState = {
-    ghostCandles: overlayPayload.ghostCandles,
-    ghostProjections: overlayPayload.ghostProjections,
-    projections: overlayPayload.projections,
-  }
-
-  return buildGhostCandlesFromEngine(pseudoEngineState, ghostSlots)
-}
-
 function buildGhostCandles(engineState: EngineState | null, candles: Candle[], ghostSlots: string[]): GhostCandle[] {
   const pythonGhosts = buildGhostCandlesFromEngine(engineState, ghostSlots)
 
@@ -1779,17 +1762,11 @@ function preserveAxisZoom(option: any, chart: echarts.ECharts | null) {
 
     const preserved = { ...zoom }
 
-    if (previousZoom.startValue !== undefined) {
-      preserved.startValue = previousZoom.startValue
-    } else if (typeof previousZoom.start === 'number' && zoom?.id !== 'main-x-scroll') {
-      preserved.start = previousZoom.start
-    }
-
-    if (previousZoom.endValue !== undefined) {
-      preserved.endValue = previousZoom.endValue
-    } else if (typeof previousZoom.end === 'number' && zoom?.id !== 'main-x-scroll') {
-      preserved.end = previousZoom.end
-    }
+    if (typeof previousZoom.start === 'number') preserved.start = previousZoom.start
+    if (typeof previousZoom.end === 'number') preserved.end = previousZoom.end
+    // Do not preserve startValue/endValue.
+    // Those categorical locks caused the chart to stay pinned to a tiny live window
+    // after MES1!/ES1! loaded the full InsightSentry historical array.
 
     return preserved
   })
@@ -1849,16 +1826,8 @@ export default function EChartsCandlestickChart({
   const [historicalCandles, setHistoricalCandles] = useState<any[]>([])
   const [historicalStatus, setHistoricalStatus] = useState<'idle' | 'loading' | 'loaded' | 'unavailable' | 'error'>('idle')
 
-  const isTradingViewFuturesSymbol = useMemo(() => {
-    const normalizedSymbol = normalizeSymbol(symbol)
-
-    return (
-      normalizedSymbol.includes('MES') ||
-      normalizedSymbol.includes('ES1') ||
-      normalizedSymbol.includes('MNQ') ||
-      normalizedSymbol.includes('NQ1')
-    )
-  }, [symbol])
+  const isFuturesChart = isFuturesDashboardSymbol(symbol)
+  const candleFetchLimit = isFuturesChart ? '300' : '5000'
 
   useEffect(() => {
     const nextSymbol = normalizeDefaultSymbol(
@@ -1889,25 +1858,13 @@ export default function EChartsCandlestickChart({
     async function fetchEngineState() {
       if (compact || !enableAdvancedOverlays) return
 
-      // MES/ES futures are controlled by TradingView webhook alerts only.
-      // Do not mix in backend engine candles/overlays because they can inject bad fallback futures candles.
-      if (isTradingViewFuturesSymbol) {
-        if (!cancelled) {
-          setEngineState(null)
-          setEngineStatus('idle')
-        }
-        return
-      }
-
       setEngineStatus((current) => (current === 'loaded' ? current : 'loading'))
 
       try {
         const params = new URLSearchParams({
           symbol,
           timeframe,
-          // Keep Python SMC/AlphaX/Ghost lightweight.
-          // Chart history is intentionally limited again for faster loading. Engine overlays use an even smaller window.
-          limit: compact ? '80' : '120',
+          limit: candleFetchLimit,
         })
 
         const response = await fetch(`${API_BASE_URL}/api/engine-state?${params.toString()}`, {
@@ -1939,7 +1896,7 @@ export default function EChartsCandlestickChart({
       cancelled = true
       if (intervalId) clearInterval(intervalId)
     }
-  }, [symbol, timeframe, compact, enableAdvancedOverlays, isTradingViewFuturesSymbol])
+  }, [symbol, timeframe, compact, enableAdvancedOverlays, candleFetchLimit])
 
   useEffect(() => {
     let cancelled = false
@@ -1947,30 +1904,13 @@ export default function EChartsCandlestickChart({
     async function fetchHistoricalCandles() {
       if (compact && !allowCompactHistory) return
 
-      const normalizedSymbol = normalizeSymbol(symbol)
-      const isTradingViewFuturesSymbol =
-        normalizedSymbol.includes('MES') ||
-        normalizedSymbol.includes('ES1') ||
-        normalizedSymbol.includes('MNQ') ||
-        normalizedSymbol.includes('NQ1')
-
-      // MES/ES futures are coming from TradingView alerts, not the backend historical route.
-      // Do not fetch backend historical for futures because it can inject incorrect scaled/fallback candles.
-      if (isTradingViewFuturesSymbol) {
-        if (!cancelled) {
-          setHistoricalCandles([])
-          setHistoricalStatus('unavailable')
-        }
-        return
-      }
-
-      setHistoricalStatus((current) => (current === 'loaded' ? current : 'loading'))
+      setHistoricalStatus('loading')
 
       try {
         const params = new URLSearchParams({
           symbol,
           timeframe,
-          limit: '300',
+          limit: candleFetchLimit,
         })
 
         const response = await fetch(`${API_BASE_URL}/api/historical-candles?${params.toString()}`, {
@@ -2006,7 +1946,7 @@ export default function EChartsCandlestickChart({
     return () => {
       cancelled = true
     }
-  }, [symbol, timeframe, compact, allowCompactHistory])
+  }, [symbol, timeframe, compact, allowCompactHistory, candleFetchLimit])
 
   const engineCandles = useMemo(
     () =>
@@ -2040,21 +1980,23 @@ export default function EChartsCandlestickChart({
   )
 
   const liveCandles = useMemo(() => {
-    // Futures symbols like MES1!/ES1! should use the same TradingView webhook candles
-    // that feed the mini charts. No backend historical and no backend engine candles.
-    if (isTradingViewFuturesSymbol) {
-      const tradingViewCandles = mergeCandlesByTime([
-        ...liveCandlesFromCandlesEndpoint,
-        ...liveCandlesFromSignalsEndpoint,
+    // Futures route rule:
+    // MES1!/ES1! should come from InsightSentry-backed Python engine/history only.
+    // Do not let TradingView alert candles or recent signal candles replace the historical array.
+    if (isFuturesChart) {
+      const futuresCandles = mergeCandlesByTime([
+        ...historicalCandlesFromAlpaca,
+        ...engineCandles,
       ])
 
-      if (tradingViewCandles.length > 0) {
-        return tradingViewCandles
+      if (futuresCandles.length > 0) {
+        return futuresCandles
       }
     }
 
-    // Crypto/equity flow: historical candles remain the base source.
-    // Engine candles and normal dashboard candles update/append to that history.
+    // Normal route rule:
+    // Historical candles remain the base source.
+    // Engine/live candles update or append, but do not wipe history.
     const primaryCandles = mergeCandlesByTime([
       ...historicalCandlesFromAlpaca,
       ...engineCandles,
@@ -2069,7 +2011,7 @@ export default function EChartsCandlestickChart({
       ...liveCandlesFromSignalsEndpoint,
     ])
   }, [
-    isTradingViewFuturesSymbol,
+    isFuturesChart,
     engineCandles,
     historicalCandlesFromAlpaca,
     liveCandlesFromCandlesEndpoint,
@@ -2091,37 +2033,24 @@ export default function EChartsCandlestickChart({
 
   const overlayPayload = useMemo(() => extractOverlayPayload(latestSignal), [latestSignal])
 
-  const engineAvailable = Boolean(
-    !isTradingViewFuturesSymbol &&
-      engineState &&
-      engineStatus === 'loaded' &&
-      engineCandles.length > 0
-  )
+  const engineAvailable = Boolean(engineState && engineStatus === 'loaded' && engineCandles.length > 0)
 
-  const overlaySource = isTradingViewFuturesSymbol ? overlayPayload : engineState
-
-  const rawSmcEvents =
-    !isTradingViewFuturesSymbol && Array.isArray(engineState?.smcEvents)
-      ? engineState?.smcEvents ?? []
-      : overlayPayload.smcEvents ?? []
+  const rawSmcEvents = Array.isArray(engineState?.smcEvents)
+    ? engineState?.smcEvents ?? []
+    : overlayPayload.smcEvents ?? []
 
   const activeSmcEvents = useMemo(
     () => filterSmcEventsForDisplay(rawSmcEvents, smcDisplayMode, compact),
     [rawSmcEvents, smcDisplayMode, compact]
   )
 
-  const activeDlmLevels =
-    !isTradingViewFuturesSymbol && Array.isArray(engineState?.dlmLevels)
-      ? engineState?.dlmLevels ?? []
-      : overlayPayload.dlmLevels ?? []
+  const activeDlmLevels = Array.isArray(engineState?.dlmLevels)
+    ? engineState?.dlmLevels ?? []
+    : overlayPayload.dlmLevels ?? []
 
   const rawActiveZones = [
-    ...(!isTradingViewFuturesSymbol && Array.isArray(engineState?.zones)
-      ? engineState?.zones ?? []
-      : overlayPayload.zones ?? []),
-    ...(!isTradingViewFuturesSymbol && Array.isArray(engineState?.alphaFvgs)
-      ? engineState?.alphaFvgs ?? []
-      : overlayPayload.alphaFvgs ?? []),
+    ...(Array.isArray(engineState?.zones) ? engineState?.zones ?? [] : overlayPayload.zones ?? []),
+    ...(Array.isArray(engineState?.alphaFvgs) ? engineState?.alphaFvgs ?? [] : []),
   ]
 
   const activeZones = useMemo(
@@ -2130,12 +2059,10 @@ export default function EChartsCandlestickChart({
   )
 
   const rawLiquidityEvents = [
-    ...(!isTradingViewFuturesSymbol && Array.isArray(engineState?.liquidityEvents)
+    ...(Array.isArray(engineState?.liquidityEvents)
       ? engineState?.liquidityEvents ?? []
       : overlayPayload.liquidityEvents ?? []),
-    ...(!isTradingViewFuturesSymbol && Array.isArray(engineState?.alphaSweeps)
-      ? engineState?.alphaSweeps ?? []
-      : overlayPayload.alphaSweeps ?? []),
+    ...(Array.isArray(engineState?.alphaSweeps) ? engineState?.alphaSweeps ?? [] : []),
   ]
 
   const activeLiquidityEvents = useMemo(
@@ -2143,25 +2070,22 @@ export default function EChartsCandlestickChart({
     [rawLiquidityEvents, smcDisplayMode, compact]
   )
 
-  const activeDlmConfluenceMarkers =
-    !isTradingViewFuturesSymbol && Array.isArray(engineState?.dlmConfluenceMarkers)
-      ? engineState?.dlmConfluenceMarkers ?? []
-      : overlayPayload.dlmConfluenceMarkers ?? []
+  const activeDlmConfluenceMarkers = Array.isArray(engineState?.dlmConfluenceMarkers)
+    ? engineState?.dlmConfluenceMarkers ?? []
+    : overlayPayload.dlmConfluenceMarkers ?? []
 
-  const rawScoreMarkers =
-    !isTradingViewFuturesSymbol && Array.isArray(engineState?.scoreMarkers)
-      ? engineState?.scoreMarkers ?? []
-      : overlayPayload.scoreMarkers ?? []
+  const rawScoreMarkers = Array.isArray(engineState?.scoreMarkers)
+    ? engineState?.scoreMarkers ?? []
+    : overlayPayload.scoreMarkers ?? []
 
   const activeScoreMarkers = useMemo(
     () => filterScoreMarkersForDisplay(rawScoreMarkers, smcDisplayMode, compact),
     [rawScoreMarkers, smcDisplayMode, compact]
   )
 
-  const alphaProfileBins =
-    !isTradingViewFuturesSymbol && Array.isArray(engineState?.alphaProfileBins)
-      ? engineState?.alphaProfileBins ?? []
-      : overlayPayload.alphaProfileBins ?? []
+  const alphaProfileBins = Array.isArray(engineState?.alphaProfileBins)
+    ? engineState?.alphaProfileBins ?? []
+    : []
 
   useEffect(() => {
     if (!chartRef.current) return
@@ -2190,11 +2114,7 @@ export default function EChartsCandlestickChart({
       : []
 
     const ghostCandles = enableAdvancedOverlays && showGhost
-      ? isTradingViewFuturesSymbol
-        ? buildGhostCandlesFromOverlayPayload(overlayPayload, ghostGapSlots).length > 0
-          ? buildGhostCandlesFromOverlayPayload(overlayPayload, ghostGapSlots)
-          : buildGhostCandles(null, activeCandles, ghostGapSlots)
-        : buildGhostCandles(engineState, activeCandles, ghostGapSlots)
+      ? buildGhostCandles(engineState, activeCandles, ghostGapSlots)
       : []
 
     const xAxisData = [...candleTimes, ...ghostGapSlots, ...profileSlots]
@@ -2346,13 +2266,15 @@ export default function EChartsCandlestickChart({
               </div>
               <div style="color:#94a3b8;">${symbol} • ${timeframe} • ${candleMode}</div>
               <div style="color:#64748b;">${
-                engineAvailable
-                  ? 'Python SMC + AlphaX engine'
-                  : usingLiveCandles
-                    ? historicalCandlesFromAlpaca.length > 0
-                      ? 'Alpaca history + live candles'
-                      : 'Live API candles'
-                    : 'Sample candles'
+                isFuturesChart
+                  ? 'InsightSentry futures + Python SMC engine'
+                  : engineAvailable
+                    ? 'Python SMC + AlphaX engine'
+                    : usingLiveCandles
+                      ? historicalCandlesFromAlpaca.length > 0
+                        ? 'Alpaca history + live candles'
+                        : 'Live API candles'
+                      : 'Sample candles'
               }</div>
               <div style="margin-top:6px;color:#e5e7eb;">O&nbsp;&nbsp;${open}</div>
               <div style="color:#e5e7eb;">H&nbsp;&nbsp;${high}</div>
@@ -2412,12 +2334,10 @@ export default function EChartsCandlestickChart({
           type: 'inside',
           xAxisIndex: 0,
           filterMode: 'none',
-          // 5000 candles are loaded, but we only show the latest window first.
-          // All older candles remain available by dragging/scrolling left.
-          startValue: Math.max(0, activeCandles.length - (compact ? 80 : 180)),
-          endValue: Math.max(0, activeCandles.length - 1),
-          minValueSpan: compact ? 25 : 60,
-          maxValueSpan: xAxisData.length,
+          start: compact ? 72 : isFuturesChart ? 0 : 68,
+          end: 100,
+          minSpan: 5,
+          maxSpan: 100,
           zoomOnMouseWheel: true,
           moveOnMouseMove: true,
           moveOnMouseWheel: true,
@@ -2528,6 +2448,7 @@ export default function EChartsCandlestickChart({
     historicalCandlesFromAlpaca,
     engineAvailable,
     engineState,
+    isFuturesChart,
   ])
 
   useEffect(() => {
@@ -2537,15 +2458,17 @@ export default function EChartsCandlestickChart({
     }
   }, [])
 
-  const dataBadge = engineAvailable
-    ? 'Python SMC Engine'
-    : usingLiveCandles
-      ? historicalCandlesFromAlpaca.length > 0
-        ? 'Alpaca + Live Candles'
-        : 'Live API Candles'
-      : historicalStatus === 'loading'
-        ? 'Loading History'
-        : 'Sample Candles'
+  const dataBadge = isFuturesChart && (engineAvailable || historicalCandlesFromAlpaca.length > 0)
+    ? 'InsightSentry Futures'
+    : engineAvailable
+      ? 'Python SMC Engine'
+      : usingLiveCandles
+        ? historicalCandlesFromAlpaca.length > 0
+          ? 'Alpaca + Live Candles'
+          : 'Live API Candles'
+        : historicalStatus === 'loading'
+          ? 'Loading History'
+          : 'Sample Candles'
 
   const liveBadge = engineAvailable ? 'Python SMC Live' : engineStatus === 'loading' ? 'Loading SMC' : 'Live SMC/AlphaX'
 
@@ -2714,7 +2637,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3Y' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3Z' : 'Chart Engine v2'}
             </div>
           </div>
         )}
