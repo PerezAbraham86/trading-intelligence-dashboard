@@ -1856,7 +1856,7 @@ export default function EChartsCandlestickChart({
         const params = new URLSearchParams({
           symbol,
           timeframe,
-          limit: '500',
+          limit: '5000',
         })
 
         const response = await fetch(`${API_BASE_URL}/api/engine-state?${params.toString()}`, {
@@ -1902,7 +1902,7 @@ export default function EChartsCandlestickChart({
         const params = new URLSearchParams({
           symbol,
           timeframe,
-          limit: '500',
+          limit: '5000',
         })
 
         const response = await fetch(`${API_BASE_URL}/api/historical-candles?${params.toString()}`, {
