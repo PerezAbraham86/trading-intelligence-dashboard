@@ -1,2621 +1,2034 @@
-'use client'
+from __future__ import annotations
 
-import { useEffect, useMemo, useRef, useState } from 'react'
-import * as echarts from 'echarts'
+import json
+import os
+import time
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
-type Candle = {
-  time: string
-  open: number
-  close: number
-  low: number
-  high: number
-  volume?: number
-}
+from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
-type GhostCandle = {
-  slot: string
-  label: string
-  open: number
-  close: number
-  low: number
-  high: number
-  confidence: number
-  direction: 'bullish' | 'bearish' | 'neutral'
-  source?: 'python' | 'chart'
-}
+from trading_engine import run_phase1_engine
 
-type CandleMode = 'Regular' | 'Heikin Ashi'
-type SmcDisplayMode = 'Clean' | 'Full' | 'Structure Only' | 'Zones Only'
 
-type SmcStructureEvent = {
-  time: string
-  fromTime?: string
-  price: number
-  tag: string
-  direction: 'bullish' | 'bearish'
-  scope?: 'internal' | 'swing'
-}
+# ─────────────────────────────────────────────────────────────────────────────
+# APP SETUP
+# ─────────────────────────────────────────────────────────────────────────────
 
-type DlmLevel = {
-  label: string
-  price: number
-  direction: 'neutral' | 'bullish' | 'bearish'
-  kind?: string
-}
+app = FastAPI(title="Trading Intelligence Dashboard API")
 
-type SmcZone = {
-  startTime: string
-  endTime: string
-  top: number
-  bottom: number
-  label: string
-  direction: 'bullish' | 'bearish' | 'neutral'
-  kind: string
-}
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-type LiquidityEvent = {
-  time: string
-  fromTime?: string
-  price: number
-  label: string
-  direction: 'bullish' | 'bearish' | 'neutral'
-  kind: string
-  touches?: number
-}
 
-type DlmConfluenceMarker = {
-  time: string
-  price: number
-  label: string
-  direction: 'bullish' | 'bearish' | 'neutral'
-  kind: string
-  pressurePct?: number
-}
+# ─────────────────────────────────────────────────────────────────────────────
+# ENVIRONMENT
+# ─────────────────────────────────────────────────────────────────────────────
 
-type ScoreMarker = {
-  time: string
-  price: number
-  label: string
-  direction: 'bullish' | 'bearish' | 'neutral'
-  kind: string
-  score?: number
-  grade?: 'A' | 'B' | 'C'
-}
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
+DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "my_trading_secret_123")
 
-type AlphaProfileBin = {
-  index: number
-  top: number
-  bottom: number
-  mid: number
-  volume?: number
-  buyVolume?: number
-  sellVolume?: number
-  widthPct: number
-  buyWidthPct?: number
-  sellWidthPct?: number
-  isPoc?: boolean
-  isBuyLiquidity?: boolean
-  isSellLiquidity?: boolean
-  direction?: 'bullish' | 'bearish' | 'neutral'
-  dominantSide?: 'bullish' | 'bearish' | 'neutral'
-  label?: string
-}
+ALPACA_STOCKS_BASE_URL = "https://data.alpaca.markets/v2"
+ALPACA_CRYPTO_BASE_URL = "https://data.alpaca.markets/v1beta3"
 
-type ChartOverlayPayload = {
-  smcEvents?: SmcStructureEvent[]
-  dlmLevels?: DlmLevel[]
-  zones?: SmcZone[]
-  liquidityEvents?: LiquidityEvent[]
-  dlmConfluenceMarkers?: DlmConfluenceMarker[]
-  scoreMarkers?: ScoreMarker[]
-}
 
-type EngineState = ChartOverlayPayload & {
-  engine?: string
-  phase?: string
-  status?: string
-  candles?: any[]
-  heikinAshiCandles?: any[]
-  alphaProfileBins?: AlphaProfileBin[]
-  alphaProfileMeta?: any
-  alphaFvgs?: SmcZone[]
-  alphaSweeps?: LiquidityEvent[]
-  ghostCandles?: any[]
-  ghostProjections?: any[]
-  projections?: any[]
-  alphaBullPressure?: number
-  alphaBearPressure?: number
-  signal?: string
-  confidence?: number
-  bullScore?: number
-  bearScore?: number
-  netBias?: number
-  price?: number
-  source?: any
-}
+# ─────────────────────────────────────────────────────────────────────────────
+# IN-MEMORY STATE
+# Render can restart, so this is not permanent storage.
+# It is enough for current live dashboard state.
+# ─────────────────────────────────────────────────────────────────────────────
 
-type EChartsCandlestickChartProps = {
-  heightClass?: string
-  compact?: boolean
-  chartTitle?: string
-  enableAdvancedOverlays?: boolean
-  defaultSymbol?: string
-  defaultTimeframe?: string
-  defaultCandleMode?: CandleMode
-  allowCompactHistory?: boolean
-  onChartSelectionChange?: (selection: {
-    symbol: string
-    timeframe: string
-    candleMode: CandleMode
-    compact: boolean
-    chartTitle?: string
-  }) => void
-  latestSignal?: any
-  recentSignals?: any[]
-  recentCandles?: any[]
-}
+LATEST_SIGNAL: Dict[str, Any] = {}
+RECENT_SIGNALS: List[Dict[str, Any]] = []
+RECENT_CANDLES: List[Dict[str, Any]] = []
+LIVE_CANDLES: Dict[str, Dict[str, Any]] = {}
 
-const GREEN = '#089981'
-const RED = '#F23645'
-const BLUE = '#2157f3'
-const TEAL = '#26a69a'
-const LIGHT_RED = '#ff4d5e'
-const YELLOW = '#facc15'
-const PURPLE = '#a855f7'
-const CYAN = '#22d3ee'
-const ORANGE = '#fb923c'
-const PINK = '#f472b6'
-const GRAY = '#94a3b8'
+MAX_RECENT_SIGNALS = 50
+MAX_RECENT_CANDLES = 1000
 
-const MAX_INTERNAL_OB_ZONES = 4
-const MAX_SWING_OB_ZONES = 2
-const MAX_FVG_ZONES = 2
-const MAX_ALPHA_FVG_ZONES = 1
-const MAX_GENERIC_ZONES = 2
-const MAX_ZONE_LOOKBACK_CANDLES = 180
-const MAX_CLEAN_STRUCTURE_EVENTS = 18
-const MAX_FULL_STRUCTURE_EVENTS = 60
-const MAX_CLEAN_LIQUIDITY_EVENTS = 10
-const MAX_FULL_LIQUIDITY_EVENTS = 40
-const MAX_CLEAN_SCORE_MARKERS = 2
-const MAX_FULL_SCORE_MARKERS = 12
 
-// Reserved empty x-axis space between live candles and the right liquidity profile.
-// This keeps future Ghost Candles from colliding with AlphaX / liquidity profile bars.
-const GHOST_CANDLE_RESERVED_SLOTS = 14
-const GHOST_CANDLE_COUNT = 3
-const RIGHT_PROFILE_SLOT_COUNT = 56
-const SHOW_LIVE_PRICE_LINE = true
+# ─────────────────────────────────────────────────────────────────────────────
+# MODELS
+# ─────────────────────────────────────────────────────────────────────────────
 
-const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
+class TradingViewPayload(BaseModel):
+    secret: Optional[str] = None
+    eventType: Optional[str] = None
+    status: Optional[str] = None
 
-const timeframeOptions = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1D']
-const candleModeOptions: CandleMode[] = ['Regular', 'Heikin Ashi']
+    symbol: Optional[str] = None
+    timeframe: Optional[str] = None
+    signal: Optional[str] = None
+    confidence: Optional[float] = None
+    bullScore: Optional[float] = None
+    bearScore: Optional[float] = None
+    netBias: Optional[float] = None
+    price: Optional[float] = None
 
-const sampleCandles: Candle[] = [
-  { time: '5/20 09:00', open: 76450, close: 76680, low: 76380, high: 76750 },
-  { time: '5/20 10:00', open: 76680, close: 76520, low: 76420, high: 76720 },
-  { time: '5/20 11:00', open: 76520, close: 76810, low: 76490, high: 76890 },
-  { time: '5/20 12:00', open: 76810, close: 77020, low: 76720, high: 77100 },
-  { time: '5/20 13:00', open: 77020, close: 76910, low: 76840, high: 77140 },
-  { time: '5/20 14:00', open: 76910, close: 77280, low: 76860, high: 77340 },
-  { time: '5/20 15:00', open: 77280, close: 77150, low: 77090, high: 77410 },
-  { time: '5/20 16:00', open: 77150, close: 77520, low: 77080, high: 77610 },
-  { time: '5/20 17:00', open: 77520, close: 77840, low: 77480, high: 77930 },
-  { time: '5/20 18:00', open: 77840, close: 77660, low: 77580, high: 77910 },
-  { time: '5/20 19:00', open: 77660, close: 77420, low: 77360, high: 77740 },
-  { time: '5/20 20:00', open: 77420, close: 77180, low: 77090, high: 77500 },
-  { time: '5/20 21:00', open: 77180, close: 76900, low: 76820, high: 77240 },
-  { time: '5/20 22:00', open: 76900, close: 76640, low: 76550, high: 76980 },
-  { time: '5/20 23:00', open: 76640, close: 76280, low: 76120, high: 76710 },
-  { time: '5/21 00:00', open: 76280, close: 75940, low: 75840, high: 76320 },
-  { time: '5/21 01:00', open: 75940, close: 75680, low: 75590, high: 76020 },
-  { time: '5/21 02:00', open: 75680, close: 75420, low: 75380, high: 75760 },
-  { time: '5/21 03:00', open: 75420, close: 75880, low: 75350, high: 75960 },
-  { time: '5/21 04:00', open: 75880, close: 76240, low: 75810, high: 76380 },
-  { time: '5/21 05:00', open: 76240, close: 76060, low: 75940, high: 76310 },
-  { time: '5/21 06:00', open: 76060, close: 76580, low: 76020, high: 76690 },
-]
+    time: Optional[Any] = None
+    timestamp: Optional[Any] = None
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    close: Optional[float] = None
+    volume: Optional[float] = None
 
-function normalizeTimeframe(value: any): string {
-  const tf = String(value ?? '').trim().toLowerCase()
+    entry: Optional[float] = None
+    current: Optional[float] = None
+    pnl: Optional[float] = None
+    percent: Optional[float] = None
 
-  if (tf === '1') return '1m'
-  if (tf === '3') return '3m'
-  if (tf === '5') return '5m'
-  if (tf === '15') return '15m'
-  if (tf === '30') return '30m'
-  if (tf === '60') return '1h'
-  if (tf === '120') return '2h'
-  if (tf === '240') return '4h'
-  if (tf === 'd' || tf === '1d') return '1d'
-  if (tf === 'w' || tf === '1w') return '1w'
+    smc: Optional[str] = None
+    alphax: Optional[str] = None
+    ghost: Optional[str] = None
+    chartOverlays: Optional[Any] = None
 
-  return tf
-}
+    openInterest: Optional[str] = None
+    footprint: Optional[str] = None
+    session: Optional[str] = None
+    fredMacro: Optional[str] = None
+    finraShortVolume: Optional[str] = None
+    cot: Optional[str] = None
+    warnings: Optional[List[str]] = Field(default_factory=list)
 
-function normalizeDefaultSymbol(value: any, fallback = 'BTCUSD'): string {
-  const normalized = normalizeSymbol(value || fallback)
 
-  if (normalized === 'MES1' || normalized === 'MES1!') return 'MES1!'
-  if (normalized === 'ES1' || normalized === 'ES1!') return 'ES1!'
-  if (normalized.includes('MES')) return 'MES1!'
-  if (normalized.includes('ES') && !normalized.includes('MES')) return 'ES1!'
-  if (normalized.includes('SPY')) return 'SPY'
-  if (normalized.includes('ETH')) return 'ETHUSD'
-  if (normalized.includes('BTC')) return 'BTCUSD'
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
 
-  return normalized || fallback
-}
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-function normalizeDefaultTimeframe(value: any, fallback = '1m'): string {
-  const normalized = normalizeTimeframe(value || fallback)
-  return timeframeOptions.includes(normalized) ? normalized : fallback
-}
 
-function normalizeSymbol(value: any): string {
-  return String(value ?? '')
-    .trim()
-    .toUpperCase()
-    .replace('CME_MINI:', '')
-    .replace('CME:', '')
-    .replace('BINANCE:', '')
-    .replace('COINBASE:', '')
-    .replace('CRYPTO:', '')
-}
+def normalize_symbol(symbol: str) -> str:
+    raw = (symbol or "").upper().strip()
 
-function symbolsMatch(signalSymbolRaw: any, selectedSymbolRaw: any): boolean {
-  const signalSymbol = normalizeSymbol(signalSymbolRaw)
-  const selectedSymbol = normalizeSymbol(selectedSymbolRaw)
+    for prefix in [
+        "BINANCE:",
+        "COINBASE:",
+        "CRYPTO:",
+        "CME_MINI:",
+        "CME:",
+        "AMEX:",
+        "NASDAQ:",
+        "NYSE:",
+    ]:
+        raw = raw.replace(prefix, "")
 
-  if (!signalSymbol || !selectedSymbol) return false
-  if (signalSymbol === selectedSymbol) return true
+    raw = raw.replace("-", "").replace("_", "")
 
-  if (selectedSymbol === 'MES1!' && signalSymbol.includes('MES')) return true
-  if (selectedSymbol === 'ES1!' && signalSymbol.includes('ES')) return true
-  if (selectedSymbol === 'BTCUSD' && signalSymbol.includes('BTC')) return true
-  if (selectedSymbol === 'ETHUSD' && signalSymbol.includes('ETH')) return true
-  if (selectedSymbol === 'SPY' && signalSymbol.includes('SPY')) return true
+    if raw in ["BTCUSD", "BTC/USD", "XBTUSD"]:
+        return "BTCUSD"
+    if raw in ["ETHUSD", "ETH/USD"]:
+        return "ETHUSD"
 
-  return false
-}
+    return raw
 
-function toNumber(value: any): number | null {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : null
-}
 
-function formatAxisTime(value: any, fallbackIndex: number): string {
-  if (typeof value === 'string' && value.length > 0) return value
+def normalize_timeframe(timeframe: str) -> str:
+    tf = str(timeframe or "1m").strip().lower()
 
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    const timestamp = value > 1000000000000 ? value : value * 1000
-    const date = new Date(timestamp)
-
-    if (!Number.isNaN(date.getTime())) return date.toISOString()
-  }
-
-  return `Live ${fallbackIndex + 1}`
-}
-
-function shortAxisLabel(value: any): string {
-  const text = String(value ?? '')
-  const date = new Date(text)
-
-  if (!Number.isNaN(date.getTime())) {
-    const month = date.getMonth() + 1
-    const day = date.getDate()
-    const hour = date.getHours().toString().padStart(2, '0')
-    const minute = date.getMinutes().toString().padStart(2, '0')
-    return `${month}/${day} ${hour}:${minute}`
-  }
-
-  return text.replace('__profile_', '')
-}
-
-function scaleCandlesForSymbol(candles: Candle[], symbol: string): Candle[] {
-  const normalized = normalizeSymbol(symbol)
-
-  if (normalized.includes('BTC')) return candles
-
-  let targetBase = 6000
-  let rangeMult = 0.002
-
-  if (normalized.includes('ETH')) {
-    targetBase = 3800
-    rangeMult = 0.003
-  } else if (normalized.includes('MES') || normalized.includes('ES')) {
-    targetBase = 6000
-    rangeMult = 0.0012
-  } else if (normalized.includes('SPY')) {
-    targetBase = 530
-    rangeMult = 0.0018
-  }
-
-  const firstClose = candles[0]?.close ?? 1
-
-  return candles.map((candle) => {
-    const openRatio = (candle.open - firstClose) / firstClose
-    const highRatio = (candle.high - firstClose) / firstClose
-    const lowRatio = (candle.low - firstClose) / firstClose
-    const closeRatio = (candle.close - firstClose) / firstClose
-
-    return {
-      time: candle.time,
-      open: Number((targetBase * (1 + openRatio * rangeMult * 100)).toFixed(2)),
-      high: Number((targetBase * (1 + highRatio * rangeMult * 100)).toFixed(2)),
-      low: Number((targetBase * (1 + lowRatio * rangeMult * 100)).toFixed(2)),
-      close: Number((targetBase * (1 + closeRatio * rangeMult * 100)).toFixed(2)),
+    mapping = {
+        "1": "1m",
+        "1m": "1m",
+        "3": "3m",
+        "3m": "3m",
+        "5": "5m",
+        "5m": "5m",
+        "15": "15m",
+        "15m": "15m",
+        "30": "30m",
+        "30m": "30m",
+        "60": "1h",
+        "1h": "1h",
+        "120": "2h",
+        "2h": "2h",
+        "240": "4h",
+        "4h": "4h",
+        "d": "1d",
+        "1d": "1d",
+        "w": "1w",
+        "1w": "1w",
     }
-  })
-}
 
-function getSampleCandlesForSymbol(symbol: string): Candle[] {
-  return scaleCandlesForSymbol(sampleCandles, symbol)
-}
-
-function candleFromAny(raw: any, index: number): Candle | null {
-  const open = toNumber(raw?.open)
-  const high = toNumber(raw?.high)
-  const low = toNumber(raw?.low)
-  const close = toNumber(raw?.close)
-
-  if (open === null || high === null || low === null || close === null) return null
-
-  return {
-    time: formatAxisTime(raw?.time ?? raw?.timestamp ?? raw?.createdAt, index),
-    open,
-    high,
-    low,
-    close,
-    volume: toNumber(raw?.volume) ?? undefined,
-  }
-}
-
-function buildCandlesFromRecentCandles(
-  candlesInput: any[] | undefined,
-  selectedSymbol: string,
-  selectedTimeframe: string
-): Candle[] {
-  if (!Array.isArray(candlesInput) || candlesInput.length === 0) return []
-
-  const normalizedTimeframe = normalizeTimeframe(selectedTimeframe)
-
-  return candlesInput
-    .filter((candle) => {
-      const timeframeMatch =
-        normalizeTimeframe(candle.timeframe) === normalizedTimeframe ||
-        !candle.timeframe
-
-      return symbolsMatch(candle.symbol, selectedSymbol) && timeframeMatch
-    })
-    .map(candleFromAny)
-    .filter((candle): candle is Candle => candle !== null)
-}
-
-function buildCandlesFromSignals(
-  signals: any[] | undefined,
-  selectedSymbol: string,
-  selectedTimeframe: string
-): Candle[] {
-  if (!Array.isArray(signals) || signals.length === 0) return []
-
-  const normalizedTimeframe = normalizeTimeframe(selectedTimeframe)
-
-  return signals
-    .filter((signal) => {
-      const timeframeMatch =
-        normalizeTimeframe(signal.timeframe) === normalizedTimeframe ||
-        !signal.timeframe
-
-      return symbolsMatch(signal.symbol, selectedSymbol) && timeframeMatch
-    })
-    .map((signal, index) => {
-      const open = toNumber(signal.open)
-      const high = toNumber(signal.high)
-      const low = toNumber(signal.low)
-      const close =
-        toNumber(signal.close) ??
-        toNumber(signal.current) ??
-        toNumber(signal.price)
-
-      if (open === null || high === null || low === null || close === null) {
-        return null
-      }
-
-      return {
-        time: formatAxisTime(signal.time ?? signal.timestamp ?? signal.createdAt, index),
-        open,
-        high,
-        low,
-        close,
-      }
-    })
-    .filter((candle): candle is Candle => candle !== null)
-}
-
-function mergeCandlesByTime(candles: Candle[]): Candle[] {
-  const merged = new Map<string, Candle>()
-
-  for (const candle of candles) {
-    merged.set(candle.time, candle)
-  }
-
-  return Array.from(merged.values()).sort((a, b) => {
-    const aTime = Date.parse(a.time)
-    const bTime = Date.parse(b.time)
-
-    if (Number.isFinite(aTime) && Number.isFinite(bTime)) return aTime - bTime
-
-    return a.time.localeCompare(b.time)
-  })
-}
-
-function safeParseJson(value: any): any {
-  if (!value) return null
-  if (typeof value === 'object') return value
-  if (typeof value !== 'string') return null
-
-  try {
-    return JSON.parse(value)
-  } catch {
-    return null
-  }
-}
-
-function extractOverlayPayload(latestSignal?: any): ChartOverlayPayload {
-  const smcPayload = safeParseJson(latestSignal?.smc)
-  const alphaxPayload = safeParseJson(latestSignal?.alphax)
-  const chartPayload = safeParseJson(latestSignal?.chartOverlays)
-
-  const merged = {
-    ...(chartPayload && typeof chartPayload === 'object' ? chartPayload : {}),
-    ...(smcPayload && typeof smcPayload === 'object' ? smcPayload : {}),
-    ...(alphaxPayload && typeof alphaxPayload === 'object' ? alphaxPayload : {}),
-  }
-
-  return {
-    smcEvents: Array.isArray(merged.smcEvents) ? merged.smcEvents : undefined,
-    dlmLevels: Array.isArray(merged.dlmLevels) ? merged.dlmLevels : undefined,
-    zones: Array.isArray(merged.zones) ? merged.zones : undefined,
-    liquidityEvents: Array.isArray(merged.liquidityEvents)
-      ? merged.liquidityEvents
-      : undefined,
-    dlmConfluenceMarkers: Array.isArray(merged.dlmConfluenceMarkers)
-      ? merged.dlmConfluenceMarkers
-      : undefined,
-    scoreMarkers: Array.isArray(merged.scoreMarkers) ? merged.scoreMarkers : undefined,
-  }
-}
-
-function convertToHeikinAshi(candles: Candle[]): Candle[] {
-  if (candles.length === 0) return []
-
-  const haCandles: Candle[] = []
-
-  for (let i = 0; i < candles.length; i++) {
-    const c = candles[i]
-    const haClose = (c.open + c.high + c.low + c.close) / 4
-    const haOpen =
-      i === 0
-        ? (c.open + c.close) / 2
-        : (haCandles[i - 1].open + haCandles[i - 1].close) / 2
-    const haHigh = Math.max(c.high, haOpen, haClose)
-    const haLow = Math.min(c.low, haOpen, haClose)
-
-    haCandles.push({
-      time: c.time,
-      open: Number(haOpen.toFixed(2)),
-      close: Number(haClose.toFixed(2)),
-      low: Number(haLow.toFixed(2)),
-      high: Number(haHigh.toFixed(2)),
-      volume: c.volume,
-    })
-  }
-
-  return haCandles
-}
-
-function getStructureColor(direction: 'bullish' | 'bearish') {
-  return direction === 'bullish' ? GREEN : RED
-}
-
-function getDlmColor(direction: DlmLevel['direction']) {
-  if (direction === 'bullish') return GREEN
-  if (direction === 'bearish') return RED
-  return BLUE
-}
-
-function getLiquidityColor(event: LiquidityEvent) {
-  if (event.kind === 'inducement') return YELLOW
-  if (event.kind === 'liquidity_pool') return PURPLE
-  if (event.direction === 'bullish') return GREEN
-  if (event.direction === 'bearish') return RED
-  return BLUE
-}
-
-function getDlmConfluenceColor(marker: DlmConfluenceMarker) {
-  if (marker.kind === 'poc_touch') return CYAN
-  if (marker.kind === 'ob_confirm') return BLUE
-  if (marker.kind === 'entry_confirm') return GREEN
-  if (marker.direction === 'bullish') return GREEN
-  if (marker.direction === 'bearish') return RED
-  return CYAN
-}
-
-function getScoreColor(marker: ScoreMarker) {
-  if (marker.kind === 'institutional_score') return ORANGE
-  if (marker.kind === 'execution_quality') return PINK
-  if (marker.kind === 'trend_phase') return PURPLE
-  if (marker.kind === 'htf_bias') return CYAN
-  if (marker.kind === 'session') return GRAY
-  if (marker.direction === 'bullish') return GREEN
-  if (marker.direction === 'bearish') return RED
-  return YELLOW
-}
+    return mapping.get(tf, tf)
 
 
-function zoneTimeValue(value: any): number {
-  const parsed = Date.parse(String(value ?? ''))
-  return Number.isFinite(parsed) ? parsed : 0
-}
+def alpaca_timeframe(timeframe: str) -> str:
+    tf = normalize_timeframe(timeframe)
 
-function zonePriority(zone: SmcZone): number {
-  if (zone.kind === 'premium') return 100
-  if (zone.kind === 'equilibrium') return 99
-  if (zone.kind === 'discount') return 98
-  if (zone.kind === 'internal_ob') return 80
-  if (zone.kind === 'swing_ob') return 70
-  if (zone.kind === 'fvg') return 55
-  if (zone.kind === 'alpha_fvg') return 45
-  return 20
-}
+    mapping = {
+        "1m": "1Min",
+        "3m": "3Min",
+        "5m": "5Min",
+        "15m": "15Min",
+        "30m": "30Min",
+        "1h": "1Hour",
+        "2h": "2Hour",
+        "4h": "4Hour",
+        "1d": "1Day",
+        "1w": "1Week",
+    }
 
-function normalizeZoneKind(kind: string): string {
-  const text = String(kind ?? '').toLowerCase()
+    return mapping.get(tf, "1Min")
 
-  if (text.includes('premium')) return 'premium'
-  if (text.includes('equilibrium')) return 'equilibrium'
-  if (text === 'eq' || text.includes('eq_')) return 'equilibrium'
-  if (text.includes('discount')) return 'discount'
-  if (text.includes('swing') && text.includes('ob')) return 'swing_ob'
-  if (text.includes('internal') && text.includes('ob')) return 'internal_ob'
-  if (text.includes('alpha') && text.includes('fvg')) return 'alpha_fvg'
-  if (text.includes('fvg')) return 'fvg'
-  if (text.includes('ob')) return 'internal_ob'
 
-  return text
-}
 
-function normalizeZone(zone: SmcZone): SmcZone | null {
-  const top = Number(zone.top)
-  const bottom = Number(zone.bottom)
 
-  if (!Number.isFinite(top) || !Number.isFinite(bottom)) return null
+def timeframe_seconds(timeframe: str) -> int:
+    tf = normalize_timeframe(timeframe)
+    mapping = {
+        "1m": 60,
+        "3m": 180,
+        "5m": 300,
+        "15m": 900,
+        "30m": 1800,
+        "1h": 3600,
+        "2h": 7200,
+        "4h": 14400,
+        "1d": 86400,
+        "1w": 604800,
+    }
+    return mapping.get(tf, 60)
 
-  const normalizedTop = Math.max(top, bottom)
-  const normalizedBottom = Math.min(top, bottom)
 
-  if (normalizedTop === normalizedBottom) return null
+def historical_start_time(timeframe: str, limit: int, *, is_crypto: bool) -> str:
+    """
+    Alpaca only returned the current session when no explicit start time was sent.
+    For a normal chart, request a real lookback window based on timeframe × limit.
 
-  const kind = normalizeZoneKind(zone.kind)
+    Crypto trades 24/7, so it needs only a small buffer.
+    Stocks have nights/weekends/holidays, so they need a much bigger calendar buffer.
+    """
+    safe_limit = max(1, min(int(limit or 5000), 10000))
+    seconds = timeframe_seconds(timeframe)
 
-  return {
-    ...zone,
-    kind,
-    top: normalizedTop,
-    bottom: normalizedBottom,
-    direction:
-      zone.direction === 'bullish' || zone.direction === 'bearish'
-        ? zone.direction
-        : kind === 'premium'
-          ? 'bearish'
-          : kind === 'discount'
-            ? 'bullish'
-            : 'neutral',
-    label:
-      zone.label ||
-      (kind === 'premium'
-        ? 'Premium'
-        : kind === 'equilibrium'
-          ? 'Equilibrium'
-          : kind === 'discount'
-            ? 'Discount'
-            : kind === 'internal_ob'
-              ? zone.direction === 'bullish'
-                ? 'Internal Bullish OB'
-                : 'Internal Bearish OB'
-              : kind === 'swing_ob'
-                ? zone.direction === 'bullish'
-                  ? 'Swing Bullish OB'
-                  : 'Swing Bearish OB'
-                : kind === 'alpha_fvg'
-                  ? 'AlphaX FVG'
-                  : 'FVG'),
-  }
-}
+    # Extra calendar time so missing stock market hours/weekends still return enough bars.
+    buffer_mult = 1.35 if is_crypto else 6.0
+    lookback_seconds = int(seconds * safe_limit * buffer_mult)
 
-function getZoneEndTime(zone: SmcZone): number {
-  return zoneTimeValue(zone.endTime || zone.startTime)
-}
-
-function filterZonesPineStyle(
-  zones: SmcZone[],
-  candles: Candle[],
-  compact: boolean,
-  displayMode: SmcDisplayMode
-): SmcZone[] {
-  if (!Array.isArray(zones) || zones.length === 0) return []
-  if (compact || displayMode === 'Structure Only') return []
-
-  const normalized = zones
-    .map(normalizeZone)
-    .filter((zone): zone is SmcZone => zone !== null)
-
-  if (normalized.length === 0) return []
-
-  const candleTimes = candles.map((candle) => candle.time)
-  const recentTimeSet = new Set(
-    candleTimes.slice(Math.max(0, candleTimes.length - MAX_ZONE_LOOKBACK_CANDLES))
-  )
-
-  const firstRecentMs = zoneTimeValue(
-    candleTimes[Math.max(0, candleTimes.length - MAX_ZONE_LOOKBACK_CANDLES)]
-  )
-  const lastMs = zoneTimeValue(candleTimes[candleTimes.length - 1])
-
-  const isCurrentEnough = (zone: SmcZone) => {
-    if (recentTimeSet.has(zone.startTime) || recentTimeSet.has(zone.endTime)) return true
-
-    const startMs = zoneTimeValue(zone.startTime)
-    const endMs = zoneTimeValue(zone.endTime)
-
-    if (!firstRecentMs || !lastMs || !startMs || !endMs) return false
-
-    return endMs >= firstRecentMs && startMs <= lastMs
-  }
-
-  const currentZones = normalized.filter(isCurrentEnough)
-
-  const latestByKind = (kind: string, limit: number) =>
-    currentZones
-      .filter((zone) => zone.kind === kind)
-      .sort((a, b) => getZoneEndTime(b) - getZoneEndTime(a))
-      .slice(0, limit)
-
-  const latestDirectional = (kind: string, perDirectionLimit: number) => {
-    const bullish = currentZones
-      .filter((zone) => zone.kind === kind && zone.direction === 'bullish')
-      .sort((a, b) => getZoneEndTime(b) - getZoneEndTime(a))
-      .slice(0, perDirectionLimit)
-
-    const bearish = currentZones
-      .filter((zone) => zone.kind === kind && zone.direction === 'bearish')
-      .sort((a, b) => getZoneEndTime(b) - getZoneEndTime(a))
-      .slice(0, perDirectionLimit)
-
-    return [...bullish, ...bearish]
-  }
-
-  const pdZones = ['premium', 'equilibrium', 'discount']
-    .map((kind) =>
-      currentZones
-        .filter((zone) => zone.kind === kind)
-        .sort((a, b) => getZoneEndTime(b) - getZoneEndTime(a))[0]
+    # Protect against too-small windows on higher timeframes.
+    minimum_days = 5 if is_crypto else 45
+    start_dt = datetime.now(timezone.utc) - max(
+        timedelta(seconds=lookback_seconds),
+        timedelta(days=minimum_days if normalize_timeframe(timeframe) in {"1m", "3m", "5m", "15m", "30m"} else 1),
     )
-    .filter((zone): zone is SmcZone => Boolean(zone))
+    return start_dt.isoformat().replace("+00:00", "Z")
 
-  const zoneMultiplier = displayMode === 'Full' ? 2 : 1
 
-  const selected = [
-    ...pdZones,
-    ...latestDirectional('internal_ob', Math.ceil((MAX_INTERNAL_OB_ZONES * zoneMultiplier) / 2)),
-    ...latestDirectional('swing_ob', Math.ceil((MAX_SWING_OB_ZONES * zoneMultiplier) / 2)),
-    ...latestByKind('fvg', MAX_FVG_ZONES * zoneMultiplier),
-    ...latestByKind('alpha_fvg', MAX_ALPHA_FVG_ZONES * zoneMultiplier),
-    ...currentZones
-      .filter(
-        (zone) =>
-          ![
-            'premium',
-            'equilibrium',
-            'discount',
-            'internal_ob',
-            'swing_ob',
-            'fvg',
-            'alpha_fvg',
-          ].includes(zone.kind)
-      )
-      .sort((a, b) => getZoneEndTime(b) - getZoneEndTime(a))
-      .slice(0, MAX_GENERIC_ZONES * zoneMultiplier),
-  ]
+def historical_end_time() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-  const deduped = new Map<string, SmcZone>()
+def is_crypto_symbol(symbol: str) -> bool:
+    normalized = normalize_symbol(symbol)
+    return normalized in {"BTCUSD", "ETHUSD"}
 
-  for (const zone of selected) {
-    const key = [
-      zone.kind,
-      zone.direction,
-      Math.round(zone.top * 100) / 100,
-      Math.round(zone.bottom * 100) / 100,
-      zone.startTime,
-    ].join('|')
 
-    if (!deduped.has(key)) deduped.set(key, zone)
-  }
+def to_alpaca_crypto_symbol(symbol: str) -> str:
+    normalized = normalize_symbol(symbol)
 
-  return Array.from(deduped.values()).sort((a, b) => {
-    const priorityDiff = zonePriority(b) - zonePriority(a)
-    if (priorityDiff !== 0) return priorityDiff
-    return getZoneEndTime(a) - getZoneEndTime(b)
-  })
-}
+    if normalized == "BTCUSD":
+        return "BTC/USD"
+    if normalized == "ETHUSD":
+        return "ETH/USD"
 
-function shouldShowZoneLabel(zone: SmcZone, compact: boolean, displayMode: SmcDisplayMode): boolean {
-  if (compact) return false
-  if (displayMode === 'Clean') {
-    return zone.kind === 'premium' || zone.kind === 'equilibrium' || zone.kind === 'discount'
-  }
+    return normalized
 
-  return (
-    zone.kind === 'premium' ||
-    zone.kind === 'equilibrium' ||
-    zone.kind === 'discount' ||
-    zone.kind === 'internal_ob' ||
-    zone.kind === 'swing_ob'
-  )
-}
 
-function eventTimeValue(value: any): number {
-  const parsed = Date.parse(String(value ?? ''))
-  return Number.isFinite(parsed) ? parsed : 0
-}
+def to_float(value: Any, fallback: float = 0.0) -> float:
+    try:
+        if value is None:
+            return fallback
+        parsed = float(value)
+        if parsed != parsed:
+            return fallback
+        return parsed
+    except Exception:
+        return fallback
 
-function isMajorStructureEvent(event: SmcStructureEvent): boolean {
-  const tag = String(event.tag ?? '').toUpperCase()
-  return (
-    event.scope === 'swing' ||
-    tag === 'BOS' ||
-    tag === 'CHOCH' ||
-    tag === 'MSS' ||
-    tag === 'IBOS' ||
-    tag === 'ICHOCH'
-  )
-}
 
-function filterSmcEventsForDisplay(
-  events: SmcStructureEvent[],
-  displayMode: SmcDisplayMode,
-  compact: boolean
-): SmcStructureEvent[] {
-  if (!Array.isArray(events) || compact || displayMode === 'Zones Only') return []
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
 
-  const sorted = [...events].sort((a, b) => eventTimeValue(a.time) - eventTimeValue(b.time))
-  const major = sorted.filter(isMajorStructureEvent)
-  const source = displayMode === 'Full' ? sorted : major
-  const limit = displayMode === 'Full' ? MAX_FULL_STRUCTURE_EVENTS : MAX_CLEAN_STRUCTURE_EVENTS
 
-  return source.slice(-limit)
-}
+def to_epoch_seconds(value: Any) -> float:
+    """
+    Converts every time format we use into sortable epoch seconds.
 
-function isMajorLiquidityEvent(event: LiquidityEvent): boolean {
-  return (
-    event.kind === 'liquidity_pool' ||
-    event.kind === 'sweep' ||
-    event.kind === 'internal_sweep' ||
-    event.kind === 'swing_sweep' ||
-    event.kind === 'alpha_sweep'
-  )
-}
+    Fixes BTCUSD engine errors caused by mixing:
+    - Alpaca ISO strings: 2026-05-24T...
+    - TradingView/live unix seconds: 1779...
+    - TradingView/live unix milliseconds: 1779...000
+    """
 
-function filterLiquidityEventsForDisplay(
-  events: LiquidityEvent[],
-  displayMode: SmcDisplayMode,
-  compact: boolean
-): LiquidityEvent[] {
-  if (!Array.isArray(events) || compact || displayMode === 'Structure Only') return []
+    if value is None:
+        return 0.0
 
-  const sorted = [...events]
-    .filter((event) => (displayMode === 'Full' ? true : isMajorLiquidityEvent(event)))
-    .sort((a, b) => eventTimeValue(a.time || a.fromTime) - eventTimeValue(b.time || b.fromTime))
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        return numeric / 1000.0 if numeric > 1000000000000 else numeric
 
-  const limit = displayMode === 'Full' ? MAX_FULL_LIQUIDITY_EVENTS : MAX_CLEAN_LIQUIDITY_EVENTS
+    text = str(value).strip()
+    if not text:
+        return 0.0
 
-  return sorted.slice(-limit)
-}
+    try:
+        numeric = float(text)
+        return numeric / 1000.0 if numeric > 1000000000000 else numeric
+    except Exception:
+        pass
 
-function filterScoreMarkersForDisplay(
-  markers: ScoreMarker[],
-  displayMode: SmcDisplayMode,
-  compact: boolean
-): ScoreMarker[] {
-  if (!Array.isArray(markers) || compact || displayMode !== 'Full') return []
+    try:
+        iso_text = text.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(iso_text)
 
-  return [...markers]
-    .sort((a, b) => eventTimeValue(a.time) - eventTimeValue(b.time))
-    .slice(-MAX_FULL_SCORE_MARKERS)
-}
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
 
-function getZoneStyle(zone: SmcZone, compact: boolean) {
-  if (zone.kind === 'premium') {
+        return parsed.timestamp()
+    except Exception:
+        return 0.0
+
+
+def format_bar_time(value: Any) -> Any:
+    if value is None:
+        return int(time.time())
+
+    # Keep ISO strings as ISO strings because Alpaca sends them that way.
+    # The sort key now handles both ISO strings and unix times safely.
+    if isinstance(value, str) and ("T" in value or "-" in value):
+        return value
+
+    try:
+        numeric = float(value)
+        if numeric > 1000000000000:
+            return int(numeric / 1000)
+        return int(numeric)
+    except Exception:
+        return value
+
+
+def candle_from_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    required = ["open", "high", "low", "close"]
+    if not all(payload.get(key) is not None for key in required):
+        return None
+
+    symbol = normalize_symbol(str(payload.get("symbol") or ""))
+    timeframe = normalize_timeframe(str(payload.get("timeframe") or "1m"))
+
+    candle_time = (
+        payload.get("time")
+        or payload.get("timestamp")
+        or payload.get("createdAt")
+        or int(time.time())
+    )
+
+    normalized_time = format_bar_time(candle_time)
+
     return {
-      color: compact ? 'rgba(242, 54, 69, 0.018)' : 'rgba(242, 54, 69, 0.035)',
-      borderColor: 'rgba(242, 54, 69, 0.18)',
+        "time": normalized_time,
+        "timestamp": normalized_time,
+        "epoch": to_epoch_seconds(normalized_time),
+        "open": to_float(payload.get("open")),
+        "high": to_float(payload.get("high")),
+        "low": to_float(payload.get("low")),
+        "close": to_float(payload.get("close")),
+        "volume": to_float(payload.get("volume")),
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "createdAt": payload.get("createdAt") or now_iso(),
     }
-  }
 
-  if (zone.kind === 'equilibrium') {
+
+def merge_candles_by_time(candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {}
+
+    for candle in candles:
+        symbol = normalize_symbol(str(candle.get("symbol", "")))
+        timeframe = normalize_timeframe(str(candle.get("timeframe", "")))
+        epoch = to_epoch_seconds(candle.get("time") or candle.get("timestamp") or candle.get("createdAt"))
+
+        if epoch <= 0:
+            raw_time = str(candle.get("time") or candle.get("timestamp") or candle.get("createdAt") or "")
+            key = f"{symbol}:{timeframe}:{raw_time}"
+        else:
+            # Round because live candles and Alpaca candles can differ by milliseconds.
+            key = f"{symbol}:{timeframe}:{int(epoch)}"
+
+        next_candle = dict(candle)
+        next_candle["epoch"] = epoch
+        merged[key] = next_candle
+
+    return sorted(merged.values(), key=lambda item: to_epoch_seconds(item.get("epoch") or item.get("time")))
+
+
+def sanitize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(payload)
+
+    normalized["symbol"] = normalize_symbol(str(normalized.get("symbol") or ""))
+    normalized["timeframe"] = normalize_timeframe(str(normalized.get("timeframe") or "1m"))
+    normalized["signal"] = str(normalized.get("signal") or "NEUTRAL")
+    normalized["confidence"] = to_float(normalized.get("confidence"), 0)
+    normalized["bullScore"] = to_float(normalized.get("bullScore"), 50)
+    normalized["bearScore"] = to_float(normalized.get("bearScore"), 50)
+    normalized["netBias"] = to_float(
+        normalized.get("netBias"),
+        normalized["bullScore"] - normalized["bearScore"],
+    )
+    normalized["price"] = to_float(
+        normalized.get("price"),
+        to_float(normalized.get("close"), 0),
+    )
+    normalized["createdAt"] = normalized.get("createdAt") or now_iso()
+
+    if "chartOverlays" not in normalized:
+        normalized["chartOverlays"] = None
+
+    if not isinstance(normalized.get("warnings"), list):
+        normalized["warnings"] = []
+
+    return normalized
+
+
+def alpaca_headers() -> Dict[str, str]:
+    if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="Missing Alpaca environment variables: ALPACA_API_KEY and/or ALPACA_SECRET_KEY",
+        )
+
     return {
-      color: compact ? 'rgba(135, 139, 148, 0.015)' : 'rgba(135, 139, 148, 0.03)',
-      borderColor: 'rgba(135, 139, 148, 0.14)',
+        "APCA-API-KEY-ID": ALPACA_API_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
     }
-  }
 
-  if (zone.kind === 'discount') {
+
+def http_get_json(url: str, headers: Optional[Dict[str, str]] = None) -> Any:
+    request = Request(url, headers=headers or {})
+
+    try:
+        with urlopen(request, timeout=20) as response:
+            body = response.read().decode("utf-8")
+            return json.loads(body)
+    except HTTPError as error:
+        body = error.read().decode("utf-8", errors="ignore")
+        raise HTTPException(
+            status_code=error.code,
+            detail=f"Alpaca request failed: {body or error.reason}",
+        )
+    except URLError as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Alpaca connection failed: {error.reason}",
+        )
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Request failed: {str(error)}",
+        )
+
+
+def normalize_alpaca_bar(raw: Dict[str, Any], symbol: str, timeframe: str) -> Dict[str, Any]:
+    raw_time = raw.get("t")
+    epoch = to_epoch_seconds(raw_time)
+
     return {
-      color: compact ? 'rgba(8, 153, 129, 0.018)' : 'rgba(8, 153, 129, 0.035)',
-      borderColor: 'rgba(8, 153, 129, 0.18)',
+        "time": raw_time,
+        "timestamp": raw_time,
+        "epoch": epoch,
+        "open": to_float(raw.get("o")),
+        "high": to_float(raw.get("h")),
+        "low": to_float(raw.get("l")),
+        "close": to_float(raw.get("c")),
+        "volume": to_float(raw.get("v")),
+        "symbol": normalize_symbol(symbol),
+        "timeframe": normalize_timeframe(timeframe),
+        "createdAt": now_iso(),
     }
-  }
 
-  if (zone.kind === 'fvg' || zone.kind === 'alpha_fvg') {
-    return zone.direction === 'bullish'
-      ? {
-          color: compact ? 'rgba(0, 255, 104, 0.020)' : 'rgba(0, 255, 104, 0.040)',
-          borderColor: 'rgba(0, 255, 104, 0.18)',
-        }
-      : {
-          color: compact ? 'rgba(255, 0, 8, 0.020)' : 'rgba(255, 0, 8, 0.040)',
-          borderColor: 'rgba(255, 0, 8, 0.18)',
-        }
-  }
 
-  if (zone.kind === 'swing_ob') {
-    return zone.direction === 'bullish'
-      ? {
-          color: compact ? 'rgba(24, 72, 204, 0.040)' : 'rgba(24, 72, 204, 0.065)',
-          borderColor: 'rgba(24, 72, 204, 0.32)',
-        }
-      : {
-          color: compact ? 'rgba(178, 40, 51, 0.040)' : 'rgba(178, 40, 51, 0.065)',
-          borderColor: 'rgba(178, 40, 51, 0.32)',
-        }
-  }
+def fetch_alpaca_historical_candles(
+    symbol: str,
+    timeframe: str = "1m",
+    limit: int = 5000,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch a real historical window for chart scrolling.
 
-  return zone.direction === 'bullish'
-    ? {
-        color: compact ? 'rgba(49, 121, 245, 0.040)' : 'rgba(49, 121, 245, 0.065)',
-        borderColor: 'rgba(49, 121, 245, 0.32)',
-      }
-    : {
-        color: compact ? 'rgba(247, 124, 128, 0.040)' : 'rgba(247, 124, 128, 0.065)',
-        borderColor: 'rgba(247, 124, 128, 0.32)',
-      }
-}
+    Root fix:
+    Previous versions sent only `limit` without an explicit `start` / `end`.
+    Alpaca can then return only the current/latest window, which is why BTCUSD
+    showed around 80 candles even when the frontend asked for 5000.
 
-function buildSmcMarkLines(events: SmcStructureEvent[]) {
-  return events
-    .filter((event) => event.fromTime)
-    .map((event) => {
-      const color = getStructureColor(event.direction)
+    This version calculates `start = now - timeframe * limit`, sends start/end,
+    and paginates until enough bars are collected.
+    """
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    alpaca_tf = alpaca_timeframe(normalized_timeframe)
 
-      return [
+    requested_limit = int(limit or 5000)
+    safe_limit = max(1, min(requested_limit, 10000))
+    per_request_limit = min(safe_limit, 1000)
+    crypto = is_crypto_symbol(normalized_symbol)
+
+    start = historical_start_time(normalized_timeframe, safe_limit, is_crypto=crypto)
+    end = historical_end_time()
+    headers = alpaca_headers()
+
+    def paged_get_bars(
+        url_base: str,
+        base_params: Dict[str, Any],
+        lookup_symbols: List[str],
+    ) -> List[Dict[str, Any]]:
+        all_bars: List[Dict[str, Any]] = []
+        page_token: Optional[str] = None
+        guard = 0
+
+        while len(all_bars) < safe_limit and guard < 30:
+            guard += 1
+
+            params_dict = dict(base_params)
+            params_dict["limit"] = min(per_request_limit, safe_limit - len(all_bars))
+            if page_token:
+                params_dict["page_token"] = page_token
+
+            url = f"{url_base}?{urlencode(params_dict)}"
+            data = http_get_json(url, headers=headers)
+
+            bars_by_symbol = data.get("bars", {})
+            page_bars: List[Dict[str, Any]] = []
+
+            if isinstance(bars_by_symbol, dict):
+                for lookup_symbol in lookup_symbols:
+                    value = bars_by_symbol.get(lookup_symbol)
+                    if isinstance(value, list) and value:
+                        page_bars = value
+                        break
+            elif isinstance(bars_by_symbol, list):
+                page_bars = bars_by_symbol
+
+            if not page_bars:
+                break
+
+            all_bars.extend(page_bars)
+
+            page_token = data.get("next_page_token")
+            if not page_token:
+                break
+
+        return all_bars[-safe_limit:]
+
+    if crypto:
+        slash_symbol = to_alpaca_crypto_symbol(normalized_symbol)
+
+        symbol_candidates = [
+            slash_symbol,       # BTC/USD
+            normalized_symbol,  # BTCUSD
+        ]
+
+        for candidate_symbol in symbol_candidates:
+            raw_bars = paged_get_bars(
+                f"{ALPACA_CRYPTO_BASE_URL}/crypto/us/bars",
+                {
+                    "symbols": candidate_symbol,
+                    "timeframe": alpaca_tf,
+                    "start": start,
+                    "end": end,
+                    "sort": "asc",
+                },
+                [candidate_symbol, slash_symbol, normalized_symbol],
+            )
+
+            if raw_bars:
+                normalized_bars = [
+                    normalize_alpaca_bar(bar, normalized_symbol, normalized_timeframe)
+                    for bar in raw_bars
+                ]
+                return merge_candles_by_time(normalized_bars)[-safe_limit:]
+
+        return []
+
+    # Stocks/ETFs. This is for SPY and similar.
+    # Futures like ES1!/MES1! are not covered by Alpaca data.
+    raw_bars = paged_get_bars(
+        f"{ALPACA_STOCKS_BASE_URL}/stocks/bars",
         {
-          coord: [event.fromTime, event.price],
-          lineStyle: {
-            color,
-            width: event.scope === 'swing' ? 2 : 1,
-            type: event.scope === 'swing' ? 'solid' : 'dashed',
-          },
-          symbol: 'none',
+            "symbols": normalized_symbol,
+            "timeframe": alpaca_tf,
+            "start": start,
+            "end": end,
+            "adjustment": "raw",
+            "feed": "iex",
+            "sort": "asc",
         },
-        {
-          coord: [event.time, event.price],
-          symbol: 'none',
-          label: {
-            show: true,
-            formatter: event.tag,
-            color,
-            fontSize: event.scope === 'swing' ? 11 : 10,
-            fontWeight: 700,
-            backgroundColor: 'rgba(15, 17, 21, 0.88)',
-            borderColor: color,
-            borderWidth: 1,
-            borderRadius: 4,
-            padding: [3, 6],
-          },
-        },
-      ]
-    })
-}
+        [normalized_symbol],
+    )
 
-function buildSmcMarkPoints(events: SmcStructureEvent[], compact: boolean) {
-  return events.map((event) => {
-    const color = getStructureColor(event.direction)
-    const isTopLabel =
-      event.direction === 'bearish' ||
-      event.tag === 'HH' ||
-      event.tag === 'LH' ||
-      event.tag === 'CHoCH' ||
-      event.tag === 'iCHoCH'
+    normalized_bars = [
+        normalize_alpaca_bar(bar, normalized_symbol, normalized_timeframe)
+        for bar in raw_bars
+    ]
 
-    return {
-      name: event.tag,
-      coord: [event.time, event.price],
-      value: event.tag,
-      symbol: 'pin',
-      symbolSize: compact ? 24 : 34,
-      symbolRotate: isTopLabel ? 0 : 180,
-      itemStyle: {
-        color: 'rgba(15, 17, 21, 0.95)',
-        borderColor: color,
-        borderWidth: 1,
-      },
-      label: {
-        show: true,
-        formatter: event.tag,
-        color,
-        fontSize: compact ? 8 : 9,
-        fontWeight: 700,
-      },
-    }
-  })
-}
+    return merge_candles_by_time(normalized_bars)[-safe_limit:]
 
-function buildDlmMarkLines(levels: DlmLevel[], compact: boolean) {
-  return levels.map((level) => {
-    const color = getDlmColor(level.direction)
-
-    return {
-      yAxis: level.price,
-      name: level.label,
-      symbol: 'none',
-      lineStyle: {
-        color,
-        width: level.direction === 'neutral' ? 2 : 1,
-        type: level.direction === 'neutral' ? 'solid' : 'dashed',
-        opacity: level.direction === 'neutral' ? 0.8 : 0.55,
-      },
-      label: {
-        show: !compact,
-        formatter: level.label,
-        color,
-        fontSize: 10,
-        fontWeight: 700,
-        position: 'end',
-        backgroundColor: 'rgba(15, 17, 21, 0.88)',
-        borderColor: color,
-        borderWidth: 1,
-        borderRadius: 4,
-        padding: [3, 6],
-      },
-    }
-  })
-}
-
-function buildZoneMarkAreas(zones: SmcZone[], compact: boolean, displayMode: SmcDisplayMode) {
-  return zones.map((zone) => {
-    const style = getZoneStyle(zone, compact)
-    const showLabel = shouldShowZoneLabel(zone, compact, displayMode)
+def get_live_recent_candles(symbol: str, timeframe: str) -> List[Dict[str, Any]]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
 
     return [
-      {
-        xAxis: zone.startTime,
-        yAxis: zone.top,
-        itemStyle: {
-          color: style.color,
-          borderColor: style.borderColor,
-          borderWidth: zone.kind === 'swing_ob' ? 1.2 : zone.kind === 'internal_ob' ? 1 : 0.8,
-          borderType: zone.kind === 'fvg' || zone.kind === 'alpha_fvg' ? 'dashed' : 'solid',
-        },
-        label: {
-          show: showLabel,
-          formatter: zone.label,
-          color: style.borderColor,
-          fontSize: displayMode === 'Clean' ? 8 : 9,
-          fontWeight: 700,
-          position:
-            zone.kind === 'premium'
-              ? 'insideTop'
-              : zone.kind === 'discount'
-                ? 'insideBottom'
-                : zone.kind === 'equilibrium'
-                  ? 'inside'
-                  : 'insideTopLeft',
-          backgroundColor: 'rgba(15, 17, 21, 0.42)',
-          borderRadius: 4,
-          padding: [2, 5],
-        },
-      },
-      {
-        xAxis: zone.endTime,
-        yAxis: zone.bottom,
-      },
+        candle
+        for candle in RECENT_CANDLES
+        if normalize_symbol(str(candle.get("symbol", ""))) == normalized_symbol
+        and normalize_timeframe(str(candle.get("timeframe", ""))) == normalized_timeframe
     ]
-  })
-}
 
-function buildLiquidityMarkLines(events: LiquidityEvent[], compact: boolean) {
-  return events
-    .filter(
-      (event) =>
-        event.kind === 'eqh' ||
-        event.kind === 'eql' ||
-        event.kind === 'liquidity_pool'
-    )
-    .map((event) => {
-      const color = getLiquidityColor(event)
 
-      if (event.fromTime) {
-        return [
-          {
-            coord: [event.fromTime, event.price],
-            lineStyle: {
-              color,
-              width: event.kind === 'liquidity_pool' ? 2 : 1,
-              type: event.kind === 'liquidity_pool' ? 'dashed' : 'dotted',
-              opacity: event.kind === 'liquidity_pool' ? 0.7 : 0.85,
-            },
-            symbol: 'none',
-          },
-          {
-            coord: [event.time, event.price],
-            symbol: 'none',
-            label: {
-              show: !compact,
-              formatter:
-                event.touches && event.touches > 1
-                  ? `${event.label} x${event.touches}`
-                  : event.label,
-              color,
-              fontSize: 10,
-              fontWeight: 700,
-              backgroundColor: 'rgba(15, 17, 21, 0.88)',
-              borderColor: color,
-              borderWidth: 1,
-              borderRadius: 4,
-              padding: [3, 6],
-            },
-          },
-        ]
-      }
+# ─────────────────────────────────────────────────────────────────────────────
+# LIVE CURRENT CANDLE BUILDER — PHASE 4B / 1-SECOND POLLING
+# ─────────────────────────────────────────────────────────────────────────────
 
-      return {
-        yAxis: event.price,
-        name: event.label,
-        symbol: 'none',
-        lineStyle: {
-          color,
-          width: 1.5,
-          type: 'dashed',
-          opacity: 0.65,
-        },
-        label: {
-          show: !compact,
-          formatter:
-            event.touches && event.touches > 1
-              ? `${event.label} x${event.touches}`
-              : event.label,
-          color,
-          fontSize: 10,
-          fontWeight: 700,
-          position: 'end',
-          backgroundColor: 'rgba(15, 17, 21, 0.88)',
-          borderColor: color,
-          borderWidth: 1,
-          borderRadius: 4,
-          padding: [3, 6],
-        },
-      }
-    })
-}
+def timeframe_seconds(timeframe: str) -> int:
+    tf = normalize_timeframe(timeframe)
 
-function buildLiquidityMarkPoints(events: LiquidityEvent[], compact: boolean) {
-  return events
-    .filter(
-      (event) =>
-        event.kind === 'internal_sweep' ||
-        event.kind === 'swing_sweep' ||
-        event.kind === 'inducement' ||
-        event.kind === 'sweep' ||
-        event.kind === 'alpha_sweep'
-    )
-    .map((event) => {
-      const color = getLiquidityColor(event)
-      const isTopLabel = event.direction === 'bearish'
-
-      return {
-        name: event.label,
-        coord: [event.time, event.price],
-        value: event.label,
-        symbol: event.kind === 'inducement' ? 'diamond' : 'pin',
-        symbolSize: compact ? 24 : event.kind === 'inducement' ? 32 : 34,
-        symbolRotate: isTopLabel ? 0 : 180,
-        itemStyle: {
-          color: 'rgba(15, 17, 21, 0.95)',
-          borderColor: color,
-          borderWidth: 1,
-        },
-        label: {
-          show: true,
-          formatter: event.label,
-          color,
-          fontSize: compact ? 8 : 9,
-          fontWeight: 700,
-        },
-      }
-    })
-}
-
-function buildDlmConfluenceMarkPoints(
-  markers: DlmConfluenceMarker[],
-  compact: boolean
-) {
-  return markers.map((marker) => {
-    const color = getDlmConfluenceColor(marker)
-    const isTopLabel = marker.direction === 'bearish'
-    const pressureText =
-      typeof marker.pressurePct === 'number' ? ` ${marker.pressurePct}%` : ''
-
-    return {
-      name: marker.label,
-      coord: [marker.time, marker.price],
-      value: `${marker.label}${pressureText}`,
-      symbol: marker.kind === 'entry_confirm' ? 'triangle' : 'circle',
-      symbolSize: compact ? 16 : marker.kind === 'entry_confirm' ? 22 : 18,
-      symbolRotate: marker.direction === 'bearish' ? 180 : 0,
-      itemStyle: {
-        color,
-        opacity: 0.95,
-        borderColor: '#0f1115',
-        borderWidth: 2,
-      },
-      label: {
-        show: !compact,
-        formatter: `${marker.label}${pressureText}`,
-        color,
-        fontSize: 10,
-        fontWeight: 800,
-        position: isTopLabel ? 'top' : 'bottom',
-        backgroundColor: 'rgba(15, 17, 21, 0.88)',
-        borderColor: color,
-        borderWidth: 1,
-        borderRadius: 4,
-        padding: [3, 6],
-      },
+    mapping = {
+        "1m": 60,
+        "3m": 180,
+        "5m": 300,
+        "15m": 900,
+        "30m": 1800,
+        "1h": 3600,
+        "2h": 7200,
+        "4h": 14400,
+        "1d": 86400,
+        "1w": 604800,
     }
-  })
-}
 
-function buildScoreMarkPoints(markers: ScoreMarker[], compact: boolean) {
-  return markers.map((marker) => {
-    const color = getScoreColor(marker)
-    const scoreText = typeof marker.score === 'number' ? ` ${marker.score}` : ''
-    const gradeText = marker.grade ? ` ${marker.grade}` : ''
-    const label = `${marker.label}${scoreText}${gradeText}`
-    const isTopLabel = marker.direction === 'bearish' || marker.kind === 'session'
-
-    return {
-      name: marker.label,
-      coord: [marker.time, marker.price],
-      value: label,
-      symbol:
-        marker.kind === 'institutional_score'
-          ? 'rect'
-          : marker.kind === 'execution_quality'
-            ? 'diamond'
-            : marker.kind === 'trend_phase'
-              ? 'roundRect'
-              : 'circle',
-      symbolSize:
-        compact
-          ? 18
-          : marker.kind === 'institutional_score'
-            ? 28
-            : marker.kind === 'trend_phase'
-              ? 26
-              : 22,
-      itemStyle: {
-        color: 'rgba(15, 17, 21, 0.96)',
-        borderColor: color,
-        borderWidth: 2,
-      },
-      label: {
-        show: !compact,
-        formatter: label,
-        color,
-        fontSize: 10,
-        fontWeight: 800,
-        position: isTopLabel ? 'top' : 'bottom',
-        backgroundColor: 'rgba(15, 17, 21, 0.90)',
-        borderColor: color,
-        borderWidth: 1,
-        borderRadius: 4,
-        padding: [3, 6],
-      },
-    }
-  })
-}
+    return mapping.get(tf, 60)
 
 
-function averageRange(candles: Candle[], lookback = 20): number {
-  if (candles.length === 0) return 1
-
-  const slice = candles.slice(Math.max(0, candles.length - lookback))
-  const total = slice.reduce((sum, candle) => sum + Math.max(candle.high - candle.low, 0), 0)
-  const avg = total / Math.max(1, slice.length)
-
-  return avg > 0 ? avg : Math.max(Math.abs(slice[slice.length - 1]?.close ?? 1) * 0.001, 1)
-}
-
-function averageCloseMomentum(candles: Candle[], lookback = 8): number {
-  if (candles.length < 2) return 0
-
-  const start = Math.max(1, candles.length - lookback)
-  let weighted = 0
-  let weightSum = 0
-
-  for (let i = start; i < candles.length; i++) {
-    const weight = i - start + 1
-    weighted += (candles[i].close - candles[i - 1].close) * weight
-    weightSum += weight
-  }
-
-  return weightSum > 0 ? weighted / weightSum : 0
-}
-
-function clampNumber(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value))
-}
-
-function getGhostSlot(index: number, ghostSlots: string[]): string {
-  // Space projected candles across the reserved ghost zone.
-  // This prevents PY1/PY2/PY3 and their confidence badges from stacking too tightly.
-  if (!ghostSlots.length) return `__ghost_gap_${index + 1}`
-
-  const preferredIndexes = [1, 4, 7, 10, 12]
-  const preferredIndex = preferredIndexes[index] ?? index * 3 + 1
-  const safeIndex = Math.max(0, Math.min(ghostSlots.length - 1, preferredIndex))
-
-  return ghostSlots[safeIndex]
-}
-
-function buildGhostCandlesFromChart(candles: Candle[], ghostSlots: string[]): GhostCandle[] {
-  if (candles.length < 3 || ghostSlots.length === 0) return []
-
-  const last = candles[candles.length - 1]
-  const previous = candles[candles.length - 2]
-  const range = averageRange(candles, 20)
-  const momentum = averageCloseMomentum(candles, 8)
-  const immediateBias = last.close - previous.close
-  const directionSeed = momentum !== 0 ? momentum : immediateBias
-  const baseDirection = directionSeed >= 0 ? 1 : -1
-  const minBody = Math.max(range * 0.10, Math.abs(last.close) * 0.00004)
-  const maxBody = Math.max(range * 0.75, minBody)
-
-  let prevOpen = last.open
-  let prevClose = last.close
-
-  return ghostSlots.slice(0, GHOST_CANDLE_COUNT).map((slot, index) => {
-    const decay = Math.pow(0.72, index)
-    const sequenceOpen = (prevOpen + prevClose) / 2
-    const rawMove = momentum * decay + baseDirection * range * 0.11 * decay
-    const direction = rawMove >= 0 ? 1 : -1
-    const bodySize = clampNumber(Math.abs(rawMove), minBody, maxBody)
-    const sequenceClose = sequenceOpen + direction * bodySize
-
-    const top = Math.max(sequenceOpen, sequenceClose)
-    const bottom = Math.min(sequenceOpen, sequenceClose)
-    const wickScale = 0.22 + index * 0.05
-    const upperWick = range * wickScale * (direction < 0 ? 1.25 : 0.85)
-    const lowerWick = range * wickScale * (direction > 0 ? 1.25 : 0.85)
-    const high = top + upperWick
-    const low = bottom - lowerWick
-    const confidence = Math.round(clampNumber((Math.abs(momentum) / Math.max(range, 1e-9)) * 45 + 18 - index * 6, 4, 88))
-
-    prevOpen = sequenceOpen
-    prevClose = sequenceClose
-
-    return {
-      slot,
-      label: `Ghost #${index + 1}`,
-      open: Number(sequenceOpen.toFixed(4)),
-      close: Number(sequenceClose.toFixed(4)),
-      low: Number(low.toFixed(4)),
-      high: Number(high.toFixed(4)),
-      confidence,
-      direction: direction > 0 ? 'bullish' : 'bearish',
-    }
-  })
-}
+def candle_bucket_epoch(epoch_seconds: float, timeframe: str) -> int:
+    seconds = timeframe_seconds(timeframe)
+    return int(epoch_seconds // seconds * seconds)
 
 
-function toFiniteNumber(value: any): number | null {
-  const numberValue = Number(value)
-  return Number.isFinite(numberValue) ? numberValue : null
-}
+def pick_latest_candle_source(symbol: str, timeframe: str) -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
 
-function normalizeGhostDirection(value: any, open: number, close: number): 'bullish' | 'bearish' | 'neutral' {
-  const text = String(value ?? '').toLowerCase()
+    candidates: List[Dict[str, Any]] = []
 
-  if (text.includes('up') || text.includes('bull') || text.includes('buy') || text === '1') return 'bullish'
-  if (text.includes('down') || text.includes('bear') || text.includes('sell') || text === '-1') return 'bearish'
+    # 1) Prefer newest Alpaca candle/bar when available.
+    # This keeps BTCUSD/ETHUSD moving from the provider even if no webhook candle arrives.
+    try:
+        alpaca_candles = fetch_alpaca_historical_candles(
+            normalized_symbol,
+            normalized_timeframe,
+            limit=2,
+        )
+        candidates.extend(alpaca_candles)
+    except Exception:
+        pass
 
-  if (close > open) return 'bullish'
-  if (close < open) return 'bearish'
+    # 2) Then use recent live webhook candles.
+    candidates.extend(get_live_recent_candles(normalized_symbol, normalized_timeframe)[-5:])
 
-  return 'neutral'
-}
+    # 3) Then use latest signal price as fallback.
+    if LATEST_SIGNAL:
+        latest_symbol = normalize_symbol(str(LATEST_SIGNAL.get("symbol") or normalized_symbol))
+        latest_timeframe = normalize_timeframe(str(LATEST_SIGNAL.get("timeframe") or normalized_timeframe))
 
-function buildGhostCandlesFromEngine(engineState: EngineState | null, ghostSlots: string[]): GhostCandle[] {
-  if (!engineState || ghostSlots.length === 0) return []
+        if latest_symbol == normalized_symbol and latest_timeframe == normalized_timeframe:
+            price = to_float(
+                LATEST_SIGNAL.get("current"),
+                to_float(LATEST_SIGNAL.get("price"), to_float(LATEST_SIGNAL.get("close"), 0.0)),
+            )
 
-  const rawGhosts = Array.isArray(engineState.ghostCandles)
-    ? engineState.ghostCandles
-    : Array.isArray(engineState.ghostProjections)
-      ? engineState.ghostProjections
-      : Array.isArray(engineState.projections)
-        ? engineState.projections
-        : []
+            if price > 0:
+                now_epoch = time.time()
+                candidates.append(
+                    {
+                        "time": int(now_epoch),
+                        "timestamp": int(now_epoch),
+                        "epoch": now_epoch,
+                        "open": price,
+                        "high": price,
+                        "low": price,
+                        "close": price,
+                        "volume": to_float(LATEST_SIGNAL.get("volume"), 0.0),
+                        "symbol": normalized_symbol,
+                        "timeframe": normalized_timeframe,
+                        "createdAt": now_iso(),
+                        "source": "latest_signal",
+                    }
+                )
 
-  if (rawGhosts.length === 0) return []
+    valid = [
+        candidate
+        for candidate in candidates
+        if to_float(candidate.get("close"), 0.0) > 0
+    ]
 
-  const normalizedGhosts: GhostCandle[] = []
+    if not valid:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No live candle source available for {normalized_symbol} {normalized_timeframe}",
+        )
 
-  rawGhosts
-    .slice(0, Math.min(GHOST_CANDLE_COUNT, ghostSlots.length))
-    .forEach((ghost: any, index: number) => {
-      const open =
-        toFiniteNumber(ghost.open) ??
-        toFiniteNumber(ghost.o) ??
-        toFiniteNumber(ghost.ghostOpen) ??
-        toFiniteNumber(ghost.projectedOpen)
+    return sorted(
+        valid,
+        key=lambda item: to_epoch_seconds(item.get("epoch") or item.get("time") or item.get("timestamp")),
+    )[-1]
 
-      const high =
-        toFiniteNumber(ghost.high) ??
-        toFiniteNumber(ghost.h) ??
-        toFiniteNumber(ghost.ghostHigh) ??
-        toFiniteNumber(ghost.projectedHigh)
 
-      const low =
-        toFiniteNumber(ghost.low) ??
-        toFiniteNumber(ghost.l) ??
-        toFiniteNumber(ghost.ghostLow) ??
-        toFiniteNumber(ghost.projectedLow)
+def update_live_candle_cache(symbol: str, timeframe: str, source: Dict[str, Any]) -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    key = f"{normalized_symbol}:{normalized_timeframe}"
 
-      const close =
-        toFiniteNumber(ghost.close) ??
-        toFiniteNumber(ghost.c) ??
-        toFiniteNumber(ghost.ghostClose) ??
-        toFiniteNumber(ghost.projectedClose)
+    source_epoch = to_epoch_seconds(source.get("epoch") or source.get("time") or source.get("timestamp"))
+    if source_epoch <= 0:
+        source_epoch = time.time()
 
-      if (open === null || high === null || low === null || close === null) return
+    bucket = candle_bucket_epoch(source_epoch, normalized_timeframe)
 
-      const confidenceRaw =
-        toFiniteNumber(ghost.confidence) ??
-        toFiniteNumber(ghost.percent) ??
-        toFiniteNumber(ghost.probability) ??
-        toFiniteNumber(ghost.score) ??
-        0
+    price = to_float(source.get("close"), 0.0)
+    source_open = to_float(source.get("open"), price)
+    source_high = to_float(source.get("high"), price)
+    source_low = to_float(source.get("low"), price)
+    source_close = to_float(source.get("close"), price)
+    source_volume = to_float(source.get("volume"), 0.0)
 
-      const confidence = Math.round(clampNumber(confidenceRaw, 0, 100))
-      const direction = normalizeGhostDirection(ghost.direction ?? ghost.dir ?? ghost.signal, open, close)
+    cached = LIVE_CANDLES.get(key)
 
-      normalizedGhosts.push({
-        slot: getGhostSlot(index, ghostSlots),
-        label: String(ghost.label ?? `Python Ghost #${index + 1}`),
-        open,
-        high,
-        low,
-        close,
-        confidence,
-        direction,
-        source: 'python',
-      })
-    })
-
-  return normalizedGhosts
-}
-
-function buildGhostCandles(engineState: EngineState | null, candles: Candle[], ghostSlots: string[]): GhostCandle[] {
-  const pythonGhosts = buildGhostCandlesFromEngine(engineState, ghostSlots)
-
-  if (pythonGhosts.length > 0) return pythonGhosts
-
-  return buildGhostCandlesFromChart(candles, ghostSlots).map((ghost) => ({
-    ...ghost,
-    source: 'chart' as const,
-  }))
-}
-
-function buildGhostLiveMarker(latestClose: number | null, ghostGapSlots: string[], compact: boolean): any[] {
-  if (latestClose === null || compact || ghostGapSlots.length === 0) return []
-
-  return [
-    {
-      coord: [ghostGapSlots[0], latestClose],
-      symbol: 'circle',
-      symbolSize: 10,
-      itemStyle: {
-        color: '#22d3ee',
-        borderColor: '#ffffff',
-        borderWidth: 2,
-        shadowBlur: 12,
-        shadowColor: '#22d3ee',
-      },
-      label: {
-        show: true,
-        formatter: `⬤ LIVE ${Number(latestClose).toFixed(2)}`,
-        color: '#22d3ee',
-        fontSize: 10,
-        fontWeight: 900,
-        position: 'right',
-        backgroundColor: 'rgba(15, 17, 21, 0.95)',
-        borderColor: '#22d3ee',
-        borderWidth: 1,
-        borderRadius: 4,
-        padding: [4, 7],
-      },
-    },
-  ]
-}
-
-function buildGhostCandleSeries(ghostCandles: GhostCandle[], compact: boolean): any[] {
-  if (!Array.isArray(ghostCandles) || ghostCandles.length === 0 || compact) return []
-
-  const data = ghostCandles.map((ghost, index) => ({
-    value: [
-      ghost.slot,
-      ghost.open,
-      ghost.close,
-      ghost.low,
-      ghost.high,
-      ghost.label,
-      ghost.confidence,
-      ghost.direction,
-      index + 1,
-      ghost.source ?? 'chart',
-    ],
-    ghost,
-  }))
-
-  return [
-    {
-      name: 'Ghost Candle Projection',
-      type: 'custom',
-      coordinateSystem: 'cartesian2d',
-      silent: true,
-      z: 20,
-      data,
-      renderItem: (_params: any, api: any) => {
-        const slot = api.value(0)
-        const open = Number(api.value(1))
-        const close = Number(api.value(2))
-        const low = Number(api.value(3))
-        const high = Number(api.value(4))
-        const confidence = Number(api.value(6))
-        const direction = String(api.value(7))
-        const ghostNumber = Number(api.value(8))
-        const ghostSource = String(api.value(9) ?? 'chart')
-
-        const xPoint = api.coord([slot, close])
-        const highPoint = api.coord([slot, high])
-        const lowPoint = api.coord([slot, low])
-        const openPoint = api.coord([slot, open])
-        const closePoint = api.coord([slot, close])
-        const slotSize = api.size([1, 0])?.[0] ?? 12
-
-        const candleWidth = Math.max(9, slotSize * 0.82)
-        const bodyX = xPoint[0] - candleWidth / 2
-        const bodyY = Math.min(openPoint[1], closePoint[1])
-        const bodyHeight = Math.max(4, Math.abs(openPoint[1] - closePoint[1]))
-        const bull = direction === 'bullish'
-
-        const bodyColor = bull ? 'rgba(8, 153, 129, 0.74)' : 'rgba(242, 54, 69, 0.74)'
-        const borderColor = bull ? 'rgba(38, 255, 180, 1)' : 'rgba(255, 82, 112, 1)'
-        const wickColor = bull ? 'rgba(38, 255, 180, 0.96)' : 'rgba(255, 82, 112, 0.96)'
-        const badgeColor = bull ? 'rgba(8, 153, 129, 0.95)' : 'rgba(242, 54, 69, 0.95)'
-
-        const labelText = `${ghostSource === 'python' ? 'PY' : 'G'}${ghostNumber} ${confidence}%`
-
-        // Keep the confidence badge locked directly above/below its own ghost candle.
-        // Previous version shifted labelX right, making the percentage look one candle ahead.
-        const labelX = xPoint[0]
-        const labelYOffset = 22 + (Math.max(ghostNumber, 1) - 1) * 16
-        const labelY = bull ? highPoint[1] - labelYOffset : lowPoint[1] + labelYOffset
-
-        return {
-          type: 'group',
-          children: [
-            {
-              type: 'line',
-              shape: {
-                x1: xPoint[0],
-                y1: highPoint[1],
-                x2: xPoint[0],
-                y2: lowPoint[1],
-              },
-              style: {
-                stroke: wickColor,
-                lineWidth: 2.6,
-                lineDash: [5, 3],
-                shadowBlur: 8,
-                shadowColor: wickColor,
-              },
-            },
-            {
-              type: 'rect',
-              shape: {
-                x: bodyX,
-                y: bodyY,
-                width: candleWidth,
-                height: bodyHeight,
-                r: 2,
-              },
-              style: {
-                fill: bodyColor,
-                stroke: borderColor,
-                lineWidth: 2.2,
-                shadowBlur: 10,
-                shadowColor: borderColor,
-              },
-            },
-            {
-              type: 'text',
-              style: {
-                text: labelText,
-                x: labelX,
-                y: labelY,
-                fill: '#ffffff',
-                backgroundColor: badgeColor,
-                borderColor,
-                borderWidth: 1,
-                borderRadius: 4,
-                padding: [3, 6],
-                font: '900 10px sans-serif',
-                align: 'center',
-                verticalAlign: 'middle',
-                shadowBlur: 6,
-                shadowColor: 'rgba(0,0,0,0.7)',
-              },
-            },
-            {
-              type: 'text',
-              style: {
-                text: `${ghostSource === 'python' ? 'PY ' : ''}${bull ? 'UP' : 'DOWN'}`,
-                x: xPoint[0],
-                y: bull ? highPoint[1] - 38 : lowPoint[1] + 38,
-                fill: borderColor,
-                font: '800 9px sans-serif',
-                align: 'center',
-                verticalAlign: 'middle',
-              },
-            },
-          ],
+    if not cached or int(cached.get("bucket", 0)) != bucket:
+        # New candle bucket. Open should be the first available price for this timeframe.
+        live = {
+            "time": bucket,
+            "timestamp": bucket,
+            "epoch": bucket,
+            "bucket": bucket,
+            "open": source_open if source_open > 0 else source_close,
+            "high": max(source_high, source_open, source_close),
+            "low": min(source_low, source_open, source_close),
+            "close": source_close,
+            "volume": source_volume,
+            "symbol": normalized_symbol,
+            "timeframe": normalized_timeframe,
+            "createdAt": now_iso(),
+            "source": source.get("source") or "live_candle_builder",
+            "isLive": True,
+            "pollingMs": 1000,
         }
-      },
-      encode: { x: 0, y: [1, 2, 3, 4] },
-    },
-  ]
-}
+    else:
+        live = dict(cached)
+        live["high"] = max(to_float(live.get("high"), source_close), source_high, source_close)
+        live["low"] = min(to_float(live.get("low"), source_close), source_low, source_close)
+        live["close"] = source_close
+        live["volume"] = max(to_float(live.get("volume"), 0.0), source_volume)
+        live["createdAt"] = now_iso()
+        live["source"] = source.get("source") or live.get("source") or "live_candle_builder"
+        live["isLive"] = True
+        live["pollingMs"] = 1000
 
-function buildAlphaProfileSeries(
-  alphaProfileBins: AlphaProfileBin[],
-  profileSlots: string[],
-  compact: boolean
-): any[] {
-  if (!Array.isArray(alphaProfileBins) || alphaProfileBins.length === 0 || profileSlots.length < 4) {
-    return []
-  }
+    LIVE_CANDLES[key] = live
+    return live
 
-  const maxSlot = profileSlots.length - 1
 
-  const bars = alphaProfileBins
-    .map((bin) => {
-      const widthPct = Number(bin.widthPct ?? 0)
-      const top = Number(bin.top)
-      const bottom = Number(bin.bottom)
-      const mid = Number(bin.mid)
+def get_cached_or_build_live_candle(symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
+    try:
+        source = pick_latest_candle_source(symbol, timeframe)
+        return update_live_candle_cache(symbol, timeframe, source)
+    except HTTPException:
+        return None
+    except Exception:
+        return None
 
-      if (
-        !Number.isFinite(widthPct) ||
-        !Number.isFinite(top) ||
-        !Number.isFinite(bottom) ||
-        !Number.isFinite(mid)
-      ) {
-        return null
-      }
 
-      const widthSlots = Math.max(1, Math.min(maxSlot, Math.round((widthPct / 100) * maxSlot)))
-      const startSlot = profileSlots[0]
-      const endSlot = profileSlots[widthSlots]
-      const direction = bin.direction === 'bullish' ? 'bullish' : 'bearish'
-      const isPoc = Boolean(bin.isPoc)
+# ─────────────────────────────────────────────────────────────────────────────
+# PYTHON GHOST CANDLE ENGINE — PHASE 3X
+# ─────────────────────────────────────────────────────────────────────────────
 
-      return {
-        value: [
-          startSlot,
-          bottom,
-          endSlot,
-          top,
-          mid,
-          widthPct,
-          bin.label ?? `${Math.round(widthPct)}%`,
+def build_heikin_ashi_candles(candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    ha_candles: List[Dict[str, Any]] = []
+
+    for index, candle in enumerate(candles):
+        o = to_float(candle.get("open"))
+        h = to_float(candle.get("high"))
+        l = to_float(candle.get("low"))
+        c = to_float(candle.get("close"))
+
+        ha_close = (o + h + l + c) / 4.0
+
+        if index == 0:
+            ha_open = (o + c) / 2.0
+        else:
+            prev = ha_candles[-1]
+            ha_open = (prev["open"] + prev["close"]) / 2.0
+
+        ha_high = max(h, ha_open, ha_close)
+        ha_low = min(l, ha_open, ha_close)
+
+        ha_candles.append(
+            {
+                **candle,
+                "open": ha_open,
+                "high": ha_high,
+                "low": ha_low,
+                "close": ha_close,
+            }
+        )
+
+    return ha_candles
+
+
+def average_true_range(candles: List[Dict[str, Any]], length: int = 14) -> float:
+    if len(candles) < 2:
+        return 0.0
+
+    ranges: List[float] = []
+
+    for index in range(max(1, len(candles) - length), len(candles)):
+        current = candles[index]
+        previous = candles[index - 1]
+
+        high = to_float(current.get("high"))
+        low = to_float(current.get("low"))
+        previous_close = to_float(previous.get("close"))
+
+        true_range = max(
+            high - low,
+            abs(high - previous_close),
+            abs(low - previous_close),
+        )
+        ranges.append(true_range)
+
+    return sum(ranges) / len(ranges) if ranges else 0.0
+
+
+def candle_momentum(candles: List[Dict[str, Any]], lookback: int = 8) -> float:
+    if len(candles) < 2:
+        return 0.0
+
+    sample = candles[-lookback:]
+    if len(sample) < 2:
+        return 0.0
+
+    weighted_sum = 0.0
+    weight_total = 0.0
+
+    for index in range(1, len(sample)):
+        weight = index
+        weighted_sum += (to_float(sample[index].get("close")) - to_float(sample[index - 1].get("close"))) * weight
+        weight_total += weight
+
+    return weighted_sum / max(weight_total, 1.0)
+
+
+def extract_levels_from_engine(result: Dict[str, Any], last_close: float) -> Dict[str, List[float]]:
+    upside: List[float] = []
+    downside: List[float] = []
+
+    def add_level(value: Any) -> None:
+        level = to_float(value, 0.0)
+
+        if level <= 0:
+            return
+
+        if level > last_close:
+            upside.append(level)
+        elif level < last_close:
+            downside.append(level)
+
+    for zone in result.get("zones", []) or []:
+        if not isinstance(zone, dict):
+            continue
+        add_level(zone.get("top"))
+        add_level(zone.get("bottom"))
+
+    for event in result.get("liquidityEvents", []) or []:
+        if isinstance(event, dict):
+            add_level(event.get("price") or event.get("level"))
+
+    for level in result.get("dlmLevels", []) or []:
+        if isinstance(level, dict):
+            add_level(level.get("price"))
+
+    return {
+        "upside": sorted(set(round(level, 8) for level in upside)),
+        "downside": sorted(set(round(level, 8) for level in downside), reverse=True),
+    }
+
+
+def recent_engine_bias(result: Dict[str, Any]) -> float:
+    bias = 0.0
+
+    for event in (result.get("smcEvents", []) or [])[-12:]:
+        if not isinstance(event, dict):
+            continue
+
+        direction = str(event.get("direction") or "").lower()
+        tag = str(event.get("tag") or "").upper()
+        scope = str(event.get("scope") or "").lower()
+
+        weight = 1.0
+        if "BOS" in tag:
+            weight += 0.4
+        if "CHOCH" in tag:
+            weight += 0.25
+        if scope == "swing":
+            weight += 0.35
+
+        if direction == "bullish":
+            bias += weight
+        elif direction == "bearish":
+            bias -= weight
+
+    for event in (result.get("liquidityEvents", []) or [])[-12:]:
+        if not isinstance(event, dict):
+            continue
+
+        direction = str(event.get("direction") or "").lower()
+
+        if direction == "bullish":
+            bias += 0.35
+        elif direction == "bearish":
+            bias -= 0.35
+
+    return clamp(bias / 8.0, -1.0, 1.0)
+
+
+def build_python_ghost_candles(
+    candles: List[Dict[str, Any]],
+    result: Dict[str, Any],
+    count: int = 3,
+) -> List[Dict[str, Any]]:
+    """
+    Phase 3X Python ghost candles.
+
+    This creates the same frontend shape that v3W already knows how to draw:
+    open/high/low/close/confidence/direction.
+
+    Logic:
+    - Start from Heikin Ashi so ghost candles remain smooth.
+    - Use recent momentum + SMC/liquidity bias.
+    - React to nearby SMC zones / liquidity levels as targets.
+    - Return PY-ready candles so frontend labels become PY1/PY2/PY3.
+    """
+
+    if len(candles) < 10:
+        return []
+
+    ha = build_heikin_ashi_candles(candles)
+
+    last_ha = ha[-1]
+    last_real = candles[-1]
+
+    atr = average_true_range(candles, 14)
+    if atr <= 0:
+        atr = max(to_float(last_real.get("high")) - to_float(last_real.get("low")), to_float(last_real.get("close")) * 0.001, 0.01)
+
+    momentum = candle_momentum(ha, 8)
+    last_close = to_float(last_real.get("close"))
+
+    smc_bias = recent_engine_bias(result)
+
+    latest_signal = str(LATEST_SIGNAL.get("signal") or "").upper()
+    if latest_signal == "BUY":
+        dashboard_bias = 0.25
+    elif latest_signal == "SELL":
+        dashboard_bias = -0.25
+    else:
+        dashboard_bias = 0.0
+
+    bull_score = to_float(LATEST_SIGNAL.get("bullScore"), 50)
+    bear_score = to_float(LATEST_SIGNAL.get("bearScore"), 50)
+    pressure_bias = clamp((bull_score - bear_score) / 100.0, -0.5, 0.5)
+
+    levels = extract_levels_from_engine(result, last_close)
+
+    prev_open = to_float(last_ha.get("open"))
+    prev_close = to_float(last_ha.get("close"))
+    prev_high = to_float(last_ha.get("high"))
+    prev_low = to_float(last_ha.get("low"))
+
+    previous_body = max(abs(prev_close - prev_open), atr * 0.08)
+
+    ghosts: List[Dict[str, Any]] = []
+    commit_direction = 0
+    commit_left = 0
+
+    for index in range(count):
+        step = index + 1
+        decay = 0.82 ** index
+
+        ha_open = (prev_open + prev_close) / 2.0
+
+        raw_delta = momentum * decay
+        bias_delta = (smc_bias * 0.30 + pressure_bias * 0.45 + dashboard_bias * 0.25) * atr * (0.75 ** index)
+        projected_close = prev_close + raw_delta + bias_delta
+
+        direction = 1 if projected_close >= ha_open else -1
+
+        if commit_left > 0 and commit_direction != 0:
+            direction = commit_direction
+            commit_left -= 1
+
+        body_size = abs(projected_close - ha_open)
+        body_size = max(body_size, atr * (0.16 if commit_direction else 0.10))
+        body_size = min(body_size, atr * 1.10)
+
+        # Smooth body rhythm like Pine HA ghost logic.
+        body_size = previous_body * 0.55 + body_size * 0.45
+
+        ha_close = ha_open + direction * body_size
+
+        top = max(ha_open, ha_close)
+        bottom = min(ha_open, ha_close)
+
+        upper_wick = max(atr * 0.10, body_size * 0.30)
+        lower_wick = max(atr * 0.10, body_size * 0.30)
+
+        # Target-aware SMC/Alpha reaction.
+        nearest_up = levels["upside"][0] if levels["upside"] else None
+        nearest_down = levels["downside"][0] if levels["downside"] else None
+
+        target_reaction = "continuation"
+        severity = 0.0
+
+        if nearest_up is not None:
+            up_distance = nearest_up - top
+            if 0 <= up_distance <= atr * 1.4 or top >= nearest_up:
+                severity = max(severity, clamp(1.0 - max(up_distance, 0.0) / max(atr * 1.4, 0.01), 0.0, 1.0))
+                upper_wick = max(upper_wick, atr * (0.35 + severity * 0.65))
+                if direction > 0 and severity >= 0.65:
+                    # Upside target rejection -> bearish flip.
+                    ha_close = ha_open - max(body_size * 0.65, atr * 0.12)
+                    direction = -1
+                    commit_direction = -1
+                    commit_left = 2
+                    target_reaction = "upside_target_rejection"
+
+        if nearest_down is not None:
+            down_distance = bottom - nearest_down
+            if 0 <= down_distance <= atr * 1.4 or bottom <= nearest_down:
+                dn_severity = clamp(1.0 - max(down_distance, 0.0) / max(atr * 1.4, 0.01), 0.0, 1.0)
+                if dn_severity > severity:
+                    severity = dn_severity
+                    lower_wick = max(lower_wick, atr * (0.35 + severity * 0.65))
+                    if direction < 0 and severity >= 0.65:
+                        # Downside target rejection -> bullish flip.
+                        ha_close = ha_open + max(body_size * 0.65, atr * 0.12)
+                        direction = 1
+                        commit_direction = 1
+                        commit_left = 2
+                        target_reaction = "downside_target_rejection"
+
+        top = max(ha_open, ha_close)
+        bottom = min(ha_open, ha_close)
+
+        ha_high = max(top + upper_wick, top)
+        ha_low = min(bottom - lower_wick, bottom)
+
+        # Confidence combines directional pressure, SMC agreement, HA momentum, and target severity.
+        momentum_score = clamp(abs(momentum) / max(atr, 0.01) * 25.0, 0.0, 25.0)
+        smc_score = abs(smc_bias) * 25.0
+        pressure_score = abs(pressure_bias) * 35.0
+        target_score = severity * 15.0
+        confidence = int(round(clamp(momentum_score + smc_score + pressure_score + target_score, 4.0, 96.0)))
+
+        ghosts.append(
+            {
+                "open": round(ha_open, 8),
+                "high": round(ha_high, 8),
+                "low": round(ha_low, 8),
+                "close": round(ha_close, 8),
+                "confidence": confidence,
+                "direction": "bullish" if direction > 0 else "bearish",
+                "label": f"Python Ghost #{step}",
+                "source": "python",
+                "engine": "python_smc_alpha_ghost",
+                "targetReaction": target_reaction,
+                "targetSeverity": round(severity, 4),
+                "smcBias": round(smc_bias, 4),
+                "pressureBias": round(pressure_bias, 4),
+            }
+        )
+
+        prev_open = ha_open
+        prev_close = ha_close
+        prev_high = ha_high
+        prev_low = ha_low
+        previous_body = max(abs(ha_close - ha_open), atr * 0.08)
+
+    return ghosts
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PYTHON TECHNICAL SENTIMENT ENGINE — PHASE 4A
+# Mirrors the LuxAlgo Market Sentiment Technicals meter logic from Pine:
+# RSI, Stochastic, Stoch RSI, CCI, Bull Bear Power, Momentum, MA, VWAP,
+# Bollinger Bands, Supertrend, Linear Regression, Market Structure.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def safe_mean(values: List[float], fallback: float = 0.0) -> float:
+    clean = [float(value) for value in values if isinstance(value, (int, float)) and value == value]
+    return sum(clean) / len(clean) if clean else fallback
+
+
+def sma(values: List[float], length: int) -> Optional[float]:
+    if len(values) < length or length <= 0:
+        return None
+    return sum(values[-length:]) / length
+
+
+def ema_series(values: List[float], length: int) -> List[float]:
+    if not values:
+        return []
+    if length <= 1:
+        return list(values)
+
+    alpha = 2.0 / (length + 1.0)
+    output = [values[0]]
+
+    for value in values[1:]:
+        output.append(value * alpha + output[-1] * (1.0 - alpha))
+
+    return output
+
+
+def ema(values: List[float], length: int) -> Optional[float]:
+    series = ema_series(values, length)
+    return series[-1] if series else None
+
+
+def wma(values: List[float], length: int) -> Optional[float]:
+    if len(values) < length or length <= 0:
+        return None
+
+    sample = values[-length:]
+    weights = list(range(1, length + 1))
+    total_weight = sum(weights)
+
+    return sum(value * weight for value, weight in zip(sample, weights)) / total_weight
+
+
+def stdev(values: List[float], length: int) -> Optional[float]:
+    if len(values) < length or length <= 1:
+        return None
+
+    sample = values[-length:]
+    mean_value = sum(sample) / length
+    variance = sum((value - mean_value) ** 2 for value in sample) / length
+
+    return variance ** 0.5
+
+
+def mean_deviation(values: List[float], length: int) -> Optional[float]:
+    if len(values) < length or length <= 0:
+        return None
+
+    sample = values[-length:]
+    mean_value = sum(sample) / length
+
+    return sum(abs(value - mean_value) for value in sample) / length
+
+
+def interpolate(value: float, value_high: float, value_low: float, range_high: float, range_low: float) -> float:
+    denominator = value_high - value_low
+    if abs(denominator) < 1e-12:
+        return range_low
+
+    return range_low + (value - value_low) * (range_high - range_low) / denominator
+
+
+def classify_sentiment_value(value: float) -> str:
+    if value > 60:
+        return "BULLISH"
+    if value < 40:
+        return "BEARISH"
+    return "NEUTRAL"
+
+
+def normalize_buy_sell(
+    closes: List[float],
+    buy_flags: List[bool],
+    sell_flags: List[bool],
+    smooth: int = 3,
+) -> float:
+    """
+    Python version of the Pine normalize(buy, sell, smooth) helper.
+    It builds a 0-100 oscillator based on buy/sell regime and recent close range.
+    """
+
+    if not closes:
+        return 50.0
+
+    os_state = 0
+    max_value: Optional[float] = None
+    min_value: Optional[float] = None
+    normalized_values: List[float] = []
+
+    for index, close_value in enumerate(closes):
+        previous_os = os_state
+
+        if index < len(buy_flags) and buy_flags[index]:
+            os_state = 1
+        elif index < len(sell_flags) and sell_flags[index]:
+            os_state = -1
+
+        if max_value is None:
+            max_value = close_value
+        if min_value is None:
+            min_value = close_value
+
+        if os_state > previous_os:
+            max_value = close_value
+        elif os_state < previous_os:
+            min_value = close_value
+        else:
+            max_value = max(close_value, max_value)
+            min_value = min(close_value, min_value)
+
+        denominator = max(max_value - min_value, 1e-12)
+        normalized_values.append(clamp((close_value - min_value) / denominator * 100.0, 0.0, 100.0))
+
+    return safe_mean(normalized_values[-max(1, smooth):], 50.0)
+
+
+def rsi_series(values: List[float], length: int = 14) -> List[float]:
+    if len(values) < 2:
+        return [50.0 for _ in values]
+
+    gains: List[float] = []
+    losses: List[float] = []
+
+    for index in range(1, len(values)):
+        change = values[index] - values[index - 1]
+        gains.append(max(change, 0.0))
+        losses.append(max(-change, 0.0))
+
+    output: List[float] = [50.0]
+
+    if len(gains) < length:
+        output.extend([50.0 for _ in gains])
+        return output[:len(values)]
+
+    avg_gain = sum(gains[:length]) / length
+    avg_loss = sum(losses[:length]) / length
+
+    for index in range(len(gains)):
+        if index < length:
+            output.append(50.0)
+            continue
+
+        avg_gain = (avg_gain * (length - 1) + gains[index]) / length
+        avg_loss = (avg_loss * (length - 1) + losses[index]) / length
+
+        if avg_loss == 0:
+            rsi = 100.0
+        else:
+            rs = avg_gain / avg_loss
+            rsi = 100.0 - (100.0 / (1.0 + rs))
+
+        output.append(clamp(rsi, 0.0, 100.0))
+
+    return output[-len(values):]
+
+
+def rsi_normalized(closes: List[float], length: int = 14) -> float:
+    raw = rsi_series(closes, length)[-1] if closes else 50.0
+
+    if raw > 70:
+        return clamp(interpolate(raw, 100, 70, 100, 75), 0, 100)
+    if raw > 50:
+        return clamp(interpolate(raw, 70, 50, 75, 50), 0, 100)
+    if raw > 30:
+        return clamp(interpolate(raw, 50, 30, 50, 25), 0, 100)
+
+    return clamp(interpolate(raw, 30, 0, 25, 0), 0, 100)
+
+
+def stochastic_normalized(highs: List[float], lows: List[float], closes: List[float], length_k: int = 14, smooth_k: int = 3) -> float:
+    if len(closes) < length_k:
+        return 50.0
+
+    stoch_values: List[float] = []
+
+    start = max(0, len(closes) - length_k - smooth_k - 5)
+
+    for index in range(start, len(closes)):
+        if index + 1 < length_k:
+            continue
+
+        high_window = highs[index + 1 - length_k:index + 1]
+        low_window = lows[index + 1 - length_k:index + 1]
+        highest_high = max(high_window)
+        lowest_low = min(low_window)
+        denominator = max(highest_high - lowest_low, 1e-12)
+        stoch_values.append(clamp((closes[index] - lowest_low) / denominator * 100.0, 0.0, 100.0))
+
+    smoothed = safe_mean(stoch_values[-smooth_k:], 50.0)
+
+    if smoothed > 80:
+        return clamp(interpolate(smoothed, 100, 80, 100, 75), 0, 100)
+    if smoothed > 50:
+        return clamp(interpolate(smoothed, 80, 50, 75, 50), 0, 100)
+    if smoothed > 20:
+        return clamp(interpolate(smoothed, 50, 20, 50, 25), 0, 100)
+
+    return clamp(interpolate(smoothed, 20, 0, 25, 0), 0, 100)
+
+
+def stochastic_rsi_normalized(closes: List[float], rsi_length: int = 14, stoch_length: int = 14, smooth_k: int = 3) -> float:
+    rsi_values = rsi_series(closes, rsi_length)
+
+    if len(rsi_values) < stoch_length:
+        return 50.0
+
+    stoch_values: List[float] = []
+
+    start = max(0, len(rsi_values) - stoch_length - smooth_k - 5)
+
+    for index in range(start, len(rsi_values)):
+        if index + 1 < stoch_length:
+            continue
+
+        sample = rsi_values[index + 1 - stoch_length:index + 1]
+        highest = max(sample)
+        lowest = min(sample)
+        denominator = max(highest - lowest, 1e-12)
+        stoch_values.append(clamp((rsi_values[index] - lowest) / denominator * 100.0, 0.0, 100.0))
+
+    smoothed = safe_mean(stoch_values[-smooth_k:], 50.0)
+
+    if smoothed > 80:
+        return clamp(interpolate(smoothed, 100, 80, 100, 75), 0, 100)
+    if smoothed > 50:
+        return clamp(interpolate(smoothed, 80, 50, 75, 50), 0, 100)
+    if smoothed > 20:
+        return clamp(interpolate(smoothed, 50, 20, 50, 25), 0, 100)
+
+    return clamp(interpolate(smoothed, 20, 0, 25, 0), 0, 100)
+
+
+def cci_normalized(highs: List[float], lows: List[float], closes: List[float], length: int = 20) -> float:
+    typical = [(h + l + c) / 3.0 for h, l, c in zip(highs, lows, closes)]
+
+    if len(typical) < length:
+        return 50.0
+
+    ma = sma(typical, length)
+    dev = mean_deviation(typical, length)
+
+    if ma is None or dev is None or dev <= 0:
+        return 50.0
+
+    cci = (typical[-1] - ma) / (0.015 * dev)
+
+    if cci > 100:
+        return 100.0 if cci > 300 else clamp(interpolate(cci, 300, 100, 100, 75), 0, 100)
+    if cci >= 0:
+        return clamp(interpolate(cci, 100, 0, 75, 50), 0, 100)
+    if cci < -100:
+        return 0.0 if cci < -300 else clamp(interpolate(cci, -100, -300, 25, 0), 0, 100)
+
+    return clamp(interpolate(cci, 0, -100, 50, 25), 0, 100)
+
+
+def bull_bear_power_normalized(highs: List[float], lows: List[float], closes: List[float], length: int = 13) -> float:
+    if len(closes) < max(length, 20):
+        return 50.0
+
+    ema_values = ema_series(closes, length)
+    bbp_values = [
+        highs[index] + lows[index] - 2.0 * ema_values[index]
+        for index in range(len(closes))
+    ]
+
+    if len(bbp_values) < 100:
+        sample = bbp_values
+    else:
+        sample = bbp_values[-100:]
+
+    basis = safe_mean(sample, 0.0)
+    deviation = (sum((value - basis) ** 2 for value in sample) / max(len(sample), 1)) ** 0.5
+    upper = basis + 2.0 * deviation
+    lower = basis - 2.0 * deviation
+    bbp = bbp_values[-1]
+
+    if bbp > upper:
+        return 100.0 if bbp > 1.5 * upper else clamp(interpolate(bbp, 1.5 * upper, upper, 100, 75), 0, 100)
+    if bbp > 0:
+        return clamp(interpolate(bbp, upper, 0, 75, 50), 0, 100)
+    if bbp < lower:
+        return 0.0 if bbp < 1.5 * lower else clamp(interpolate(bbp, lower, 1.5 * lower, 25, 0), 0, 100)
+    if bbp < 0:
+        return clamp(interpolate(bbp, 0, lower, 50, 25), 0, 100)
+
+    return 50.0
+
+
+def momentum_normalized(closes: List[float], length: int = 10, smooth: int = 3) -> float:
+    buy_flags: List[bool] = []
+    sell_flags: List[bool] = []
+
+    for index, close_value in enumerate(closes):
+        if index < length:
+            buy_flags.append(False)
+            sell_flags.append(False)
+            continue
+
+        momentum = close_value - closes[index - length]
+        buy_flags.append(momentum > 0)
+        sell_flags.append(momentum < 0)
+
+    return normalize_buy_sell(closes, buy_flags, sell_flags, smooth)
+
+
+def moving_average_normalized(closes: List[float], length: int = 20, ma_type: str = "SMA", smooth: int = 3) -> float:
+    buy_flags: List[bool] = []
+    sell_flags: List[bool] = []
+    ma_type_upper = ma_type.upper()
+
+    for index in range(len(closes)):
+        sub = closes[:index + 1]
+
+        if ma_type_upper == "EMA":
+            basis = ema(sub, length)
+        elif ma_type_upper == "WMA":
+            basis = wma(sub, length)
+        else:
+            basis = sma(sub, length)
+
+        if basis is None:
+            buy_flags.append(False)
+            sell_flags.append(False)
+            continue
+
+        buy_flags.append(closes[index] > basis)
+        sell_flags.append(closes[index] < basis)
+
+    return normalize_buy_sell(closes, buy_flags, sell_flags, smooth)
+
+
+def bollinger_bands_normalized(closes: List[float], length: int = 20, multiplier: float = 2.0, smooth: int = 3) -> float:
+    buy_flags: List[bool] = []
+    sell_flags: List[bool] = []
+
+    for index in range(len(closes)):
+        sub = closes[:index + 1]
+        basis = sma(sub, length)
+        deviation = stdev(sub, length)
+
+        if basis is None or deviation is None:
+            buy_flags.append(False)
+            sell_flags.append(False)
+            continue
+
+        upper = basis + multiplier * deviation
+        lower = basis - multiplier * deviation
+
+        buy_flags.append(closes[index] > upper)
+        sell_flags.append(closes[index] < lower)
+
+    return normalize_buy_sell(closes, buy_flags, sell_flags, smooth)
+
+
+def vwap_bands_normalized(candles: List[Dict[str, Any]], stdev_mult: float = 2.0, smooth: int = 3) -> float:
+    closes = [to_float(c.get("close")) for c in candles]
+    typical = [
+        (to_float(c.get("high")) + to_float(c.get("low")) + to_float(c.get("close"))) / 3.0
+        for c in candles
+    ]
+    volumes = [max(to_float(c.get("volume")), 0.0) for c in candles]
+
+    buy_flags: List[bool] = []
+    sell_flags: List[bool] = []
+
+    # Intraday Auto anchor in the Pine script defaults to day.
+    # The API candles usually contain the most recent day/session, so this rolling
+    # full-sample VWAP is a close approximation and works even when volume is sparse.
+    for index in range(len(candles)):
+        sample_price = typical[:index + 1]
+        sample_volume = volumes[:index + 1]
+
+        volume_sum = sum(sample_volume)
+
+        if volume_sum > 0:
+            vwap = sum(p * v for p, v in zip(sample_price, sample_volume)) / volume_sum
+        else:
+            vwap = safe_mean(sample_price, closes[index])
+
+        deviation = (sum((p - vwap) ** 2 for p in sample_price) / max(len(sample_price), 1)) ** 0.5
+        upper = vwap + stdev_mult * deviation
+        lower = vwap - stdev_mult * deviation
+
+        buy_flags.append(closes[index] > upper)
+        sell_flags.append(closes[index] < lower)
+
+    return normalize_buy_sell(closes, buy_flags, sell_flags, smooth)
+
+
+def supertrend_series(highs: List[float], lows: List[float], closes: List[float], period: int = 10, factor: float = 3.0) -> List[float]:
+    if len(closes) < 2:
+        return [closes[0] if closes else 0.0]
+
+    true_ranges: List[float] = [highs[0] - lows[0]]
+
+    for index in range(1, len(closes)):
+        true_ranges.append(
+            max(
+                highs[index] - lows[index],
+                abs(highs[index] - closes[index - 1]),
+                abs(lows[index] - closes[index - 1]),
+            )
+        )
+
+    atr_values: List[float] = []
+    for index in range(len(true_ranges)):
+        if index + 1 < period:
+            atr_values.append(safe_mean(true_ranges[:index + 1], true_ranges[index]))
+        elif index + 1 == period:
+            atr_values.append(safe_mean(true_ranges[:period], true_ranges[index]))
+        else:
+            atr_values.append((atr_values[-1] * (period - 1) + true_ranges[index]) / period)
+
+    final_upper: List[float] = []
+    final_lower: List[float] = []
+    supertrend_values: List[float] = []
+    direction = 1
+
+    for index in range(len(closes)):
+        hl2 = (highs[index] + lows[index]) / 2.0
+        basic_upper = hl2 + factor * atr_values[index]
+        basic_lower = hl2 - factor * atr_values[index]
+
+        if index == 0:
+            final_upper.append(basic_upper)
+            final_lower.append(basic_lower)
+            supertrend_values.append(basic_lower)
+            continue
+
+        upper = basic_upper if basic_upper < final_upper[-1] or closes[index - 1] > final_upper[-1] else final_upper[-1]
+        lower = basic_lower if basic_lower > final_lower[-1] or closes[index - 1] < final_lower[-1] else final_lower[-1]
+
+        if supertrend_values[-1] == final_upper[-1]:
+            if closes[index] <= upper:
+                direction = -1
+                supertrend_value = upper
+            else:
+                direction = 1
+                supertrend_value = lower
+        else:
+            if closes[index] >= lower:
+                direction = 1
+                supertrend_value = lower
+            else:
+                direction = -1
+                supertrend_value = upper
+
+        final_upper.append(upper)
+        final_lower.append(lower)
+        supertrend_values.append(supertrend_value)
+
+    return supertrend_values
+
+
+def supertrend_normalized(highs: List[float], lows: List[float], closes: List[float], period: int = 10, factor: float = 3.0, smooth: int = 3) -> float:
+    st_values = supertrend_series(highs, lows, closes, period, factor)
+
+    buy_flags = [close > st for close, st in zip(closes, st_values)]
+    sell_flags = [close < st for close, st in zip(closes, st_values)]
+
+    return normalize_buy_sell(closes, buy_flags, sell_flags, smooth)
+
+
+def correlation_with_index(values: List[float], length: int = 25) -> float:
+    if len(values) < length or length <= 1:
+        return 0.0
+
+    y_values = values[-length:]
+    x_values = list(range(length))
+
+    mean_x = safe_mean(x_values, 0.0)
+    mean_y = safe_mean(y_values, 0.0)
+
+    numerator = sum((x - mean_x) * (y - mean_y) for x, y in zip(x_values, y_values))
+    denominator_x = sum((x - mean_x) ** 2 for x in x_values) ** 0.5
+    denominator_y = sum((y - mean_y) ** 2 for y in y_values) ** 0.5
+
+    denominator = denominator_x * denominator_y
+
+    if denominator <= 1e-12:
+        return 0.0
+
+    return numerator / denominator
+
+
+def linear_regression_normalized(closes: List[float], length: int = 25) -> float:
+    corr = correlation_with_index(closes, length)
+    return clamp(50.0 * corr + 50.0, 0.0, 100.0)
+
+
+def market_structure_normalized(highs: List[float], lows: List[float], closes: List[float], length: int = 5, smooth: int = 3) -> float:
+    last_pivot_high: Optional[float] = None
+    last_pivot_low: Optional[float] = None
+    pivot_high_crossed = False
+    pivot_low_crossed = False
+
+    buy_flags = [False for _ in closes]
+    sell_flags = [False for _ in closes]
+
+    for index in range(len(closes)):
+        pivot_index = index - length
+
+        if pivot_index >= length and pivot_index + length < len(closes):
+            high_window = highs[pivot_index - length:pivot_index + length + 1]
+            low_window = lows[pivot_index - length:pivot_index + length + 1]
+
+            if highs[pivot_index] == max(high_window):
+                last_pivot_high = highs[pivot_index]
+                pivot_high_crossed = False
+
+            if lows[pivot_index] == min(low_window):
+                last_pivot_low = lows[pivot_index]
+                pivot_low_crossed = False
+
+        if last_pivot_high is not None and closes[index] > last_pivot_high and not pivot_high_crossed:
+            buy_flags[index] = True
+            pivot_high_crossed = True
+
+        if last_pivot_low is not None and closes[index] < last_pivot_low and not pivot_low_crossed:
+            sell_flags[index] = True
+            pivot_low_crossed = True
+
+    return normalize_buy_sell(closes, buy_flags, sell_flags, smooth)
+
+
+def calculate_technical_sentiment(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if len(candles) < 60:
+        return {
+            "eventType": "PYTHON_TECHNICAL_SENTIMENT",
+            "status": "Waiting",
+            "sentiment": 50.0,
+            "sentimentStatus": "Waiting for more candles",
+            "bearCount": 0,
+            "neutralCount": 0,
+            "bullCount": 0,
+            "bearPct": 0.0,
+            "neutralPct": 0.0,
+            "bullPct": 0.0,
+            "activeCount": 0,
+            "indicators": [],
+        }
+
+    highs = [to_float(c.get("high")) for c in candles]
+    lows = [to_float(c.get("low")) for c in candles]
+    closes = [to_float(c.get("close")) for c in candles]
+
+    indicator_values = [
+        ("RSI", rsi_normalized(closes, 14)),
+        ("Stochastic", stochastic_normalized(highs, lows, closes, 14, 3)),
+        ("Stoch RSI", stochastic_rsi_normalized(closes, 14, 14, 3)),
+        ("CCI", cci_normalized(highs, lows, closes, 20)),
+        ("Bull Bear Power", bull_bear_power_normalized(highs, lows, closes, 13)),
+        ("Momentum", momentum_normalized(closes, 10, 3)),
+        ("Moving Average", moving_average_normalized(closes, 20, "SMA", 3)),
+        ("VWAP", vwap_bands_normalized(candles, 2.0, 3)),
+        ("Bollinger Bands", bollinger_bands_normalized(closes, 20, 2.0, 3)),
+        ("Supertrend", supertrend_normalized(highs, lows, closes, 10, 3.0, 3)),
+        ("Linear Regression", linear_regression_normalized(closes, 25)),
+        ("Market Structure", market_structure_normalized(highs, lows, closes, 5, 3)),
+    ]
+
+    indicators = []
+    bull_count = 0
+    bear_count = 0
+    neutral_count = 0
+
+    for name, value in indicator_values:
+        clean_value = clamp(float(value), 0.0, 100.0)
+        signal = classify_sentiment_value(clean_value)
+
+        if signal == "BULLISH":
+            bull_count += 1
+        elif signal == "BEARISH":
+            bear_count += 1
+        else:
+            neutral_count += 1
+
+        indicators.append(
+            {
+                "name": name,
+                "value": round(clean_value, 2),
+                "signal": signal,
+            }
+        )
+
+    active_count = len(indicators)
+    sentiment = safe_mean([item["value"] for item in indicators], 50.0)
+
+    bear_pct = bear_count * 100.0 / active_count if active_count else 0.0
+    neutral_pct = neutral_count * 100.0 / active_count if active_count else 0.0
+    bull_pct = bull_count * 100.0 / active_count if active_count else 0.0
+
+    if bull_count > bear_count and bull_count > neutral_count:
+        status = "Mostly Bullish"
+    elif bear_count > bull_count and bear_count > neutral_count:
+        status = "Mostly Bearish"
+    elif neutral_count > bull_count and neutral_count > bear_count:
+        status = "Mostly Neutral"
+    else:
+        status = "Mixed"
+
+    return {
+        "eventType": "PYTHON_TECHNICAL_SENTIMENT",
+        "status": "Live",
+        "sentiment": round(sentiment, 2),
+        "sentimentStatus": status,
+        "bearCount": bear_count,
+        "neutralCount": neutral_count,
+        "bullCount": bull_count,
+        "bearPct": round(bear_pct, 2),
+        "neutralPct": round(neutral_pct, 2),
+        "bullPct": round(bull_pct, 2),
+        "activeCount": active_count,
+        "indicators": indicators,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BASIC ROUTES
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/")
+def root() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "service": "Trading Intelligence Dashboard API",
+        "engine": "phase_4C_large_history_live_candle_polling",
+        "endpoints": [
+            "/api/latest-signal",
+            "/api/recent-signals",
+            "/api/recent-candles",
+            "/api/historical-candles",
+            "/api/merged-candles",
+            "/api/live-candle",
+            "/api/engine-state",
+            "/api/latest-sentiment",
+            "/webhook/tradingview",
         ],
-        itemStyle: {
-          color: isPoc
-            ? 'rgba(255, 152, 0, 0.38)'
-            : direction === 'bullish'
-              ? 'rgba(8, 153, 129, 0.30)'
-              : 'rgba(242, 54, 69, 0.30)',
-          borderColor: isPoc
-            ? 'rgba(255, 152, 0, 0.85)'
-            : direction === 'bullish'
-              ? 'rgba(8, 153, 129, 0.65)'
-              : 'rgba(242, 54, 69, 0.65)',
-          borderWidth: isPoc ? 1.5 : 0,
-        },
-        bin,
-      }
-    })
-    .filter(Boolean)
-
-  const labels = alphaProfileBins
-    .filter((bin) => Number(bin.widthPct ?? 0) >= (compact ? 18 : 8) || bin.isPoc)
-    .map((bin) => {
-      const widthPct = Number(bin.widthPct ?? 0)
-      const widthSlots = Math.max(1, Math.min(maxSlot, Math.round((widthPct / 100) * maxSlot)))
-      const labelSlot = profileSlots[Math.min(maxSlot, widthSlots + 1)]
-      const direction = bin.direction === 'bullish' ? 'bullish' : 'bearish'
-
-      return {
-        value: [labelSlot, Number(bin.mid), `${Math.round(widthPct)}%`],
-        label: {
-          show: !compact,
-          formatter: `${Math.round(widthPct)}%`,
-          color: bin.isPoc
-            ? '#ff9800'
-            : direction === 'bullish'
-              ? '#22c7a9'
-              : '#ff4d5e',
-          fontSize: 10,
-          fontWeight: 700,
-          position: 'right',
-        },
-        itemStyle: { color: 'transparent' },
-      }
-    })
-
-  return [
-    {
-      name: 'AlphaX DLM Profile',
-      type: 'custom',
-      coordinateSystem: 'cartesian2d',
-      silent: true,
-      z: 6,
-      data: bars,
-      renderItem: (_params: any, api: any) => {
-        const x1 = api.value(0)
-        const yBottom = api.value(1)
-        const x2 = api.value(2)
-        const yTop = api.value(3)
-
-        const p1 = api.coord([x1, yBottom])
-        const p2 = api.coord([x2, yTop])
-
-        const x = p1[0]
-        const y = p2[1]
-        const width = Math.max(1, p2[0] - p1[0])
-        const height = Math.max(1, p1[1] - p2[1])
-
-        return {
-          type: 'rect',
-          shape: { x, y, width, height },
-          style: api.style(),
-        }
-      },
-      encode: { x: [0, 2], y: [1, 3] },
-    },
-    {
-      name: 'AlphaX DLM Profile Labels',
-      type: 'scatter',
-      silent: true,
-      z: 9,
-      symbolSize: 1,
-      data: labels,
-      encode: { x: 0, y: 1 },
-      label: {
-        show: true,
-        formatter: (params: any) => params?.data?.value?.[2] ?? '',
-      },
-    },
-  ]
-}
-
-function preserveAxisZoom(option: any, chart: echarts.ECharts | null) {
-  const previousOption = chart?.getOption?.() as any
-  const previousZooms = Array.isArray(previousOption?.dataZoom)
-    ? previousOption.dataZoom
-    : []
-
-  if (!Array.isArray(option.dataZoom) || previousZooms.length === 0) {
-    return option
-  }
-
-  const getPreviousZoom = (id: string, index: number) => {
-    return (
-      previousZooms.find((zoom: any) => zoom?.id === id) ??
-      previousZooms[index] ??
-      null
-    )
-  }
-
-  option.dataZoom = option.dataZoom.map((zoom: any, index: number) => {
-    const previousZoom = getPreviousZoom(zoom?.id, index)
-
-    if (!previousZoom) return zoom
-
-    const preserved = { ...zoom }
-
-    if (typeof previousZoom.start === 'number') preserved.start = previousZoom.start
-    if (typeof previousZoom.end === 'number') preserved.end = previousZoom.end
-    if (previousZoom.startValue !== undefined) preserved.startValue = previousZoom.startValue
-    if (previousZoom.endValue !== undefined) preserved.endValue = previousZoom.endValue
-
-    return preserved
-  })
-
-  return option
-}
-
-export default function EChartsCandlestickChart({
-  heightClass = 'h-[650px]',
-  compact = false,
-  chartTitle,
-  enableAdvancedOverlays = true,
-  defaultSymbol,
-  defaultTimeframe = '1m',
-  defaultCandleMode = 'Heikin Ashi',
-  allowCompactHistory = true,
-  onChartSelectionChange,
-  latestSignal,
-  recentSignals,
-  recentCandles,
-}: EChartsCandlestickChartProps) {
-  const chartRef = useRef<HTMLDivElement | null>(null)
-  const chartInstance = useRef<echarts.ECharts | null>(null)
-
-  const initialSymbol = normalizeDefaultSymbol(
-    defaultSymbol ?? (compact ? 'SPY' : latestSignal?.symbol),
-    compact ? 'SPY' : 'BTCUSD'
-  )
-  const initialTimeframe = normalizeDefaultTimeframe(defaultTimeframe ?? latestSignal?.timeframe, '1m')
-  const initialCandleMode = candleModeOptions.includes(defaultCandleMode)
-    ? defaultCandleMode
-    : 'Heikin Ashi'
-
-  const [symbol, setSymbol] = useState(initialSymbol)
-  const [timeframe, setTimeframe] = useState(initialTimeframe)
-  const [candleMode, setCandleMode] = useState<CandleMode>(initialCandleMode)
-
-  useEffect(() => {
-    onChartSelectionChange?.({
-      symbol,
-      timeframe,
-      candleMode,
-      compact,
-      chartTitle,
-    })
-  }, [symbol, timeframe, candleMode, compact, chartTitle, onChartSelectionChange])
-
-  const [showSmc, setShowSmc] = useState(true)
-  const [showDlm, setShowDlm] = useState(true)
-  const [showZones, setShowZones] = useState(true)
-  const [showLiquidity, setShowLiquidity] = useState(true)
-  const [showScores, setShowScores] = useState(true)
-  const [showGhost, setShowGhost] = useState(true)
-  const [smcDisplayMode, setSmcDisplayMode] = useState<SmcDisplayMode>('Clean')
-  const [engineState, setEngineState] = useState<EngineState | null>(null)
-  const [engineStatus, setEngineStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle')
-  const [historicalCandles, setHistoricalCandles] = useState<any[]>([])
-  const [historicalStatus, setHistoricalStatus] = useState<'idle' | 'loading' | 'loaded' | 'unavailable' | 'error'>('idle')
-
-  useEffect(() => {
-    const nextSymbol = normalizeDefaultSymbol(
-      defaultSymbol ?? (compact ? symbol : latestSignal?.symbol),
-      compact ? symbol : 'BTCUSD'
-    )
-
-    if (nextSymbol && nextSymbol !== symbol) {
-      setSymbol(nextSymbol)
-    }
-  }, [defaultSymbol, latestSignal?.symbol])
-
-  useEffect(() => {
-    const nextTimeframe = normalizeDefaultTimeframe(
-      defaultTimeframe ?? (compact ? timeframe : latestSignal?.timeframe),
-      timeframe || '1m'
-    )
-
-    if (nextTimeframe && nextTimeframe !== timeframe) {
-      setTimeframe(nextTimeframe)
-    }
-  }, [defaultTimeframe, latestSignal?.timeframe])
-
-  useEffect(() => {
-    let cancelled = false
-    let intervalId: ReturnType<typeof setInterval> | null = null
-
-    async function fetchEngineState() {
-      if (compact || !enableAdvancedOverlays) return
-
-      setEngineStatus((current) => (current === 'loaded' ? current : 'loading'))
-
-      try {
-        const params = new URLSearchParams({
-          symbol,
-          timeframe,
-          limit: '5000',
-        })
-
-        const response = await fetch(`${API_BASE_URL}/api/engine-state?${params.toString()}`, {
-          cache: 'no-store',
-        })
-
-        if (!response.ok) {
-          if (!cancelled) setEngineStatus('error')
-          return
-        }
-
-        const json = await response.json()
-
-        if (!cancelled) {
-          setEngineState(json && typeof json === 'object' ? json : null)
-          setEngineStatus('loaded')
-        }
-      } catch (error) {
-        console.error('Engine-state fetch error:', error)
-
-        if (!cancelled) setEngineStatus('error')
-      }
     }
 
-    fetchEngineState()
-    intervalId = setInterval(fetchEngineState, 15000)
 
-    return () => {
-      cancelled = true
-      if (intervalId) clearInterval(intervalId)
-    }
-  }, [symbol, timeframe, compact, enableAdvancedOverlays])
-
-  useEffect(() => {
-    let cancelled = false
-
-    async function fetchHistoricalCandles() {
-      if (compact && !allowCompactHistory) return
-
-      setHistoricalStatus('loading')
-
-      try {
-        const params = new URLSearchParams({
-          symbol,
-          timeframe,
-          limit: '5000',
-        })
-
-        const response = await fetch(`${API_BASE_URL}/api/historical-candles?${params.toString()}`, {
-          cache: 'no-store',
-        })
-
-        if (!response.ok) {
-          if (!cancelled) {
-            setHistoricalCandles([])
-            setHistoricalStatus(response.status === 404 ? 'unavailable' : 'error')
-          }
-          return
-        }
-
-        const json = await response.json()
-
-        if (!cancelled) {
-          setHistoricalCandles(Array.isArray(json) ? json : [])
-          setHistoricalStatus(Array.isArray(json) && json.length > 0 ? 'loaded' : 'unavailable')
-        }
-      } catch (error) {
-        console.error('Historical candle fetch error:', error)
-
-        if (!cancelled) {
-          setHistoricalCandles([])
-          setHistoricalStatus('error')
-        }
-      }
+@app.get("/health")
+def health() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "time": now_iso(),
+        "alpacaKeyPresent": bool(ALPACA_API_KEY),
+        "alpacaSecretPresent": bool(ALPACA_SECRET_KEY),
     }
 
-    fetchHistoricalCandles()
 
-    return () => {
-      cancelled = true
-    }
-  }, [symbol, timeframe, compact, allowCompactHistory])
+# ─────────────────────────────────────────────────────────────────────────────
+# WEBHOOK
+# ─────────────────────────────────────────────────────────────────────────────
 
-  const engineCandles = useMemo(
-    () =>
-      Array.isArray(engineState?.candles)
-        ? engineState.candles.map(candleFromAny).filter((candle): candle is Candle => candle !== null)
-        : [],
-    [engineState]
-  )
+@app.post("/webhook/tradingview")
+async def tradingview_webhook(request: FastAPIRequest) -> Dict[str, Any]:
+    global LATEST_SIGNAL, RECENT_SIGNALS, RECENT_CANDLES
 
-  const engineHaCandles = useMemo(
-    () =>
-      Array.isArray(engineState?.heikinAshiCandles)
-        ? engineState.heikinAshiCandles.map(candleFromAny).filter((candle): candle is Candle => candle !== null)
-        : [],
-    [engineState]
-  )
+    try:
+        raw_payload = await request.json()
+    except Exception:
+        raw_text = await request.body()
+        try:
+            raw_payload = json.loads(raw_text.decode("utf-8"))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-  const liveCandlesFromCandlesEndpoint = useMemo(
-    () => buildCandlesFromRecentCandles(recentCandles, symbol, timeframe),
-    [recentCandles, symbol, timeframe]
-  )
+    if not isinstance(raw_payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
 
-  const liveCandlesFromSignalsEndpoint = useMemo(
-    () => buildCandlesFromSignals(recentSignals, symbol, timeframe),
-    [recentSignals, symbol, timeframe]
-  )
+    supplied_secret = raw_payload.get("secret")
+    if DASHBOARD_SECRET and supplied_secret and supplied_secret != DASHBOARD_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
-  const historicalCandlesFromAlpaca = useMemo(
-    () => buildCandlesFromRecentCandles(historicalCandles, symbol, timeframe),
-    [historicalCandles, symbol, timeframe]
-  )
+    payload = sanitize_payload(raw_payload)
 
-  const liveCandles = useMemo(() => {
-    // IMPORTANT:
-    // Historical candles must remain the base source.
-    // Engine candles and normal dashboard candles should update/append to that history,
-    // not replace the full historical chart with only the latest live window.
-    const primaryCandles = mergeCandlesByTime([
-      ...historicalCandlesFromAlpaca,
-      ...engineCandles,
-      ...liveCandlesFromCandlesEndpoint,
-    ])
+    LATEST_SIGNAL = payload
 
-    if (primaryCandles.length > 0) {
-      return primaryCandles
+    candle = candle_from_payload(payload)
+    if candle is not None:
+        RECENT_CANDLES.append(candle)
+        RECENT_CANDLES = merge_candles_by_time(RECENT_CANDLES)[-MAX_RECENT_CANDLES:]
+
+    event_type = str(payload.get("eventType") or "").upper()
+    if event_type == "TRADE_SIGNAL":
+        RECENT_SIGNALS.insert(0, payload)
+        RECENT_SIGNALS = RECENT_SIGNALS[:MAX_RECENT_SIGNALS]
+
+    return {
+        "ok": True,
+        "message": "Webhook received",
+        "storedAsLatest": True,
+        "storedCandle": candle is not None,
+        "storedRecentSignal": event_type == "TRADE_SIGNAL",
+        "chartOverlaysPresent": payload.get("chartOverlays") is not None,
     }
 
-    return mergeCandlesByTime([
-      ...liveCandlesFromSignalsEndpoint,
-    ])
-  }, [
-    engineCandles,
-    historicalCandlesFromAlpaca,
-    liveCandlesFromCandlesEndpoint,
-    liveCandlesFromSignalsEndpoint,
-  ])
 
-  const lastValidLiveCandlesRef = useRef<Candle[]>([])
+# ─────────────────────────────────────────────────────────────────────────────
+# DASHBOARD STATE ROUTES
+# ─────────────────────────────────────────────────────────────────────────────
 
-  if (liveCandles.length > 0) {
-    lastValidLiveCandlesRef.current = liveCandles
-  }
+@app.get("/api/latest-signal")
+def latest_signal() -> Dict[str, Any]:
+    if LATEST_SIGNAL:
+        return LATEST_SIGNAL
 
-  const stickyLiveCandles =
-    liveCandles.length > 0 ? liveCandles : lastValidLiveCandlesRef.current
-
-  const usingLiveCandles = stickyLiveCandles.length >= 1
-  const symbolSampleCandles = useMemo(() => getSampleCandlesForSymbol(symbol), [symbol])
-  const baseCandles = usingLiveCandles ? stickyLiveCandles : symbolSampleCandles
-
-  const overlayPayload = useMemo(() => extractOverlayPayload(latestSignal), [latestSignal])
-
-  const engineAvailable = Boolean(engineState && engineStatus === 'loaded' && engineCandles.length > 0)
-
-  const rawSmcEvents = Array.isArray(engineState?.smcEvents)
-    ? engineState?.smcEvents ?? []
-    : overlayPayload.smcEvents ?? []
-
-  const activeSmcEvents = useMemo(
-    () => filterSmcEventsForDisplay(rawSmcEvents, smcDisplayMode, compact),
-    [rawSmcEvents, smcDisplayMode, compact]
-  )
-
-  const activeDlmLevels = Array.isArray(engineState?.dlmLevels)
-    ? engineState?.dlmLevels ?? []
-    : overlayPayload.dlmLevels ?? []
-
-  const rawActiveZones = [
-    ...(Array.isArray(engineState?.zones) ? engineState?.zones ?? [] : overlayPayload.zones ?? []),
-    ...(Array.isArray(engineState?.alphaFvgs) ? engineState?.alphaFvgs ?? [] : []),
-  ]
-
-  const activeZones = useMemo(
-    () => filterZonesPineStyle(rawActiveZones, baseCandles, compact, smcDisplayMode),
-    [rawActiveZones, baseCandles, compact, smcDisplayMode]
-  )
-
-  const rawLiquidityEvents = [
-    ...(Array.isArray(engineState?.liquidityEvents)
-      ? engineState?.liquidityEvents ?? []
-      : overlayPayload.liquidityEvents ?? []),
-    ...(Array.isArray(engineState?.alphaSweeps) ? engineState?.alphaSweeps ?? [] : []),
-  ]
-
-  const activeLiquidityEvents = useMemo(
-    () => filterLiquidityEventsForDisplay(rawLiquidityEvents, smcDisplayMode, compact),
-    [rawLiquidityEvents, smcDisplayMode, compact]
-  )
-
-  const activeDlmConfluenceMarkers = Array.isArray(engineState?.dlmConfluenceMarkers)
-    ? engineState?.dlmConfluenceMarkers ?? []
-    : overlayPayload.dlmConfluenceMarkers ?? []
-
-  const rawScoreMarkers = Array.isArray(engineState?.scoreMarkers)
-    ? engineState?.scoreMarkers ?? []
-    : overlayPayload.scoreMarkers ?? []
-
-  const activeScoreMarkers = useMemo(
-    () => filterScoreMarkersForDisplay(rawScoreMarkers, smcDisplayMode, compact),
-    [rawScoreMarkers, smcDisplayMode, compact]
-  )
-
-  const alphaProfileBins = Array.isArray(engineState?.alphaProfileBins)
-    ? engineState?.alphaProfileBins ?? []
-    : []
-
-  useEffect(() => {
-    if (!chartRef.current) return
-
-    if (!chartInstance.current) {
-      chartInstance.current = echarts.init(chartRef.current, 'dark', {
-        renderer: 'canvas',
-      })
+    return {
+        "eventType": "WAITING",
+        "status": "Waiting",
+        "symbol": "WAITING",
+        "timeframe": "1m",
+        "signal": "NEUTRAL",
+        "confidence": 0,
+        "bullScore": 50,
+        "bearScore": 50,
+        "netBias": 0,
+        "price": 0,
+        "smc": "Waiting for signal",
+        "alphax": "Waiting for signal",
+        "ghost": "Waiting for signal",
+        "chartOverlays": None,
+        "warnings": ["No webhook received yet"],
+        "createdAt": now_iso(),
     }
 
-    const activeCandles =
-      candleMode === 'Heikin Ashi'
-        ? convertToHeikinAshi(baseCandles)
-        : baseCandles
 
-    const candleTimes = activeCandles.map((c) => c.time)
-    const showRightProfile =
-      enableAdvancedOverlays && showDlm && !compact && alphaProfileBins.length > 0
+@app.get("/api/recent-signals")
+def recent_signals(limit: int = 20) -> List[Dict[str, Any]]:
+    safe_limit = max(1, min(int(limit or 20), MAX_RECENT_SIGNALS))
+    return RECENT_SIGNALS[:safe_limit]
 
-    const ghostGapSlots = !compact
-      ? Array.from({ length: GHOST_CANDLE_RESERVED_SLOTS }, (_, index) => `__ghost_gap_${index + 1}`)
-      : []
 
-    const profileSlots = showRightProfile
-      ? Array.from({ length: RIGHT_PROFILE_SLOT_COUNT }, (_, index) => `__profile_${index + 1}`)
-      : []
+@app.get("/api/recent-candles")
+def recent_candles(
+    symbol: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    limit: int = 300,
+) -> List[Dict[str, Any]]:
+    candles = RECENT_CANDLES
 
-    const ghostCandles = enableAdvancedOverlays && showGhost
-      ? buildGhostCandles(engineState, activeCandles, ghostGapSlots)
-      : []
-
-    const xAxisData = [...candleTimes, ...ghostGapSlots, ...profileSlots]
-
-    const candleData = activeCandles.map((c) => [
-      c.open,
-      c.close,
-      c.low,
-      c.high,
-    ])
-
-    const effectiveShowSmc = showSmc && smcDisplayMode !== 'Zones Only'
-    const effectiveShowZones = showZones && smcDisplayMode !== 'Structure Only'
-    const effectiveShowLiquidity = showLiquidity && smcDisplayMode !== 'Structure Only'
-    const effectiveShowScores = showScores && smcDisplayMode === 'Full'
-
-    const markLineData = enableAdvancedOverlays
-      ? [
-          ...(effectiveShowSmc ? buildSmcMarkLines(activeSmcEvents) : []),
-          ...(showDlm ? buildDlmMarkLines(activeDlmLevels, compact) : []),
-          ...(effectiveShowLiquidity ? buildLiquidityMarkLines(activeLiquidityEvents, compact) : []),
+    if symbol:
+        normalized_symbol = normalize_symbol(symbol)
+        candles = [
+            candle
+            for candle in candles
+            if normalize_symbol(str(candle.get("symbol", ""))) == normalized_symbol
         ]
-      : []
 
-    const markPointData = enableAdvancedOverlays
-      ? [
-          ...(effectiveShowSmc ? buildSmcMarkPoints(activeSmcEvents, compact) : []),
-          ...(effectiveShowLiquidity ? buildLiquidityMarkPoints(activeLiquidityEvents, compact) : []),
-          ...(showDlm && smcDisplayMode === 'Full'
-            ? buildDlmConfluenceMarkPoints(activeDlmConfluenceMarkers, compact)
-            : []),
-          ...(effectiveShowScores ? buildScoreMarkPoints(activeScoreMarkers, compact) : []),
-          ...buildGhostLiveMarker(
-            activeCandles.length > 0 ? activeCandles[activeCandles.length - 1].close : null,
-            ghostGapSlots,
-            compact
-          ),
+    if timeframe:
+        normalized_timeframe = normalize_timeframe(timeframe)
+        candles = [
+            candle
+            for candle in candles
+            if normalize_timeframe(str(candle.get("timeframe", ""))) == normalized_timeframe
         ]
-      : []
 
-    const latestClose = activeCandles.length > 0 ? activeCandles[activeCandles.length - 1].close : null
+    safe_limit = max(1, min(int(limit or 300), MAX_RECENT_CANDLES))
+    return candles[-safe_limit:]
 
-    const livePriceLineData =
-      SHOW_LIVE_PRICE_LINE && latestClose !== null
-        ? [
-            {
-              yAxis: latestClose,
-              name: 'Live Price',
-              symbol: 'none',
-              lineStyle: {
-                color: 'rgba(34, 211, 238, 0.95)',
-                width: 2.4,
-                type: 'solid',
-              },
-              label: {
-                show: !compact,
-                formatter: `⬤ LIVE ${Number(latestClose).toFixed(2)}`,
-                color: '#22d3ee',
-                fontSize: 10,
-                fontWeight: 900,
-                position: 'end',
-                backgroundColor: 'rgba(15, 17, 21, 0.92)',
-                borderColor: '#22d3ee',
-                borderWidth: 1,
-                borderRadius: 4,
-                padding: [3, 6],
-              },
-            },
-          ]
-        : []
 
-    const ghostZoneMarkArea =
-      enableAdvancedOverlays && showGhost && ghostGapSlots.length > 0 && !compact
-        ? [
-            [
-              {
-                xAxis: ghostGapSlots[0],
-                itemStyle: {
-                  color: 'rgba(34, 211, 238, 0.035)',
-                },
-                label: {
-                  show: true,
-                  formatter: 'GHOST ZONE',
-                  color: 'rgba(34, 211, 238, 0.90)',
-                  fontSize: 10,
-                  fontWeight: 900,
-                  position: 'insideTop',
-                  backgroundColor: 'rgba(15, 17, 21, 0.70)',
-                  borderColor: 'rgba(34, 211, 238, 0.45)',
-                  borderWidth: 1,
-                  borderRadius: 4,
-                  padding: [3, 6],
-                },
-              },
-              {
-                xAxis: ghostGapSlots[Math.min(GHOST_CANDLE_RESERVED_SLOTS - 1, ghostGapSlots.length - 1)],
-              },
-            ],
-          ]
-        : []
+# ─────────────────────────────────────────────────────────────────────────────
+# ALPACA ROUTES
+# ─────────────────────────────────────────────────────────────────────────────
 
-    const option: any = {
-      backgroundColor: '#0f1115',
-      animation: false,
+@app.get("/api/historical-candles")
+def historical_candles(
+    symbol: str = "BTCUSD",
+    timeframe: str = "1m",
+    limit: int = 5000,
+) -> List[Dict[str, Any]]:
+    return fetch_alpaca_historical_candles(symbol, timeframe, limit)
 
-      grid: {
-        left: compact ? 4 : 10,
-        right: compact ? 48 : showRightProfile ? 28 : 86,
-        top: compact ? 12 : 30,
-        bottom: compact ? 20 : 35,
-        containLabel: true,
-      },
 
-      tooltip: {
-        trigger: 'axis',
-        axisPointer: {
-          type: 'cross',
-          crossStyle: {
-            color: 'rgba(148, 163, 184, 0.55)',
-            type: 'dashed',
-          },
+@app.get("/api/merged-candles")
+def merged_candles(
+    symbol: str = "BTCUSD",
+    timeframe: str = "1m",
+    limit: int = 5000,
+) -> List[Dict[str, Any]]:
+    historical = fetch_alpaca_historical_candles(symbol, timeframe, limit)
+    live = get_live_recent_candles(symbol, timeframe)
+    live_current = get_cached_or_build_live_candle(symbol, timeframe)
+
+    merged = merge_candles_by_time([
+        *historical,
+        *live,
+        *([live_current] if live_current else []),
+    ])
+    safe_limit = max(1, min(int(limit or 5000), 10000))
+
+    return merged[-safe_limit:]
+
+
+@app.get("/api/live-candle")
+def live_candle(
+    symbol: str = "BTCUSD",
+    timeframe: str = "1m",
+) -> Dict[str, Any]:
+    """
+    Returns one mutable current candle for the selected symbol/timeframe.
+
+    Frontend polls this every 1 second and replaces only the last candle.
+    Historical candles remain stable. This creates the live moving candle effect.
+    """
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    source = pick_latest_candle_source(normalized_symbol, normalized_timeframe)
+    return update_live_candle_cache(normalized_symbol, normalized_timeframe, source)
+
+
+
+
+@app.get("/api/latest-sentiment")
+def latest_sentiment(
+    symbol: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    limit: int = 5000,
+) -> Dict[str, Any]:
+    """
+    Phase 4A technical sentiment endpoint.
+    Computes the full 12-indicator LuxAlgo-style sentiment meter from candles.
+    """
+
+    selected_symbol = normalize_symbol(symbol or str(LATEST_SIGNAL.get("symbol") or "BTCUSD"))
+    selected_timeframe = normalize_timeframe(timeframe or str(LATEST_SIGNAL.get("timeframe") or "1m"))
+    safe_limit = max(100, min(int(limit or 5000), 10000))
+
+    historical = fetch_alpaca_historical_candles(selected_symbol, selected_timeframe, safe_limit)
+    live = get_live_recent_candles(selected_symbol, selected_timeframe)
+    live_current = get_cached_or_build_live_candle(selected_symbol, selected_timeframe)
+    candles = merge_candles_by_time([
+        *historical,
+        *live,
+        *([live_current] if live_current else []),
+    ])[-safe_limit:]
+
+    sentiment = calculate_technical_sentiment(candles)
+    sentiment["symbol"] = selected_symbol
+    sentiment["timeframe"] = selected_timeframe
+    sentiment["price"] = candles[-1]["close"] if candles else 0
+    sentiment["time"] = candles[-1].get("time") if candles else None
+    sentiment["createdAt"] = now_iso()
+
+    return sentiment
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PYTHON ENGINE ROUTE — PHASE 3X
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/engine-state")
+def engine_state(
+    symbol: str = "BTCUSD",
+    timeframe: str = "1m",
+    limit: int = 5000,
+) -> Dict[str, Any]:
+    """
+    Phase 3X endpoint.
+
+    Browser test:
+    https://trading-intelligence-dashboard.onrender.com/api/engine-state?symbol=BTCUSD&timeframe=1m&limit=5000
+
+    What it does:
+    1. Gets historical candles from Alpaca.
+    2. Merges any live webhook candles.
+    3. Runs the Python SMC Phase 2 engine.
+    4. Adds Python Ghost Candles from HA + SMC + AlphaX-style pressure.
+    5. Returns candles + heikinAshiCandles + smcEvents + zones + liquidityEvents + ghostCandles.
+    """
+
+    safe_limit = max(100, min(int(limit or 5000), 10000))
+
+    historical = fetch_alpaca_historical_candles(symbol, timeframe, safe_limit)
+    live = get_live_recent_candles(symbol, timeframe)
+    live_current = get_cached_or_build_live_candle(symbol, timeframe)
+    candles = merge_candles_by_time([
+        *historical,
+        *live,
+        *([live_current] if live_current else []),
+    ])[-safe_limit:]
+
+    result = run_phase1_engine(
+        candles,
+        config={
+            "internal_pivot_len": 5,
+            "swing_pivot_len": 50,
+            "internal_equal_pivot_len": 3,
+            "swing_equal_pivot_len": 3,
+            "show_internal_structure": True,
+            "show_swing_structure": True,
+            "show_internal_order_blocks": True,
+            "show_swing_order_blocks": False,
+            "internal_order_blocks_size": 5,
+            "swing_order_blocks_size": 5,
+            "show_fair_value_gaps": True,
+            "show_premium_discount_zones": True,
+            "show_equal_highs_lows": True,
+            "show_internal_sweeps": True,
+            "show_swing_sweeps": True,
+            "show_liquidity_pools": True,
+            "max_events": 150,
+            "max_zones": 80,
+            "max_liquidity_events": 120,
         },
-        backgroundColor: 'rgba(15, 17, 21, 0.95)',
-        borderColor: 'rgba(71, 85, 105, 0.8)',
-        textStyle: {
-          color: '#e5e7eb',
-          fontSize: 12,
-        },
-        formatter: (params: any) => {
-          const item = Array.isArray(params) ? params[0] : params
+    )
 
-          if (
-            !item ||
-            !item.data ||
-            String(item.axisValue).startsWith('__profile_') ||
-            String(item.axisValue).startsWith('__ghost_gap_')
-          ) return ''
+    ghost_candles = build_python_ghost_candles(candles, result, count=3)
+    technical_sentiment = calculate_technical_sentiment(candles)
 
-          const data = item.data as number[]
-          const open = data[1]
-          const close = data[2]
-          const low = data[3]
-          const high = data[4]
-
-          return `
-            <div style="font-size:12px;">
-              <div style="margin-bottom:4px;color:#e5e7eb;font-weight:700;">
-                ${shortAxisLabel(item.axisValue)}
-              </div>
-              <div style="color:#94a3b8;">${symbol} • ${timeframe} • ${candleMode}</div>
-              <div style="color:#64748b;">${
-                engineAvailable
-                  ? 'Python SMC + AlphaX engine'
-                  : usingLiveCandles
-                    ? historicalCandlesFromAlpaca.length > 0
-                      ? 'Alpaca history + live candles'
-                      : 'Live API candles'
-                    : 'Sample candles'
-              }</div>
-              <div style="margin-top:6px;color:#e5e7eb;">O&nbsp;&nbsp;${open}</div>
-              <div style="color:#e5e7eb;">H&nbsp;&nbsp;${high}</div>
-              <div style="color:#e5e7eb;">L&nbsp;&nbsp;${low}</div>
-              <div style="color:#e5e7eb;">C&nbsp;&nbsp;${close}</div>
-            </div>
-          `
-        },
-      },
-
-      xAxis: {
-        type: 'category',
-        data: xAxisData,
-        boundaryGap: true,
-        axisLine: {
-          lineStyle: {
-            color: 'rgba(148, 163, 184, 0.25)',
-          },
-        },
-        axisLabel: {
-          color: '#94a3b8',
-          fontSize: compact ? 8 : 11,
-          formatter: (value: string) => {
-            const text = String(value)
-            if (text.startsWith('__profile_') || text.startsWith('__ghost_gap_')) return ''
-            return shortAxisLabel(value)
-          },
-        },
-        splitLine: {
-          show: false,
-        },
-      },
-
-      yAxis: {
-        scale: true,
-        position: 'right',
-        axisLine: {
-          show: false,
-        },
-        axisTick: {
-          show: false,
-        },
-        axisLabel: {
-          color: '#94a3b8',
-          fontSize: compact ? 8 : 11,
-        },
-        splitLine: {
-          lineStyle: {
-            color: 'rgba(148, 163, 184, 0.08)',
-          },
-        },
-      },
-
-      dataZoom: [
-        {
-          id: 'main-x-scroll',
-          type: 'inside',
-          xAxisIndex: 0,
-          filterMode: 'none',
-          start: compact ? 72 : 68,
-          end: 100,
-          minSpan: 5,
-          maxSpan: 100,
-          zoomOnMouseWheel: true,
-          moveOnMouseMove: true,
-          moveOnMouseWheel: true,
-          preventDefaultMouseMove: true,
-          throttle: 35,
-        },
-        {
-          id: 'main-y-scale',
-          type: 'inside',
-          yAxisIndex: 0,
-          filterMode: 'none',
-          start: 0,
-          end: 100,
-          minSpan: 5,
-          maxSpan: 100,
-          zoomOnMouseWheel: 'shift',
-          moveOnMouseMove: false,
-          moveOnMouseWheel: false,
-          preventDefaultMouseMove: false,
-          throttle: 35,
-        },
-      ],
-
-      series: [
-        {
-          id: 'main-candles',
-          name: `${symbol} ${candleMode}`,
-          type: 'candlestick',
-          data: candleData,
-          itemStyle: {
-            color: TEAL,
-            color0: LIGHT_RED,
-            borderColor: TEAL,
-            borderColor0: LIGHT_RED,
-          },
-          barWidth: compact ? '48%' : '58%',
-
-          markArea: {
-            silent: true,
-            data: [
-              ...(enableAdvancedOverlays && effectiveShowZones
-                ? buildZoneMarkAreas(activeZones, compact, smcDisplayMode)
-                : []),
-              ...ghostZoneMarkArea,
-            ],
-          },
-
-          markLine: {
-            silent: true,
-            symbol: 'none',
-            data: [...markLineData, ...livePriceLineData],
-          },
-
-          markPoint: {
-            silent: true,
-            data: markPointData,
-          },
-        },
-        ...(enableAdvancedOverlays && showGhost
-          ? buildGhostCandleSeries(ghostCandles, compact)
-          : []),
-        ...(showRightProfile
-          ? buildAlphaProfileSeries(alphaProfileBins, profileSlots, compact)
-          : []),
-      ],
+    result["technicalSentiment"] = technical_sentiment
+    result["sentiment"] = technical_sentiment
+    result["ghostProjections"] = ghost_candles
+    result["ghostEngine"] = {
+        "phase": "phase_3x_python_ghost_candles",
+        "source": "python",
+        "count": len(ghost_candles),
+        "uses": [
+            "heikin_ashi_sequence",
+            "smc_structure_bias",
+            "liquidity_target_reaction",
+            "dashboard_pressure_bias",
+        ],
     }
 
-    const optionWithPreservedZoom = preserveAxisZoom(option, chartInstance.current)
-
-    chartInstance.current.setOption(optionWithPreservedZoom, {
-      notMerge: false,
-      replaceMerge: ['series'],
-      lazyUpdate: false,
-    })
-
-    const resize = () => {
-      chartInstance.current?.resize()
+    result["source"] = {
+        "symbol": normalize_symbol(symbol),
+        "timeframe": normalize_timeframe(timeframe),
+        "limit": safe_limit,
+        "historicalCandles": len(historical),
+        "liveCandles": len(live),
+        "liveCurrentCandle": live_current is not None,
+        "mergedCandles": len(candles),
+        "dataProvider": "alpaca",
     }
 
-    window.addEventListener('resize', resize)
-
-    return () => {
-      window.removeEventListener('resize', resize)
-    }
-  }, [
-    symbol,
-    timeframe,
-    candleMode,
-    compact,
-    showSmc,
-    showDlm,
-    showZones,
-    showLiquidity,
-    showScores,
-    showGhost,
-    smcDisplayMode,
-    enableAdvancedOverlays,
-    baseCandles,
-    engineHaCandles,
-    activeSmcEvents,
-    activeDlmLevels,
-    activeZones,
-    activeLiquidityEvents,
-    activeDlmConfluenceMarkers,
-    activeScoreMarkers,
-    alphaProfileBins,
-    usingLiveCandles,
-    historicalCandlesFromAlpaca,
-    engineAvailable,
-    engineState,
-  ])
-
-  useEffect(() => {
-    return () => {
-      chartInstance.current?.dispose()
-      chartInstance.current = null
-    }
-  }, [])
-
-  const dataBadge = engineAvailable
-    ? 'Python SMC Engine'
-    : usingLiveCandles
-      ? historicalCandlesFromAlpaca.length > 0
-        ? 'Alpaca + Live Candles'
-        : 'Live API Candles'
-      : historicalStatus === 'loading'
-        ? 'Loading History'
-        : 'Sample Candles'
-
-  const liveBadge = engineAvailable ? 'Python SMC Live' : engineStatus === 'loading' ? 'Loading SMC' : 'Live SMC/AlphaX'
-
-  return (
-    <div
-      className={`flex ${heightClass} w-full flex-col overflow-hidden rounded-2xl border border-dark-700 bg-[#0f1115]`}
-    >
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-dark-700 px-4 py-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="rounded-full bg-orange-500 px-2 py-1 text-xs font-bold text-white">
-            ₿
-          </div>
-
-          {chartTitle && (
-            <span className="text-xs font-semibold text-gray-300">
-              {chartTitle}
-            </span>
-          )}
-
-          <select
-            value={symbol}
-            onChange={(e) => setSymbol(normalizeDefaultSymbol(e.target.value, symbol))}
-            className="rounded-md border border-dark-700 bg-[#151922] px-3 py-1.5 text-sm text-gray-100 outline-none"
-          >
-            <option value="BTCUSD">BTCUSD</option>
-            <option value="ETHUSD">ETHUSD</option>
-            <option value="SPY">SPY</option>
-            <option value="ES1!">ES1!</option>
-            <option value="MES1!">MES1!</option>
-          </select>
-
-          <select
-            value={timeframe}
-            onChange={(e) => setTimeframe(normalizeDefaultTimeframe(e.target.value, timeframe))}
-            className="rounded-md border border-dark-700 bg-[#151922] px-3 py-1.5 text-sm text-gray-100 outline-none"
-          >
-            {timeframeOptions.map((tf) => (
-              <option key={tf} value={tf}>
-                {tf}
-              </option>
-            ))}
-          </select>
-
-          <select
-            value={candleMode}
-            onChange={(e) => setCandleMode(e.target.value as CandleMode)}
-            className="rounded-md border border-dark-700 bg-[#151922] px-3 py-1.5 text-sm text-gray-100 outline-none"
-          >
-            {candleModeOptions.map((mode) => (
-              <option key={mode} value={mode}>
-                {mode}
-              </option>
-            ))}
-          </select>
-
-          {!compact && enableAdvancedOverlays && (
-            <select
-              value={smcDisplayMode}
-              onChange={(e) => setSmcDisplayMode(e.target.value as SmcDisplayMode)}
-              className="rounded-md border border-dark-700 bg-[#151922] px-3 py-1.5 text-sm text-gray-100 outline-none"
-            >
-              <option value="Clean">Clean</option>
-              <option value="Full">Full</option>
-              <option value="Structure Only">Structure Only</option>
-              <option value="Zones Only">Zones Only</option>
-            </select>
-          )}
-
-          {!compact && enableAdvancedOverlays && (
-            <>
-              <button
-                type="button"
-                onClick={() => setShowSmc((value) => !value)}
-                className={`rounded-md border px-3 py-1.5 text-sm font-semibold ${
-                  showSmc
-                    ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
-                    : 'border-dark-700 bg-[#151922] text-gray-400'
-                }`}
-              >
-                SMC
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setShowZones((value) => !value)}
-                className={`rounded-md border px-3 py-1.5 text-sm font-semibold ${
-                  showZones
-                    ? 'border-purple-500/50 bg-purple-500/10 text-purple-300'
-                    : 'border-dark-700 bg-[#151922] text-gray-400'
-                }`}
-              >
-                Zones
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setShowLiquidity((value) => !value)}
-                className={`rounded-md border px-3 py-1.5 text-sm font-semibold ${
-                  showLiquidity
-                    ? 'border-yellow-500/50 bg-yellow-500/10 text-yellow-300'
-                    : 'border-dark-700 bg-[#151922] text-gray-400'
-                }`}
-              >
-                Liquidity
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setShowDlm((value) => !value)}
-                className={`rounded-md border px-3 py-1.5 text-sm font-semibold ${
-                  showDlm
-                    ? 'border-blue-500/50 bg-blue-500/10 text-blue-300'
-                    : 'border-dark-700 bg-[#151922] text-gray-400'
-                }`}
-              >
-                AlphaX DLM
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setShowScores((value) => !value)}
-                className={`rounded-md border px-3 py-1.5 text-sm font-semibold ${
-                  showScores
-                    ? 'border-orange-500/50 bg-orange-500/10 text-orange-300'
-                    : 'border-dark-700 bg-[#151922] text-gray-400'
-                }`}
-              >
-                Scores
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setShowGhost((value) => !value)}
-                className={`rounded-md border px-3 py-1.5 text-sm font-semibold ${
-                  showGhost
-                    ? 'border-cyan-500/50 bg-cyan-500/10 text-cyan-300'
-                    : 'border-dark-700 bg-[#151922] text-gray-400'
-                }`}
-              >
-                Ghost
-              </button>
-            </>
-          )}
-        </div>
-
-        {!compact && (
-          <div className="flex items-center gap-2">
-            <div
-              className={`rounded-full border px-3 py-1 text-sm ${
-                engineAvailable || usingLiveCandles
-                  ? 'border-emerald-500/50 text-emerald-400'
-                  : 'border-yellow-500/50 text-yellow-400'
-              }`}
-            >
-              {dataBadge}
-            </div>
-
-            <div
-              className={`rounded-full border px-3 py-1 text-sm ${
-                engineAvailable
-                  ? 'border-blue-500/50 text-blue-300'
-                  : 'border-slate-500/50 text-slate-300'
-              }`}
-            >
-              {liveBadge}
-            </div>
-
-            <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3Y' : 'Chart Engine v2'}
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div ref={chartRef} className="h-full w-full flex-1" />
-    </div>
-  )
-}
+    return result
