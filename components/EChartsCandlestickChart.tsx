@@ -2330,12 +2330,50 @@ export default function EChartsCandlestickChart({
 
       dataZoom: [
         {
+          id: 'x-axis-inside-zoom',
           type: 'inside',
           xAxisIndex: 0,
           filterMode: 'none',
           zoomOnMouseWheel: true,
           moveOnMouseMove: true,
           moveOnMouseWheel: false,
+          throttle: 50,
+        },
+        {
+          id: 'y-axis-inside-zoom',
+          type: 'inside',
+          yAxisIndex: 0,
+          filterMode: 'none',
+          zoomOnMouseWheel: 'shift',
+          moveOnMouseMove: false,
+          moveOnMouseWheel: true,
+          throttle: 50,
+        },
+        {
+          id: 'y-axis-slider-zoom',
+          type: 'slider',
+          yAxisIndex: 0,
+          filterMode: 'none',
+          right: compact ? 0 : 4,
+          width: compact ? 8 : 12,
+          showDataShadow: false,
+          showDetail: false,
+          brushSelect: false,
+          borderColor: 'rgba(148, 163, 184, 0.18)',
+          fillerColor: 'rgba(34, 211, 238, 0.12)',
+          backgroundColor: 'rgba(15, 23, 42, 0.20)',
+          handleStyle: {
+            color: 'rgba(34, 211, 238, 0.85)',
+            borderColor: 'rgba(34, 211, 238, 0.95)',
+          },
+          moveHandleStyle: {
+            color: 'rgba(34, 211, 238, 0.35)',
+          },
+          emphasis: {
+            handleStyle: {
+              color: 'rgba(34, 211, 238, 1)',
+            },
+          },
           throttle: 50,
         },
       ],
