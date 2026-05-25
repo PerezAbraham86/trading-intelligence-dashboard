@@ -795,7 +795,7 @@ function filterZonesPineStyle(
 
 function shouldShowZoneLabel(zone: SmcZone, compact: boolean, displayMode: SmcDisplayMode): boolean {
   if (compact) return false
-  if (effectiveDisplayMode === 'Clean') {
+  if (displayMode === 'Clean') {
     return zone.kind === 'premium' || zone.kind === 'equilibrium' || zone.kind === 'discount'
   }
 
@@ -1054,7 +1054,7 @@ function buildZoneMarkAreas(zones: SmcZone[], compact: boolean, displayMode: Smc
           show: showLabel,
           formatter: zone.label,
           color: style.borderColor,
-          fontSize: effectiveDisplayMode === 'Clean' ? 8 : 9,
+          fontSize: displayMode === 'Clean' ? 8 : 9,
           fontWeight: 700,
           position:
             zone.kind === 'premium'
@@ -1813,7 +1813,6 @@ function preserveAxisZoom(option: any, chart: echarts.ECharts | null) {
 
 export default function EChartsCandlestickChart({
   const cleanBaselineBtc = isCleanBaselineBtc(symbol)
-  const effectiveDisplayMode = cleanBaselineBtc ? 'Clean' : displayMode
   heightClass = 'h-[650px]',
   compact = false,
   chartTitle,
@@ -2165,10 +2164,10 @@ export default function EChartsCandlestickChart({
       c.high,
     ])
 
-    const effectiveShowSmc = !cleanBaselineBtc && showSmc && smcDisplayMode !== 'Zones Only'
-    const effectiveShowZones = !cleanBaselineBtc && showZones && smcDisplayMode !== 'Structure Only'
-    const effectiveShowLiquidity = !cleanBaselineBtc && showLiquidity && smcDisplayMode !== 'Structure Only'
-    const effectiveShowScores = !cleanBaselineBtc && showScores && smcDisplayMode === 'Full'
+    const effectiveShowSmc = showSmc && smcDisplayMode !== 'Zones Only'
+    const effectiveShowZones = showZones && smcDisplayMode !== 'Structure Only'
+    const effectiveShowLiquidity = showLiquidity && smcDisplayMode !== 'Structure Only'
+    const effectiveShowScores = showScores && smcDisplayMode === 'Full'
 
     const markLineData = enableAdvancedOverlays
       ? [
@@ -2226,7 +2225,7 @@ export default function EChartsCandlestickChart({
         : []
 
     const ghostZoneMarkArea =
-      enableAdvancedOverlays && !cleanBaselineBtc && showGhost && ghostGapSlots.length > 0 && !compact
+      enableAdvancedOverlays && showGhost && ghostGapSlots.length > 0 && !compact
         ? [
             [
               {
@@ -2500,7 +2499,7 @@ export default function EChartsCandlestickChart({
   }, [])
 
   const dataBadge = isFuturesChart && (engineAvailable || historicalCandlesFromAlpaca.length > 0)
-    ? '{cleanBaselineBtc ? 'BTC Clean Baseline' : 'InsightSentry Futures'}'
+    ? 'InsightSentry Futures'
     : engineAvailable
       ? 'Python SMC Engine'
       : usingLiveCandles
@@ -2678,7 +2677,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3AF' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3AG' : 'Chart Engine v2'}
             </div>
           </div>
         )}
