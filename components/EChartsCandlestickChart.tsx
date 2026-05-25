@@ -1862,7 +1862,9 @@ export default function EChartsCandlestickChart({
         const params = new URLSearchParams({
           symbol,
           timeframe,
-          limit: '5000',
+          // Keep Python SMC/AlphaX/Ghost lightweight.
+          // Full 5000-candle history is loaded separately from /api/historical-candles.
+          limit: compact ? '250' : '750',
         })
 
         const response = await fetch(`${API_BASE_URL}/api/engine-state?${params.toString()}`, {
