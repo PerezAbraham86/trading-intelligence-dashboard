@@ -36,6 +36,31 @@ type ChartSelection = {
   candleMode: 'Regular' | 'Heikin Ashi'
 }
 
+type TechnicalIndicator = {
+  name: string
+  value: number
+  signal: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | string
+}
+
+type TechnicalSentiment = {
+  eventType?: string
+  symbol?: string
+  timeframe?: string
+  sentiment?: number
+  sentimentStatus?: string
+  bearCount?: number
+  neutralCount?: number
+  bullCount?: number
+  bearPct?: number
+  neutralPct?: number
+  bullPct?: number
+  activeCount?: number
+  indicators?: TechnicalIndicator[]
+  technicalIndicators?: TechnicalIndicator[]
+  technicalMeter?: TechnicalIndicator[]
+  factors?: TechnicalIndicator[]
+}
+
 function normalizeSymbol(value: unknown) {
   return String(value ?? 'BTCUSD')
     .trim()
@@ -125,6 +150,8 @@ export default function Dashboard() {
   const [isClient, setIsClient] = useState(false)
   const [pythonEngineState, setPythonEngineState] =
     useState<PythonEngineState | null>(null)
+  const [sharedTechnicalSentiment, setSharedTechnicalSentiment] =
+    useState<TechnicalSentiment | null>(null)
 
   const [mainChartSelection, setMainChartSelection] = useState<ChartSelection>({
     symbol: 'BTCUSD',
@@ -187,6 +214,46 @@ export default function Dashboard() {
     }
   }, [apiBaseUrl, isClient, selectedSymbol, selectedTimeframe])
 
+  useEffect(() => {
+    if (!isClient || !apiBaseUrl) return
+
+    let cancelled = false
+    let intervalId: ReturnType<typeof setInterval> | null = null
+
+    async function fetchSharedTechnicalSentiment() {
+      try {
+        const params = new URLSearchParams({
+          symbol: selectedSymbol,
+          timeframe: selectedTimeframe,
+          limit: '500',
+        })
+
+        const response = await fetch(`${apiBaseUrl}/api/latest-sentiment?${params.toString()}`, {
+          cache: 'no-store',
+        })
+
+        if (!response.ok) return
+
+        const json = await response.json()
+
+        if (!cancelled) {
+          setSharedTechnicalSentiment(json && typeof json === 'object' ? json : null)
+        }
+      } catch (error) {
+        console.error('Dashboard shared technical sentiment sync error:', error)
+      }
+    }
+
+    setSharedTechnicalSentiment(null)
+    fetchSharedTechnicalSentiment()
+    intervalId = setInterval(fetchSharedTechnicalSentiment, 10000)
+
+    return () => {
+      cancelled = true
+      if (intervalId) clearInterval(intervalId)
+    }
+  }, [apiBaseUrl, isClient, selectedSymbol, selectedTimeframe])
+
   const augmentedLatestSignal = useMemo(() => {
     const ghostConfidence = getAverageGhostConfidence(pythonEngineState)
     const pythonGhostText = getPythonGhostText(pythonEngineState)
@@ -207,9 +274,19 @@ export default function Dashboard() {
       ghost: pythonGhostText || latestSignal?.ghost || 'Python Ghost Projection',
       ghostConfidence,
       pythonGhostEngine: Boolean(ghostConfidence || pythonGhostText),
+
+      // Shared 12-indicator technical meter.
+      // This is the single source passed into Market Sentiment and Factor Confirmation,
+      // so MES1!/ES1!/BTCUSD/ETHUSD/SPY all display the exact same technical array.
+      technicalSentiment: sharedTechnicalSentiment,
+      indicators: sharedTechnicalSentiment?.indicators,
+      technicalIndicators: sharedTechnicalSentiment?.technicalIndicators,
+      technicalMeter: sharedTechnicalSentiment?.technicalMeter,
+      factors: sharedTechnicalSentiment?.factors,
+
       chartCandleMode: mainChartSelection.candleMode,
     }
-  }, [latestSignal, pythonEngineState, selectedSymbol, selectedTimeframe, mainChartSelection.candleMode])
+  }, [latestSignal, pythonEngineState, sharedTechnicalSentiment, selectedSymbol, selectedTimeframe, mainChartSelection.candleMode])
 
   if (!isClient) {
     return null
@@ -304,7 +381,7 @@ export default function Dashboard() {
 
         {/* Right Column */}
         <div className="space-y-6">
-          <MarketSentimentGauge signal={augmentedLatestSignal} />
+          <MarketSentimentGauge signal={augmentedLatestSignal} technicalSentiment={sharedTechnicalSentiment} />
 
           <PressureGauges signal={augmentedLatestSignal} />
 
@@ -314,7 +391,7 @@ export default function Dashboard() {
 
       {/* Second Row */}
       <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <FactorConfirmationTable signal={augmentedLatestSignal} />
+        <FactorConfirmationTable signal={augmentedLatestSignal} technicalSentiment={sharedTechnicalSentiment} />
 
         <GhostCandleProjection signal={augmentedLatestSignal} />
       </div>
