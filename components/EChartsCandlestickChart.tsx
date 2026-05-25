@@ -252,6 +252,89 @@ const SHOW_LIVE_PRICE_LINE = true
 
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
 
+
+function getApiSymbolCandidates(symbol: string): string[] {
+  const normalized = normalizeDefaultSymbol(symbol, symbol)
+  const compact = normalizeSymbol(normalized).replace('!', '')
+  const candidates: string[] = []
+
+  const add = (value: string) => {
+    const cleaned = String(value ?? '').trim()
+    if (cleaned && !candidates.includes(cleaned)) candidates.push(cleaned)
+  }
+
+  add(normalized)
+
+  if (normalized === 'MES1!' || compact === 'MES1' || compact.includes('MES')) {
+    add('MES1!')
+    add('MES1')
+    add('MES')
+    add('/MES')
+    add('CME_MINI:MES1!')
+  } else if (normalized === 'ES1!' || compact === 'ES1' || (compact.includes('ES') && !compact.includes('MES'))) {
+    add('ES1!')
+    add('ES1')
+    add('ES')
+    add('/ES')
+    add('CME_MINI:ES1!')
+  } else if (compact.includes('SPY')) {
+    add('SPY')
+  } else if (compact.includes('BTC')) {
+    add('BTCUSD')
+    add('BTC/USD')
+    add('XBTUSD')
+  } else if (compact.includes('ETH')) {
+    add('ETHUSD')
+    add('ETH/USD')
+  }
+
+  return candidates
+}
+
+function shouldUseSampleFallback(symbol: string): boolean {
+  const normalized = normalizeDefaultSymbol(symbol, '')
+
+  // Do not show scaled BTC sample candles for real dashboard markets.
+  // If SPY/ES/MES history is unavailable, show the waiting/empty state instead
+  // of fake sample candles that look like real data.
+  return !['BTCUSD', 'ETHUSD', 'SPY', 'ES1!', 'MES1!'].includes(normalized)
+}
+
+async function fetchJsonWithSymbolFallback(path: string, symbol: string, timeframe: string, limit: string) {
+  const candidates = getApiSymbolCandidates(symbol)
+  let lastStatus = 0
+
+  for (const candidate of candidates) {
+    const params = new URLSearchParams({
+      symbol: candidate,
+      timeframe,
+      limit,
+    })
+
+    try {
+      const response = await fetch(`${API_BASE_URL}${path}?${params.toString()}`, {
+        cache: 'no-store',
+      })
+
+      lastStatus = response.status
+
+      if (!response.ok) continue
+
+      const json = await response.json()
+      const candles = extractCandleArray(json)
+
+      // For historical candles we only accept a candidate if it actually returns bars.
+      if (path.includes('historical-candles') && candles.length === 0) continue
+
+      return { json, candles, symbol: candidate, status: response.status, ok: true }
+    } catch (error) {
+      console.error(`Fetch error for ${path} ${candidate}:`, error)
+    }
+  }
+
+  return { json: null, candles: [], symbol: candidates[0] ?? symbol, status: lastStatus, ok: false }
+}
+
 const timeframeOptions = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1D']
 const candleModeOptions: CandleMode[] = ['Regular', 'Heikin Ashi']
 
@@ -518,6 +601,20 @@ function extractCandleArray(payload: any): any[] {
     if (Array.isArray(payload.items)) return payload.items
     if (Array.isArray(payload.results)) return payload.results
     if (Array.isArray(payload.historicalCandles)) return payload.historicalCandles
+
+    // Some futures/stock endpoints wrap the bars one level deeper:
+    // { data: { bars: [...] } }, { result: { candles: [...] } }, etc.
+    const nestedSources = [payload.data, payload.result, payload.payload, payload.response]
+
+    for (const nested of nestedSources) {
+      if (!nested || typeof nested !== 'object') continue
+      if (Array.isArray(nested.candles)) return nested.candles
+      if (Array.isArray(nested.bars)) return nested.bars
+      if (Array.isArray(nested.data)) return nested.data
+      if (Array.isArray(nested.items)) return nested.items
+      if (Array.isArray(nested.results)) return nested.results
+      if (Array.isArray(nested.historicalCandles)) return nested.historicalCandles
+    }
   }
 
   return []
@@ -2177,22 +2274,19 @@ export default function EChartsCandlestickChart({
       setEngineStatus((current) => (current === 'loaded' ? current : 'loading'))
 
       try {
-        const params = new URLSearchParams({
+        const result = await fetchJsonWithSymbolFallback(
+          '/api/engine-state',
           symbol,
           timeframe,
-          limit: candleFetchLimit,
-        })
+          candleFetchLimit
+        )
 
-        const response = await fetch(`${API_BASE_URL}/api/engine-state?${params.toString()}`, {
-          cache: 'no-store',
-        })
-
-        if (!response.ok) {
+        if (!result.ok) {
           if (!cancelled) setEngineStatus('error')
           return
         }
 
-        const json = await response.json()
+        const json = result.json
 
         if (!cancelled) {
           setEngineState(json && typeof json === 'object' ? json : null)
@@ -2223,30 +2317,24 @@ export default function EChartsCandlestickChart({
       setHistoricalStatus('loading')
 
       try {
-        const params = new URLSearchParams({
+        const result = await fetchJsonWithSymbolFallback(
+          '/api/historical-candles',
           symbol,
           timeframe,
-          limit: candleFetchLimit,
-        })
+          candleFetchLimit
+        )
 
-        const response = await fetch(`${API_BASE_URL}/api/historical-candles?${params.toString()}`, {
-          cache: 'no-store',
-        })
-
-        if (!response.ok) {
+        if (!result.ok) {
           if (!cancelled) {
             setHistoricalCandles([])
-            setHistoricalStatus(response.status === 404 ? 'unavailable' : 'error')
+            setHistoricalStatus(result.status === 404 ? 'unavailable' : 'error')
           }
           return
         }
 
-        const json = await response.json()
-        const candles = extractCandleArray(json)
-
         if (!cancelled) {
-          setHistoricalCandles(candles)
-          setHistoricalStatus(candles.length > 0 ? 'loaded' : 'unavailable')
+          setHistoricalCandles(result.candles)
+          setHistoricalStatus(result.candles.length > 0 ? 'loaded' : 'unavailable')
         }
       } catch (error) {
         console.error('Historical candle fetch error:', error)
@@ -2305,6 +2393,8 @@ export default function EChartsCandlestickChart({
       return mergeCandlesByTime([
         ...historicalCandlesFromAlpaca,
         ...engineCandles,
+        ...liveCandlesFromCandlesEndpoint,
+        ...liveCandlesFromSignalsEndpoint,
       ])
     }
 
@@ -2351,8 +2441,13 @@ export default function EChartsCandlestickChart({
 
   const usingLiveCandles = stickyLiveCandles.length >= 1
   const symbolSampleCandles = useMemo(() => getSampleCandlesForSymbol(symbol), [symbol])
+  const allowSampleFallbackForSymbol = shouldUseSampleFallback(symbol)
 
-  const baseCandles = usingLiveCandles ? stickyLiveCandles : symbolSampleCandles
+  const baseCandles = usingLiveCandles
+    ? stickyLiveCandles
+    : allowSampleFallbackForSymbol
+      ? symbolSampleCandles
+      : []
 
   const overlayPayload = useMemo(() => extractOverlayPayload(latestSignal), [latestSignal])
 
