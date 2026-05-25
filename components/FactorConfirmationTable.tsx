@@ -24,6 +24,7 @@ type TradingSignal = {
 type FactorConfirmationTableProps = {
   signal?: TradingSignal
   technicalSentiment?: TechnicalSentiment | null
+  onTechnicalSentimentUpdate?: (sentiment: TechnicalSentiment | null) => void
 }
 
 type FactorStatus = 'bullish' | 'bearish' | 'neutral' | 'active' | 'inactive'
@@ -379,6 +380,7 @@ function TechnicalChip({ indicator }: { indicator: TechnicalIndicator }) {
 export default function FactorConfirmationTable({
   signal,
   technicalSentiment: technicalSentimentOverride,
+  onTechnicalSentimentUpdate,
 }: FactorConfirmationTableProps) {
   const [fetchedTechnicalSentiment, setFetchedTechnicalSentiment] =
     useState<TechnicalSentiment | null>(null)
@@ -434,6 +436,26 @@ export default function FactorConfirmationTable({
     () => extractTechnicalIndicators(technicalSentiment),
     [technicalSentiment]
   )
+
+  useEffect(() => {
+    if (!onTechnicalSentimentUpdate) return
+
+    if (!technicalSentiment || technicalIndicators.length === 0) {
+      onTechnicalSentimentUpdate(null)
+      return
+    }
+
+    // Factor Confirmation is the principal source.
+    // Emit the exact technical meter this component is rendering.
+    onTechnicalSentimentUpdate({
+      ...technicalSentiment,
+      indicators: technicalIndicators,
+      technicalIndicators,
+      technicalMeter: technicalIndicators,
+      factors: technicalIndicators,
+      activeCount: technicalIndicators.length,
+    })
+  }, [onTechnicalSentimentUpdate, technicalSentiment, technicalIndicators])
 
   const activeTechnicalCount =
     technicalSentiment?.activeCount ?? technicalIndicators.length
