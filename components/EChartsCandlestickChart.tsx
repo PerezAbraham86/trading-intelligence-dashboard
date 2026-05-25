@@ -1812,7 +1812,6 @@ function preserveAxisZoom(option: any, chart: echarts.ECharts | null) {
 }
 
 export default function EChartsCandlestickChart({
-  const cleanBaselineBtc = isCleanBaselineBtc(symbol)
   heightClass = 'h-[650px]',
   compact = false,
   chartTitle,
@@ -1826,6 +1825,7 @@ export default function EChartsCandlestickChart({
   recentSignals,
   recentCandles,
 }: EChartsCandlestickChartProps) {
+  const cleanBaselineBtc = isCleanBaselineBtc(symbol)
   const chartRef = useRef<HTMLDivElement | null>(null)
   const chartInstance = useRef<echarts.ECharts | null>(null)
 
@@ -2677,7 +2677,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-emerald-500/50 px-3 py-1 text-sm text-emerald-400">
-              {enableAdvancedOverlays ? 'Chart Engine v3AG' : 'Chart Engine v2'}
+              {enableAdvancedOverlays ? 'Chart Engine v3AH' : 'Chart Engine v2'}
             </div>
           </div>
         )}
