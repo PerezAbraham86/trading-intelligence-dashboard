@@ -477,6 +477,7 @@ function normalizeTechnicalSentiment(
 
 export default function MarketSentimentGauge({ signal }: MarketSentimentGaugeProps) {
   const [apiSentiment, setApiSentiment] = useState<SentimentData>(DEFAULT_SENTIMENT)
+  const [engineSentiment, setEngineSentiment] = useState<SentimentData | null>(null)
 
   useEffect(() => {
     const fetchSentiment = async () => {
@@ -509,6 +510,79 @@ export default function MarketSentimentGauge({ signal }: MarketSentimentGaugePro
     }
   }, [signal?.symbol, signal?.timeframe])
 
+  useEffect(() => {
+    setEngineSentiment(null)
+
+    const fetchEngineSentiment = async () => {
+      try {
+        const selectedSymbol = normalizeSymbol(signal?.symbol ?? 'BTCUSD')
+        const selectedTimeframe = normalizeTimeframe(signal?.timeframe ?? '1m')
+
+        const params = new URLSearchParams({
+          symbol: selectedSymbol,
+          timeframe: selectedTimeframe,
+          limit: '300',
+        })
+
+        const response = await fetch(`${API_BASE_URL}/api/engine-state?${params.toString()}`, {
+          cache: 'no-store',
+        })
+
+        if (!response.ok) return
+
+        const data = await response.json()
+        const raw = data && typeof data === 'object' ? data as Record<string, unknown> : {}
+
+        const nestedTechnical =
+          raw.technicalSentiment && typeof raw.technicalSentiment === 'object'
+            ? raw.technicalSentiment as Partial<SentimentData>
+            : raw.sentiment && typeof raw.sentiment === 'object'
+              ? raw.sentiment as Partial<SentimentData>
+              : null
+
+        const candidate: SentimentData = {
+          eventType: 'PYTHON_TECHNICAL_SENTIMENT',
+          symbol: selectedSymbol,
+          timeframe: selectedTimeframe,
+          sentiment: Number(nestedTechnical?.sentiment ?? raw.sentiment ?? 50),
+          sentimentStatus: String(nestedTechnical?.sentimentStatus ?? raw.sentimentStatus ?? 'Mixed'),
+          bearCount: Number(nestedTechnical?.bearCount ?? raw.bearCount ?? 0),
+          neutralCount: Number(nestedTechnical?.neutralCount ?? raw.neutralCount ?? 0),
+          bullCount: Number(nestedTechnical?.bullCount ?? raw.bullCount ?? 0),
+          bearPct: Number(nestedTechnical?.bearPct ?? raw.bearPct ?? 0),
+          neutralPct: Number(nestedTechnical?.neutralPct ?? raw.neutralPct ?? 0),
+          bullPct: Number(nestedTechnical?.bullPct ?? raw.bullPct ?? 0),
+          activeCount: Number(nestedTechnical?.activeCount ?? raw.activeCount ?? 0),
+          price: Number(raw.price ?? raw.current ?? 0),
+          indicators: [
+            ...asIndicatorArray(raw.indicators),
+            ...asIndicatorArray(raw.technicalIndicators),
+            ...asIndicatorArray(raw.technicalMeter),
+            ...asIndicatorArray(raw.factors),
+            ...asIndicatorArray(nestedTechnical?.indicators),
+            ...asIndicatorArray(nestedTechnical?.technicalIndicators),
+            ...asIndicatorArray(nestedTechnical?.technicalMeter),
+            ...asIndicatorArray(nestedTechnical?.factors),
+          ],
+        }
+
+        if (extractTechnicalIndicators(candidate).length > 0) {
+          setEngineSentiment(candidate)
+        }
+      } catch (error) {
+        console.error('Failed to fetch engine technical sentiment:', error)
+      }
+    }
+
+    fetchEngineSentiment()
+
+    const interval = window.setInterval(fetchEngineSentiment, 10000)
+
+    return () => {
+      window.clearInterval(interval)
+    }
+  }, [signal?.symbol, signal?.timeframe])
+
   const signalSentiment = useMemo(() => buildSentimentFromSignal(signal), [signal])
 
   const selectedSymbol = normalizeSymbol(signal?.symbol ?? signalSentiment?.symbol ?? 'WAITING')
@@ -521,6 +595,7 @@ export default function MarketSentimentGauge({ signal }: MarketSentimentGaugePro
     apiSymbol === selectedSymbol && apiTimeframe === selectedTimeframe
 
   const apiTechnicalIndicators = extractTechnicalIndicators(apiSentiment)
+  const engineTechnicalIndicators = extractTechnicalIndicators(engineSentiment)
   const signalTechnicalSentiment = buildTechnicalSentimentFromSignal(
     signal,
     selectedSymbol,
@@ -533,19 +608,27 @@ export default function MarketSentimentGauge({ signal }: MarketSentimentGaugePro
     apiSentiment.eventType === 'PYTHON_TECHNICAL_SENTIMENT' &&
     apiTechnicalIndicators.length > 0
 
-  // Market Sentiment should match the PineScript meter:
-  // activeCount = number of technical indicators, not dashboard factor votes.
-  //
-  // ES1!/MES1! often receive the full 12-indicator payload through the same
-  // latestSignal object that FactorConfirmationTable uses, while /api/latest-sentiment
-  // may still return a smaller/simple futures sentiment. Prefer the source with
-  // the most technical indicators so ES1!/MES1! display the same full meter as SPY/BTC/ETH.
+  const candidates = [
+    {
+      sentiment: apiHasTechnicalSentiment ? apiSentiment : null,
+      count: apiHasTechnicalSentiment ? apiTechnicalIndicators.length : 0,
+    },
+    {
+      sentiment: engineSentiment,
+      count: engineTechnicalIndicators.length,
+    },
+    {
+      sentiment: signalTechnicalSentiment,
+      count: signalTechnicalIndicators.length,
+    },
+  ].filter((candidate): candidate is { sentiment: SentimentData; count: number } =>
+    Boolean(candidate.sentiment) && candidate.count > 0
+  )
+
   const bestTechnicalSentiment =
-    signalTechnicalIndicators.length > apiTechnicalIndicators.length
-      ? signalTechnicalSentiment
-      : apiHasTechnicalSentiment
-        ? apiSentiment
-        : signalTechnicalSentiment
+    candidates.length > 0
+      ? candidates.reduce((best, current) => current.count > best.count ? current : best).sentiment
+      : null
 
   const sentiment = bestTechnicalSentiment
     ? normalizeTechnicalSentiment(bestTechnicalSentiment, selectedSymbol, selectedTimeframe)
