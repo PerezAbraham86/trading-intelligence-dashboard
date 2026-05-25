@@ -2318,8 +2318,8 @@ export default function EChartsCandlestickChart({
           filterMode: 'none',
           // 5000 candles are loaded, but we only show the latest window first.
           // All older candles remain available by dragging/scrolling left.
-          startValue: Math.max(0, xAxisData.length - (compact ? 90 : 260)),
-          endValue: Math.max(0, lastLiveCandleIndex),
+          startValue: Math.max(0, activeCandles.length - (compact ? 90 : 260)),
+          endValue: Math.max(0, activeCandles.length - 1),
           minValueSpan: compact ? 25 : 60,
           maxValueSpan: xAxisData.length,
           zoomOnMouseWheel: true,
