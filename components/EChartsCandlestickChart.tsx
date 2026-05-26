@@ -1075,18 +1075,18 @@ function buildChartOption({
       candle.low,
       candle.high,
     ]),
-    ...Array.from({ length: ghostSlots.length + profileSlots.length }, () => null),
+    ...Array.from({ length: ghostSlots.length + profileSlots.length }, () => '-'),
   ]
 
   const ghostData = [
-    ...Array.from({ length: activeCandles.length }, () => null),
+    ...Array.from({ length: activeCandles.length }, () => '-'),
     ...visibleGhosts.map((ghost) => [
       ghost.open,
       ghost.close,
       ghost.low,
       ghost.high,
     ]),
-    ...Array.from({ length: profileSlots.length }, () => null),
+    ...Array.from({ length: profileSlots.length }, () => '-'),
   ]
 
   const volumeData = [
@@ -1703,7 +1703,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-slate-500/50 px-3 py-1 text-sm text-slate-300">
-              Chart v3AR
+              Chart v3AS
             </div>
           </div>
         </div>
