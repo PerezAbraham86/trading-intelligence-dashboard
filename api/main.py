@@ -5,7 +5,7 @@ import os
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -49,6 +49,20 @@ DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "my_trading_secret_123")
 
 ALPACA_STOCKS_BASE_URL = "https://data.alpaca.markets/v2"
 ALPACA_CRYPTO_BASE_URL = "https://data.alpaca.markets/v1beta3"
+
+# InsightSentry / RapidAPI
+# Set one of these in Render:
+#   INSIGHTSENTRY_API_KEY = your RapidAPI key
+#   or RAPIDAPI_KEY = your RapidAPI key
+# Current RapidAPI app/header values from your RapidAPI console screenshot.
+# You can override these in Render later without changing code.
+INSIGHTSENTRY_API_KEY = os.getenv(
+    "INSIGHTSENTRY_API_KEY",
+    os.getenv("RAPIDAPI_KEY", "a565bbf474msh188ab0b6480dcadp17fa80jsn7895a56a95f2"),
+)
+INSIGHTSENTRY_HOST = os.getenv("INSIGHTSENTRY_HOST", "insightsentry.p.rapidapi.com")
+INSIGHTSENTRY_API_VERSION = os.getenv("INSIGHTSENTRY_API_VERSION", "v3")
+INSIGHTSENTRY_BASE_URL = os.getenv("INSIGHTSENTRY_BASE_URL", f"https://{INSIGHTSENTRY_HOST}").rstrip("/")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -219,6 +233,64 @@ def yfinance_period(timeframe: str) -> str:
     if tf in {"1h", "2h", "4h"}:
         return "60d"
     return "2y"
+
+
+def insightsentry_timeframe_parts(timeframe: str) -> tuple[str, int, str]:
+    """
+    InsightSentry v3 console uses RapidAPI host:
+        insightsentry.p.rapidapi.com
+
+    The API pages show v3 routes. Different OHLCV pages can use either:
+        interval=1min
+    or:
+        bar_type=minute&bar_interval=1
+
+    Return all forms so the request builder can support both.
+    """
+    tf = normalize_timeframe(timeframe)
+    mapping = {
+        "1m": ("minute", 1, "1min"),
+        "3m": ("minute", 3, "3min"),
+        "5m": ("minute", 5, "5min"),
+        "15m": ("minute", 15, "15min"),
+        "30m": ("minute", 30, "30min"),
+        "1h": ("hour", 1, "1h"),
+        "2h": ("hour", 2, "2h"),
+        "4h": ("hour", 4, "4h"),
+        "1d": ("day", 1, "1day"),
+        "1w": ("week", 1, "1week"),
+    }
+    return mapping.get(tf, ("minute", 1, "1min"))
+
+
+def to_insightsentry_symbol(symbol: str) -> str:
+    """
+    Converts dashboard/TradingView symbols into InsightSentry API symbols.
+    The RapidAPI search result confirmed MES1! uses CME_MINI:MES1!.
+    """
+    normalized = normalize_symbol(symbol)
+
+    mapping = {
+        "MES": "CME_MINI:MES1!",
+        "MES1!": "CME_MINI:MES1!",
+        "MES2!": "CME_MINI:MES2!",
+        "ES": "CME_MINI:ES1!",
+        "ES1!": "CME_MINI:ES1!",
+        "ES2!": "CME_MINI:ES2!",
+        "SPY": "SPY",
+        "BTCUSD": "BTCUSD",
+        "ETHUSD": "ETHUSD",
+    }
+
+    if normalized in mapping:
+        return mapping[normalized]
+
+    # Preserve already-valid InsightSentry symbols if they are passed directly.
+    raw = str(symbol or "").upper().strip()
+    if ":" in raw:
+        return raw
+
+    return normalized
 
 
 def is_crypto_symbol(symbol: str) -> bool:
@@ -450,6 +522,94 @@ def http_get_json(url: str, headers: Optional[Dict[str, str]] = None, provider: 
         raise HTTPException(status_code=500, detail=f"{provider} request failed: {str(error)}")
 
 
+def insightsentry_headers() -> Dict[str, str]:
+    if not INSIGHTSENTRY_API_KEY:
+        raise HTTPException(status_code=500, detail="Missing INSIGHTSENTRY_API_KEY or RAPIDAPI_KEY")
+
+    return {
+        "x-rapidapi-key": INSIGHTSENTRY_API_KEY,
+        "x-rapidapi-host": INSIGHTSENTRY_HOST,
+        "Accept": "application/json",
+    }
+
+
+def pick_first(raw: Dict[str, Any], keys: List[str], fallback: Any = None) -> Any:
+    for key in keys:
+        if key in raw and raw.get(key) is not None:
+            return raw.get(key)
+    return fallback
+
+
+def normalize_insightsentry_bar(raw: Dict[str, Any], symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return None
+
+    raw_time = pick_first(raw, [
+        "time", "timestamp", "datetime", "date", "t", "start", "start_time", "time_start"
+    ])
+
+    formatted_time = format_bar_time(raw_time)
+
+    candle = {
+        "time": formatted_time,
+        "timestamp": formatted_time,
+        "epoch": to_epoch_seconds(formatted_time),
+        "open": to_float(pick_first(raw, ["open", "o"])),
+        "high": to_float(pick_first(raw, ["high", "h"])),
+        "low": to_float(pick_first(raw, ["low", "l"])),
+        "close": to_float(pick_first(raw, ["close", "c", "price"])),
+        "volume": to_float(pick_first(raw, ["volume", "v", "vol"], 0)),
+        "symbol": normalize_symbol(symbol),
+        "timeframe": normalize_timeframe(timeframe),
+        "createdAt": now_iso(),
+        "provider": "insightsentry",
+    }
+
+    if candle["epoch"] <= 0:
+        return None
+
+    if candle["open"] <= 0 or candle["high"] <= 0 or candle["low"] <= 0 or candle["close"] <= 0:
+        return None
+
+    if not is_candle_valid_for_symbol(candle, symbol):
+        return None
+
+    return candle
+
+
+def extract_insightsentry_rows(data: Any) -> List[Dict[str, Any]]:
+    """
+    Handles common InsightSentry/RapidAPI response shapes:
+    - [{...}, {...}]
+    - {"series": [...]}
+    - {"data": [...]}
+    - {"bars": [...]}
+    - nested symbol dictionaries.
+    """
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+
+    if not isinstance(data, dict):
+        return []
+
+    for key in ["series", "data", "bars", "candles", "values", "results", "items"]:
+        value = data.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, dict):
+            nested = extract_insightsentry_rows(value)
+            if nested:
+                return nested
+
+    # Sometimes the response is symbol-keyed, for example {"CME_MINI:MES1!": [...]}.
+    for value in data.values():
+        nested = extract_insightsentry_rows(value)
+        if nested:
+            return nested
+
+    return []
+
+
 def normalize_alpaca_bar(raw: Dict[str, Any], symbol: str, timeframe: str) -> Dict[str, Any]:
     raw_time = raw.get("t") or raw.get("timestamp") or raw.get("time")
     formatted_time = format_bar_time(raw_time)
@@ -508,6 +668,91 @@ def normalize_yfinance_row(index_value: Any, row: Any, symbol: str, timeframe: s
 # ─────────────────────────────────────────────────────────────────────────────
 # CANDLE PROVIDERS
 # ─────────────────────────────────────────────────────────────────────────────
+
+def fetch_insightsentry_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 300) -> List[Dict[str, Any]]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    api_symbol = to_insightsentry_symbol(normalized_symbol)
+    bar_type, bar_interval, api_interval = insightsentry_timeframe_parts(normalized_timeframe)
+    safe_limit = max(1, min(int(limit or 300), 5000))
+
+    encoded_symbol = quote(api_symbol, safe="")
+    encoded_symbol_query = quote(api_symbol, safe="")
+    base = f"{INSIGHTSENTRY_BASE_URL}/{INSIGHTSENTRY_API_VERSION}"
+
+    # RapidAPI screenshot confirms v3 and host insightsentry.p.rapidapi.com.
+    # OHLCV route names can differ across InsightSentry pages, so try the common
+    # v3 OHLCV route shapes and return the first one that produces rows.
+    param_variants = [
+        urlencode({"interval": api_interval, "limit": safe_limit, "sort": "desc"}),
+        urlencode({"timeframe": normalized_timeframe, "limit": safe_limit, "sort": "desc"}),
+        urlencode({"bar_type": bar_type, "bar_interval": bar_interval, "limit": safe_limit, "sort": "desc"}),
+    ]
+
+    candidates: List[str] = []
+    for params in param_variants:
+        candidates.extend([
+            f"{base}/symbols/{encoded_symbol}/series?{params}",
+            f"{base}/symbols/{encoded_symbol}/time-series?{params}",
+            f"{base}/symbols/{encoded_symbol}/ohlcv?{params}",
+        ])
+
+    query_param_variants = [
+        urlencode({"symbol": api_symbol, "interval": api_interval, "limit": safe_limit, "sort": "desc"}),
+        urlencode({"code": api_symbol, "interval": api_interval, "limit": safe_limit, "sort": "desc"}),
+        urlencode({"symbol": api_symbol, "timeframe": normalized_timeframe, "limit": safe_limit, "sort": "desc"}),
+        urlencode({"code": api_symbol, "timeframe": normalized_timeframe, "limit": safe_limit, "sort": "desc"}),
+        urlencode({"symbol": api_symbol, "bar_type": bar_type, "bar_interval": bar_interval, "limit": safe_limit, "sort": "desc"}),
+        urlencode({"code": api_symbol, "bar_type": bar_type, "bar_interval": bar_interval, "limit": safe_limit, "sort": "desc"}),
+    ]
+
+    for params in query_param_variants:
+        candidates.extend([
+            f"{base}/time-series/ohlcv?{params}",
+            f"{base}/symbols/time-series?{params}",
+            f"{base}/ohlcv?{params}",
+        ])
+
+    print(
+        "[InsightSentry] "
+        f"frontend_symbol={symbol} normalized_symbol={normalized_symbol} "
+        f"api_symbol={api_symbol} timeframe={normalized_timeframe} "
+        f"api_interval={api_interval} bar_type={bar_type} bar_interval={bar_interval} "
+        f"host={INSIGHTSENTRY_HOST} version={INSIGHTSENTRY_API_VERSION}"
+    )
+
+    last_error = ""
+    headers = insightsentry_headers()
+
+    for url in candidates:
+        try:
+            data = http_get_json(url, headers=headers, provider="InsightSentry")
+            rows = extract_insightsentry_rows(data)
+
+            candles: List[Dict[str, Any]] = []
+            for row in rows:
+                candle = normalize_insightsentry_bar(row, normalized_symbol, normalized_timeframe)
+                if candle is not None:
+                    candles.append(candle)
+
+            candles = merge_candles_by_time(candles)[-safe_limit:]
+            if candles:
+                print(f"[InsightSentry] candles_ok count={len(candles)} url={url}")
+                return candles
+
+            print(f"[InsightSentry] no_rows url={url}")
+        except HTTPException as error:
+            last_error = str(error.detail)
+            print(f"[InsightSentry] candidate_failed url={url} error={last_error}")
+            continue
+        except Exception as error:
+            last_error = str(error)
+            print(f"[InsightSentry] candidate_failed url={url} error={last_error}")
+            continue
+
+    print(f"[InsightSentry] all_candidates_failed_or_empty last_error={last_error}")
+    return []
+
 
 def fetch_alpaca_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 300) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
@@ -588,9 +833,16 @@ def fetch_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 30
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = max(1, min(int(limit or 300), 5000))
 
-    # Futures are not stocks. Route ES/MES directly to Yahoo futures symbols.
+    # Futures are not stocks. Route ES/MES directly to InsightSentry.
+    # Do not use yfinance for ES/MES.
     if is_futures_symbol(normalized_symbol):
-        return fetch_yfinance_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
+        try:
+            return fetch_insightsentry_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
+        except HTTPException:
+            raise
+        except Exception as error:
+            print(f"[InsightSentry] futures candle fetch failed: {error}")
+            return []
 
     # SPY: try Alpaca first, then Yahoo fallback.
     if normalized_symbol == "SPY":
@@ -841,7 +1093,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v4f_hard_symbol_price_guard",
+        "engine": "main_v5_insightsentry_futures",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
@@ -865,6 +1117,29 @@ def health() -> Dict[str, Any]:
         "alpacaKeyPresent": bool(ALPACA_API_KEY),
         "alpacaSecretPresent": bool(ALPACA_SECRET_KEY),
         "yfinancePresent": yf is not None,
+        "insightSentryKeyPresent": bool(INSIGHTSENTRY_API_KEY),
+        "insightSentryHost": INSIGHTSENTRY_HOST,
+        "insightSentryVersion": INSIGHTSENTRY_API_VERSION,
+    }
+
+
+@app.get("/api/provider-debug")
+def provider_debug(symbol: str = "MES1!", timeframe: str = "1m", limit: int = 5) -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    api_symbol = to_insightsentry_symbol(normalized_symbol)
+    candles = fetch_insightsentry_historical_candles(normalized_symbol, normalized_timeframe, limit)
+    return {
+        "provider": "insightsentry",
+        "host": INSIGHTSENTRY_HOST,
+        "version": INSIGHTSENTRY_API_VERSION,
+        "frontendSymbol": symbol,
+        "normalizedSymbol": normalized_symbol,
+        "apiSymbol": api_symbol,
+        "timeframe": normalized_timeframe,
+        "count": len(candles),
+        "latest": candles[-1] if candles else None,
+        "candles": candles,
     }
 
 
@@ -1031,8 +1306,8 @@ def engine_state(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 300
     latest = candles[-1] if candles else {}
 
     return {
-        "engine": "main_v4f_hard_symbol_price_guard",
-        "phase": "hard_symbol_price_guard_no_btc_contamination",
+        "engine": "main_v5_insightsentry_futures",
+        "phase": "insightsentry_v3_futures_no_yfinance_for_es_mes",
         "status": "Live" if candles else "Waiting",
         "symbol": normalized_symbol,
         "timeframe": normalized_timeframe,
