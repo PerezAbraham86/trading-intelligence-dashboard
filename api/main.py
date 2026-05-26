@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, quote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -47,22 +47,20 @@ ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
 DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "my_trading_secret_123")
 
-ALPACA_STOCKS_BASE_URL = "https://data.alpaca.markets/v2"
-ALPACA_CRYPTO_BASE_URL = "https://data.alpaca.markets/v1beta3"
-
-# InsightSentry / RapidAPI
-# Set one of these in Render:
-#   INSIGHTSENTRY_API_KEY = your RapidAPI key
-#   or RAPIDAPI_KEY = your RapidAPI key
-# Current RapidAPI app/header values from your RapidAPI console screenshot.
-# You can override these in Render later without changing code.
-INSIGHTSENTRY_API_KEY = os.getenv(
-    "INSIGHTSENTRY_API_KEY",
-    os.getenv("RAPIDAPI_KEY", "a565bbf474msh188ab0b6480dcadp17fa80jsn7895a56a95f2"),
+# RapidAPI / InsightSentry
+# Set this in Render:
+# INSIGHTSENTRY_API_KEY=your_rapidapi_key
+# INSIGHTSENTRY_HOST=insightsentry.p.rapidapi.com
+INSIGHTSENTRY_API_KEY = (
+    os.getenv("INSIGHTSENTRY_API_KEY", "")
+    or os.getenv("RAPIDAPI_KEY", "")
+    or os.getenv("X_RAPIDAPI_KEY", "")
 )
 INSIGHTSENTRY_HOST = os.getenv("INSIGHTSENTRY_HOST", "insightsentry.p.rapidapi.com")
-INSIGHTSENTRY_API_VERSION = os.getenv("INSIGHTSENTRY_API_VERSION", "v3")
-INSIGHTSENTRY_BASE_URL = os.getenv("INSIGHTSENTRY_BASE_URL", f"https://{INSIGHTSENTRY_HOST}").rstrip("/")
+INSIGHTSENTRY_BASE_URL = f"https://{INSIGHTSENTRY_HOST}"
+
+ALPACA_STOCKS_BASE_URL = "https://data.alpaca.markets/v2"
+ALPACA_CRYPTO_BASE_URL = "https://data.alpaca.markets/v1beta3"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -180,18 +178,35 @@ def normalize_symbol(symbol: str) -> str:
 def normalize_timeframe(timeframe: str) -> str:
     tf = str(timeframe or "1m").strip().lower()
     mapping = {
-        "1": "1m", "1m": "1m",
-        "3": "3m", "3m": "3m",
-        "5": "5m", "5m": "5m",
-        "15": "15m", "15m": "15m",
-        "30": "30m", "30m": "30m",
-        "60": "1h", "1h": "1h",
-        "120": "2h", "2h": "2h",
-        "240": "4h", "4h": "4h",
-        "d": "1d", "1d": "1d",
-        "w": "1w", "1w": "1w",
+        "1": "1m", "1m": "1m", "1min": "1m", "1minute": "1m",
+        "3": "3m", "3m": "3m", "3min": "3m",
+        "5": "5m", "5m": "5m", "5min": "5m",
+        "15": "15m", "15m": "15m", "15min": "15m",
+        "30": "30m", "30m": "30m", "30min": "30m",
+        "60": "1h", "1h": "1h", "60m": "1h", "60min": "1h",
+        "120": "2h", "2h": "2h", "120m": "2h",
+        "240": "4h", "4h": "4h", "240m": "4h",
+        "d": "1d", "1d": "1d", "day": "1d", "1day": "1d",
+        "w": "1w", "1w": "1w", "week": "1w", "1week": "1w",
     }
     return mapping.get(tf, tf)
+
+
+def timeframe_seconds(timeframe: str) -> int:
+    tf = normalize_timeframe(timeframe)
+    mapping = {
+        "1m": 60,
+        "3m": 180,
+        "5m": 300,
+        "15m": 900,
+        "30m": 1800,
+        "1h": 3600,
+        "2h": 7200,
+        "4h": 14400,
+        "1d": 86400,
+        "1w": 604800,
+    }
+    return mapping.get(tf, 60)
 
 
 def alpaca_timeframe(timeframe: str) -> str:
@@ -213,7 +228,7 @@ def alpaca_timeframe(timeframe: str) -> str:
 def yfinance_interval(timeframe: str) -> str:
     mapping = {
         "1m": "1m",
-        "3m": "2m",       # Yahoo does not reliably support 3m. Use 2m fallback.
+        "3m": "2m",
         "5m": "5m",
         "15m": "15m",
         "30m": "30m",
@@ -235,64 +250,6 @@ def yfinance_period(timeframe: str) -> str:
     return "2y"
 
 
-def insightsentry_timeframe_parts(timeframe: str) -> tuple[str, int, str]:
-    """
-    InsightSentry v3 console uses RapidAPI host:
-        insightsentry.p.rapidapi.com
-
-    The API pages show v3 routes. Different OHLCV pages can use either:
-        interval=1min
-    or:
-        bar_type=minute&bar_interval=1
-
-    Return all forms so the request builder can support both.
-    """
-    tf = normalize_timeframe(timeframe)
-    mapping = {
-        "1m": ("minute", 1, "1min"),
-        "3m": ("minute", 3, "3min"),
-        "5m": ("minute", 5, "5min"),
-        "15m": ("minute", 15, "15min"),
-        "30m": ("minute", 30, "30min"),
-        "1h": ("hour", 1, "1h"),
-        "2h": ("hour", 2, "2h"),
-        "4h": ("hour", 4, "4h"),
-        "1d": ("day", 1, "1day"),
-        "1w": ("week", 1, "1week"),
-    }
-    return mapping.get(tf, ("minute", 1, "1min"))
-
-
-def to_insightsentry_symbol(symbol: str) -> str:
-    """
-    Converts dashboard/TradingView symbols into InsightSentry API symbols.
-    The RapidAPI search result confirmed MES1! uses CME_MINI:MES1!.
-    """
-    normalized = normalize_symbol(symbol)
-
-    mapping = {
-        "MES": "CME_MINI:MES1!",
-        "MES1!": "CME_MINI:MES1!",
-        "MES2!": "CME_MINI:MES2!",
-        "ES": "CME_MINI:ES1!",
-        "ES1!": "CME_MINI:ES1!",
-        "ES2!": "CME_MINI:ES2!",
-        "SPY": "SPY",
-        "BTCUSD": "BTCUSD",
-        "ETHUSD": "ETHUSD",
-    }
-
-    if normalized in mapping:
-        return mapping[normalized]
-
-    # Preserve already-valid InsightSentry symbols if they are passed directly.
-    raw = str(symbol or "").upper().strip()
-    if ":" in raw:
-        return raw
-
-    return normalized
-
-
 def is_crypto_symbol(symbol: str) -> bool:
     return normalize_symbol(symbol) in {"BTCUSD", "ETHUSD"}
 
@@ -307,9 +264,6 @@ def is_stock_symbol(symbol: str) -> bool:
 
 def valid_price_range_for_symbol(symbol: str) -> tuple[float, float]:
     normalized = normalize_symbol(symbol)
-
-    # Hard safety rails. These prevent BTC/ETH candles or ghost projections
-    # from contaminating MES/ES/SPY if a webhook/provider returns the wrong symbol scale.
     if normalized == "BTCUSD":
         return 10000.0, 300000.0
     if normalized == "ETHUSD":
@@ -318,7 +272,6 @@ def valid_price_range_for_symbol(symbol: str) -> tuple[float, float]:
         return 50.0, 2000.0
     if normalized in {"ES1!", "MES1!"}:
         return 1000.0, 20000.0
-
     return 0.000001, 1_000_000_000.0
 
 
@@ -338,11 +291,23 @@ def is_candle_valid_for_symbol(candle: Dict[str, Any], symbol: str) -> bool:
     if candle_symbol and candle_symbol != normalized:
         return False
 
+    o = to_float(candle.get("open"))
+    h = to_float(candle.get("high"))
+    l = to_float(candle.get("low"))
+    c = to_float(candle.get("close"))
+
+    if h < l:
+        return False
+    if max(o, c) > h + 1e-9:
+        return False
+    if min(o, c) < l - 1e-9:
+        return False
+
     return (
-        is_price_valid_for_symbol(candle.get("open"), normalized)
-        and is_price_valid_for_symbol(candle.get("high"), normalized)
-        and is_price_valid_for_symbol(candle.get("low"), normalized)
-        and is_price_valid_for_symbol(candle.get("close"), normalized)
+        is_price_valid_for_symbol(o, normalized)
+        and is_price_valid_for_symbol(h, normalized)
+        and is_price_valid_for_symbol(l, normalized)
+        and is_price_valid_for_symbol(c, normalized)
     )
 
 
@@ -465,7 +430,6 @@ def candle_from_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "provider": "tradingview_webhook",
     }
 
-    # Never store BTC-scale candles under MES/ES/SPY symbols.
     if not is_candle_valid_for_symbol(candle, symbol):
         return None
 
@@ -481,17 +445,71 @@ def merge_candles_by_time(candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 
         symbol = normalize_symbol(str(candle.get("symbol", "")))
         timeframe = normalize_timeframe(str(candle.get("timeframe", "")))
-        epoch = to_epoch_seconds(candle.get("time") or candle.get("timestamp") or candle.get("createdAt"))
+        epoch = to_epoch_seconds(candle.get("epoch") or candle.get("time") or candle.get("timestamp") or candle.get("createdAt"))
 
         if epoch <= 0:
             continue
 
         key = f"{symbol}:{timeframe}:{int(epoch)}"
         next_candle = dict(candle)
+        next_candle["symbol"] = symbol
+        next_candle["timeframe"] = timeframe
         next_candle["epoch"] = epoch
+        next_candle["time"] = format_bar_time(epoch)
+        next_candle["timestamp"] = next_candle["time"]
         merged[key] = next_candle
 
     return sorted(merged.values(), key=lambda item: to_epoch_seconds(item.get("epoch") or item.get("time")))
+
+
+def resample_candles(candles: List[Dict[str, Any]], target_timeframe: str, limit: int = 300) -> List[Dict[str, Any]]:
+    """
+    Resample 1m candles into 3m/5m/15m/30m/1h/2h/4h/1d/1w.
+
+    This is the important futures fix:
+    InsightSentry currently returns MES/ES reliably on 1m. Some higher futures
+    intervals can return blank depending on the endpoint/provider. We fetch 1m
+    and aggregate locally so all dashboard timeframes work.
+    """
+    tf = normalize_timeframe(target_timeframe)
+    seconds = timeframe_seconds(tf)
+
+    if seconds <= 60:
+        return merge_candles_by_time(candles)[-limit:]
+
+    source = merge_candles_by_time(candles)
+    buckets: Dict[int, Dict[str, Any]] = {}
+
+    for candle in source:
+        epoch = int(to_epoch_seconds(candle.get("epoch") or candle.get("time") or candle.get("timestamp")))
+        if epoch <= 0:
+            continue
+
+        bucket_epoch = (epoch // seconds) * seconds
+        existing = buckets.get(bucket_epoch)
+
+        if existing is None:
+            buckets[bucket_epoch] = {
+                "time": format_bar_time(bucket_epoch),
+                "timestamp": format_bar_time(bucket_epoch),
+                "epoch": float(bucket_epoch),
+                "open": to_float(candle.get("open")),
+                "high": to_float(candle.get("high")),
+                "low": to_float(candle.get("low")),
+                "close": to_float(candle.get("close")),
+                "volume": to_float(candle.get("volume")),
+                "symbol": normalize_symbol(str(candle.get("symbol") or "")),
+                "timeframe": tf,
+                "createdAt": now_iso(),
+                "provider": f"{candle.get('provider', 'insightsentry')}_resampled_from_1m",
+            }
+        else:
+            existing["high"] = max(to_float(existing.get("high")), to_float(candle.get("high")))
+            existing["low"] = min(to_float(existing.get("low")), to_float(candle.get("low")))
+            existing["close"] = to_float(candle.get("close"))
+            existing["volume"] = to_float(existing.get("volume")) + to_float(candle.get("volume"))
+
+    return sorted(buckets.values(), key=lambda item: to_epoch_seconds(item.get("epoch")))[-limit:]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -507,10 +525,20 @@ def alpaca_headers() -> Dict[str, str]:
     }
 
 
+def insightsentry_headers() -> Dict[str, str]:
+    if not INSIGHTSENTRY_API_KEY:
+        raise HTTPException(status_code=500, detail="Missing INSIGHTSENTRY_API_KEY or RAPIDAPI_KEY")
+    return {
+        "Content-Type": "application/json",
+        "x-rapidapi-host": INSIGHTSENTRY_HOST,
+        "x-rapidapi-key": INSIGHTSENTRY_API_KEY,
+    }
+
+
 def http_get_json(url: str, headers: Optional[Dict[str, str]] = None, provider: str = "Data provider") -> Any:
     request = Request(url, headers=headers or {})
     try:
-        with urlopen(request, timeout=20) as response:
+        with urlopen(request, timeout=25) as response:
             body = response.read().decode("utf-8")
             return json.loads(body)
     except HTTPError as error:
@@ -518,96 +546,17 @@ def http_get_json(url: str, headers: Optional[Dict[str, str]] = None, provider: 
         raise HTTPException(status_code=error.code, detail=f"{provider} request failed: {body or error.reason}")
     except URLError as error:
         raise HTTPException(status_code=502, detail=f"{provider} connection failed: {error.reason}")
+    except HTTPException:
+        raise
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"{provider} request failed: {str(error)}")
 
 
-def insightsentry_headers() -> Dict[str, str]:
-    if not INSIGHTSENTRY_API_KEY:
-        raise HTTPException(status_code=500, detail="Missing INSIGHTSENTRY_API_KEY or RAPIDAPI_KEY")
-
-    return {
-        "x-rapidapi-key": INSIGHTSENTRY_API_KEY,
-        "x-rapidapi-host": INSIGHTSENTRY_HOST,
-        "Accept": "application/json",
-    }
-
-
-def pick_first(raw: Dict[str, Any], keys: List[str], fallback: Any = None) -> Any:
-    for key in keys:
-        if key in raw and raw.get(key) is not None:
-            return raw.get(key)
-    return fallback
-
-
-def normalize_insightsentry_bar(raw: Dict[str, Any], symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
-    if not isinstance(raw, dict):
+def http_get_json_or_none(url: str, headers: Optional[Dict[str, str]] = None, provider: str = "Data provider") -> Any:
+    try:
+        return http_get_json(url, headers=headers, provider=provider)
+    except Exception:
         return None
-
-    raw_time = pick_first(raw, [
-        "time", "timestamp", "datetime", "date", "t", "start", "start_time", "time_start"
-    ])
-
-    formatted_time = format_bar_time(raw_time)
-
-    candle = {
-        "time": formatted_time,
-        "timestamp": formatted_time,
-        "epoch": to_epoch_seconds(formatted_time),
-        "open": to_float(pick_first(raw, ["open", "o"])),
-        "high": to_float(pick_first(raw, ["high", "h"])),
-        "low": to_float(pick_first(raw, ["low", "l"])),
-        "close": to_float(pick_first(raw, ["close", "c", "price"])),
-        "volume": to_float(pick_first(raw, ["volume", "v", "vol"], 0)),
-        "symbol": normalize_symbol(symbol),
-        "timeframe": normalize_timeframe(timeframe),
-        "createdAt": now_iso(),
-        "provider": "insightsentry",
-    }
-
-    if candle["epoch"] <= 0:
-        return None
-
-    if candle["open"] <= 0 or candle["high"] <= 0 or candle["low"] <= 0 or candle["close"] <= 0:
-        return None
-
-    if not is_candle_valid_for_symbol(candle, symbol):
-        return None
-
-    return candle
-
-
-def extract_insightsentry_rows(data: Any) -> List[Dict[str, Any]]:
-    """
-    Handles common InsightSentry/RapidAPI response shapes:
-    - [{...}, {...}]
-    - {"series": [...]}
-    - {"data": [...]}
-    - {"bars": [...]}
-    - nested symbol dictionaries.
-    """
-    if isinstance(data, list):
-        return [item for item in data if isinstance(item, dict)]
-
-    if not isinstance(data, dict):
-        return []
-
-    for key in ["series", "data", "bars", "candles", "values", "results", "items"]:
-        value = data.get(key)
-        if isinstance(value, list):
-            return [item for item in value if isinstance(item, dict)]
-        if isinstance(value, dict):
-            nested = extract_insightsentry_rows(value)
-            if nested:
-                return nested
-
-    # Sometimes the response is symbol-keyed, for example {"CME_MINI:MES1!": [...]}.
-    for value in data.values():
-        nested = extract_insightsentry_rows(value)
-        if nested:
-            return nested
-
-    return []
 
 
 def normalize_alpaca_bar(raw: Dict[str, Any], symbol: str, timeframe: str) -> Dict[str, Any]:
@@ -666,93 +615,271 @@ def normalize_yfinance_row(index_value: Any, row: Any, symbol: str, timeframe: s
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CANDLE PROVIDERS
+# INSIGHTSENTRY HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_insightsentry_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 300) -> List[Dict[str, Any]]:
+INSIGHTSENTRY_SYMBOL_MAP = {
+    "MES": "CME_MINI:MES1!",
+    "MES1": "CME_MINI:MES1!",
+    "MES1!": "CME_MINI:MES1!",
+    "/MES": "CME_MINI:MES1!",
+    "MES2": "CME_MINI:MES2!",
+    "MES2!": "CME_MINI:MES2!",
+
+    "ES": "CME_MINI:ES1!",
+    "ES1": "CME_MINI:ES1!",
+    "ES1!": "CME_MINI:ES1!",
+    "/ES": "CME_MINI:ES1!",
+    "ES2": "CME_MINI:ES2!",
+    "ES2!": "CME_MINI:ES2!",
+
+    "SPY": "SPY",
+    "BTCUSD": "BTCUSD",
+    "ETHUSD": "ETHUSD",
+}
+
+
+def to_insightsentry_symbol(symbol: str) -> str:
+    normalized = normalize_symbol(symbol)
+    return INSIGHTSENTRY_SYMBOL_MAP.get(normalized, normalized)
+
+
+def insightsentry_interval_candidates(timeframe: str) -> List[str]:
+    tf = normalize_timeframe(timeframe)
+
+    mapping = {
+        "1m": ["1min", "1m", "1"],
+        "3m": ["3min", "3m", "3"],
+        "5m": ["5min", "5m", "5"],
+        "15m": ["15min", "15m", "15"],
+        "30m": ["30min", "30m", "30"],
+        "1h": ["1h", "60min", "60m", "60"],
+        "2h": ["2h", "120min", "120m", "120"],
+        "4h": ["4h", "240min", "240m", "240"],
+        "1d": ["1day", "1d", "day", "D"],
+        "1w": ["1week", "1w", "week", "W"],
+    }
+
+    return mapping.get(tf, [tf])
+
+
+def extract_insightsentry_bars(payload: Any) -> List[Any]:
+    if isinstance(payload, list):
+        return payload
+
+    if not isinstance(payload, dict):
+        return []
+
+    direct_keys = [
+        "candles",
+        "bars",
+        "data",
+        "items",
+        "results",
+        "values",
+        "series",
+        "time_series",
+        "ohlcv",
+        "historical",
+    ]
+
+    for key in direct_keys:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+
+    for parent_key in ["result", "payload", "response"]:
+        nested = payload.get(parent_key)
+        if isinstance(nested, list):
+            return nested
+        if isinstance(nested, dict):
+            for key in direct_keys:
+                value = nested.get(key)
+                if isinstance(value, list):
+                    return value
+
+    # Sometimes data is returned as {"data": {"CME_MINI:MES1!": [...]}}
+    data = payload.get("data")
+    if isinstance(data, dict):
+        for value in data.values():
+            if isinstance(value, list):
+                return value
+
+    return []
+
+
+def normalize_insightsentry_bar(raw: Any, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
+    if isinstance(raw, list):
+        # Common array formats:
+        # [time, open, high, low, close, volume]
+        # [open, high, low, close, volume, time]
+        if len(raw) < 4:
+            return None
+
+        first_is_time = isinstance(raw[0], str) or to_epoch_seconds(raw[0]) > 100000
+        if first_is_time:
+            raw_time = raw[0]
+            open_value = raw[1] if len(raw) > 1 else None
+            high_value = raw[2] if len(raw) > 2 else None
+            low_value = raw[3] if len(raw) > 3 else None
+            close_value = raw[4] if len(raw) > 4 else None
+            volume_value = raw[5] if len(raw) > 5 else 0
+        else:
+            raw_time = raw[5] if len(raw) > 5 else None
+            open_value = raw[0]
+            high_value = raw[1] if len(raw) > 1 else None
+            low_value = raw[2] if len(raw) > 2 else None
+            close_value = raw[3] if len(raw) > 3 else None
+            volume_value = raw[4] if len(raw) > 4 else 0
+    elif isinstance(raw, dict):
+        raw_time = (
+            raw.get("time")
+            or raw.get("timestamp")
+            or raw.get("datetime")
+            or raw.get("date")
+            or raw.get("t")
+            or raw.get("T")
+        )
+        open_value = raw.get("open", raw.get("o", raw.get("Open", raw.get("OPEN"))))
+        high_value = raw.get("high", raw.get("h", raw.get("High", raw.get("HIGH"))))
+        low_value = raw.get("low", raw.get("l", raw.get("Low", raw.get("LOW"))))
+        close_value = raw.get("close", raw.get("c", raw.get("Close", raw.get("CLOSE", raw.get("price", raw.get("last"))))))
+        volume_value = raw.get("volume", raw.get("v", raw.get("Volume", 0)))
+    else:
+        return None
+
+    if open_value is None or high_value is None or low_value is None or close_value is None:
+        return None
+
+    formatted_time = format_bar_time(raw_time)
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    candle = {
+        "time": formatted_time,
+        "timestamp": formatted_time,
+        "epoch": to_epoch_seconds(formatted_time),
+        "open": to_float(open_value),
+        "high": to_float(high_value),
+        "low": to_float(low_value),
+        "close": to_float(close_value),
+        "volume": to_float(volume_value),
+        "symbol": normalized_symbol,
+        "timeframe": normalized_timeframe,
+        "createdAt": now_iso(),
+        "provider": "insightsentry",
+    }
+
+    if candle["open"] <= 0 or candle["high"] <= 0 or candle["low"] <= 0 or candle["close"] <= 0:
+        return None
+
+    if not is_candle_valid_for_symbol(candle, normalized_symbol):
+        return None
+
+    return candle
+
+
+def build_insightsentry_urls(api_symbol: str, api_interval: str, limit: int) -> List[str]:
+    encoded_path_symbol = quote(api_symbol, safe="")
+    common_params = {
+        "symbol": api_symbol,
+        "code": api_symbol,
+        "interval": api_interval,
+        "timeframe": api_interval,
+        "limit": limit,
+    }
+
+    # Keep the working endpoint first. Additional endpoints are defensive fallbacks
+    # for RapidAPI/InsightSentry naming differences.
+    return [
+        f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_path_symbol}/series?{urlencode({'interval': api_interval, 'limit': limit})}",
+        f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_path_symbol}/time-series?{urlencode({'interval': api_interval, 'limit': limit})}",
+        f"{INSIGHTSENTRY_BASE_URL}/v3/time-series?{urlencode({'symbol': api_symbol, 'interval': api_interval, 'limit': limit})}",
+        f"{INSIGHTSENTRY_BASE_URL}/v3/ohlcv?{urlencode({'symbol': api_symbol, 'interval': api_interval, 'limit': limit})}",
+        f"{INSIGHTSENTRY_BASE_URL}/v3/historical?{urlencode({'symbol': api_symbol, 'interval': api_interval, 'limit': limit})}",
+        f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_path_symbol}/historical?{urlencode({'interval': api_interval, 'limit': limit})}",
+    ]
+
+
+def fetch_insightsentry_direct_candles(symbol: str, timeframe: str = "1m", limit: int = 300) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     api_symbol = to_insightsentry_symbol(normalized_symbol)
-    bar_type, bar_interval, api_interval = insightsentry_timeframe_parts(normalized_timeframe)
     safe_limit = max(1, min(int(limit or 300), 5000))
-
-    encoded_symbol = quote(api_symbol, safe="")
-    encoded_symbol_query = quote(api_symbol, safe="")
-    base = f"{INSIGHTSENTRY_BASE_URL}/{INSIGHTSENTRY_API_VERSION}"
-
-    # RapidAPI screenshot confirms v3 and host insightsentry.p.rapidapi.com.
-    # OHLCV route names can differ across InsightSentry pages, so try the common
-    # v3 OHLCV route shapes and return the first one that produces rows.
-    param_variants = [
-        urlencode({"interval": api_interval, "limit": safe_limit, "sort": "desc"}),
-        urlencode({"timeframe": normalized_timeframe, "limit": safe_limit, "sort": "desc"}),
-        urlencode({"bar_type": bar_type, "bar_interval": bar_interval, "limit": safe_limit, "sort": "desc"}),
-    ]
-
-    candidates: List[str] = []
-    for params in param_variants:
-        candidates.extend([
-            f"{base}/symbols/{encoded_symbol}/series?{params}",
-            f"{base}/symbols/{encoded_symbol}/time-series?{params}",
-            f"{base}/symbols/{encoded_symbol}/ohlcv?{params}",
-        ])
-
-    query_param_variants = [
-        urlencode({"symbol": api_symbol, "interval": api_interval, "limit": safe_limit, "sort": "desc"}),
-        urlencode({"code": api_symbol, "interval": api_interval, "limit": safe_limit, "sort": "desc"}),
-        urlencode({"symbol": api_symbol, "timeframe": normalized_timeframe, "limit": safe_limit, "sort": "desc"}),
-        urlencode({"code": api_symbol, "timeframe": normalized_timeframe, "limit": safe_limit, "sort": "desc"}),
-        urlencode({"symbol": api_symbol, "bar_type": bar_type, "bar_interval": bar_interval, "limit": safe_limit, "sort": "desc"}),
-        urlencode({"code": api_symbol, "bar_type": bar_type, "bar_interval": bar_interval, "limit": safe_limit, "sort": "desc"}),
-    ]
-
-    for params in query_param_variants:
-        candidates.extend([
-            f"{base}/time-series/ohlcv?{params}",
-            f"{base}/symbols/time-series?{params}",
-            f"{base}/ohlcv?{params}",
-        ])
-
-    print(
-        "[InsightSentry] "
-        f"frontend_symbol={symbol} normalized_symbol={normalized_symbol} "
-        f"api_symbol={api_symbol} timeframe={normalized_timeframe} "
-        f"api_interval={api_interval} bar_type={bar_type} bar_interval={bar_interval} "
-        f"host={INSIGHTSENTRY_HOST} version={INSIGHTSENTRY_API_VERSION}"
-    )
-
-    last_error = ""
     headers = insightsentry_headers()
 
-    for url in candidates:
-        try:
-            data = http_get_json(url, headers=headers, provider="InsightSentry")
-            rows = extract_insightsentry_rows(data)
+    last_error: Optional[str] = None
 
-            candles: List[Dict[str, Any]] = []
-            for row in rows:
-                candle = normalize_insightsentry_bar(row, normalized_symbol, normalized_timeframe)
-                if candle is not None:
-                    candles.append(candle)
+    for api_interval in insightsentry_interval_candidates(normalized_timeframe):
+        for url in build_insightsentry_urls(api_symbol, api_interval, safe_limit):
+            data = http_get_json_or_none(url, headers=headers, provider="InsightSentry")
+            if data is None:
+                continue
 
-            candles = merge_candles_by_time(candles)[-safe_limit:]
+            bars = extract_insightsentry_bars(data)
+            candles = [
+                candle
+                for candle in (normalize_insightsentry_bar(bar, normalized_symbol, normalized_timeframe) for bar in bars)
+                if candle is not None
+            ]
+
+            candles = filter_valid_candles_for_symbol(merge_candles_by_time(candles), normalized_symbol)
+
             if candles:
-                print(f"[InsightSentry] candles_ok count={len(candles)} url={url}")
-                return candles
+                print(
+                    f"[InsightSentry] frontend_symbol={symbol} normalized={normalized_symbol} "
+                    f"api_symbol={api_symbol} timeframe={normalized_timeframe} api_interval={api_interval} "
+                    f"count={len(candles)}"
+                )
+                return candles[-safe_limit:]
 
-            print(f"[InsightSentry] no_rows url={url}")
-        except HTTPException as error:
-            last_error = str(error.detail)
-            print(f"[InsightSentry] candidate_failed url={url} error={last_error}")
-            continue
-        except Exception as error:
-            last_error = str(error)
-            print(f"[InsightSentry] candidate_failed url={url} error={last_error}")
-            continue
+            last_error = f"No bars parsed from {url}"
 
-    print(f"[InsightSentry] all_candidates_failed_or_empty last_error={last_error}")
+    if last_error:
+        print(f"[InsightSentry] {last_error}")
+
     return []
 
+
+def fetch_insightsentry_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 300) -> List[Dict[str, Any]]:
+    """
+    Futures data source for ES/MES.
+
+    Direct timeframe is tried first.
+    If ES/MES only returns 1m from InsightSentry, this fetches 1m and locally
+    resamples into the requested timeframe. This fixes ES/MES 3m, 5m, 15m,
+    30m, 1h, 2h, 4h, 1D, etc.
+    """
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    safe_limit = max(1, min(int(limit or 300), 5000))
+
+    direct = fetch_insightsentry_direct_candles(normalized_symbol, normalized_timeframe, safe_limit)
+    if direct:
+        return direct[-safe_limit:]
+
+    # Futures fallback: fetch 1m then aggregate locally.
+    if is_futures_symbol(normalized_symbol) and normalized_timeframe != "1m":
+        seconds = timeframe_seconds(normalized_timeframe)
+        multiplier = max(1, seconds // 60)
+        one_minute_limit = min(5000, max(safe_limit * multiplier + multiplier * 3, safe_limit * 2, 300))
+        one_minute = fetch_insightsentry_direct_candles(normalized_symbol, "1m", one_minute_limit)
+        if one_minute:
+            resampled = resample_candles(one_minute, normalized_timeframe, safe_limit)
+            resampled = filter_valid_candles_for_symbol(resampled, normalized_symbol)
+            if resampled:
+                print(
+                    f"[InsightSentry] resampled futures {normalized_symbol} from 1m "
+                    f"to {normalized_timeframe}; source={len(one_minute)} output={len(resampled)}"
+                )
+                return resampled[-safe_limit:]
+
+    return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CANDLE PROVIDERS
+# ─────────────────────────────────────────────────────────────────────────────
 
 def fetch_alpaca_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 300) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
@@ -779,7 +906,6 @@ def fetch_alpaca_historical_candles(symbol: str, timeframe: str = "1m", limit: i
         return []
 
     if normalized_symbol == "SPY":
-        # Use a 5-day window/large limit because 1-day requests return blank on weekends/holidays/closed market.
         request_limit = max(safe_limit, 1000)
         params = urlencode({
             "symbols": normalized_symbol,
@@ -833,16 +959,10 @@ def fetch_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 30
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = max(1, min(int(limit or 300), 5000))
 
-    # Futures are not stocks. Route ES/MES directly to InsightSentry.
-    # Do not use yfinance for ES/MES.
+    # Futures are routed to InsightSentry only.
+    # If InsightSentry only returns 1m, we resample 1m locally to all higher timeframes.
     if is_futures_symbol(normalized_symbol):
-        try:
-            return fetch_insightsentry_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
-        except HTTPException:
-            raise
-        except Exception as error:
-            print(f"[InsightSentry] futures candle fetch failed: {error}")
-            return []
+        return fetch_insightsentry_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
 
     # SPY: try Alpaca first, then Yahoo fallback.
     if normalized_symbol == "SPY":
@@ -866,7 +986,6 @@ def fetch_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 30
             return candles
         return fetch_yfinance_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
 
-    # Generic fallback.
     return fetch_yfinance_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
 
 
@@ -893,7 +1012,6 @@ def get_dashboard_candles(symbol: str, timeframe: str = "1m", limit: int = 300) 
         normalized_symbol,
     )
 
-    # Do not let BTC/ETH TradingView webhook candles contaminate ES/MES/SPY scales.
     live = filter_valid_candles_for_symbol(
         get_live_recent_candles(normalized_symbol, normalized_timeframe),
         normalized_symbol,
@@ -1026,7 +1144,6 @@ def calculate_latest_sentiment(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     bull = 0
     bear = 0
-    neutral = 0
 
     checks = [
         ("SMA", last_close > sma_fast),
@@ -1093,7 +1210,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v5_insightsentry_futures",
+        "engine": "main_v5_insightsentry_futures_all_timeframes",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
@@ -1102,6 +1219,7 @@ def root() -> Dict[str, Any]:
             "/api/candles",
             "/api/merged-candles",
             "/api/live-candle",
+            "/api/provider-debug",
             "/api/engine-state",
             "/api/latest-sentiment",
             "/webhook/tradingview",
@@ -1116,30 +1234,9 @@ def health() -> Dict[str, Any]:
         "time": now_iso(),
         "alpacaKeyPresent": bool(ALPACA_API_KEY),
         "alpacaSecretPresent": bool(ALPACA_SECRET_KEY),
+        "insightsentryKeyPresent": bool(INSIGHTSENTRY_API_KEY),
+        "insightsentryHost": INSIGHTSENTRY_HOST,
         "yfinancePresent": yf is not None,
-        "insightSentryKeyPresent": bool(INSIGHTSENTRY_API_KEY),
-        "insightSentryHost": INSIGHTSENTRY_HOST,
-        "insightSentryVersion": INSIGHTSENTRY_API_VERSION,
-    }
-
-
-@app.get("/api/provider-debug")
-def provider_debug(symbol: str = "MES1!", timeframe: str = "1m", limit: int = 5) -> Dict[str, Any]:
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-    api_symbol = to_insightsentry_symbol(normalized_symbol)
-    candles = fetch_insightsentry_historical_candles(normalized_symbol, normalized_timeframe, limit)
-    return {
-        "provider": "insightsentry",
-        "host": INSIGHTSENTRY_HOST,
-        "version": INSIGHTSENTRY_API_VERSION,
-        "frontendSymbol": symbol,
-        "normalizedSymbol": normalized_symbol,
-        "apiSymbol": api_symbol,
-        "timeframe": normalized_timeframe,
-        "count": len(candles),
-        "latest": candles[-1] if candles else None,
-        "candles": candles,
     }
 
 
@@ -1277,6 +1374,52 @@ def live_candle(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]
     }
 
 
+@app.get("/api/provider-debug")
+def provider_debug(symbol: str = "MES1!", timeframe: str = "1m", limit: int = 5) -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    api_symbol = to_insightsentry_symbol(normalized_symbol)
+    safe_limit = max(1, min(int(limit or 5), 5000))
+
+    if is_futures_symbol(normalized_symbol):
+        direct = fetch_insightsentry_direct_candles(normalized_symbol, normalized_timeframe, safe_limit)
+        resampled = False
+
+        candles = direct
+        if not candles and normalized_timeframe != "1m":
+            seconds = timeframe_seconds(normalized_timeframe)
+            multiplier = max(1, seconds // 60)
+            one_minute_limit = min(5000, max(safe_limit * multiplier + multiplier * 3, 300))
+            one_minute = fetch_insightsentry_direct_candles(normalized_symbol, "1m", one_minute_limit)
+            candles = resample_candles(one_minute, normalized_timeframe, safe_limit) if one_minute else []
+            resampled = bool(candles)
+
+        return {
+            "provider": "insightsentry",
+            "host": INSIGHTSENTRY_HOST,
+            "version": "v3",
+            "frontendSymbol": symbol,
+            "normalizedSymbol": normalized_symbol,
+            "apiSymbol": api_symbol,
+            "timeframe": normalized_timeframe,
+            "resampledFrom1m": resampled,
+            "count": len(candles),
+            "latest": candles[-1] if candles else None,
+            "candles": candles,
+        }
+
+    candles = fetch_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
+    return {
+        "provider": candles[-1].get("provider") if candles else None,
+        "frontendSymbol": symbol,
+        "normalizedSymbol": normalized_symbol,
+        "timeframe": normalized_timeframe,
+        "count": len(candles),
+        "latest": candles[-1] if candles else None,
+        "candles": candles,
+    }
+
+
 @app.get("/api/latest-sentiment")
 def latest_sentiment(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 300) -> Dict[str, Any]:
     candles = get_dashboard_candles(symbol, timeframe, limit)
@@ -1292,7 +1435,6 @@ def engine_state(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 300
 
     overlay_payload: Dict[str, Any] = empty_overlay_payload()
 
-    # Keep compatibility with your trading_engine.py if it exists and supports these candles.
     if run_phase1_engine is not None and candles:
         try:
             engine_result = run_phase1_engine(candles)
@@ -1306,8 +1448,8 @@ def engine_state(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 300
     latest = candles[-1] if candles else {}
 
     return {
-        "engine": "main_v5_insightsentry_futures",
-        "phase": "insightsentry_v3_futures_no_yfinance_for_es_mes",
+        "engine": "main_v5_insightsentry_futures_all_timeframes",
+        "phase": "insightsentry_futures_with_1m_resample_fallback",
         "status": "Live" if candles else "Waiting",
         "symbol": normalized_symbol,
         "timeframe": normalized_timeframe,
