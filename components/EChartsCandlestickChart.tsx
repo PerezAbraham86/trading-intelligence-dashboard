@@ -36,6 +36,7 @@ type EChartsCandlestickChartProps = {
   defaultTimeframe?: string
   defaultCandleMode?: CandleMode
   allowCompactHistory?: boolean
+  showCompactControls?: boolean
   onChartSelectionChange?: (selection: {
     symbol: string
     timeframe: string
@@ -722,6 +723,7 @@ export default function EChartsCandlestickChart({
   defaultTimeframe = '1m',
   defaultCandleMode = 'Heikin Ashi',
   allowCompactHistory = true,
+  showCompactControls = true,
   onChartSelectionChange,
   latestSignal,
   recentSignals,
@@ -731,8 +733,8 @@ export default function EChartsCandlestickChart({
   const chartInstance = useRef<echarts.ECharts | null>(null)
 
   const initialSymbol = normalizeDefaultSymbol(
-    defaultSymbol ?? (compact ? 'SPY' : latestSignal?.symbol),
-    compact ? 'SPY' : 'BTCUSD'
+    defaultSymbol ?? latestSignal?.symbol ?? 'BTCUSD',
+    'BTCUSD'
   )
   const initialTimeframe = normalizeDefaultTimeframe(defaultTimeframe ?? latestSignal?.timeframe, '1m')
   const initialCandleMode = candleModeOptions.includes(defaultCandleMode) ? defaultCandleMode : 'Heikin Ashi'
@@ -757,21 +759,21 @@ export default function EChartsCandlestickChart({
 
   useEffect(() => {
     const nextSymbol = normalizeDefaultSymbol(
-      defaultSymbol ?? (compact ? symbol : latestSignal?.symbol),
-      compact ? symbol : 'BTCUSD'
+      defaultSymbol ?? latestSignal?.symbol ?? symbol,
+      symbol || 'BTCUSD'
     )
 
     if (nextSymbol && nextSymbol !== symbol) setSymbol(nextSymbol)
-  }, [defaultSymbol, latestSignal?.symbol])
+  }, [defaultSymbol, latestSignal?.symbol, symbol])
 
   useEffect(() => {
     const nextTimeframe = normalizeDefaultTimeframe(
-      defaultTimeframe ?? (compact ? timeframe : latestSignal?.timeframe),
+      defaultTimeframe ?? latestSignal?.timeframe ?? timeframe,
       timeframe || '1m'
     )
 
     if (nextTimeframe && nextTimeframe !== timeframe) setTimeframe(nextTimeframe)
-  }, [defaultTimeframe, latestSignal?.timeframe])
+  }, [defaultTimeframe, latestSignal?.timeframe, timeframe])
 
   useEffect(() => {
     // Always fetch history now. Compact charts use the same Render/InsightSentry feed as the main chart.
@@ -871,21 +873,33 @@ export default function EChartsCandlestickChart({
             ? 'Candle Error'
             : 'Ready'
 
+  const showControlBar = !compact || showCompactControls
+
   return (
     <div className={`flex ${heightClass} w-full flex-col overflow-hidden rounded-2xl border border-dark-700 bg-[#0f1115]`}>
-      {!compact && (
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-dark-700 px-4 py-3">
-          <div className="flex flex-wrap items-center gap-3">
+      {showControlBar && (
+        <div
+          className={`flex flex-wrap items-center justify-between gap-2 border-b border-dark-700 ${
+            compact ? 'px-2 py-2' : 'px-4 py-3'
+          }`}
+        >
+          <div className="flex flex-wrap items-center gap-2">
             <div className="rounded-full bg-orange-500 px-2 py-1 text-xs font-bold text-white">
               ₿
             </div>
 
-            {chartTitle && <span className="text-xs font-semibold text-gray-300">{chartTitle}</span>}
+            {(chartTitle || compact) && (
+              <span className={`${compact ? 'text-[10px]' : 'text-xs'} font-semibold text-gray-300`}>
+                {chartTitle || 'Mini Chart'}
+              </span>
+            )}
 
             <select
               value={symbol}
               onChange={(event) => setSymbol(normalizeDefaultSymbol(event.target.value, symbol))}
-              className="rounded-md border border-dark-700 bg-[#151922] px-3 py-1.5 text-sm text-gray-100 outline-none"
+              className={`rounded-md border border-dark-700 bg-[#151922] text-gray-100 outline-none ${
+                compact ? 'px-2 py-1 text-[10px]' : 'px-3 py-1.5 text-sm'
+              }`}
             >
               {symbolOptions.map((item) => (
                 <option key={item} value={item}>
@@ -897,7 +911,9 @@ export default function EChartsCandlestickChart({
             <select
               value={timeframe}
               onChange={(event) => setTimeframe(normalizeDefaultTimeframe(event.target.value, timeframe))}
-              className="rounded-md border border-dark-700 bg-[#151922] px-3 py-1.5 text-sm text-gray-100 outline-none"
+              className={`rounded-md border border-dark-700 bg-[#151922] text-gray-100 outline-none ${
+                compact ? 'px-2 py-1 text-[10px]' : 'px-3 py-1.5 text-sm'
+              }`}
             >
               {timeframeOptions.map((tf) => (
                 <option key={tf} value={tf}>
@@ -909,7 +925,9 @@ export default function EChartsCandlestickChart({
             <select
               value={candleMode}
               onChange={(event) => setCandleMode(event.target.value as CandleMode)}
-              className="rounded-md border border-dark-700 bg-[#151922] px-3 py-1.5 text-sm text-gray-100 outline-none"
+              className={`rounded-md border border-dark-700 bg-[#151922] text-gray-100 outline-none ${
+                compact ? 'px-2 py-1 text-[10px]' : 'px-3 py-1.5 text-sm'
+              }`}
             >
               {candleModeOptions.map((mode) => (
                 <option key={mode} value={mode}>
@@ -920,13 +938,19 @@ export default function EChartsCandlestickChart({
           </div>
 
           <div className="flex items-center gap-2">
-            <div className={`rounded-full border px-3 py-1 text-sm ${status === 'loaded' ? 'border-emerald-500/50 text-emerald-400' : 'border-yellow-500/50 text-yellow-400'}`}>
+            <div
+              className={`rounded-full border ${
+                compact ? 'px-2 py-0.5 text-[10px]' : 'px-3 py-1 text-sm'
+              } ${status === 'loaded' ? 'border-emerald-500/50 text-emerald-400' : 'border-yellow-500/50 text-yellow-400'}`}
+            >
               {statusBadge}
             </div>
 
-            <div className="rounded-full border border-slate-500/50 px-3 py-1 text-sm text-slate-300">
-              Basic Chart Reset
-            </div>
+            {!compact && (
+              <div className="rounded-full border border-slate-500/50 px-3 py-1 text-sm text-slate-300">
+                Basic Chart Reset
+              </div>
+            )}
           </div>
         </div>
       )}
