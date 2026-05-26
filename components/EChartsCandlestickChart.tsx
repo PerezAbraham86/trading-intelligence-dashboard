@@ -53,18 +53,6 @@ const timeframeOptions = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1D'
 const candleModeOptions: CandleMode[] = ['Regular', 'Heikin Ashi']
 const symbolOptions = ['BTCUSD', 'ETHUSD', 'SPY', 'ES1!', 'MES1!']
 
-function shouldCompactPreferLiveSymbol(compact: boolean, defaultSymbol: any, latestSignal: any): boolean {
-  if (!compact || !latestSignal?.symbol) return false
-
-  const normalizedDefault = normalizeDefaultSymbol(defaultSymbol, '')
-  const normalizedLive = normalizeDefaultSymbol(latestSignal.symbol, '')
-
-  // The old dashboard used SPY as the left mini-chart placeholder.
-  // For compact mini charts, treat missing/SPY default as a placeholder and follow the live/main symbol first.
-  // If the parent explicitly passes ES1!, MES1!, BTCUSD, or ETHUSD, keep that explicit choice.
-  return Boolean(normalizedLive) && (!normalizedDefault || normalizedDefault === 'SPY')
-}
-
 function normalizeSymbol(value: any): string {
   return String(value ?? '')
     .trim()
@@ -394,8 +382,8 @@ function getApiSymbolCandidates(symbol: string): string[] {
 
 async function fetchCandles(symbol: string, timeframe: string, limit: string): Promise<Candle[]> {
   const endpoints = [
-    '/api/candles',
     '/api/historical-candles',
+    '/api/candles',
     '/api/recent-candles',
     '/api/live-candle',
     '/api/provider-debug',
@@ -745,19 +733,13 @@ export default function EChartsCandlestickChart({
   const chartInstance = useRef<echarts.ECharts | null>(null)
 
   // IMPORTANT:
-  // Use latestSignal/default props only for the FIRST load.
-  // After the user changes symbol/timeframe/candle type, do not let parent
-  // dashboard refreshes or main-chart changes snap this chart back to default.
+  // Use default props/latestSignal only for the FIRST render.
+  // After mount, each chart instance is separate and will not follow main-chart changes.
   const initialSymbol = normalizeDefaultSymbol(
-    shouldCompactPreferLiveSymbol(compact, defaultSymbol, latestSignal)
-      ? latestSignal?.symbol
-      : defaultSymbol ?? latestSignal?.symbol ?? 'BTCUSD',
+    defaultSymbol ?? latestSignal?.symbol ?? 'BTCUSD',
     'BTCUSD'
   )
-  const initialTimeframe = normalizeDefaultTimeframe(
-    compact && latestSignal?.timeframe ? latestSignal?.timeframe : defaultTimeframe ?? latestSignal?.timeframe,
-    '1m'
-  )
+  const initialTimeframe = normalizeDefaultTimeframe(defaultTimeframe ?? latestSignal?.timeframe, '1m')
   const initialCandleMode = candleModeOptions.includes(defaultCandleMode) ? defaultCandleMode : 'Heikin Ashi'
 
   const [symbol, setSymbol] = useState(() => initialSymbol)
@@ -766,27 +748,17 @@ export default function EChartsCandlestickChart({
   const [historicalCandles, setHistoricalCandles] = useState<Candle[]>([])
   const [status, setStatus] = useState<'idle' | 'loading' | 'loaded' | 'empty' | 'error'>('idle')
 
-  const userChangedSymbolRef = useRef(false)
-  const userChangedTimeframeRef = useRef(false)
-  const userChangedCandleModeRef = useRef(false)
-  const lastDefaultSymbolRef = useRef(defaultSymbol)
-  const lastDefaultTimeframeRef = useRef(defaultTimeframe)
-  const lastDefaultCandleModeRef = useRef(defaultCandleMode)
-
   const candleFetchLimit = compact ? '500' : '1500'
 
   const handleSymbolChange = (value: string) => {
-    userChangedSymbolRef.current = true
     setSymbol(normalizeDefaultSymbol(value, symbol))
   }
 
   const handleTimeframeChange = (value: string) => {
-    userChangedTimeframeRef.current = true
     setTimeframe(normalizeDefaultTimeframe(value, timeframe))
   }
 
   const handleCandleModeChange = (value: string) => {
-    userChangedCandleModeRef.current = true
     setCandleMode(value as CandleMode)
   }
 
@@ -800,51 +772,11 @@ export default function EChartsCandlestickChart({
     })
   }, [symbol, timeframe, candleMode, compact, chartTitle, onChartSelectionChange])
 
-  // Only follow an explicit defaultSymbol prop change until the user manually edits this chart.
-  // Do NOT follow latestSignal changes here; that was causing symbol snap-back/glitching.
-  useEffect(() => {
-    if (defaultSymbol === lastDefaultSymbolRef.current) return
-    lastDefaultSymbolRef.current = defaultSymbol
-    if (userChangedSymbolRef.current || !defaultSymbol) return
-
-    const nextSymbol = normalizeDefaultSymbol(defaultSymbol, symbol)
-    if (nextSymbol && nextSymbol !== symbol) setSymbol(nextSymbol)
-  }, [defaultSymbol, symbol])
-
-  // Compact mini-chart safety:
-  // If the parent left mini chart still passes defaultSymbol="SPY", but the dashboard live symbol is MES1!/ES1!,
-  // follow the live symbol until the user manually changes this mini chart.
-  useEffect(() => {
-    if (!compact || userChangedSymbolRef.current) return
-    if (!shouldCompactPreferLiveSymbol(compact, defaultSymbol, latestSignal)) return
-
-    const nextSymbol = normalizeDefaultSymbol(latestSignal?.symbol, symbol)
-    if (nextSymbol && nextSymbol !== symbol) setSymbol(nextSymbol)
-  }, [compact, defaultSymbol, latestSignal?.symbol, symbol])
-
-  useEffect(() => {
-    if (!compact || userChangedTimeframeRef.current) return
-    if (!latestSignal?.timeframe) return
-
-    const nextTimeframe = normalizeDefaultTimeframe(latestSignal.timeframe, timeframe || '1m')
-    if (nextTimeframe && nextTimeframe !== timeframe) setTimeframe(nextTimeframe)
-  }, [compact, latestSignal?.timeframe, timeframe])
-
-  useEffect(() => {
-    if (defaultTimeframe === lastDefaultTimeframeRef.current) return
-    lastDefaultTimeframeRef.current = defaultTimeframe
-    if (userChangedTimeframeRef.current || !defaultTimeframe) return
-
-    const nextTimeframe = normalizeDefaultTimeframe(defaultTimeframe, timeframe || '1m')
-    if (nextTimeframe && nextTimeframe !== timeframe) setTimeframe(nextTimeframe)
-  }, [defaultTimeframe, timeframe])
-
-  useEffect(() => {
-    if (defaultCandleMode === lastDefaultCandleModeRef.current) return
-    lastDefaultCandleModeRef.current = defaultCandleMode
-    if (userChangedCandleModeRef.current) return
-    if (candleModeOptions.includes(defaultCandleMode)) setCandleMode(defaultCandleMode)
-  }, [defaultCandleMode])
+  // IMPORTANT:
+  // This component is intentionally self-contained after first render.
+  // It does NOT sync again from defaultSymbol/defaultTimeframe/defaultCandleMode/latestSignal.
+  // That prevents mini charts from changing when the main chart symbol changes.
+  // To reset a chart from the parent, remount it with a different React key on purpose.
 
   useEffect(() => {
     // Always fetch history now. Compact charts use the same Render/InsightSentry feed as the main chart.
