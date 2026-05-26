@@ -14,11 +14,15 @@ const BG = '#0f1115'
 
 type Candle = {
   time: string
+  epoch?: number
   open: number
   high: number
   low: number
   close: number
   volume?: number
+  symbol?: string
+  timeframe?: string
+  provider?: string
 }
 
 type CandleMode = 'Regular' | 'Heikin Ashi'
@@ -114,6 +118,24 @@ function toNumber(value: any): number | null {
   return Number.isFinite(parsed) ? parsed : null
 }
 
+function toEpochSeconds(value: any): number | undefined {
+  if (value === null || value === undefined || value === '') return undefined
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.floor(value > 1000000000000 ? value / 1000 : value)
+  }
+
+  const numeric = Number(value)
+  if (Number.isFinite(numeric)) {
+    return Math.floor(numeric > 1000000000000 ? numeric / 1000 : numeric)
+  }
+
+  const parsed = Date.parse(String(value))
+  if (Number.isFinite(parsed)) return Math.floor(parsed / 1000)
+
+  return undefined
+}
+
 function formatAxisTime(value: any, fallbackIndex: number): string {
   if (typeof value === 'string' && value.length > 0) return value
 
@@ -158,6 +180,7 @@ function candleFromAny(raw: any, index: number): Candle | null {
 
     return {
       time: formatAxisTime(time, index),
+      epoch: toEpochSeconds(time),
       open,
       high,
       low,
@@ -194,18 +217,22 @@ function candleFromAny(raw: any, index: number): Candle | null {
 
   if (open === null || high === null || low === null || close === null) return null
 
+  const rawTime =
+    raw?.epoch ??
+    raw?.time ??
+    raw?.timestamp ??
+    raw?.createdAt ??
+    raw?.t ??
+    raw?.T ??
+    raw?.date ??
+    raw?.datetime ??
+    raw?.Timestamp
+
+  const formattedTime = formatAxisTime(rawTime, index)
+
   return {
-    time: formatAxisTime(
-      raw?.time ??
-        raw?.timestamp ??
-        raw?.createdAt ??
-        raw?.t ??
-        raw?.T ??
-        raw?.date ??
-        raw?.datetime ??
-        raw?.Timestamp,
-      index
-    ),
+    time: formattedTime,
+    epoch: toEpochSeconds(raw?.epoch ?? rawTime ?? formattedTime),
     open,
     high,
     low,
@@ -215,12 +242,18 @@ function candleFromAny(raw: any, index: number): Candle | null {
       toNumber(raw?.v) ??
       toNumber(raw?.Volume) ??
       undefined,
+    symbol: raw?.symbol ?? raw?.ticker ?? raw?.S ?? raw?.s,
+    timeframe: raw?.timeframe ?? raw?.tf ?? raw?.interval,
+    provider: raw?.provider,
   }
 }
 
 function extractCandleArray(payload: any): any[] {
   if (Array.isArray(payload)) return payload
   if (!payload || typeof payload !== 'object') return []
+
+  if (payload.candle && typeof payload.candle === 'object') return [payload.candle]
+  if (payload.latest && typeof payload.latest === 'object') return [payload.latest]
 
   const directKeys = ['candles', 'bars', 'data', 'items', 'results', 'historicalCandles']
 
@@ -232,6 +265,9 @@ function extractCandleArray(payload: any): any[] {
 
   for (const nested of nestedSources) {
     if (!nested || typeof nested !== 'object') continue
+
+    if (nested.candle && typeof nested.candle === 'object') return [nested.candle]
+    if (nested.latest && typeof nested.latest === 'object') return [nested.latest]
 
     for (const key of directKeys) {
       if (Array.isArray(nested[key])) return nested[key]
@@ -245,16 +281,31 @@ function mergeCandlesByTime(candles: Candle[]): Candle[] {
   const merged = new Map<string, Candle>()
 
   for (const candle of candles) {
-    merged.set(candle.time, candle)
+    if (!candle) continue
+
+    const epoch = candle.epoch ?? toEpochSeconds(candle.time)
+    const open = toNumber(candle.open)
+    const high = toNumber(candle.high)
+    const low = toNumber(candle.low)
+    const close = toNumber(candle.close)
+
+    if (epoch === undefined || open === null || high === null || low === null || close === null) continue
+
+    merged.set(String(epoch), {
+      ...candle,
+      time: candle.time || new Date(epoch * 1000).toISOString(),
+      epoch,
+      open,
+      high,
+      low,
+      close,
+    })
   }
 
   return Array.from(merged.values()).sort((a, b) => {
-    const aTime = Date.parse(a.time)
-    const bTime = Date.parse(b.time)
-
-    if (Number.isFinite(aTime) && Number.isFinite(bTime)) return aTime - bTime
-
-    return a.time.localeCompare(b.time)
+    const aEpoch = a.epoch ?? toEpochSeconds(a.time) ?? 0
+    const bEpoch = b.epoch ?? toEpochSeconds(b.time) ?? 0
+    return aEpoch - bEpoch
   })
 }
 
@@ -275,11 +326,15 @@ function convertToHeikinAshi(candles: Candle[]): Candle[] {
 
     haCandles.push({
       time: candle.time,
+      epoch: candle.epoch,
       open: haOpen,
       high: haHigh,
       low: haLow,
       close: haClose,
       volume: candle.volume,
+      symbol: candle.symbol,
+      timeframe: candle.timeframe,
+      provider: candle.provider,
     })
   }
 
@@ -329,14 +384,15 @@ async function fetchCandles(symbol: string, timeframe: string, limit: string): P
     '/api/historical-candles',
     '/api/candles',
     '/api/recent-candles',
-    '/api/live-candles',
+    '/api/live-candle',
+    '/api/provider-debug',
   ]
 
   for (const path of endpoints) {
     for (const candidate of getApiSymbolCandidates(symbol)) {
       const params = new URLSearchParams({
         symbol: candidate,
-        timeframe,
+        timeframe: normalizeTimeframe(timeframe),
         limit,
       })
 
@@ -718,7 +774,9 @@ export default function EChartsCandlestickChart({
   }, [defaultTimeframe, latestSignal?.timeframe])
 
   useEffect(() => {
-    if (compact && !allowCompactHistory) return
+    // Always fetch history now. Compact charts use the same Render/InsightSentry feed as the main chart.
+    // This prevents mini charts from showing 'No candles loaded' when ES1!/MES1! are selected.
+    void allowCompactHistory
 
     let cancelled = false
 
