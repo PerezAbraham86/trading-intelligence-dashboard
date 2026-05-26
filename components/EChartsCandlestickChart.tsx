@@ -53,6 +53,18 @@ const timeframeOptions = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1D'
 const candleModeOptions: CandleMode[] = ['Regular', 'Heikin Ashi']
 const symbolOptions = ['BTCUSD', 'ETHUSD', 'SPY', 'ES1!', 'MES1!']
 
+function shouldCompactPreferLiveSymbol(compact: boolean, defaultSymbol: any, latestSignal: any): boolean {
+  if (!compact || !latestSignal?.symbol) return false
+
+  const normalizedDefault = normalizeDefaultSymbol(defaultSymbol, '')
+  const normalizedLive = normalizeDefaultSymbol(latestSignal.symbol, '')
+
+  // The old dashboard used SPY as the left mini-chart placeholder.
+  // For compact mini charts, treat missing/SPY default as a placeholder and follow the live/main symbol first.
+  // If the parent explicitly passes ES1!, MES1!, BTCUSD, or ETHUSD, keep that explicit choice.
+  return Boolean(normalizedLive) && (!normalizedDefault || normalizedDefault === 'SPY')
+}
+
 function normalizeSymbol(value: any): string {
   return String(value ?? '')
     .trim()
@@ -382,8 +394,8 @@ function getApiSymbolCandidates(symbol: string): string[] {
 
 async function fetchCandles(symbol: string, timeframe: string, limit: string): Promise<Candle[]> {
   const endpoints = [
-    '/api/historical-candles',
     '/api/candles',
+    '/api/historical-candles',
     '/api/recent-candles',
     '/api/live-candle',
     '/api/provider-debug',
@@ -737,10 +749,15 @@ export default function EChartsCandlestickChart({
   // After the user changes symbol/timeframe/candle type, do not let parent
   // dashboard refreshes or main-chart changes snap this chart back to default.
   const initialSymbol = normalizeDefaultSymbol(
-    defaultSymbol ?? latestSignal?.symbol ?? 'BTCUSD',
+    shouldCompactPreferLiveSymbol(compact, defaultSymbol, latestSignal)
+      ? latestSignal?.symbol
+      : defaultSymbol ?? latestSignal?.symbol ?? 'BTCUSD',
     'BTCUSD'
   )
-  const initialTimeframe = normalizeDefaultTimeframe(defaultTimeframe ?? latestSignal?.timeframe, '1m')
+  const initialTimeframe = normalizeDefaultTimeframe(
+    compact && latestSignal?.timeframe ? latestSignal?.timeframe : defaultTimeframe ?? latestSignal?.timeframe,
+    '1m'
+  )
   const initialCandleMode = candleModeOptions.includes(defaultCandleMode) ? defaultCandleMode : 'Heikin Ashi'
 
   const [symbol, setSymbol] = useState(() => initialSymbol)
@@ -793,6 +810,25 @@ export default function EChartsCandlestickChart({
     const nextSymbol = normalizeDefaultSymbol(defaultSymbol, symbol)
     if (nextSymbol && nextSymbol !== symbol) setSymbol(nextSymbol)
   }, [defaultSymbol, symbol])
+
+  // Compact mini-chart safety:
+  // If the parent left mini chart still passes defaultSymbol="SPY", but the dashboard live symbol is MES1!/ES1!,
+  // follow the live symbol until the user manually changes this mini chart.
+  useEffect(() => {
+    if (!compact || userChangedSymbolRef.current) return
+    if (!shouldCompactPreferLiveSymbol(compact, defaultSymbol, latestSignal)) return
+
+    const nextSymbol = normalizeDefaultSymbol(latestSignal?.symbol, symbol)
+    if (nextSymbol && nextSymbol !== symbol) setSymbol(nextSymbol)
+  }, [compact, defaultSymbol, latestSignal?.symbol, symbol])
+
+  useEffect(() => {
+    if (!compact || userChangedTimeframeRef.current) return
+    if (!latestSignal?.timeframe) return
+
+    const nextTimeframe = normalizeDefaultTimeframe(latestSignal.timeframe, timeframe || '1m')
+    if (nextTimeframe && nextTimeframe !== timeframe) setTimeframe(nextTimeframe)
+  }, [compact, latestSignal?.timeframe, timeframe])
 
   useEffect(() => {
     if (defaultTimeframe === lastDefaultTimeframeRef.current) return
