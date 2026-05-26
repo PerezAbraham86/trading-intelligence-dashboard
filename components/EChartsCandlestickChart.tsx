@@ -1075,18 +1075,18 @@ function buildChartOption({
       candle.low,
       candle.high,
     ]),
-    ...Array.from({ length: ghostSlots.length + profileSlots.length }, () => '-'),
+    ...Array.from({ length: ghostSlots.length + profileSlots.length }, () => []),
   ]
 
   const ghostData = [
-    ...Array.from({ length: activeCandles.length }, () => '-'),
+    ...Array.from({ length: activeCandles.length }, () => []),
     ...visibleGhosts.map((ghost) => [
       ghost.open,
       ghost.close,
       ghost.low,
       ghost.high,
     ]),
-    ...Array.from({ length: profileSlots.length }, () => '-'),
+    ...Array.from({ length: profileSlots.length }, () => []),
   ]
 
   const volumeData = [
@@ -1114,7 +1114,7 @@ function buildChartOption({
     activeCandles[activeCandles.length - 1]?.provider ??
     (isFuturesSymbol(symbol) ? 'InsightSentry' : 'Alpaca')
 
-  return {
+  const option: any = {
     backgroundColor: BG,
     animation: false,
     grid: compact
@@ -1363,6 +1363,8 @@ function buildChartOption({
           ...profileSeries,
         ],
   }
+
+  return option as echarts.EChartsOption
 }
 
 export default function EChartsCandlestickChart({
@@ -1703,7 +1705,7 @@ export default function EChartsCandlestickChart({
             </div>
 
             <div className="rounded-full border border-slate-500/50 px-3 py-1 text-sm text-slate-300">
-              Chart v3AS
+              Chart v3AT
             </div>
           </div>
         </div>
