@@ -1,6 +1,5 @@
 'use client'
 
-import Link from 'next/link'
 import { useState, useEffect, useMemo } from 'react'
 import SignalCard from '@/components/SignalCard'
 import EChartsCandlestickChart from '@/components/EChartsCandlestickChart'
@@ -399,35 +398,35 @@ export default function Dashboard() {
                 className="rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 font-semibold text-amber-300 hover:bg-amber-400 hover:text-black"
               >
                 Membership
-              </Link>
+              </a>
 
               <Link
                 href="/indicators"
                 className="rounded-lg border border-dark-600 bg-dark-800 px-3 py-2 font-semibold text-gray-300 hover:border-amber-400/50 hover:text-amber-300"
               >
                 Indicators
-              </Link>
+              </a>
 
               <Link
                 href="/academy"
                 className="rounded-lg border border-dark-600 bg-dark-800 px-3 py-2 font-semibold text-gray-300 hover:border-amber-400/50 hover:text-amber-300"
               >
                 Academy
-              </Link>
+              </a>
 
               <Link
                 href="/shop"
                 className="rounded-lg border border-dark-600 bg-dark-800 px-3 py-2 font-semibold text-gray-300 hover:border-amber-400/50 hover:text-amber-300"
               >
                 Shop
-              </Link>
+              </a>
 
               <Link
                 href="/trading-room"
                 className="rounded-lg border border-dark-600 bg-dark-800 px-3 py-2 font-semibold text-gray-300 hover:border-amber-400/50 hover:text-amber-300"
               >
                 Trading Room
-              </Link>
+              </a>
             </div>
 
             <h1 className="text-4xl font-bold gradient-text">
