@@ -1,5 +1,6 @@
 'use client'
 
+import Link from 'next/link'
 import { useState, useEffect, useMemo } from 'react'
 import SignalCard from '@/components/SignalCard'
 import EChartsCandlestickChart from '@/components/EChartsCandlestickChart'
@@ -390,21 +391,60 @@ export default function Dashboard() {
         transition={{ duration: 0.5 }}
         className="mb-8"
       >
-        <div className="mb-2 flex items-center justify-between">
-          <h1 className="text-4xl font-bold gradient-text">
-            TRADING DASHBOARD
-          </h1>
+        <div className="mb-4 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+          <div>
+            <div className="mb-3 flex flex-wrap items-center gap-3 text-sm">
+              <Link
+                href="/membership"
+                className="rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 font-semibold text-amber-300 hover:bg-amber-400 hover:text-black"
+              >
+                Membership
+              </Link>
+
+              <Link
+                href="/indicators"
+                className="rounded-lg border border-dark-600 bg-dark-800 px-3 py-2 font-semibold text-gray-300 hover:border-amber-400/50 hover:text-amber-300"
+              >
+                Indicators
+              </Link>
+
+              <Link
+                href="/academy"
+                className="rounded-lg border border-dark-600 bg-dark-800 px-3 py-2 font-semibold text-gray-300 hover:border-amber-400/50 hover:text-amber-300"
+              >
+                Academy
+              </Link>
+
+              <Link
+                href="/shop"
+                className="rounded-lg border border-dark-600 bg-dark-800 px-3 py-2 font-semibold text-gray-300 hover:border-amber-400/50 hover:text-amber-300"
+              >
+                Shop
+              </Link>
+
+              <Link
+                href="/trading-room"
+                className="rounded-lg border border-dark-600 bg-dark-800 px-3 py-2 font-semibold text-gray-300 hover:border-amber-400/50 hover:text-amber-300"
+              >
+                Trading Room
+              </Link>
+            </div>
+
+            <h1 className="text-4xl font-bold gradient-text">
+              MARKETBOS ALGO DASHBOARD
+            </h1>
+
+            <p className="mt-2 text-sm text-gray-400">
+              Real-time trading signals and analysis • {selectedSymbol} •{' '}
+              {selectedTimeframe} timeframe
+            </p>
+          </div>
 
           <ConnectionStatusBadge
             status={connectionStatus}
             lastUpdateTime={lastUpdateTime}
           />
         </div>
-
-        <p className="text-sm text-gray-400">
-          Real-time trading signals and analysis • {selectedSymbol} •{' '}
-          {selectedTimeframe} timeframe
-        </p>
       </motion.div>
 
       {/* Main Grid */}
