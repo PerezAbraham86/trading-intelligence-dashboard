@@ -393,35 +393,35 @@ export default function Dashboard() {
         <div className="mb-4 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
           <div>
             <div className="mb-3 flex flex-wrap items-center gap-3 text-sm">
-              <Link
+              <a
                 href="/membership"
                 className="rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 font-semibold text-amber-300 hover:bg-amber-400 hover:text-black"
               >
                 Membership
               </a>
 
-              <Link
+              <a
                 href="/indicators"
                 className="rounded-lg border border-dark-600 bg-dark-800 px-3 py-2 font-semibold text-gray-300 hover:border-amber-400/50 hover:text-amber-300"
               >
                 Indicators
               </a>
 
-              <Link
+              <a
                 href="/academy"
                 className="rounded-lg border border-dark-600 bg-dark-800 px-3 py-2 font-semibold text-gray-300 hover:border-amber-400/50 hover:text-amber-300"
               >
                 Academy
               </a>
 
-              <Link
+              <a
                 href="/shop"
                 className="rounded-lg border border-dark-600 bg-dark-800 px-3 py-2 font-semibold text-gray-300 hover:border-amber-400/50 hover:text-amber-300"
               >
                 Shop
               </a>
 
-              <Link
+              <a
                 href="/trading-room"
                 className="rounded-lg border border-dark-600 bg-dark-800 px-3 py-2 font-semibold text-gray-300 hover:border-amber-400/50 hover:text-amber-300"
               >
