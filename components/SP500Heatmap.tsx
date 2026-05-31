@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 
 type HeatmapStock = {
@@ -28,6 +28,7 @@ type HeatmapPayload = {
   source?: string
   note?: string
   isLiveSnapshot?: boolean
+  cache?: string
   createdAt?: string
   count?: number
   sectorCount?: number
@@ -41,6 +42,10 @@ type HeatmapPayload = {
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ||
   'https://trading-intelligence-dashboard.onrender.com'
+
+const HEATMAP_CACHE_KEY = 'marketbos:sp500-heatmap-cache:v2'
+const HEATMAP_CACHE_TTL_MS = 1000 * 60 * 10
+const HEATMAP_REFRESH_MS = 1000 * 60 * 3
 
 function formatPct(value: number | undefined) {
   const number = Number(value ?? 0)
@@ -90,22 +95,134 @@ function textColor(changePercent: number | undefined) {
   return 'text-gray-300'
 }
 
+function isValidHeatmapPayload(value: unknown): value is HeatmapPayload {
+  if (!value || typeof value !== 'object') return false
+  const data = value as HeatmapPayload
+  return Array.isArray(data.sectors) && data.sectors.length > 0
+}
+
+function readCachedHeatmap() {
+  if (typeof window === 'undefined') return null
+
+  try {
+    const raw = window.localStorage.getItem(HEATMAP_CACHE_KEY)
+    if (!raw) return null
+
+    const parsed = JSON.parse(raw)
+    const payload = parsed?.payload
+    const savedAt = Number(parsed?.savedAt ?? 0)
+
+    if (!isValidHeatmapPayload(payload)) return null
+
+    return {
+      payload: payload as HeatmapPayload,
+      savedAt,
+      isFresh: Date.now() - savedAt <= HEATMAP_CACHE_TTL_MS,
+    }
+  } catch {
+    return null
+  }
+}
+
+function saveCachedHeatmap(payload: HeatmapPayload) {
+  if (typeof window === 'undefined') return
+  if (!isValidHeatmapPayload(payload)) return
+
+  try {
+    window.localStorage.setItem(
+      HEATMAP_CACHE_KEY,
+      JSON.stringify({
+        payload,
+        savedAt: Date.now(),
+      })
+    )
+  } catch {
+    // Ignore localStorage quota/private-mode failures.
+  }
+}
+
 export default function SP500Heatmap() {
-  const [data, setData] = useState<HeatmapPayload | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const [data, setData] = useState<HeatmapPayload | null>(() => {
+    const cached = readCachedHeatmap()
+    return cached?.payload ?? null
+  })
+  const [hasMounted, setHasMounted] = useState(false)
+  const [isVisible, setIsVisible] = useState(false)
+  const [isRefreshing, setIsRefreshing] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
+    setHasMounted(true)
+
+    const cached = readCachedHeatmap()
+    if (cached?.payload) {
+      setData(cached.payload)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!hasMounted) return
+    if (!rootRef.current) return
+
+    const current = rootRef.current
+
+    if (!('IntersectionObserver' in window)) {
+      setIsVisible(true)
+      return
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setIsVisible(true)
+          observer.disconnect()
+        }
+      },
+      {
+        root: null,
+        rootMargin: '420px',
+        threshold: 0.01,
+      }
+    )
+
+    observer.observe(current)
+
+    return () => {
+      observer.disconnect()
+    }
+  }, [hasMounted])
+
+  useEffect(() => {
+    if (!hasMounted || !isVisible) return
+
+    const cached = readCachedHeatmap()
+    if (cached?.payload) {
+      setData(cached.payload)
+    }
+
     let cancelled = false
     let intervalId: ReturnType<typeof setInterval> | null = null
 
-    async function fetchHeatmap() {
+    async function fetchHeatmap(force = false) {
+      const cachedNow = readCachedHeatmap()
+
+      if (!force && cachedNow?.payload && cachedNow.isFresh) {
+        setData(cachedNow.payload)
+        setError('')
+        return
+      }
+
       try {
+        setIsRefreshing(true)
         setError('')
 
-        const response = await fetch(`${API_BASE_URL}/api/sp500-heatmap`, {
-          cache: 'no-store',
-        })
+        const response = await fetch(
+          `${API_BASE_URL}/api/sp500-heatmap${force ? '?force=true' : ''}`,
+          {
+            cache: 'no-store',
+          }
+        )
 
         if (!response.ok) {
           throw new Error(`Heatmap request failed: ${response.status}`)
@@ -113,34 +230,54 @@ export default function SP500Heatmap() {
 
         const json = await response.json()
 
-        if (!cancelled) {
-          setData(json && typeof json === 'object' ? json : null)
-          setIsLoading(false)
+        if (!cancelled && isValidHeatmapPayload(json)) {
+          setData(json)
+          saveCachedHeatmap(json)
+          setError('')
         }
       } catch (err) {
         console.error('S&P 500 heatmap fetch error:', err)
+
         if (!cancelled) {
-          setError('Heatmap unavailable')
-          setIsLoading(false)
+          const stale = readCachedHeatmap()
+          if (stale?.payload) {
+            setData(stale.payload)
+            setError('')
+          } else {
+            setError('Heatmap unavailable')
+          }
+        }
+      } finally {
+        if (!cancelled) {
+          setIsRefreshing(false)
         }
       }
     }
 
-    fetchHeatmap()
-    intervalId = setInterval(fetchHeatmap, 60000)
+    // Stale-while-refresh behavior:
+    // show cached heatmap immediately, then refresh quietly in the background.
+    fetchHeatmap(false)
+    intervalId = setInterval(() => fetchHeatmap(false), HEATMAP_REFRESH_MS)
 
     return () => {
       cancelled = true
       if (intervalId) clearInterval(intervalId)
     }
-  }, [])
+  }, [hasMounted, isVisible])
 
   const sectors = useMemo(() => data?.sectors ?? [], [data])
   const overall = Number(data?.overallChangePercent ?? 0)
   const topSectors = sectors.slice(0, 7)
+  const hasData = topSectors.length > 0
+  const sourceLabel = data?.cache
+    ? `Cache: ${data.cache}`
+    : data?.source
+      ? 'Cached market snapshot'
+      : 'Waiting'
 
   return (
     <motion.div
+      ref={rootRef}
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.35 }}
@@ -150,7 +287,7 @@ export default function SP500Heatmap() {
         <div>
           <h2 className="text-lg font-bold text-white">S&amp;P 500 Heatmap</h2>
           <p className="text-xs text-gray-500">
-            Live snapshot • top weighted S&amp;P sectors
+            Lazy-loaded after chart candles • cached snapshot first
           </p>
         </div>
 
@@ -174,19 +311,19 @@ export default function SP500Heatmap() {
         </div>
       </div>
 
-      {isLoading && (
-        <div className="flex h-64 items-center justify-center rounded-lg border border-dark-700 bg-dark-900/40 text-sm text-gray-500">
-          Loading S&amp;P 500 heatmap...
+      {!hasData && !error && (
+        <div className="flex h-64 items-center justify-center rounded-lg border border-dark-700 bg-dark-900/40 text-center text-sm text-gray-500">
+          {isVisible ? 'Preparing cached S&P 500 heatmap...' : 'Heatmap waits until this card is near view'}
         </div>
       )}
 
-      {!isLoading && error && (
+      {!hasData && error && (
         <div className="flex h-64 items-center justify-center rounded-lg border border-red-400/30 bg-red-950/20 text-sm text-red-300">
           {error}
         </div>
       )}
 
-      {!isLoading && !error && (
+      {hasData && (
         <div className="max-h-[520px] space-y-2 overflow-hidden rounded-lg border border-dark-700 bg-dark-900/40 p-2">
           {topSectors.map((sector) => (
             <section key={sector.name} className="rounded-lg border border-dark-700/70 bg-dark-950/30 p-2">
@@ -225,8 +362,11 @@ export default function SP500Heatmap() {
       )}
 
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[10px] text-gray-500">
-        <span>{data?.count ?? 0} large S&amp;P names • {data?.sectorCount ?? 0} sectors</span>
-        <span>Source: Yahoo Finance quote snapshot</span>
+        <span>
+          {data?.count ?? 0} large S&amp;P names • {data?.sectorCount ?? 0} sectors
+          {isRefreshing ? ' • refreshing...' : ''}
+        </span>
+        <span>{sourceLabel}</span>
       </div>
     </motion.div>
   )
