@@ -19,6 +19,14 @@ type TradingSignal = {
   confidence?: number
   bullScore?: number
   bearScore?: number
+  smcStrength?: number
+  alphaxStrength?: number
+  ghostConfidence?: number
+  smcDirection?: string
+  alphaxDirection?: string
+  ghostDirection?: string
+  alphaxBullPressure?: number
+  alphaxBearPressure?: number
 }
 
 type TechnicalIndicator = {
@@ -63,6 +71,12 @@ type FactorRow = {
 function clamp(value: number) {
   if (!Number.isFinite(value)) return 0
   return Math.max(0, Math.min(100, Math.round(value)))
+}
+
+function factorStrength(value: unknown, fallback: number) {
+  const parsed = Number(value)
+  if (Number.isFinite(parsed) && parsed > 0) return clamp(parsed)
+  return clamp(fallback)
 }
 
 function isWaitingOrNeutral(value?: string) {
@@ -144,31 +158,35 @@ function buildCoreRows(signal?: TradingSignal): FactorRow[] {
   const bullScore = clamp(Number(signal?.bullScore ?? 50))
   const bearScore = clamp(Number(signal?.bearScore ?? 50))
 
-  const smcStatus = statusFromText(signal?.smc)
-  const alphaxStatus = statusFromText(signal?.alphax)
-  const ghostStatus = statusFromText(signal?.ghost)
+  const smcStatus = statusFromText(signal?.smc ?? signal?.smcDirection)
+  const alphaxStatus = statusFromText(signal?.alphax ?? signal?.alphaxDirection)
+  const ghostStatus = statusFromText(signal?.ghost ?? signal?.ghostDirection)
   const sessionStatus = statusFromText(signal?.session)
+
+  const smcStrength = factorStrength(signal?.smcStrength, Math.max(confidence, bullScore, bearScore))
+  const alphaxStrength = factorStrength(signal?.alphaxStrength, Math.max(signal?.alphaxBullPressure ?? 0, signal?.alphaxBearPressure ?? 0, bullScore, bearScore))
+  const ghostStrength = factorStrength(signal?.ghostConfidence, confidence)
 
   return [
     {
       factor: 'SMC Structure',
       status: smcStatus,
-      strength: smcStatus === 'inactive' ? 0 : Math.max(confidence, bullScore, bearScore),
+      strength: smcStatus === 'inactive' ? 0 : smcStrength,
     },
     {
       factor: 'AlphaX DLM',
       status: alphaxStatus,
-      strength: alphaxStatus === 'inactive' ? 0 : Math.max(bullScore, bearScore),
+      strength: alphaxStatus === 'inactive' ? 0 : alphaxStrength,
     },
     {
       factor: 'Python Ghost Candles',
       status: ghostStatus,
-      strength: ghostStatus === 'inactive' ? 0 : confidence,
+      strength: ghostStatus === 'inactive' ? 0 : ghostStrength,
     },
     {
       factor: 'Session',
       status: sessionStatus,
-      strength: sessionStatus === 'inactive' ? 0 : 85,
+      strength: sessionStatus === 'inactive' ? 0 : 55,
     },
   ]
 }
@@ -308,7 +326,7 @@ export default function FactorConfirmationTable({
       </div>
 
       <div className="mt-4 border-t border-dark-700 pt-3 text-xs text-gray-500">
-        Bull/Bear balance: {bullScore}% / {bearScore}% • Technical meter shown only under Market Sentiment
+        Bull/Bear balance: {bullScore}% / {bearScore}% • SMC + AlphaX + Ghost linked from Python chart engine
       </div>
     </motion.div>
   )
