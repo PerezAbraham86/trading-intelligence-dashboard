@@ -663,7 +663,7 @@ export default function MarketSentimentGauge({
   const gaugeStartAngle = 160
   const gaugeEndAngle = 20
   const needleAngle = gaugeStartAngle - (value / 100) * (gaugeStartAngle - gaugeEndAngle)
-  const needleEnd = polarToCartesian(150, 145, 83, needleAngle)
+  const needleEnd = polarToCartesian(160, 142, 78, needleAngle)
 
   return (
     <motion.div
@@ -685,12 +685,12 @@ export default function MarketSentimentGauge({
         </div>
       </div>
 
-      <div className="relative mx-auto h-56 w-full max-w-sm">
-        <svg viewBox="0 0 300 210" className="h-full w-full overflow-visible">
+      <div className="relative mx-auto h-[260px] w-full max-w-sm">
+        <svg viewBox="0 0 320 235" className="h-full w-full overflow-visible">
           <defs>
-            <linearGradient id="marketbos-sentiment-gradient" x1="45" y1="145" x2="255" y2="145" gradientUnits="userSpaceOnUse">
+            <linearGradient id="marketbos-sentiment-gradient" x1="45" y1="142" x2="275" y2="142" gradientUnits="userSpaceOnUse">
               <stop offset="0%" stopColor="#ff2d55" />
-              <stop offset="50%" stopColor="#444444" />
+              <stop offset="50%" stopColor="#3f3f46" />
               <stop offset="100%" stopColor="#3b82f6" />
             </linearGradient>
 
@@ -701,17 +701,17 @@ export default function MarketSentimentGauge({
 
           {/* Base arc */}
           <path
-            d="M 45 145 A 105 105 0 0 1 255 145"
+            d="M 45 142 A 115 115 0 0 1 275 142"
             fill="none"
-            stroke="rgba(255,255,255,0.14)"
+            stroke="rgba(255,255,255,0.15)"
             strokeWidth="7"
             strokeLinecap="butt"
             pathLength={100}
           />
 
-          {/* Colored sentiment progress arc, similar to the TradingView LuxAlgo visual */}
+          {/* Colored sentiment progress arc */}
           <path
-            d="M 45 145 A 105 105 0 0 1 255 145"
+            d="M 45 142 A 115 115 0 0 1 275 142"
             fill="none"
             stroke="url(#marketbos-sentiment-gradient)"
             strokeWidth="7"
@@ -721,25 +721,26 @@ export default function MarketSentimentGauge({
             className="transition-all duration-500"
           />
 
-          {/* Hard left/right end caps to match the angular TradingView look */}
-          <line x1="45" y1="145" x2="50" y2="121" stroke={value <= 40 ? '#ff2d55' : 'rgba(255,255,255,0.14)'} strokeWidth="7" strokeLinecap="butt" />
-          <line x1="255" y1="145" x2="250" y2="121" stroke={value > 60 ? '#3b82f6' : 'rgba(255,255,255,0.14)'} strokeWidth="7" strokeLinecap="butt" />
+          {/* Angular end caps like the TradingView gauge */}
+          <line x1="45" y1="142" x2="52" y2="113" stroke={value <= 40 ? '#ff2d55' : 'rgba(255,255,255,0.15)'} strokeWidth="7" strokeLinecap="butt" />
+          <line x1="275" y1="142" x2="268" y2="113" stroke={value > 60 ? '#3b82f6' : 'rgba(255,255,255,0.15)'} strokeWidth="7" strokeLinecap="butt" />
 
+          {/* Labels placed outside the arc so they do not overlap the gauge */}
           <text
-            x="32"
-            y="132"
+            x="42"
+            y="119"
             fill={isActiveGaugeLabel('Strong Bearish', value) ? '#ff2d55' : '#6b7280'}
             fontSize="11"
             textAnchor="middle"
             fontWeight={isActiveGaugeLabel('Strong Bearish', value) ? 700 : 600}
           >
-            <tspan x="32" dy="0">Strong</tspan>
-            <tspan x="32" dy="13">Bearish</tspan>
+            <tspan x="42" dy="0">Strong</tspan>
+            <tspan x="42" dy="13">Bearish</tspan>
           </text>
 
           <text
-            x="77"
-            y="58"
+            x="82"
+            y="48"
             fill={isActiveGaugeLabel('Bearish', value) ? '#ff2d55' : '#6b7280'}
             fontSize="11"
             textAnchor="middle"
@@ -749,8 +750,8 @@ export default function MarketSentimentGauge({
           </text>
 
           <text
-            x="150"
-            y="35"
+            x="160"
+            y="25"
             fill={isActiveGaugeLabel('Neutral', value) ? '#e5e7eb' : '#6b7280'}
             fontSize="11"
             textAnchor="middle"
@@ -760,8 +761,8 @@ export default function MarketSentimentGauge({
           </text>
 
           <text
-            x="223"
-            y="58"
+            x="238"
+            y="48"
             fill={isActiveGaugeLabel('Bullish', value) ? '#3b82f6' : '#6b7280'}
             fontSize="11"
             textAnchor="middle"
@@ -771,20 +772,20 @@ export default function MarketSentimentGauge({
           </text>
 
           <text
-            x="268"
-            y="132"
+            x="278"
+            y="119"
             fill={isActiveGaugeLabel('Strong Bullish', value) ? '#3b82f6' : '#6b7280'}
             fontSize="11"
             textAnchor="middle"
             fontWeight={isActiveGaugeLabel('Strong Bullish', value) ? 700 : 600}
           >
-            <tspan x="268" dy="0">Strong</tspan>
-            <tspan x="268" dy="13">Bullish</tspan>
+            <tspan x="278" dy="0">Strong</tspan>
+            <tspan x="278" dy="13">Bullish</tspan>
           </text>
 
           <line
-            x1="150"
-            y1="145"
+            x1="160"
+            y1="142"
             x2={needleEnd.x}
             y2={needleEnd.y}
             stroke="rgba(255,255,255,0.78)"
@@ -794,8 +795,8 @@ export default function MarketSentimentGauge({
             className="transition-all duration-500"
           />
           <line
-            x1="150"
-            y1="145"
+            x1="160"
+            y1="142"
             x2={needleEnd.x}
             y2={needleEnd.y}
             stroke="rgba(255,255,255,0.95)"
@@ -804,41 +805,45 @@ export default function MarketSentimentGauge({
             className="transition-all duration-500"
           />
 
-          <circle cx="150" cy="145" r="8" fill="rgba(255,255,255,0.86)" />
-          <circle cx="150" cy="145" r="3" fill="rgba(15,17,21,0.55)" />
-        </svg>
+          <circle cx="160" cy="142" r="8" fill="rgba(255,255,255,0.86)" />
+          <circle cx="160" cy="142" r="3" fill="rgba(15,17,21,0.55)" />
 
-        <div className="absolute inset-x-0 bottom-0 text-center">
-          <p className={`text-xl font-bold ${statusColor}`}>
+          {/* Status and counts are below the gauge, not on top of it */}
+          <text
+            x="160"
+            y="177"
+            className={statusColor}
+            fontSize="17"
+            textAnchor="middle"
+            fontWeight="800"
+          >
             {sentiment.sentimentStatus}
-          </p>
+          </text>
 
-          <div className="mx-auto mt-2 grid max-w-[250px] grid-cols-3 gap-5 text-center">
-            <div>
-              <p className="text-2xl font-bold text-red-400">
-                {sentiment.bearCount}
-              </p>
-              <p className="text-[10px] uppercase tracking-wide text-red-400">Bearish</p>
-            </div>
+          <text x="90" y="207" fill="#ff4d64" fontSize="24" textAnchor="middle" fontWeight="800">
+            {sentiment.bearCount}
+          </text>
+          <text x="90" y="224" fill="#ff4d64" fontSize="9" textAnchor="middle" fontWeight="700">
+            BEARISH
+          </text>
 
-            <div>
-              <p className="text-2xl font-bold text-gray-300">
-                {sentiment.neutralCount}
-              </p>
-              <p className="text-[10px] uppercase tracking-wide text-gray-400">Neutral</p>
-            </div>
+          <text x="160" y="207" fill="#d1d5db" fontSize="24" textAnchor="middle" fontWeight="800">
+            {sentiment.neutralCount}
+          </text>
+          <text x="160" y="224" fill="#9ca3af" fontSize="9" textAnchor="middle" fontWeight="700">
+            NEUTRAL
+          </text>
 
-            <div>
-              <p className="text-2xl font-bold text-blue-400">
-                {sentiment.bullCount}
-              </p>
-              <p className="text-[10px] uppercase tracking-wide text-blue-400">Bullish</p>
-            </div>
-          </div>
-        </div>
+          <text x="230" y="207" fill="#60a5fa" fontSize="24" textAnchor="middle" fontWeight="800">
+            {sentiment.bullCount}
+          </text>
+          <text x="230" y="224" fill="#60a5fa" fontSize="9" textAnchor="middle" fontWeight="700">
+            BULLISH
+          </text>
+        </svg>
       </div>
 
-      <p className="mt-4 text-center text-xs text-gray-500">
+      <p className="mt-2 text-center text-xs text-gray-500">
         Technical indicators: {technicalIndicators.length > 0
           ? technicalIndicators.length
           : sentiment.activeCount}
