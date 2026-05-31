@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
-const DEFAULT_VISIBLE_CANDLES = 120
+const DEFAULT_VISIBLE_CANDLES = 78
 const CACHE_TTL_MS = 1000 * 60 * 5
 const LOCAL_STORAGE_PREFIX = 'marketbos:v9:python-smc-alphax-ghost:'
 const CHART_SETTINGS_PREFIX = 'marketbos:chart-settings:v1:'
@@ -524,6 +524,18 @@ function candleDataSignature(candles: Candle[]) {
   return `${candles.length}:${firstEpoch}:${lastEpoch}:${lastClose}`
 }
 
+function overlayLayoutSignature(overlays?: ChartOverlays | null) {
+  if (!overlays) return 'no-overlays'
+
+  const ghostCount = Array.isArray(overlays.ghostCandles) ? overlays.ghostCandles.length : 0
+  const profileCount = Array.isArray(overlays.alphaProfileBins) ? overlays.alphaProfileBins.length : 0
+  const zoneCount = Array.isArray(overlays.zones) ? overlays.zones.length : 0
+  const smcCount = Array.isArray(overlays.smcEvents) ? overlays.smcEvents.length : 0
+  const liquidityCount = Array.isArray(overlays.liquidityEvents) ? overlays.liquidityEvents.length : 0
+
+  return `${ghostCount}:${profileCount}:${zoneCount}:${smcCount}:${liquidityCount}`
+}
+
 function readMemoryCache(cacheKey: string): Candle[] | null {
   const cached = memoryCandleCache.get(cacheKey)
   if (!cached) return null
@@ -748,12 +760,19 @@ function applyLivePriceToCandles(
 }
 
 function getInitialZoom(candleCount: number, totalCount = candleCount) {
-  const safeTotal = Math.max(totalCount, candleCount, 1)
+  const safeCandleCount = Math.max(candleCount, 1)
+  const safeTotal = Math.max(totalCount, safeCandleCount, 1)
   const visible = Math.min(DEFAULT_VISIBLE_CANDLES, safeTotal)
 
+  // Anchor the default view around the current live candle, not the far-right
+  // synthetic AlphaX profile labels. This keeps candle bodies readable while
+  // still leaving enough space to see ghost candles and the liquidity profile.
+  const rightPadding = Math.max(0, Math.min(safeTotal - safeCandleCount, GHOST_LEADING_GAP_BARS + 8))
+  const endValue = Math.min(safeTotal - 1, safeCandleCount - 1 + rightPadding)
+
   return {
-    startValue: Math.max(0, safeTotal - visible),
-    endValue: Math.max(0, safeTotal - 1),
+    startValue: Math.max(0, endValue - visible + 1),
+    endValue,
   }
 }
 
@@ -1212,7 +1231,10 @@ function buildChartOption({
             axisTick: { show: false },
             axisLabel: {
               color: TEXT,
-              formatter: shortAxisLabel,
+              formatter: (value: string) =>
+                String(value).includes('GhostGap') || String(value).includes('ProfileGap') || String(value).includes('AlphaProfile')
+                  ? ''
+                  : shortAxisLabel(value),
             },
             splitLine: { show: false },
           },
@@ -1266,7 +1288,7 @@ function buildChartOption({
             type: 'inside',
             xAxisIndex: [0],
             ...zoom,
-            zoomOnMouseWheel: false,
+            zoomOnMouseWheel: true,
             moveOnMouseMove: true,
             moveOnMouseWheel: true,
           },
@@ -1277,7 +1299,7 @@ function buildChartOption({
             type: 'inside',
             xAxisIndex: [0, 1],
             ...zoom,
-            zoomOnMouseWheel: false,
+            zoomOnMouseWheel: true,
             moveOnMouseMove: true,
             moveOnMouseWheel: true,
           },
@@ -1317,7 +1339,7 @@ function buildChartOption({
               borderColor: GREEN,
               borderColor0: RED,
             },
-            barWidth: '58%',
+            barWidth: '68%',
             barMinWidth: 2,
             barMaxWidth: 10,
             markLine: Number.isFinite(latestRealClose)
@@ -1358,9 +1380,9 @@ function buildChartOption({
               borderColor: GREEN,
               borderColor0: RED,
             },
-            barWidth: '58%',
-            barMinWidth: 3,
-            barMaxWidth: 15,
+            barWidth: '68%',
+            barMinWidth: 4,
+            barMaxWidth: 18,
             markLine: Number.isFinite(latestRealClose)
               ? {
                   silent: true,
@@ -1526,6 +1548,8 @@ export default function EChartsCandlestickChart({
   const activeCacheKeyRef = useRef<string>('')
   const chartIdentityRef = useRef<string>('')
   const dataSignatureRef = useRef<string>('')
+  const overlayLayoutSignatureRef = useRef<string>('')
+  const userZoomedRef = useRef(false)
 
   const chartSettingsKey = getChartSettingsKey(compact, chartTitle, defaultTimeframe)
   const savedChartSettings = typeof window === 'undefined' ? {} : readChartSettings(chartSettingsKey)
@@ -1747,6 +1771,9 @@ export default function EChartsCandlestickChart({
 
     if (!chartInstance.current) {
       chartInstance.current = echarts.init(chartRef.current)
+      chartInstance.current.on('datazoom', () => {
+        userZoomedRef.current = true
+      })
     }
 
     const option = buildChartOption({
@@ -1761,14 +1788,18 @@ export default function EChartsCandlestickChart({
 
     const chartIdentity = `${symbol}::${timeframe}::${candleMode}::${compact}`
     const dataSignature = candleDataSignature(candles)
+    const layoutSignature = overlayLayoutSignature(chartOverlays)
     const identityChanged = chartIdentityRef.current !== chartIdentity
     const dataChanged = dataSignatureRef.current !== dataSignature
+    const overlayLayoutChanged = overlayLayoutSignatureRef.current !== layoutSignature
     chartIdentityRef.current = chartIdentity
     dataSignatureRef.current = dataSignature
+    overlayLayoutSignatureRef.current = layoutSignature
 
     if (identityChanged) {
       // Full reset only when symbol/timeframe/candle type changes.
       // Live ticks should update the current candle without wiping the chart.
+      userZoomedRef.current = false
       chartInstance.current.clear()
       chartInstance.current.setOption(option, true)
     } else {
@@ -1776,7 +1807,13 @@ export default function EChartsCandlestickChart({
       // Preserve the user's current zoom/pan so the chart does not snap back
       // when they scroll right to inspect ghost candles or the liquidity profile.
       const currentOption = chartInstance.current.getOption() as any
-      if (Array.isArray(currentOption?.dataZoom) && currentOption.dataZoom.length > 0) {
+      const shouldPreserveUserZoom =
+        userZoomedRef.current &&
+        !overlayLayoutChanged &&
+        Array.isArray(currentOption?.dataZoom) &&
+        currentOption.dataZoom.length > 0
+
+      if (shouldPreserveUserZoom) {
         option.dataZoom = currentOption.dataZoom
       }
 
