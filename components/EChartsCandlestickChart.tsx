@@ -937,6 +937,8 @@ async function fetchEngineState(
   }
 }
 
+// Returns any because this chart builds dynamic ECharts series conditionally.
+// EChartsOption's strict union type rejects valid runtime markArea/markLine series.
 function buildChartOption({
   symbol,
   timeframe,
@@ -953,7 +955,7 @@ function buildChartOption({
   compact: boolean
   loading: boolean
   chartOverlays?: ChartOverlays | null
-}): echarts.EChartsOption {
+}): any {
   const activeCandles = candleMode === 'Heikin Ashi' ? convertToHeikinAshi(candles) : candles
   const latestRealClose = candles.length > 0 ? Number(candles[candles.length - 1].close) : NaN
   const overlayGhostCandles = !compact && Array.isArray(chartOverlays?.ghostCandles) ? chartOverlays?.ghostCandles ?? [] : []
