@@ -1,8 +1,8 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo } from 'react'
 import { motion } from 'framer-motion'
-import { CheckCircle2, MinusCircle, XCircle } from 'lucide-react'
+import { CheckCircle2, XCircle } from 'lucide-react'
 
 type TradingSignal = {
   symbol?: string
@@ -19,20 +19,6 @@ type TradingSignal = {
   confidence?: number
   bullScore?: number
   bearScore?: number
-}
-
-type FactorConfirmationTableProps = {
-  signal?: TradingSignal
-  technicalSentiment?: TechnicalSentiment | null
-  onTechnicalSentimentUpdate?: (sentiment: TechnicalSentiment | null) => void
-}
-
-type FactorStatus = 'bullish' | 'bearish' | 'neutral' | 'active' | 'inactive'
-
-type FactorRow = {
-  factor: string
-  status: FactorStatus
-  strength: number
 }
 
 type TechnicalIndicator = {
@@ -60,61 +46,23 @@ type TechnicalSentiment = {
   factors?: TechnicalIndicator[]
 }
 
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ||
-  'https://trading-intelligence-dashboard.onrender.com'
+type FactorConfirmationTableProps = {
+  signal?: TradingSignal
+  technicalSentiment?: TechnicalSentiment | null
+  onTechnicalSentimentUpdate?: (sentiment: TechnicalSentiment | null) => void
+}
 
-const TECHNICAL_ORDER = [
-  'RSI',
-  'Stochastic',
-  'Stoch RSI',
-  'CCI',
-  'Bull Bear Power',
-  'Momentum',
-  'Moving Average',
-  'VWAP',
-  'Bollinger Bands',
-  'Supertrend',
-  'Linear Regression',
-  'Market Structure',
-]
+type FactorStatus = 'bullish' | 'bearish' | 'active' | 'inactive'
+
+type FactorRow = {
+  factor: string
+  status: FactorStatus
+  strength: number
+}
 
 function clamp(value: number) {
   if (!Number.isFinite(value)) return 0
   return Math.max(0, Math.min(100, Math.round(value)))
-}
-
-function normalizeSymbol(value: unknown) {
-  return String(value ?? 'BTCUSD')
-    .trim()
-    .toUpperCase()
-    .split('BINANCE:')
-    .join('')
-    .split('COINBASE:')
-    .join('')
-    .split('CRYPTO:')
-    .join('')
-    .split('CME_MINI:')
-    .join('')
-    .split('CME:')
-    .join('')
-}
-
-function normalizeTimeframe(value: unknown) {
-  const tf = String(value ?? '1m').trim().toLowerCase()
-
-  if (tf === '1') return '1m'
-  if (tf === '3') return '3m'
-  if (tf === '5') return '5m'
-  if (tf === '15') return '15m'
-  if (tf === '30') return '30m'
-  if (tf === '60') return '1h'
-  if (tf === '120') return '2h'
-  if (tf === '240') return '4h'
-  if (tf === 'd' || tf === '1d') return '1d'
-  if (tf === 'w' || tf === '1w') return '1w'
-
-  return tf || '1m'
 }
 
 function isWaitingOrNeutral(value?: string) {
@@ -160,23 +108,9 @@ function statusFromText(value?: string): FactorStatus {
   return 'active'
 }
 
-function statusFromTechnical(value?: string): FactorStatus {
-  const side = String(value ?? '').toUpperCase()
-
-  if (side === 'BULLISH') return 'bullish'
-  if (side === 'BEARISH') return 'bearish'
-  if (side === 'NEUTRAL') return 'neutral'
-
-  return 'inactive'
-}
-
 function getStatusIcon(status: FactorStatus, size = 15) {
   if (status === 'bullish' || status === 'active') {
     return <CheckCircle2 size={size} className="text-emerald-400" />
-  }
-
-  if (status === 'neutral') {
-    return <MinusCircle size={size} className="text-yellow-400" />
   }
 
   if (status === 'bearish') {
@@ -189,14 +123,12 @@ function getStatusIcon(status: FactorStatus, size = 15) {
 function getBarColor(status: FactorStatus) {
   if (status === 'bullish' || status === 'active') return 'bg-emerald-400'
   if (status === 'bearish') return 'bg-red-400'
-  if (status === 'neutral') return 'bg-yellow-400'
   return 'bg-dark-600'
 }
 
 function getStatusText(status: FactorStatus) {
   if (status === 'bullish') return 'Bullish'
   if (status === 'bearish') return 'Bearish'
-  if (status === 'neutral') return 'Neutral'
   if (status === 'active') return 'Active'
   return 'Inactive'
 }
@@ -204,67 +136,7 @@ function getStatusText(status: FactorStatus) {
 function getStatusTextColor(status: FactorStatus) {
   if (status === 'bullish' || status === 'active') return 'text-emerald-400'
   if (status === 'bearish') return 'text-red-400'
-  if (status === 'neutral') return 'text-yellow-400'
   return 'text-gray-500'
-}
-
-function asIndicatorArray(value: unknown): TechnicalIndicator[] {
-  if (!Array.isArray(value)) return []
-
-  return value
-    .map((item) => {
-      if (!item || typeof item !== 'object') return null
-
-      const raw = item as Record<string, unknown>
-      const name = String(raw.name ?? raw.factor ?? raw.label ?? raw.indicator ?? '').trim()
-
-      if (!name) return null
-
-      return {
-        name,
-        value: clamp(Number(raw.value ?? raw.strength ?? raw.score ?? 0)),
-        signal: String(raw.signal ?? raw.status ?? raw.side ?? 'NEUTRAL').toUpperCase(),
-      }
-    })
-    .filter((item): item is TechnicalIndicator => Boolean(item))
-}
-
-function extractTechnicalIndicators(data: TechnicalSentiment | null): TechnicalIndicator[] {
-  if (!data) return []
-
-  const merged = [
-    ...asIndicatorArray(data.indicators),
-    ...asIndicatorArray(data.technicalIndicators),
-    ...asIndicatorArray(data.technicalMeter),
-    ...asIndicatorArray(data.factors),
-  ]
-
-  const byName = new Map<string, TechnicalIndicator>()
-
-  for (const indicator of merged) {
-    const key = indicator.name.trim().toLowerCase()
-    if (!byName.has(key)) {
-      byName.set(key, indicator)
-    }
-  }
-
-  const sorted: TechnicalIndicator[] = []
-
-  for (const expectedName of TECHNICAL_ORDER) {
-    const found = Array.from(byName.values()).find(
-      (indicator) => indicator.name.trim().toLowerCase() === expectedName.toLowerCase()
-    )
-
-    if (found) sorted.push(found)
-  }
-
-  for (const indicator of byName.values()) {
-    if (!sorted.some((item) => item.name.toLowerCase() === indicator.name.toLowerCase())) {
-      sorted.push(indicator)
-    }
-  }
-
-  return sorted
 }
 
 function buildCoreRows(signal?: TradingSignal): FactorRow[] {
@@ -349,188 +221,25 @@ function FactorRowItem({ row }: { row: FactorRow }) {
   )
 }
 
-function TechnicalChip({ indicator }: { indicator: TechnicalIndicator }) {
-  const status = statusFromTechnical(indicator.signal)
-  const strength = clamp(Number(indicator.value ?? 0))
-
-  return (
-    <div className="rounded-lg border border-dark-700/80 bg-dark-900/35 px-3 py-2">
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <p className="truncate text-xs font-semibold text-gray-300">{indicator.name}</p>
-        {getStatusIcon(status, 13)}
-      </div>
-
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <p className={`text-[10px] font-bold uppercase ${getStatusTextColor(status)}`}>
-          {getStatusText(status)}
-        </p>
-        <p className="text-xs font-bold text-white">{strength}%</p>
-      </div>
-
-      <div className="h-1.5 overflow-hidden rounded-full bg-dark-700">
-        <div
-          className={`h-full rounded-full ${getBarColor(status)}`}
-          style={{ width: `${strength}%` }}
-        />
-      </div>
-    </div>
-  )
-}
-
 export default function FactorConfirmationTable({
   signal,
-  technicalSentiment: technicalSentimentOverride,
   onTechnicalSentimentUpdate,
 }: FactorConfirmationTableProps) {
-  const [fetchedTechnicalSentiment, setFetchedTechnicalSentiment] =
-    useState<TechnicalSentiment | null>(null)
-
-  const symbol = normalizeSymbol(signal?.symbol)
-  const timeframe = normalizeTimeframe(signal?.timeframe)
   const bullScore = clamp(Number(signal?.bullScore ?? 50))
   const bearScore = clamp(Number(signal?.bearScore ?? 50))
 
-  // Important:
-  // app/page.tsx can pass a lightweight/shared sentiment object before the real
-  // 12-indicator array arrives. Do NOT let that empty override block this component's
-  // own /api/latest-sentiment fetch, or the table shows "Waiting for technical meter data".
-  const overrideTechnicalIndicators = useMemo(
-    () => extractTechnicalIndicators(technicalSentimentOverride ?? null),
-    [technicalSentimentOverride]
-  )
-
-  const hasValidTechnicalOverride = overrideTechnicalIndicators.length > 0
-
-  const technicalSentiment: TechnicalSentiment | null = hasValidTechnicalOverride
-    ? technicalSentimentOverride ?? null
-    : fetchedTechnicalSentiment
-
-  useEffect(() => {
-    let cancelled = false
-    let intervalId: ReturnType<typeof setInterval> | null = null
-
-    async function fetchTechnicalSentiment() {
-      if (hasValidTechnicalOverride) return
-
-      try {
-        const params = new URLSearchParams({
-          symbol,
-          timeframe,
-          limit: '500',
-        })
-
-        const response = await fetch(`${API_BASE_URL}/api/latest-sentiment?${params.toString()}`, {
-          cache: 'no-store',
-        })
-
-        if (!response.ok) return
-
-        const json = await response.json()
-
-        if (!cancelled) {
-          setFetchedTechnicalSentiment(json && typeof json === 'object' ? json : null)
-        }
-      } catch (error) {
-        console.error('Factor confirmation technical sentiment fetch error:', error)
-      }
-    }
-
-    fetchTechnicalSentiment()
-    intervalId = setInterval(fetchTechnicalSentiment, 10000)
-
-    return () => {
-      cancelled = true
-      if (intervalId) clearInterval(intervalId)
-    }
-  }, [symbol, timeframe, hasValidTechnicalOverride])
-
   const coreRows = useMemo(() => buildCoreRows(signal), [signal])
   const externalRows = useMemo(() => buildExternalRows(signal), [signal])
-  const technicalIndicators = useMemo(
-    () => extractTechnicalIndicators(technicalSentiment ?? null),
-    [technicalSentiment]
-  )
 
-  // Use the exact 12 indicators shown in the grid as the source of truth.
-  // This prevents the header/summary from showing stale sentiment values like 0%
-  // while the technical meter grid is already populated.
-  const activeTechnicalCount = technicalIndicators.length
+  const activeCoreCount = coreRows.filter((row) => row.status !== 'inactive').length
+  const bullCoreCount = coreRows.filter((row) => row.status === 'bullish' || row.status === 'active').length
+  const bearCoreCount = coreRows.filter((row) => row.status === 'bearish').length
 
-  const bullTechnicalCount = technicalIndicators.filter(
-    (indicator) => statusFromTechnical(indicator.signal) === 'bullish'
-  ).length
-
-  const bearTechnicalCount = technicalIndicators.filter(
-    (indicator) => statusFromTechnical(indicator.signal) === 'bearish'
-  ).length
-
-  const neutralTechnicalCount = technicalIndicators.filter(
-    (indicator) => statusFromTechnical(indicator.signal) === 'neutral'
-  ).length
-
-  const technicalValue =
-    activeTechnicalCount > 0
-      ? clamp(
-          technicalIndicators.reduce(
-            (sum, indicator) => sum + Number(indicator.value ?? 0),
-            0
-          ) / activeTechnicalCount
-        )
-      : 0
-
-  const technicalSentimentStatus =
-    activeTechnicalCount === 0
-      ? 'Waiting'
-      : bullTechnicalCount > bearTechnicalCount && bullTechnicalCount > neutralTechnicalCount
-        ? 'Mostly Bullish'
-        : bearTechnicalCount > bullTechnicalCount && bearTechnicalCount > neutralTechnicalCount
-          ? 'Mostly Bearish'
-          : neutralTechnicalCount > bullTechnicalCount && neutralTechnicalCount > bearTechnicalCount
-            ? 'Mostly Neutral'
-            : technicalValue > 60
-              ? 'Bullish Lean'
-              : technicalValue < 40
-                ? 'Bearish Lean'
-                : 'Mixed'
-
+  // The 12-indicator technical meter now belongs ONLY under Market Sentiment.
+  // Clear the shared technical state so app/page.tsx does not duplicate it here.
   useEffect(() => {
-    if (!onTechnicalSentimentUpdate) return
-
-    if (!technicalSentiment || technicalIndicators.length === 0) {
-      onTechnicalSentimentUpdate(null)
-      return
-    }
-
-    // Factor Confirmation is the principal source.
-    // Emit the exact 12-indicator technical meter that this component renders,
-    // so Market Sentiment can display the same values.
-    onTechnicalSentimentUpdate({
-      ...technicalSentiment,
-      indicators: technicalIndicators,
-      technicalIndicators,
-      technicalMeter: technicalIndicators,
-      factors: technicalIndicators,
-      activeCount: activeTechnicalCount,
-      sentiment: technicalValue,
-      sentimentStatus: technicalSentimentStatus,
-      bullCount: bullTechnicalCount,
-      bearCount: bearTechnicalCount,
-      neutralCount: neutralTechnicalCount,
-      bullPct: activeTechnicalCount > 0 ? (bullTechnicalCount / activeTechnicalCount) * 100 : 0,
-      bearPct: activeTechnicalCount > 0 ? (bearTechnicalCount / activeTechnicalCount) * 100 : 0,
-      neutralPct: activeTechnicalCount > 0 ? (neutralTechnicalCount / activeTechnicalCount) * 100 : 0,
-    })
-  }, [
-    onTechnicalSentimentUpdate,
-    technicalSentiment,
-    technicalIndicators,
-    activeTechnicalCount,
-    technicalValue,
-    technicalSentimentStatus,
-    bullTechnicalCount,
-    bearTechnicalCount,
-    neutralTechnicalCount,
-  ])
+    onTechnicalSentimentUpdate?.(null)
+  }, [onTechnicalSentimentUpdate])
 
   return (
     <motion.div
@@ -543,35 +252,30 @@ export default function FactorConfirmationTable({
         <div>
           <h2 className="text-xl font-bold text-white">Factor Confirmation</h2>
           <p className="mt-1 text-xs text-gray-500">
-            Core + full Python technical meter + external datasets
+            Core Python factors + external datasets
           </p>
         </div>
 
         <div className="rounded-lg border border-dark-600 bg-dark-900/40 px-3 py-2 text-right">
-          <p className="text-xs text-gray-500">Technical</p>
-          <p className="text-lg font-bold text-white">{technicalValue}%</p>
+          <p className="text-xs text-gray-500">Core</p>
+          <p className="text-lg font-bold text-white">{activeCoreCount}</p>
         </div>
       </div>
 
-      <div className="mb-4 grid grid-cols-4 gap-2 text-center text-xs">
+      <div className="mb-4 grid grid-cols-3 gap-2 text-center text-xs">
         <div className="rounded-lg bg-dark-900/40 p-2">
           <p className="text-gray-500">Active</p>
-          <p className="font-bold text-white">{activeTechnicalCount}</p>
+          <p className="font-bold text-white">{activeCoreCount}</p>
         </div>
 
         <div className="rounded-lg bg-dark-900/40 p-2">
           <p className="text-red-400">Bear</p>
-          <p className="font-bold text-white">{bearTechnicalCount}</p>
-        </div>
-
-        <div className="rounded-lg bg-dark-900/40 p-2">
-          <p className="text-yellow-400">Neutral</p>
-          <p className="font-bold text-white">{neutralTechnicalCount}</p>
+          <p className="font-bold text-white">{bearCoreCount}</p>
         </div>
 
         <div className="rounded-lg bg-dark-900/40 p-2">
           <p className="text-emerald-400">Bull</p>
-          <p className="font-bold text-white">{bullTechnicalCount}</p>
+          <p className="font-bold text-white">{bullCoreCount}</p>
         </div>
       </div>
 
@@ -586,30 +290,6 @@ export default function FactorConfirmationTable({
               <FactorRowItem key={`core-${row.factor}`} row={row} />
             ))}
           </div>
-        </section>
-
-        <section>
-          <div className="mb-3 flex items-center justify-between border-b border-dark-700 pb-2">
-            <p className="text-xs font-bold uppercase tracking-wide text-gray-400">
-              Technical Meter
-            </p>
-
-            <p className="text-xs text-gray-500">
-              {technicalIndicators.length} indicators
-            </p>
-          </div>
-
-          {technicalIndicators.length > 0 ? (
-            <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-              {technicalIndicators.map((indicator) => (
-                <TechnicalChip key={`technical-${indicator.name}`} indicator={indicator} />
-              ))}
-            </div>
-          ) : (
-            <p className="rounded-lg border border-dark-700/80 bg-dark-900/30 p-3 text-xs text-gray-500">
-              Waiting for technical meter data...
-            </p>
-          )}
         </section>
 
         <section>
@@ -628,8 +308,7 @@ export default function FactorConfirmationTable({
       </div>
 
       <div className="mt-4 border-t border-dark-700 pt-3 text-xs text-gray-500">
-        Bull/Bear balance: {bullScore}% / {bearScore}% • Technical sentiment:{' '}
-        {technicalSentimentStatus}
+        Bull/Bear balance: {bullScore}% / {bearScore}% • Technical meter shown only under Market Sentiment
       </div>
     </motion.div>
   )
