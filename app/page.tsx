@@ -1,132 +1,97 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
-import SignalCard from '@/components/SignalCard'
-import EChartsCandlestickChart from '@/components/EChartsCandlestickChart'
-import PressureGauges from '@/components/PressureGauges'
-import FactorConfirmationTable from '@/components/FactorConfirmationTable'
-import GhostCandleProjection from '@/components/GhostCandleProjection'
-import WarningsPanel from '@/components/WarningsPanel'
-import RecentSignalsTable from '@/components/RecentSignalsTable'
-import ConnectionStatusBadge from '@/components/ConnectionStatusBadge'
-import MarketSentimentGauge from '@/components/MarketSentimentGauge'
-import { motion } from 'framer-motion'
-import { useApiPolling } from '@/hooks/useApiPolling'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import * as echarts from 'echarts'
 
-type PythonGhostCandle = {
-  confidence?: number
-  direction?: string
-  source?: string
-}
+const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
+const DEFAULT_VISIBLE_CANDLES = 120
+const CACHE_TTL_MS = 1000 * 60 * 5
+const LOCAL_STORAGE_PREFIX = 'marketbos:candles:'
 
-type PythonEngineState = {
-  ghostCandles?: PythonGhostCandle[]
-  ghostProjections?: PythonGhostCandle[]
-  projections?: PythonGhostCandle[]
-  ghostEngine?: {
-    phase?: string
-    source?: string
-    count?: number
-  }
-}
+const GREEN = '#26a69a'
+const RED = '#ef5350'
+const GRID = '#1f2937'
+const TEXT = '#9ca3af'
+const BG = '#0f1115'
 
-type ChartSelection = {
-  symbol: string
-  timeframe: string
-  candleMode: 'Regular' | 'Heikin Ashi'
-}
-
-type TechnicalIndicator = {
-  name: string
-  value: number
-  signal: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | string
-}
-
-type TechnicalSentiment = {
-  eventType?: string
+type Candle = {
+  time: string
+  epoch?: number
+  open: number
+  high: number
+  low: number
+  close: number
+  volume?: number
   symbol?: string
   timeframe?: string
-  sentiment?: number
-  sentimentStatus?: string
-  bearCount?: number
-  neutralCount?: number
-  bullCount?: number
-  bearPct?: number
-  neutralPct?: number
-  bullPct?: number
-  activeCount?: number
-  indicators?: TechnicalIndicator[]
-  technicalIndicators?: TechnicalIndicator[]
-  technicalMeter?: TechnicalIndicator[]
-  factors?: TechnicalIndicator[]
+  provider?: string
 }
 
-function countTechnicalIndicatorsPayload(value: unknown): number {
-  if (!value || typeof value !== 'object') return 0
+type CandleMode = 'Regular' | 'Heikin Ashi'
 
-  const data = value as {
-    indicators?: unknown
-    technicalIndicators?: unknown
-    technicalMeter?: unknown
-    factors?: unknown
-    technicalSentiment?: unknown
-    sentiment?: unknown
-  }
-
-  const directCount =
-    (Array.isArray(data.indicators) ? data.indicators.length : 0) +
-    (Array.isArray(data.technicalIndicators) ? data.technicalIndicators.length : 0) +
-    (Array.isArray(data.technicalMeter) ? data.technicalMeter.length : 0) +
-    (Array.isArray(data.factors) ? data.factors.length : 0)
-
-  const nestedTechnicalCount = countTechnicalIndicatorsPayload(data.technicalSentiment)
-  const nestedSentimentCount = countTechnicalIndicatorsPayload(data.sentiment)
-
-  return Math.max(directCount, nestedTechnicalCount, nestedSentimentCount)
+type EChartsCandlestickChartProps = {
+  heightClass?: string
+  compact?: boolean
+  chartTitle?: string
+  enableAdvancedOverlays?: boolean
+  defaultSymbol?: string
+  defaultTimeframe?: string
+  defaultCandleMode?: CandleMode
+  allowCompactHistory?: boolean
+  showControls?: boolean
+  lockSymbolToDefault?: boolean
+  followDefaultSymbol?: boolean
+  onChartSelectionChange?: (selection: {
+    symbol: string
+    timeframe: string
+    candleMode: CandleMode
+    compact: boolean
+    chartTitle?: string
+  }) => void
+  latestSignal?: any
+  recentSignals?: any[]
+  recentCandles?: any[]
 }
 
-function normalizeSharedTechnicalSentimentPayload(value: unknown): TechnicalSentiment | null {
-  if (!value || typeof value !== 'object') return null
-
-  const raw = value as Record<string, unknown>
-  const nestedTechnical =
-    raw.technicalSentiment && typeof raw.technicalSentiment === 'object'
-      ? raw.technicalSentiment as Record<string, unknown>
-      : raw.sentiment && typeof raw.sentiment === 'object'
-        ? raw.sentiment as Record<string, unknown>
-        : null
-
-  const candidate: TechnicalSentiment = {
-    ...(nestedTechnical ?? {}),
-    ...(raw as TechnicalSentiment),
-    indicators: [
-      ...(Array.isArray(raw.indicators) ? raw.indicators as TechnicalIndicator[] : []),
-      ...(Array.isArray(raw.technicalIndicators) ? raw.technicalIndicators as TechnicalIndicator[] : []),
-      ...(Array.isArray(raw.technicalMeter) ? raw.technicalMeter as TechnicalIndicator[] : []),
-      ...(Array.isArray(raw.factors) ? raw.factors as TechnicalIndicator[] : []),
-      ...(nestedTechnical && Array.isArray(nestedTechnical.indicators) ? nestedTechnical.indicators as TechnicalIndicator[] : []),
-      ...(nestedTechnical && Array.isArray(nestedTechnical.technicalIndicators) ? nestedTechnical.technicalIndicators as TechnicalIndicator[] : []),
-      ...(nestedTechnical && Array.isArray(nestedTechnical.technicalMeter) ? nestedTechnical.technicalMeter as TechnicalIndicator[] : []),
-      ...(nestedTechnical && Array.isArray(nestedTechnical.factors) ? nestedTechnical.factors as TechnicalIndicator[] : []),
-    ],
-  }
-
-  return countTechnicalIndicatorsPayload(candidate) > 0 ? candidate : null
+type CachedCandles = {
+  candles: Candle[]
+  savedAt: number
 }
 
-function normalizeSymbol(value: unknown) {
-  return String(value ?? 'BTCUSD')
+const memoryCandleCache = new Map<string, CachedCandles>()
+const inflightCandleRequests = new Map<string, Promise<Candle[]>>()
+
+const timeframeOptions = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1D']
+const candleModeOptions: CandleMode[] = ['Regular', 'Heikin Ashi']
+const symbolOptions = ['BTCUSD', 'MES1!']
+
+function normalizeSymbol(value: any): string {
+  return String(value ?? '')
     .trim()
     .toUpperCase()
+    .replace('CME_MINI:', '')
+    .replace('CME:', '')
     .replace('BINANCE:', '')
     .replace('COINBASE:', '')
     .replace('CRYPTO:', '')
-    .replace('CME_MINI:', '')
-    .replace('CME:', '')
 }
 
-function normalizeTimeframe(value: unknown) {
-  const tf = String(value ?? '1m').trim().toLowerCase()
+function normalizeDefaultSymbol(value: any, fallback = 'BTCUSD'): string {
+  const normalized = normalizeSymbol(value || fallback)
+
+  if (normalized === 'MES1' || normalized === 'MES1!') return 'MES1!'
+  if (normalized === 'ES1' || normalized === 'ES1!') return 'ES1!'
+  if (normalized.includes('MES')) return 'MES1!'
+  if (normalized.includes('ES') && !normalized.includes('MES')) return 'ES1!'
+  if (normalized.includes('SPY')) return 'SPY'
+  if (normalized.includes('ETH')) return 'ETHUSD'
+  if (normalized.includes('BTC')) return 'BTCUSD'
+
+  return normalized || fallback
+}
+
+function normalizeTimeframe(value: any): string {
+  const tf = String(value ?? '').trim().toLowerCase()
 
   if (tf === '1') return '1m'
   if (tf === '3') return '3m'
@@ -136,416 +101,985 @@ function normalizeTimeframe(value: unknown) {
   if (tf === '60') return '1h'
   if (tf === '120') return '2h'
   if (tf === '240') return '4h'
-  if (tf === 'd' || tf === '1d') return '1d'
-  if (tf === 'w' || tf === '1w') return '1w'
+  if (tf === 'd' || tf === '1d') return '1D'
 
-  return tf || '1m'
+  return tf
 }
 
-function clampPercent(value: number) {
-  if (!Number.isFinite(value)) return 0
-  return Math.max(0, Math.min(100, Math.round(value)))
+function normalizeDefaultTimeframe(value: any, fallback = '1m'): string {
+  const normalized = normalizeTimeframe(value || fallback)
+  return timeframeOptions.includes(normalized) ? normalized : fallback
 }
 
-function getPythonGhostCandles(engineState: PythonEngineState | null) {
-  if (!engineState) return []
+function symbolsMatch(inputSymbol: any, selectedSymbol: any): boolean {
+  const input = normalizeSymbol(inputSymbol)
+  const selected = normalizeSymbol(selectedSymbol)
 
-  if (Array.isArray(engineState.ghostCandles)) return engineState.ghostCandles
-  if (Array.isArray(engineState.ghostProjections)) return engineState.ghostProjections
-  if (Array.isArray(engineState.projections)) return engineState.projections
+  if (!input || !selected) return false
+  if (input === selected) return true
+  if (selected === 'BTCUSD' && input.includes('BTC')) return true
+  if (selected === 'ETHUSD' && input.includes('ETH')) return true
+  if (selected === 'SPY' && input.includes('SPY')) return true
+  if (selected === 'MES1!' && input.includes('MES')) return true
+  if (selected === 'ES1!' && input.includes('ES') && !input.includes('MES')) return true
+
+  return false
+}
+
+function toNumber(value: any): number | null {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function toEpochSeconds(value: any): number | undefined {
+  if (value === null || value === undefined || value === '') return undefined
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.floor(value > 1000000000000 ? value / 1000 : value)
+  }
+
+  const numeric = Number(value)
+  if (Number.isFinite(numeric)) {
+    return Math.floor(numeric > 1000000000000 ? numeric / 1000 : numeric)
+  }
+
+  const parsed = Date.parse(String(value))
+  if (Number.isFinite(parsed)) return Math.floor(parsed / 1000)
+
+  return undefined
+}
+
+function formatAxisTime(value: any, fallbackIndex: number): string {
+  if (typeof value === 'string' && value.length > 0) return value
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const timestamp = value > 1000000000000 ? value : value * 1000
+    const date = new Date(timestamp)
+    if (!Number.isNaN(date.getTime())) return date.toISOString()
+  }
+
+  return `Bar ${fallbackIndex + 1}`
+}
+
+function shortAxisLabel(value: any): string {
+  const text = String(value ?? '')
+  const date = new Date(text)
+
+  if (!Number.isNaN(date.getTime())) {
+    const month = date.getMonth() + 1
+    const day = date.getDate()
+    const hour = date.getHours().toString().padStart(2, '0')
+    const minute = date.getMinutes().toString().padStart(2, '0')
+    return `${month}/${day} ${hour}:${minute}`
+  }
+
+  return text
+}
+
+function candleFromAny(raw: any, index: number): Candle | null {
+  if (Array.isArray(raw)) {
+    const timeFirst = typeof raw[0] === 'string' || Number(raw[0]) > 100000
+    const time = timeFirst ? raw[0] : undefined
+    const offset = timeFirst ? 1 : 0
+
+    const open = toNumber(raw[offset])
+    const high = toNumber(raw[offset + 1])
+    const low = toNumber(raw[offset + 2])
+    const close = toNumber(raw[offset + 3])
+    const volume = toNumber(raw[offset + 4]) ?? undefined
+
+    if (open === null || high === null || low === null || close === null) return null
+
+    return {
+      time: formatAxisTime(time, index),
+      epoch: toEpochSeconds(time),
+      open,
+      high,
+      low,
+      close,
+      volume,
+    }
+  }
+
+  const open =
+    toNumber(raw?.open) ??
+    toNumber(raw?.o) ??
+    toNumber(raw?.Open) ??
+    toNumber(raw?.OPEN)
+
+  const high =
+    toNumber(raw?.high) ??
+    toNumber(raw?.h) ??
+    toNumber(raw?.High) ??
+    toNumber(raw?.HIGH)
+
+  const low =
+    toNumber(raw?.low) ??
+    toNumber(raw?.l) ??
+    toNumber(raw?.Low) ??
+    toNumber(raw?.LOW)
+
+  const close =
+    toNumber(raw?.close) ??
+    toNumber(raw?.c) ??
+    toNumber(raw?.Close) ??
+    toNumber(raw?.CLOSE) ??
+    toNumber(raw?.price) ??
+    toNumber(raw?.last)
+
+  if (open === null || high === null || low === null || close === null) return null
+
+  const rawTime =
+    raw?.epoch ??
+    raw?.time ??
+    raw?.timestamp ??
+    raw?.createdAt ??
+    raw?.t ??
+    raw?.T ??
+    raw?.date ??
+    raw?.datetime ??
+    raw?.Timestamp
+
+  const formattedTime = formatAxisTime(rawTime, index)
+
+  return {
+    time: formattedTime,
+    epoch: toEpochSeconds(raw?.epoch ?? rawTime ?? formattedTime),
+    open,
+    high,
+    low,
+    close,
+    volume:
+      toNumber(raw?.volume) ??
+      toNumber(raw?.v) ??
+      toNumber(raw?.Volume) ??
+      undefined,
+    symbol: raw?.symbol ?? raw?.ticker ?? raw?.S ?? raw?.s,
+    timeframe: raw?.timeframe ?? raw?.tf ?? raw?.interval,
+    provider: raw?.provider,
+  }
+}
+
+function extractCandleArray(payload: any): any[] {
+  if (Array.isArray(payload)) return payload
+  if (!payload || typeof payload !== 'object') return []
+
+  if (payload.candle && typeof payload.candle === 'object') return [payload.candle]
+  if (payload.latest && typeof payload.latest === 'object') return [payload.latest]
+
+  const directKeys = ['candles', 'bars', 'data', 'items', 'results', 'historicalCandles']
+
+  for (const key of directKeys) {
+    if (Array.isArray(payload[key])) return payload[key]
+  }
+
+  const nestedSources = [payload.data, payload.result, payload.payload, payload.response]
+
+  for (const nested of nestedSources) {
+    if (!nested || typeof nested !== 'object') continue
+
+    if (nested.candle && typeof nested.candle === 'object') return [nested.candle]
+    if (nested.latest && typeof nested.latest === 'object') return [nested.latest]
+
+    for (const key of directKeys) {
+      if (Array.isArray(nested[key])) return nested[key]
+    }
+  }
 
   return []
 }
 
-function getAverageGhostConfidence(engineState: PythonEngineState | null) {
-  const ghostCandles = getPythonGhostCandles(engineState)
+function mergeCandlesByTime(candles: Candle[]): Candle[] {
+  const merged = new Map<string, Candle>()
 
-  if (ghostCandles.length === 0) return 0
+  for (const candle of candles) {
+    if (!candle) continue
 
-  const values = ghostCandles
-    .map((ghost) => Number(ghost.confidence ?? 0))
-    .filter((value) => Number.isFinite(value))
+    const epoch = candle.epoch ?? toEpochSeconds(candle.time)
+    const open = toNumber(candle.open)
+    const high = toNumber(candle.high)
+    const low = toNumber(candle.low)
+    const close = toNumber(candle.close)
 
-  if (values.length === 0) return 0
+    if (epoch === undefined || open === null || high === null || low === null || close === null) continue
 
-  return clampPercent(
-    values.reduce((sum, value) => sum + value, 0) / values.length
-  )
-}
-
-function getPythonGhostText(engineState: PythonEngineState | null) {
-  const ghostCandles = getPythonGhostCandles(engineState)
-
-  if (ghostCandles.length === 0) return ''
-
-  const firstDirection = String(ghostCandles[0]?.direction ?? '').toLowerCase()
-
-  if (
-    firstDirection.includes('bull') ||
-    firstDirection.includes('up') ||
-    firstDirection.includes('buy')
-  ) {
-    return 'Python Bullish Projection'
+    merged.set(String(epoch), {
+      ...candle,
+      time: candle.time || new Date(epoch * 1000).toISOString(),
+      epoch,
+      open,
+      high,
+      low,
+      close,
+    })
   }
 
-  if (
-    firstDirection.includes('bear') ||
-    firstDirection.includes('down') ||
-    firstDirection.includes('sell')
-  ) {
-    return 'Python Bearish Projection'
-  }
-
-  return 'Python Neutral Projection'
-}
-
-export default function Dashboard() {
-  const [isClient, setIsClient] = useState(false)
-  const [pythonEngineState, setPythonEngineState] =
-    useState<PythonEngineState | null>(null)
-  const [sharedTechnicalSentiment, setSharedTechnicalSentiment] =
-    useState<TechnicalSentiment | null>(null)
-  const [factorTechnicalSentiment, setFactorTechnicalSentiment] =
-    useState<TechnicalSentiment | null>(null)
-
-  const [mainChartSelection, setMainChartSelection] = useState<ChartSelection>({
-    symbol: 'BTCUSD',
-    timeframe: '1m',
-    candleMode: 'Heikin Ashi',
+  return Array.from(merged.values()).sort((a, b) => {
+    const aEpoch = a.epoch ?? toEpochSeconds(a.time) ?? 0
+    const bEpoch = b.epoch ?? toEpochSeconds(b.time) ?? 0
+    return aEpoch - bEpoch
   })
+}
 
-  const {
-    latestSignal,
-    recentSignals,
-    recentCandles,
-    connectionStatus,
-    lastUpdateTime,
-    apiBaseUrl,
-  } = useApiPolling()
+function convertToHeikinAshi(candles: Candle[]): Candle[] {
+  if (candles.length === 0) return []
 
-  useEffect(() => {
-    setIsClient(true)
-  }, [])
+  const haCandles: Candle[] = []
 
-  const selectedSymbol = normalizeSymbol(mainChartSelection.symbol || latestSignal?.symbol)
-  const selectedTimeframe = normalizeTimeframe(mainChartSelection.timeframe || latestSignal?.timeframe)
-  const FactorConfirmationTableLoose = FactorConfirmationTable as any
+  for (let i = 0; i < candles.length; i++) {
+    const candle = candles[i]
+    const haClose = (candle.open + candle.high + candle.low + candle.close) / 4
+    const haOpen =
+      i === 0
+        ? (candle.open + candle.close) / 2
+        : (haCandles[i - 1].open + haCandles[i - 1].close) / 2
+    const haHigh = Math.max(candle.high, haOpen, haClose)
+    const haLow = Math.min(candle.low, haOpen, haClose)
 
-  useEffect(() => {
-    setFactorTechnicalSentiment(null)
-  }, [selectedSymbol, selectedTimeframe])
+    haCandles.push({
+      time: candle.time,
+      epoch: candle.epoch,
+      open: haOpen,
+      high: haHigh,
+      low: haLow,
+      close: haClose,
+      volume: candle.volume,
+      symbol: candle.symbol,
+      timeframe: candle.timeframe,
+      provider: candle.provider,
+    })
+  }
 
-  useEffect(() => {
-    if (!isClient || !apiBaseUrl) return
+  return haCandles
+}
 
-    let cancelled = false
-    let intervalId: ReturnType<typeof setInterval> | null = null
+function getApiSymbolCandidates(symbol: string): string[] {
+  const normalized = normalizeDefaultSymbol(symbol, symbol)
+  const compact = normalizeSymbol(normalized).replace('!', '')
+  const candidates: string[] = []
 
-    async function fetchPythonEngineState() {
-      try {
-        const params = new URLSearchParams({
-          symbol: selectedSymbol,
-          timeframe: selectedTimeframe,
-          limit: '500',
-        })
+  const add = (value: string) => {
+    const cleaned = String(value ?? '').trim()
+    if (cleaned && !candidates.includes(cleaned)) candidates.push(cleaned)
+  }
 
-        const response = await fetch(`${apiBaseUrl}/api/engine-state?${params.toString()}`, {
-          cache: 'no-store',
-        })
+  add(normalized)
 
-        if (!response.ok) return
+  if (normalized === 'MES1!' || compact === 'MES1' || compact.includes('MES')) {
+    add('MES1!')
+    add('MES1')
+    add('MES')
+    add('/MES')
+    add('CME_MINI:MES1!')
+  } else if (normalized === 'ES1!' || compact === 'ES1' || (compact.includes('ES') && !compact.includes('MES'))) {
+    add('ES1!')
+    add('ES1')
+    add('ES')
+    add('/ES')
+    add('CME_MINI:ES1!')
+  } else if (compact.includes('SPY')) {
+    add('SPY')
+  } else if (compact.includes('BTC')) {
+    add('BTCUSD')
+    add('BTC/USD')
+    add('XBTUSD')
+  } else if (compact.includes('ETH')) {
+    add('ETHUSD')
+    add('ETH/USD')
+  }
 
-        const json = await response.json()
+  return candidates
+}
 
-        if (!cancelled) {
-          setPythonEngineState(json && typeof json === 'object' ? json : null)
-        }
-      } catch (error) {
-        console.error('Dashboard Python engine sync error:', error)
-      }
-    }
+function getCandleCacheKey(symbol: string, timeframe: string, limit: string) {
+  return `${normalizeDefaultSymbol(symbol)}::${normalizeTimeframe(timeframe)}::${limit}`
+}
 
-    fetchPythonEngineState()
-    intervalId = setInterval(fetchPythonEngineState, 15000)
+function readMemoryCache(cacheKey: string): Candle[] | null {
+  const cached = memoryCandleCache.get(cacheKey)
+  if (!cached) return null
 
-    return () => {
-      cancelled = true
-      if (intervalId) clearInterval(intervalId)
-    }
-  }, [apiBaseUrl, isClient, selectedSymbol, selectedTimeframe])
-
-  useEffect(() => {
-    if (!isClient || !apiBaseUrl) return
-
-    let cancelled = false
-    let intervalId: ReturnType<typeof setInterval> | null = null
-
-    async function fetchSharedTechnicalSentiment() {
-      try {
-        const params = new URLSearchParams({
-          symbol: selectedSymbol,
-          timeframe: selectedTimeframe,
-          limit: '500',
-        })
-
-        const [latestResponse, engineResponse] = await Promise.allSettled([
-          fetch(`${apiBaseUrl}/api/latest-sentiment?${params.toString()}`, {
-            cache: 'no-store',
-          }),
-          fetch(`${apiBaseUrl}/api/engine-state?${params.toString()}`, {
-            cache: 'no-store',
-          }),
-        ])
-
-        const payloads: unknown[] = []
-
-        if (latestResponse.status === 'fulfilled' && latestResponse.value.ok) {
-          payloads.push(await latestResponse.value.json())
-        }
-
-        if (engineResponse.status === 'fulfilled' && engineResponse.value.ok) {
-          payloads.push(await engineResponse.value.json())
-        }
-
-        const candidates = payloads
-          .map(normalizeSharedTechnicalSentimentPayload)
-          .filter((item): item is TechnicalSentiment => Boolean(item))
-
-        const best =
-          candidates.length > 0
-            ? candidates.reduce((currentBest, current) =>
-                countTechnicalIndicatorsPayload(current) > countTechnicalIndicatorsPayload(currentBest)
-                  ? current
-                  : currentBest
-              )
-            : null
-
-        if (!cancelled) {
-          // Only set sharedTechnicalSentiment when the payload actually has indicator arrays.
-          // Do not let simple futures sentiment override the shared technical meter.
-          setSharedTechnicalSentiment(best)
-        }
-      } catch (error) {
-        console.error('Dashboard shared technical sentiment sync error:', error)
-      }
-    }
-
-    setSharedTechnicalSentiment(null)
-    fetchSharedTechnicalSentiment()
-    intervalId = setInterval(fetchSharedTechnicalSentiment, 10000)
-
-    return () => {
-      cancelled = true
-      if (intervalId) clearInterval(intervalId)
-    }
-  }, [apiBaseUrl, isClient, selectedSymbol, selectedTimeframe])
-
-  const augmentedLatestSignal = useMemo(() => {
-    const ghostConfidence = getAverageGhostConfidence(pythonEngineState)
-    const pythonGhostText = getPythonGhostText(pythonEngineState)
-
-    return {
-      ...latestSignal,
-
-      // Main chart is now the master symbol/timeframe source for every outside panel.
-      // When the chart dropdown changes, SignalCard, Market Sentiment, Pressure Gauges,
-      // Warnings, Factor Confirmation, Ghost Projections, and Recent Signals all follow it.
-      symbol: selectedSymbol,
-      timeframe: selectedTimeframe,
-
-      // This syncs the Python ghost engine into the dashboard summary cards.
-      // It fixes Pressure Gauges and Factor Confirmation showing Ghost Confidence as 0
-      // while the Python ghost panel already shows PY confidence.
-      confidence: Math.max(Number(latestSignal?.confidence ?? 0), ghostConfidence),
-      ghost: pythonGhostText || latestSignal?.ghost || 'Python Ghost Projection',
-      ghostConfidence,
-      pythonGhostEngine: Boolean(ghostConfidence || pythonGhostText),
-
-      // Shared 12-indicator technical meter.
-      // This is the single source passed into Market Sentiment and Factor Confirmation,
-      // so MES1!/ES1!/BTCUSD/ETHUSD/SPY all display the exact same technical array.
-      technicalSentiment: sharedTechnicalSentiment ?? undefined,
-      indicators: sharedTechnicalSentiment?.indicators,
-      technicalIndicators: sharedTechnicalSentiment?.technicalIndicators,
-      technicalMeter: sharedTechnicalSentiment?.technicalMeter,
-      factors: sharedTechnicalSentiment?.factors,
-
-      chartCandleMode: mainChartSelection.candleMode,
-    }
-  }, [latestSignal, pythonEngineState, sharedTechnicalSentiment, selectedSymbol, selectedTimeframe, mainChartSelection.candleMode])
-
-  if (!isClient) {
+  if (Date.now() - cached.savedAt > CACHE_TTL_MS) {
+    memoryCandleCache.delete(cacheKey)
     return null
   }
 
-  const maxSignalsToShow = 25
-  const visibleRecentSignals = recentSignals.slice(0, maxSignalsToShow)
+  return cached.candles
+}
+
+function readLocalStorageCache(cacheKey: string): Candle[] | null {
+  if (typeof window === 'undefined') return null
+
+  try {
+    const raw = window.localStorage.getItem(`${LOCAL_STORAGE_PREFIX}${cacheKey}`)
+    if (!raw) return null
+
+    const parsed = JSON.parse(raw) as CachedCandles
+    if (!parsed || !Array.isArray(parsed.candles)) return null
+
+    if (Date.now() - Number(parsed.savedAt ?? 0) > CACHE_TTL_MS) {
+      window.localStorage.removeItem(`${LOCAL_STORAGE_PREFIX}${cacheKey}`)
+      return null
+    }
+
+    memoryCandleCache.set(cacheKey, parsed)
+    return parsed.candles
+  } catch {
+    return null
+  }
+}
+
+function saveCandleCache(cacheKey: string, candles: Candle[]) {
+  if (candles.length === 0) return
+
+  const payload: CachedCandles = {
+    candles,
+    savedAt: Date.now(),
+  }
+
+  memoryCandleCache.set(cacheKey, payload)
+
+  if (typeof window === 'undefined') return
+
+  try {
+    window.localStorage.setItem(`${LOCAL_STORAGE_PREFIX}${cacheKey}`, JSON.stringify(payload))
+  } catch {
+    // Ignore storage quota/private-mode failures.
+  }
+}
+
+async function fetchCandlesFromNetwork(
+  symbol: string,
+  timeframe: string,
+  limit: string,
+  signal?: AbortSignal
+): Promise<Candle[]> {
+  const endpoints = [
+    '/api/historical-candles',
+    '/api/candles',
+    '/api/recent-candles',
+    '/api/live-candle',
+    '/api/provider-debug',
+  ]
+
+  for (const path of endpoints) {
+    for (const candidate of getApiSymbolCandidates(symbol)) {
+      const params = new URLSearchParams({
+        symbol: candidate,
+        timeframe: normalizeTimeframe(timeframe),
+        limit,
+      })
+
+      try {
+        const response = await fetch(`${API_BASE_URL}${path}?${params.toString()}`, {
+          cache: 'no-store',
+          signal,
+        })
+
+        if (!response.ok) continue
+
+        const json = await response.json()
+        const candles = extractCandleArray(json)
+          .map(candleFromAny)
+          .filter((candle): candle is Candle => candle !== null)
+
+        if (candles.length > 0) return mergeCandlesByTime(candles)
+      } catch (error: any) {
+        if (error?.name === 'AbortError') throw error
+        console.error(`Candle fetch error: ${path} ${candidate}`, error)
+      }
+    }
+  }
+
+  return []
+}
+
+async function fetchCandles(
+  symbol: string,
+  timeframe: string,
+  limit: string,
+  signal?: AbortSignal
+): Promise<Candle[]> {
+  const cacheKey = getCandleCacheKey(symbol, timeframe, limit)
+
+  const cached = readMemoryCache(cacheKey) ?? readLocalStorageCache(cacheKey)
+  if (cached && cached.length > 0) return cached
+
+  const existingRequest = inflightCandleRequests.get(cacheKey)
+  if (existingRequest) return existingRequest
+
+  const request = fetchCandlesFromNetwork(symbol, timeframe, limit, signal)
+    .then((candles) => {
+      saveCandleCache(cacheKey, candles)
+      return candles
+    })
+    .finally(() => {
+      inflightCandleRequests.delete(cacheKey)
+    })
+
+  inflightCandleRequests.set(cacheKey, request)
+  return request
+}
+
+function buildCandlesFromRecentCandles(
+  candlesInput: any[] | undefined,
+  selectedSymbol: string,
+  selectedTimeframe: string
+): Candle[] {
+  if (!Array.isArray(candlesInput) || candlesInput.length === 0) return []
+
+  const normalizedTimeframe = normalizeTimeframe(selectedTimeframe)
+
+  return candlesInput
+    .filter((candle) => {
+      const candleSymbol = candle?.symbol ?? candle?.ticker ?? candle?.S ?? candle?.s ?? candle?.contract ?? candle?.instrument
+      const candleTimeframe = candle?.timeframe ?? candle?.tf ?? candle?.interval
+
+      const symbolOk = candleSymbol ? symbolsMatch(candleSymbol, selectedSymbol) : true
+      const timeframeOk = candleTimeframe ? normalizeTimeframe(candleTimeframe) === normalizedTimeframe : true
+
+      return symbolOk && timeframeOk
+    })
+    .map(candleFromAny)
+    .filter((candle): candle is Candle => candle !== null)
+}
+
+function buildCandlesFromSignals(
+  signals: any[] | undefined,
+  selectedSymbol: string,
+  selectedTimeframe: string
+): Candle[] {
+  if (!Array.isArray(signals) || signals.length === 0) return []
+
+  const normalizedTimeframe = normalizeTimeframe(selectedTimeframe)
+
+  return signals
+    .filter((signal) => {
+      const timeframeOk = signal?.timeframe ? normalizeTimeframe(signal.timeframe) === normalizedTimeframe : true
+      return symbolsMatch(signal?.symbol, selectedSymbol) && timeframeOk
+    })
+    .map(candleFromAny)
+    .filter((candle): candle is Candle => candle !== null)
+}
+
+function getInitialZoom(candleCount: number) {
+  const visible = Math.min(DEFAULT_VISIBLE_CANDLES, Math.max(candleCount, 1))
+
+  return {
+    startValue: Math.max(0, candleCount - visible),
+    endValue: Math.max(0, candleCount - 1),
+  }
+}
+
+function buildChartOption({
+  symbol,
+  timeframe,
+  candleMode,
+  candles,
+  compact,
+  loading,
+}: {
+  symbol: string
+  timeframe: string
+  candleMode: CandleMode
+  candles: Candle[]
+  compact: boolean
+  loading: boolean
+}): echarts.EChartsOption {
+  const activeCandles = candleMode === 'Heikin Ashi' ? convertToHeikinAshi(candles) : candles
+  const xAxisData = activeCandles.map((candle) => candle.time)
+  const candleData = activeCandles.map((candle) => [
+    candle.open,
+    candle.close,
+    candle.low,
+    candle.high,
+  ])
+  const volumeData = activeCandles.map((candle, index) => ({
+    value: candle.volume ?? 0,
+    itemStyle: {
+      color: candle.close >= candle.open ? GREEN : RED,
+      opacity: compact ? 0.22 : 0.35,
+    },
+    xAxis: index,
+  }))
+
+  const zoom = getInitialZoom(activeCandles.length)
+
+  return {
+    backgroundColor: BG,
+    animation: false,
+    grid: compact
+      ? [
+          { left: 8, right: 8, top: 8, bottom: 20 },
+        ]
+      : [
+          // Slider scrollbar removed. Keep a clean price pane + volume pane layout.
+          { left: 58, right: 72, top: 44, bottom: 84 },
+          { left: 58, right: 72, height: 46, bottom: 18 },
+        ],
+    title: compact
+      ? undefined
+      : {
+          text: `${symbol} · ${timeframe} · ${candleMode}`,
+          left: 16,
+          top: 10,
+          textStyle: {
+            color: '#e5e7eb',
+            fontSize: 13,
+            fontWeight: 700,
+          },
+        },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: {
+        type: 'cross',
+        label: {
+          backgroundColor: '#111827',
+        },
+      },
+      formatter: (params: any) => {
+        const candleParam = Array.isArray(params)
+          ? params.find((param) => param.seriesType === 'candlestick')
+          : params
+
+        if (!candleParam) return ''
+
+        const data = candleParam.data
+        const open = Number(data?.[0])
+        const close = Number(data?.[1])
+        const low = Number(data?.[2])
+        const high = Number(data?.[3])
+
+        return [
+          `<strong>${candleParam.axisValue}</strong>`,
+          `Open: ${open.toFixed(2)}`,
+          `High: ${high.toFixed(2)}`,
+          `Low: ${low.toFixed(2)}`,
+          `Close: ${close.toFixed(2)}`,
+        ].join('<br/>')
+      },
+    },
+    axisPointer: {
+      link: compact ? [] : [{ xAxisIndex: 'all' }],
+    },
+    xAxis: compact
+      ? [
+          {
+            type: 'category',
+            data: xAxisData,
+            boundaryGap: true,
+            axisLabel: { show: false },
+            axisLine: { lineStyle: { color: GRID } },
+            axisTick: { show: false },
+            splitLine: { show: false },
+          },
+        ]
+      : [
+          {
+            type: 'category',
+            data: xAxisData,
+            boundaryGap: true,
+            axisLine: { lineStyle: { color: GRID } },
+            axisTick: { show: false },
+            axisLabel: {
+              color: TEXT,
+              formatter: shortAxisLabel,
+            },
+            splitLine: { show: false },
+          },
+          {
+            type: 'category',
+            gridIndex: 1,
+            data: xAxisData,
+            boundaryGap: true,
+            axisLine: { lineStyle: { color: GRID } },
+            axisTick: { show: false },
+            axisLabel: { show: false },
+            splitLine: { show: false },
+          },
+        ],
+    yAxis: compact
+      ? [
+          {
+            scale: true,
+            position: 'right',
+            axisLabel: { show: false },
+            axisLine: { show: false },
+            axisTick: { show: false },
+            splitLine: { show: false },
+          },
+        ]
+      : [
+          {
+            scale: true,
+            position: 'right',
+            axisLabel: { color: TEXT, margin: 14 },
+            axisLine: { lineStyle: { color: GRID } },
+            splitLine: { lineStyle: { color: GRID, opacity: 0.55 } },
+          },
+          {
+            scale: true,
+            gridIndex: 1,
+            axisLabel: { show: false },
+            axisLine: { show: false },
+            axisTick: { show: false },
+            splitLine: { show: false },
+          },
+        ],
+    dataZoom: compact
+      ? [
+          {
+            type: 'inside',
+            xAxisIndex: [0],
+            ...zoom,
+            zoomOnMouseWheel: false,
+            moveOnMouseMove: true,
+            moveOnMouseWheel: true,
+          },
+        ]
+      : [
+          {
+            // Inside zoom/pan remains active, but the visible slider scrollbar is removed.
+            type: 'inside',
+            xAxisIndex: [0, 1],
+            ...zoom,
+            zoomOnMouseWheel: false,
+            moveOnMouseMove: true,
+            moveOnMouseWheel: true,
+          },
+        ],
+    // Keep one stable graphic element so old "Loading candles..." text is actively hidden
+    // after cached or loaded candles are visible. This prevents ECharts/zrender from
+    // keeping a stale loading overlay when setOption uses lazy merged updates.
+    graphic: [
+      {
+        id: 'empty-state-text',
+        type: 'text',
+        left: 'center',
+        top: 'middle',
+        silent: true,
+        invisible: activeCandles.length > 0,
+        style: {
+          text: activeCandles.length === 0
+            ? loading
+              ? 'Loading candles...'
+              : 'No candles loaded'
+            : '',
+          fill: '#9ca3af',
+          fontSize: compact ? 11 : 14,
+          fontWeight: 700,
+        },
+      },
+    ],
+    series: compact
+      ? [
+          {
+            name: `${symbol} ${candleMode}`,
+            type: 'candlestick',
+            data: candleData,
+            itemStyle: {
+              color: GREEN,
+              color0: RED,
+              borderColor: GREEN,
+              borderColor0: RED,
+            },
+            barWidth: '58%',
+            barMinWidth: 2,
+            barMaxWidth: 10,
+          },
+        ]
+      : [
+          {
+            name: `${symbol} ${candleMode}`,
+            type: 'candlestick',
+            data: candleData,
+            itemStyle: {
+              color: GREEN,
+              color0: RED,
+              borderColor: GREEN,
+              borderColor0: RED,
+            },
+            barWidth: '58%',
+            barMinWidth: 3,
+            barMaxWidth: 15,
+          },
+          {
+            name: 'Volume',
+            type: 'bar',
+            xAxisIndex: 1,
+            yAxisIndex: 1,
+            data: volumeData,
+            large: true,
+          },
+        ],
+  }
+}
+
+export default function EChartsCandlestickChart({
+  heightClass = 'h-[650px]',
+  compact = false,
+  chartTitle,
+  defaultSymbol,
+  defaultTimeframe = '1m',
+  defaultCandleMode = 'Heikin Ashi',
+  allowCompactHistory = true,
+  showControls = true,
+  lockSymbolToDefault = false,
+  followDefaultSymbol = false,
+  onChartSelectionChange,
+  latestSignal,
+  recentSignals,
+  recentCandles,
+}: EChartsCandlestickChartProps) {
+  const chartRef = useRef<HTMLDivElement | null>(null)
+  const chartInstance = useRef<echarts.ECharts | null>(null)
+
+  const initialSymbol = normalizeDefaultSymbol(
+    defaultSymbol ?? latestSignal?.symbol ?? 'BTCUSD',
+    'BTCUSD'
+  )
+  const initialTimeframe = normalizeDefaultTimeframe(defaultTimeframe ?? latestSignal?.timeframe, '1m')
+  const initialCandleMode = candleModeOptions.includes(defaultCandleMode) ? defaultCandleMode : 'Heikin Ashi'
+
+  const [symbol, setSymbol] = useState(() => initialSymbol)
+  const [timeframe, setTimeframe] = useState(() => initialTimeframe)
+  const [candleMode, setCandleMode] = useState<CandleMode>(() => initialCandleMode)
+  const [historicalCandles, setHistoricalCandles] = useState<Candle[]>([])
+  const [status, setStatus] = useState<'idle' | 'loading' | 'cached' | 'loaded' | 'empty' | 'error'>('idle')
+
+  const candleFetchLimit = compact ? '300' : '1500'
+
+  const handleSymbolChange = (value: string) => {
+    if (lockSymbolToDefault) return
+    setSymbol(normalizeDefaultSymbol(value, symbol))
+  }
+
+  const handleTimeframeChange = (value: string) => {
+    setTimeframe(normalizeDefaultTimeframe(value, timeframe))
+  }
+
+  const handleCandleModeChange = (value: string) => {
+    setCandleMode(value as CandleMode)
+  }
+
+  useEffect(() => {
+    if (!followDefaultSymbol) return
+
+    const nextSymbol = normalizeDefaultSymbol(defaultSymbol ?? latestSignal?.symbol ?? symbol, symbol)
+    if (nextSymbol && nextSymbol !== symbol) {
+      setSymbol(nextSymbol)
+    }
+  }, [defaultSymbol, latestSignal?.symbol, followDefaultSymbol, symbol])
+
+  useEffect(() => {
+    onChartSelectionChange?.({
+      symbol,
+      timeframe,
+      candleMode,
+      compact,
+      chartTitle,
+    })
+  }, [symbol, timeframe, candleMode, compact, chartTitle, onChartSelectionChange])
+
+  useEffect(() => {
+    void allowCompactHistory
+
+    const controller = new AbortController()
+    let cancelled = false
+
+    async function loadCandles() {
+      const cacheKey = getCandleCacheKey(symbol, timeframe, candleFetchLimit)
+      const cached = readMemoryCache(cacheKey) ?? readLocalStorageCache(cacheKey)
+
+      if (cached && cached.length > 0) {
+        setHistoricalCandles(cached)
+        setStatus('cached')
+      } else {
+        setStatus('loading')
+      }
+
+      try {
+        const candles = await fetchCandlesFromNetwork(symbol, timeframe, candleFetchLimit, controller.signal)
+
+        if (cancelled) return
+
+        if (candles.length > 0) {
+          saveCandleCache(cacheKey, candles)
+          setHistoricalCandles(candles)
+          setStatus('loaded')
+        } else if (!cached || cached.length === 0) {
+          setHistoricalCandles([])
+          setStatus('empty')
+        }
+      } catch (error: any) {
+        if (error?.name === 'AbortError') return
+
+        console.error('Historical candle fetch error:', error)
+
+        if (!cancelled && (!cached || cached.length === 0)) {
+          setHistoricalCandles([])
+          setStatus('error')
+        }
+      }
+    }
+
+    loadCandles()
+
+    return () => {
+      cancelled = true
+      controller.abort()
+    }
+  }, [symbol, timeframe, compact, allowCompactHistory, candleFetchLimit])
+
+  const liveCandlesFromCandlesEndpoint = useMemo(
+    () => buildCandlesFromRecentCandles(recentCandles, symbol, timeframe),
+    [recentCandles, symbol, timeframe]
+  )
+
+  const liveCandlesFromSignalsEndpoint = useMemo(
+    () => buildCandlesFromSignals(recentSignals, symbol, timeframe),
+    [recentSignals, symbol, timeframe]
+  )
+
+  const candles = useMemo(
+    () =>
+      mergeCandlesByTime([
+        ...historicalCandles,
+        ...liveCandlesFromCandlesEndpoint,
+        ...liveCandlesFromSignalsEndpoint,
+      ]),
+    [historicalCandles, liveCandlesFromCandlesEndpoint, liveCandlesFromSignalsEndpoint]
+  )
+
+  useEffect(() => {
+    if (!chartRef.current) return
+
+    if (!chartInstance.current) {
+      chartInstance.current = echarts.init(chartRef.current)
+    }
+
+    const option = buildChartOption({
+      symbol,
+      timeframe,
+      candleMode,
+      candles,
+      compact,
+      loading: status === 'loading' && candles.length === 0,
+    })
+
+    chartInstance.current.setOption(option, {
+      notMerge: false,
+      lazyUpdate: true,
+      replaceMerge: ['graphic'],
+    })
+
+    const resize = () => chartInstance.current?.resize()
+    window.addEventListener('resize', resize)
+
+    return () => {
+      window.removeEventListener('resize', resize)
+    }
+  }, [symbol, timeframe, candleMode, candles, compact, status])
+
+  useEffect(() => {
+    return () => {
+      chartInstance.current?.dispose()
+      chartInstance.current = null
+    }
+  }, [])
+
+  const statusBadge =
+    status === 'loading'
+      ? candles.length > 0
+        ? 'Refreshing'
+        : 'Loading Candles'
+      : status === 'cached'
+        ? `${candles.length} Cached`
+        : status === 'loaded'
+          ? `${candles.length} Candles`
+          : status === 'empty'
+            ? 'No Candles'
+            : status === 'error'
+              ? 'Candle Error'
+              : 'Ready'
+
+  const headerClass = compact
+    ? 'flex flex-wrap items-center justify-between gap-2 border-b border-dark-700 px-2 py-2'
+    : 'flex flex-wrap items-center justify-between gap-3 border-b border-dark-700 px-4 py-3'
+
+  const selectClass = compact
+    ? 'rounded-md border border-dark-700 bg-[#151922] px-2 py-1 text-[10px] text-gray-100 outline-none'
+    : 'rounded-md border border-dark-700 bg-[#151922] px-3 py-1.5 text-sm text-gray-100 outline-none'
+
+  const lockedSymbolClass = compact
+    ? 'rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] font-bold text-amber-300'
+    : 'rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-sm font-bold text-amber-300'
+
+  const badgeClass = compact
+    ? `rounded-full border px-2 py-1 text-[10px] ${status === 'loaded' || status === 'cached' ? 'border-emerald-500/50 text-emerald-400' : 'border-yellow-500/50 text-yellow-400'}`
+    : `rounded-full border px-3 py-1 text-sm ${status === 'loaded' || status === 'cached' ? 'border-emerald-500/50 text-emerald-400' : 'border-yellow-500/50 text-yellow-400'}`
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-dark-900 via-dark-800 to-dark-900 p-6">
-      {/* Header */}
-      <motion.div
-        initial={{ opacity: 0, y: -20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5 }}
-        className="mb-8"
-      >
-        <div className="mb-4 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-          <div>
-            <div className="mb-3 flex flex-wrap items-center gap-3 text-sm">
-              <a
-                href="/membership"
-                className="rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 font-semibold text-amber-300 hover:bg-amber-400 hover:text-black"
-              >
-                Membership
-              </a>
-
-              <a
-                href="/indicators"
-                className="rounded-lg border border-dark-600 bg-dark-800 px-3 py-2 font-semibold text-gray-300 hover:border-amber-400/50 hover:text-amber-300"
-              >
-                Indicators
-              </a>
-
-              <a
-                href="/academy"
-                className="rounded-lg border border-dark-600 bg-dark-800 px-3 py-2 font-semibold text-gray-300 hover:border-amber-400/50 hover:text-amber-300"
-              >
-                Academy
-              </a>
-
-              <a
-                href="/shop"
-                className="rounded-lg border border-dark-600 bg-dark-800 px-3 py-2 font-semibold text-gray-300 hover:border-amber-400/50 hover:text-amber-300"
-              >
-                Shop
-              </a>
-
-              <a
-                href="/trading-room"
-                className="rounded-lg border border-dark-600 bg-dark-800 px-3 py-2 font-semibold text-gray-300 hover:border-amber-400/50 hover:text-amber-300"
-              >
-                Trading Room
-              </a>
+    <div className={`flex ${heightClass} w-full flex-col overflow-hidden rounded-2xl border border-dark-700 bg-[#0f1115]`}>
+      {showControls && (
+        <div className={headerClass}>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className={compact ? 'rounded-full bg-orange-500 px-1.5 py-0.5 text-[9px] font-bold text-white' : 'rounded-full bg-orange-500 px-2 py-1 text-xs font-bold text-white'}>
+              ₿
             </div>
 
-            <h1 className="text-4xl font-bold gradient-text">
-              MARKETBOS ALGO DASHBOARD
-            </h1>
+            {chartTitle && !compact && <span className="text-xs font-semibold text-gray-300">{chartTitle}</span>}
 
-            <p className="mt-2 text-sm text-gray-400">
-              Real-time trading signals and analysis • {selectedSymbol} •{' '}
-              {selectedTimeframe} timeframe
-            </p>
+            {lockSymbolToDefault ? (
+              <span className={lockedSymbolClass}>{symbol}</span>
+            ) : (
+              <select
+                value={symbol}
+                onChange={(event) => handleSymbolChange(event.target.value)}
+                className={selectClass}
+              >
+                {symbolOptions.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </select>
+            )}
+
+            <select
+              value={timeframe}
+              onChange={(event) => handleTimeframeChange(event.target.value)}
+              className={selectClass}
+            >
+              {timeframeOptions.map((tf) => (
+                <option key={tf} value={tf}>
+                  {tf}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={candleMode}
+              onChange={(event) => handleCandleModeChange(event.target.value)}
+              className={selectClass}
+            >
+              {candleModeOptions.map((mode) => (
+                <option key={mode} value={mode}>
+                  {compact ? mode.replace('Heikin Ashi', 'HA') : mode}
+                </option>
+              ))}
+            </select>
           </div>
 
-          <ConnectionStatusBadge
-            status={connectionStatus}
-            lastUpdateTime={lastUpdateTime}
-          />
-        </div>
-      </motion.div>
-
-      {/* Main Grid */}
-      <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
-        {/* Left Column */}
-        <div className="space-y-6 lg:col-span-2">
-          <SignalCard signal={augmentedLatestSignal} />
-
-          <EChartsCandlestickChart
-            heightClass="h-[760px]"
-            enableAdvancedOverlays
-            defaultSymbol={selectedSymbol}
-            defaultTimeframe={selectedTimeframe}
-            defaultCandleMode={mainChartSelection.candleMode}
-            onChartSelectionChange={(selection) => {
-              if (!selection.compact) {
-                setMainChartSelection({
-                  symbol: normalizeSymbol(selection.symbol),
-                  timeframe: normalizeTimeframe(selection.timeframe),
-                  candleMode: selection.candleMode,
-                })
-              }
-            }}
-            latestSignal={augmentedLatestSignal}
-            recentSignals={recentSignals}
-            recentCandles={recentCandles}
-          />
-
-          {/* Two Smaller Charts */}
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-            <EChartsCandlestickChart
-              heightClass="h-[390px]"
-              compact
-              chartTitle="Mini Chart 1"
-              enableAdvancedOverlays={false}
-              defaultSymbol={selectedSymbol}
-              defaultTimeframe="5m"
-              defaultCandleMode="Heikin Ashi"
-              allowCompactHistory
-              lockSymbolToDefault
-              followDefaultSymbol
-              latestSignal={augmentedLatestSignal}
-              recentSignals={recentSignals}
-              recentCandles={recentCandles}
-            />
-
-            <EChartsCandlestickChart
-              heightClass="h-[390px]"
-              compact
-              chartTitle="Mini Chart 2"
-              enableAdvancedOverlays={false}
-              defaultSymbol={selectedSymbol}
-              defaultTimeframe="15m"
-              defaultCandleMode="Heikin Ashi"
-              allowCompactHistory
-              lockSymbolToDefault
-              followDefaultSymbol
-              latestSignal={augmentedLatestSignal}
-              recentSignals={recentSignals}
-              recentCandles={recentCandles}
-            />
+          <div className="flex items-center gap-2">
+            <div className={badgeClass}>
+              {statusBadge}
+            </div>
           </div>
         </div>
+      )}
 
-        {/* Right Column */}
-        <div className="space-y-6">
-          <MarketSentimentGauge
-            signal={augmentedLatestSignal as any}
-            technicalSentiment={(factorTechnicalSentiment ?? sharedTechnicalSentiment) as any}
-          />
-
-          <PressureGauges signal={augmentedLatestSignal} />
-
-          <WarningsPanel signal={augmentedLatestSignal} />
-        </div>
-      </div>
-
-      {/* Second Row */}
-      <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <FactorConfirmationTableLoose
-            signal={augmentedLatestSignal as any}
-            technicalSentiment={sharedTechnicalSentiment as any}
-            onTechnicalSentimentUpdate={setFactorTechnicalSentiment as any}
-          />
-
-        <GhostCandleProjection signal={augmentedLatestSignal} />
-      </div>
-
-      <RecentSignalsTable signals={visibleRecentSignals} latestSignal={augmentedLatestSignal} />
-
-      {/* Footer */}
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: 0.5, delay: 0.6 }}
-        className="mt-8 border-t border-dark-700 pt-4 text-center text-xs text-gray-500"
-      >
-        <p>
-          Trading Intelligence Dashboard • Live API Polling Mode • Connected to{' '}
-          {apiBaseUrl}
-        </p>
-      </motion.div>
+      <div ref={chartRef} className="min-h-0 flex-1" />
     </div>
   )
 }
