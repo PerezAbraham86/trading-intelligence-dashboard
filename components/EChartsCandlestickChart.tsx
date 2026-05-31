@@ -15,6 +15,13 @@ const GRID = '#1f2937'
 const TEXT = '#9ca3af'
 const BG = '#0f1115'
 
+const GHOST_LEADING_GAP_BARS = 8
+const PROFILE_LEADING_GAP_BARS = 8
+const ALPHA_PROFILE_WIDTH_BARS = 22
+const MAX_SMC_LABELS = 7
+const MAX_LIQUIDITY_LABELS = 5
+const MAX_ZONE_COUNT = 6
+
 type Candle = {
   time: string
   epoch?: number
@@ -799,27 +806,43 @@ function buildFutureGhostAxisLabels(candles: Candle[], ghosts: GhostCandle[], ti
 function buildZoneMarkAreas(zones: ChartZone[] | undefined, axisCandles: Candle[]) {
   if (!Array.isArray(zones)) return []
 
-  return zones
+  const cleanedZones = zones
+    .filter((zone) => {
+      const kind = String(zone.kind ?? '').toLowerCase()
+      return (
+        kind.includes('premium') ||
+        kind.includes('discount') ||
+        kind.includes('equilibrium') ||
+        kind.includes('ob') ||
+        kind.includes('fvg')
+      )
+    })
+    .slice(-MAX_ZONE_COUNT)
+
+  return cleanedZones
     .map((zone) => {
       const top = toNumber(zone.top)
       const bottom = toNumber(zone.bottom)
       if (top === null || bottom === null) return null
 
-      const start = nearestAxisTime(zone.startTime, axisCandles) ?? axisCandles[0]?.time
+      const start = nearestAxisTime(zone.startTime, axisCandles) ?? axisCandles[Math.max(0, axisCandles.length - 160)]?.time
       const end = nearestAxisTime(zone.endTime, axisCandles) ?? axisCandles[axisCandles.length - 1]?.time
       if (!start || !end) return null
+
+      const kind = String(zone.kind ?? '').toLowerCase()
+      const isPdZone = kind.includes('premium') || kind.includes('discount') || kind.includes('equilibrium')
 
       return [
         {
           xAxis: start,
           yAxis: Math.max(top, bottom),
           itemStyle: {
-            color: overlayColor(zone.direction, zone.kind === 'fvg' ? 0.16 : 0.12),
-            borderColor: overlayColor(zone.direction, 0.42),
-            borderWidth: 1,
+            color: overlayColor(zone.direction, isPdZone ? 0.10 : 0.14),
+            borderColor: overlayColor(zone.direction, isPdZone ? 0.24 : 0.38),
+            borderWidth: isPdZone ? 0.75 : 1,
           },
           label: {
-            show: true,
+            show: isPdZone,
             color: overlayTextColor(zone.direction),
             fontSize: 10,
             fontWeight: 700,
@@ -835,31 +858,53 @@ function buildZoneMarkAreas(zones: ChartZone[] | undefined, axisCandles: Candle[
     .filter(Boolean) as any[]
 }
 
-function buildMarkerData(markers: ChartMarker[] | undefined, axisCandles: Candle[]) {
+function buildMarkerData(
+  markers: ChartMarker[] | undefined,
+  axisCandles: Candle[],
+  maxCount = 8,
+  showLabels = true
+) {
   if (!Array.isArray(markers)) return []
 
   return markers
+    .slice(-maxCount)
     .map((marker) => {
       const price = toNumber(marker.price)
       const time = nearestAxisTime(marker.time, axisCandles)
       if (price === null || !time) return null
 
+      const label = String(marker.tag ?? marker.label ?? marker.kind ?? '')
+      const direction = String(marker.direction ?? '').toLowerCase()
+      const isBearish = direction.includes('bear')
+
       return {
         value: [time, price],
-        name: marker.tag ?? marker.label ?? marker.kind ?? '',
+        name: label,
         marker,
+        symbol: label.toLowerCase().includes('sweep') || label.toLowerCase().includes('pool') ? 'diamond' : 'circle',
         itemStyle: {
           color: overlayTextColor(marker.direction),
           borderColor: '#111827',
           borderWidth: 1,
+          opacity: 0.95,
         },
         label: {
-          show: true,
-          formatter: marker.tag ?? marker.label ?? '',
+          show: showLabels && Boolean(label),
+          formatter: label
+            .replace('Buy-Side Sweep', 'BS Sweep')
+            .replace('Sell-Side Sweep', 'SS Sweep')
+            .replace('Buy-Side Pool', 'BS Pool')
+            .replace('Sell-Side Pool', 'SS Pool')
+            .replace('Bullish FVG', 'Bull FVG')
+            .replace('Bearish FVG', 'Bear FVG'),
           color: overlayTextColor(marker.direction),
-          fontSize: 10,
+          fontSize: 9,
           fontWeight: 700,
-          position: String(marker.direction).toLowerCase().includes('bear') ? 'top' : 'bottom',
+          backgroundColor: 'rgba(15,17,21,0.55)',
+          borderRadius: 3,
+          padding: [1, 3],
+          position: isBearish ? 'top' : 'bottom',
+          distance: 5,
         },
       }
     })
@@ -874,19 +919,22 @@ function buildDlmMarkLines(levels: DlmLevel[] | undefined) {
       const price = toNumber(level.price)
       if (price === null) return null
 
+      const label = String(level.label ?? 'DLM')
+      const isPoc = label.toLowerCase().includes('poc')
+
       return {
         yAxis: price,
-        name: level.label ?? 'DLM',
+        name: label,
         lineStyle: {
-          color: overlayTextColor(level.direction),
-          width: level.label?.toLowerCase().includes('poc') ? 2 : 1,
-          type: level.label?.toLowerCase().includes('poc') ? 'solid' : 'dotted',
-          opacity: 0.85,
+          color: isPoc ? '#d1d5db' : overlayTextColor(level.direction),
+          width: isPoc ? 1.25 : 1,
+          type: isPoc ? 'solid' : 'dotted',
+          opacity: isPoc ? 0.9 : 0.45,
         },
         label: {
-          show: true,
-          formatter: level.label ?? 'DLM',
-          color: overlayTextColor(level.direction),
+          show: isPoc,
+          formatter: isPoc ? 'AlphaX POC' : '',
+          color: '#d1d5db',
           fontSize: 10,
           fontWeight: 700,
           backgroundColor: 'rgba(15,17,21,0.72)',
@@ -898,8 +946,8 @@ function buildDlmMarkLines(levels: DlmLevel[] | undefined) {
     .filter(Boolean) as any[]
 }
 
-function buildGhostCandleData(activeLength: number, ghosts: GhostCandle[]) {
-  const empty = Array.from({ length: activeLength }, () => '-')
+function buildGhostCandleData(activeLength: number, ghosts: GhostCandle[], leadingGap = 0) {
+  const empty = Array.from({ length: activeLength + leadingGap }, () => '-')
   const ghostData = ghosts.map((ghost) => {
     const open = toNumber(ghost.open)
     const close = toNumber(ghost.close)
@@ -912,8 +960,12 @@ function buildGhostCandleData(activeLength: number, ghosts: GhostCandle[]) {
   return [...empty, ...ghostData]
 }
 
-function buildAlphaProfileFutureLabels(startIndex: number, count = 18) {
-  return Array.from({ length: count }, (_, index) => `AlphaProfile-${startIndex + index + 1}`)
+function buildFutureSpacerLabels(startIndex: number, count: number, prefix: string) {
+  return Array.from({ length: count }, (_, index) => `${prefix}-${startIndex + index + 1}`)
+}
+
+function buildAlphaProfileFutureLabels(startIndex: number, count = ALPHA_PROFILE_WIDTH_BARS) {
+  return buildFutureSpacerLabels(startIndex, count, 'AlphaProfile')
 }
 
 function buildAlphaProfileCustomData(
@@ -950,9 +1002,9 @@ function buildAlphaProfileRenderItem() {
     const side = api.value(3)
 
     const point = api.coord([xIndex, price])
-    const maxWidth = Math.max(42, Math.min(170, api.getWidth() * 0.18))
+    const maxWidth = Math.max(34, Math.min(118, api.getWidth() * 0.115))
     const width = Math.max(8, (Number(volumePct) / 100) * maxWidth)
-    const height = 6
+    const height = 5
     const fill = side < 0
       ? `rgba(239, 83, 80, ${0.24 + Math.min(Number(volumePct), 100) / 180})`
       : `rgba(38, 166, 154, ${0.24 + Math.min(Number(volumePct), 100) / 180})`
@@ -1024,10 +1076,29 @@ function buildChartOption({
   const latestRealClose = candles.length > 0 ? Number(candles[candles.length - 1].close) : NaN
   const overlayGhostCandles = !compact && Array.isArray(chartOverlays?.ghostCandles) ? chartOverlays?.ghostCandles ?? [] : []
   const alphaProfileBins = !compact && Array.isArray(chartOverlays?.alphaProfileBins) ? chartOverlays?.alphaProfileBins ?? [] : []
-  const futureGhostLabels = buildFutureGhostAxisLabels(activeCandles, overlayGhostCandles, timeframe)
-  const alphaProfileStartIndex = activeCandles.length + futureGhostLabels.length + 1
-  const alphaProfileLabels = alphaProfileBins.length > 0 ? buildAlphaProfileFutureLabels(alphaProfileStartIndex, 18) : []
-  const xAxisData = [...activeCandles.map((candle) => candle.time), ...futureGhostLabels, ...alphaProfileLabels]
+  const ghostSpacerLabels = overlayGhostCandles.length > 0
+    ? buildFutureSpacerLabels(activeCandles.length, GHOST_LEADING_GAP_BARS, 'GhostGap')
+    : []
+  const futureGhostLabels = buildFutureGhostAxisLabels(
+    [...activeCandles, ...ghostSpacerLabels.map((time) => ({ time, open: 0, high: 0, low: 0, close: 0 })) as Candle[]],
+    overlayGhostCandles,
+    timeframe
+  )
+  const profileSpacerLabels = alphaProfileBins.length > 0
+    ? buildFutureSpacerLabels(activeCandles.length + ghostSpacerLabels.length + futureGhostLabels.length, PROFILE_LEADING_GAP_BARS, 'ProfileGap')
+    : []
+  const alphaProfileStartIndex =
+    activeCandles.length + ghostSpacerLabels.length + futureGhostLabels.length + profileSpacerLabels.length + 1
+  const alphaProfileLabels = alphaProfileBins.length > 0
+    ? buildAlphaProfileFutureLabels(alphaProfileStartIndex, ALPHA_PROFILE_WIDTH_BARS)
+    : []
+  const xAxisData = [
+    ...activeCandles.map((candle) => candle.time),
+    ...ghostSpacerLabels,
+    ...futureGhostLabels,
+    ...profileSpacerLabels,
+    ...alphaProfileLabels,
+  ]
   const candleData = activeCandles.map((candle) => [
     candle.open,
     candle.close,
@@ -1044,12 +1115,12 @@ function buildChartOption({
   }))
 
   const zoneMarkAreas = !compact ? buildZoneMarkAreas(chartOverlays?.zones, activeCandles) : []
-  const smcMarkerData = !compact ? buildMarkerData(chartOverlays?.smcEvents, activeCandles) : []
-  const liquidityMarkerData = !compact ? buildMarkerData(chartOverlays?.liquidityEvents, activeCandles) : []
-  const scoreMarkerData = !compact ? buildMarkerData(chartOverlays?.scoreMarkers, activeCandles) : []
+  const smcMarkerData = !compact ? buildMarkerData(chartOverlays?.smcEvents, activeCandles, MAX_SMC_LABELS, true) : []
+  const liquidityMarkerData = !compact ? buildMarkerData(chartOverlays?.liquidityEvents, activeCandles, MAX_LIQUIDITY_LABELS, true) : []
+  const scoreMarkerData: any[] = []
   const dlmMarkLines = !compact ? buildDlmMarkLines(chartOverlays?.dlmLevels) : []
   const alphaProfileData = !compact ? buildAlphaProfileCustomData(alphaProfileBins, alphaProfileStartIndex, activeCandles) : []
-  const ghostData = !compact ? buildGhostCandleData(activeCandles.length, overlayGhostCandles) : []
+  const ghostData = !compact ? buildGhostCandleData(activeCandles.length, overlayGhostCandles, ghostSpacerLabels.length) : []
 
   const zoom = getInitialZoom(activeCandles.length, xAxisData.length)
 
@@ -1063,8 +1134,8 @@ function buildChartOption({
         ]
       : [
           // Slider scrollbar removed. Keep a clean price pane + volume pane layout.
-          { left: 58, right: 104, top: 44, bottom: 84 },
-          { left: 58, right: 104, height: 46, bottom: 18 },
+          { left: 58, right: 136, top: 44, bottom: 84 },
+          { left: 58, right: 136, height: 46, bottom: 18 },
         ],
     title: compact
       ? undefined
@@ -1121,7 +1192,10 @@ function buildChartOption({
             axisTick: { show: false },
             axisLabel: {
               color: TEXT,
-              formatter: shortAxisLabel,
+              formatter: (value: string) =>
+                String(value).includes('GhostGap') || String(value).includes('ProfileGap') || String(value).includes('AlphaProfile')
+                  ? ''
+                  : shortAxisLabel(value),
               fontSize: 9,
               margin: 8,
               hideOverlap: true,
@@ -1386,7 +1460,7 @@ function buildChartOption({
                   renderItem: buildAlphaProfileRenderItem(),
                   encode: { x: 0, y: 1 },
                   silent: true,
-                  z: 16,
+                  z: 12,
                   tooltip: {
                     formatter: (param: any) => {
                       const bin = param?.data?.bin ?? {}
@@ -1417,7 +1491,7 @@ function buildChartOption({
                   barWidth: '42%',
                   barMinWidth: 3,
                   barMaxWidth: 12,
-                  z: 18,
+                  z: 19,
                 },
               ]
             : []),
