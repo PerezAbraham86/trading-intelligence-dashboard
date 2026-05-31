@@ -2081,20 +2081,124 @@ def fetch_yahoo_quote_batch(symbols: List[str]) -> List[Dict[str, Any]]:
     if not safe_symbols:
         return []
 
-    params = urlencode({
-        "symbols": ",".join(safe_symbols),
-        "fields": "symbol,shortName,longName,regularMarketPrice,regularMarketChangePercent,regularMarketChange,regularMarketPreviousClose,regularMarketTime,marketCap",
-    })
-
-    url = f"https://query1.finance.yahoo.com/v7/finance/quote?{params}"
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; MARKETBOS-Dashboard/1.0)",
         "Accept": "application/json",
     }
 
-    data = http_get_json(url, headers=headers, provider="Yahoo Finance quote")
-    result = data.get("quoteResponse", {}).get("result", []) if isinstance(data, dict) else []
-    return result if isinstance(result, list) else []
+    # Primary: standard Yahoo quote endpoint.
+    # Some hosts return an empty result unless the request is shaped like the public site.
+    primary_params = urlencode({
+        "symbols": ",".join(safe_symbols),
+        "formatted": "false",
+        "region": "US",
+        "lang": "en-US",
+        "corsDomain": "finance.yahoo.com",
+        "fields": "symbol,shortName,longName,regularMarketPrice,regularMarketChangePercent,regularMarketChange,regularMarketPreviousClose,regularMarketTime,marketCap",
+    })
+
+    primary_urls = [
+        f"https://query1.finance.yahoo.com/v7/finance/quote?{primary_params}",
+        f"https://query2.finance.yahoo.com/v7/finance/quote?{primary_params}",
+    ]
+
+    for url in primary_urls:
+        try:
+            data = http_get_json_or_none(url, headers=headers, provider="Yahoo Finance quote")
+            result = data.get("quoteResponse", {}).get("result", []) if isinstance(data, dict) else []
+            if isinstance(result, list) and len(result) > 0:
+                return result
+        except Exception as error:
+            print(f"[S&P 500 Heatmap] Yahoo quote batch failed: {error}")
+
+    # Fallback: Yahoo spark endpoint. This usually works even when the quote endpoint
+    # returns empty on server hosts. It gives current/previous close and enough data
+    # to calculate a real live/near-live percent change.
+    spark_params = urlencode({
+        "symbols": ",".join(safe_symbols),
+        "range": "1d",
+        "interval": "1m",
+        "includePrePost": "true",
+        "includeTimestamps": "true",
+    })
+
+    spark_urls = [
+        f"https://query1.finance.yahoo.com/v7/finance/spark?{spark_params}",
+        f"https://query2.finance.yahoo.com/v7/finance/spark?{spark_params}",
+    ]
+
+    for url in spark_urls:
+        try:
+            data = http_get_json_or_none(url, headers=headers, provider="Yahoo Finance spark")
+            if not isinstance(data, dict):
+                continue
+
+            rows: List[Dict[str, Any]] = []
+            spark_result = data.get("spark", {}).get("result", [])
+
+            if not isinstance(spark_result, list):
+                continue
+
+            for item in spark_result:
+                if not isinstance(item, dict):
+                    continue
+
+                symbol = str(item.get("symbol") or "").upper().strip()
+                response = item.get("response", [])
+                response_item = response[0] if isinstance(response, list) and response else {}
+
+                if not symbol or not isinstance(response_item, dict):
+                    continue
+
+                meta = response_item.get("meta", {}) if isinstance(response_item.get("meta"), dict) else {}
+                close_values = response_item.get("close", []) if isinstance(response_item.get("close"), list) else []
+                timestamps = response_item.get("timestamp", []) if isinstance(response_item.get("timestamp"), list) else []
+
+                latest_price = 0.0
+                for close in reversed(close_values):
+                    parsed = to_float(close, 0.0)
+                    if parsed > 0:
+                        latest_price = parsed
+                        break
+
+                previous_close = to_float(
+                    meta.get("previousClose") or
+                    meta.get("chartPreviousClose") or
+                    meta.get("regularMarketPreviousClose"),
+                    0.0,
+                )
+
+                if latest_price <= 0:
+                    latest_price = to_float(meta.get("regularMarketPrice"), 0.0)
+
+                if previous_close <= 0 and len(close_values) > 1:
+                    first_valid = next((to_float(close, 0.0) for close in close_values if to_float(close, 0.0) > 0), 0.0)
+                    previous_close = first_valid
+
+                change = latest_price - previous_close if latest_price > 0 and previous_close > 0 else 0.0
+                change_pct = (change / previous_close) * 100.0 if previous_close > 0 else 0.0
+
+                market_time = timestamps[-1] if timestamps else meta.get("regularMarketTime")
+
+                rows.append({
+                    "symbol": symbol,
+                    "shortName": symbol,
+                    "longName": symbol,
+                    "regularMarketPrice": latest_price,
+                    "regularMarketChange": change,
+                    "regularMarketChangePercent": change_pct,
+                    "regularMarketPreviousClose": previous_close,
+                    "regularMarketTime": market_time,
+                    "marketCap": to_float(meta.get("marketCap"), 0.0),
+                })
+
+            if rows:
+                return rows
+        except Exception as error:
+            print(f"[S&P 500 Heatmap] Yahoo spark fallback failed: {error}")
+
+    return []
+
 
 
 def build_sp500_heatmap_payload() -> Dict[str, Any]:
@@ -2168,7 +2272,7 @@ def build_sp500_heatmap_payload() -> Dict[str, Any]:
 
     return {
         "eventType": "SP500_HEATMAP",
-        "source": "yahoo_finance_quote",
+        "source": "yahoo_finance_quote_or_spark",
         "note": "Free quote source. Data may be delayed depending on exchange/vendor rules.",
         "isLiveSnapshot": True,
         "createdAt": now_iso(),
@@ -2197,7 +2301,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v12_sp500_heatmap_live_snapshot",
+        "engine": "main_v13_sp500_heatmap_yahoo_spark_fallback",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
