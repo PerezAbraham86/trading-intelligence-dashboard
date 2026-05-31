@@ -30,6 +30,15 @@ type TradingSignal = {
   fredMacroStrength?: number
   fredMacroDirection?: string
   fredMacroRisk?: number
+  optionsFlow?: string
+  optionsFlowStrength?: number
+  optionsFlowDirection?: string
+  optionsBullPressure?: number
+  optionsBearPressure?: number
+  putCallRatio?: number | null
+  unusualOptionsVolume?: number
+  gammaRisk?: number
+  dealerPinZone?: number | null
 }
 
 type TechnicalIndicator = {
@@ -198,7 +207,13 @@ function buildExternalRows(signal?: TradingSignal): FactorRow[] {
   const bullScore = clamp(Number(signal?.bullScore ?? 50))
   const fredStrength = factorStrength(signal?.fredMacroStrength, Number(signal?.fredMacroRisk ?? 45))
 
+  const optionsStrength = factorStrength(
+    signal?.optionsFlowStrength,
+    Math.max(Number(signal?.optionsBullPressure ?? 0), Number(signal?.optionsBearPressure ?? 0), Number(signal?.gammaRisk ?? 0))
+  )
+
   const rows: Array<[string, string | undefined, number]> = [
+    ['Options Flow', signal?.optionsFlow, optionsStrength],
     ['Open Interest', signal?.openInterest, 65],
     ['Footprint Delta', signal?.footprint, bullScore],
     ['FRED Macro', signal?.fredMacro ?? 'Active FRED Macro', fredStrength],
@@ -330,7 +345,7 @@ export default function FactorConfirmationTable({
       </div>
 
       <div className="mt-4 border-t border-dark-700 pt-3 text-xs text-gray-500">
-        Bull/Bear balance: {bullScore}% / {bearScore}% • SMC + AlphaX + Ghost linked from Python chart engine
+        Bull/Bear balance: {bullScore}% / {bearScore}% • SMC + AlphaX + Ghost + Options linked from Python engine
       </div>
     </motion.div>
   )
