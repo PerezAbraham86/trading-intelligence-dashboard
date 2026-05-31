@@ -751,15 +751,15 @@ export default function MarketSentimentGauge({
 
             {/* Labels only around the arc, never over the center status text */}
             <text
-              x="30"
-              y="128"
+              x="14"
+              y="132"
               fill={isActiveGaugeLabel('Strong Bearish', value) ? '#ff2d55' : '#6b7280'}
               fontSize="11"
               textAnchor="middle"
               fontWeight={isActiveGaugeLabel('Strong Bearish', value) ? 700 : 600}
             >
-              <tspan x="30" dy="0">Strong</tspan>
-              <tspan x="30" dy="13">Bearish</tspan>
+              <tspan x="14" dy="0">Strong</tspan>
+              <tspan x="14" dy="13">Bearish</tspan>
             </text>
 
             <text
@@ -796,15 +796,15 @@ export default function MarketSentimentGauge({
             </text>
 
             <text
-              x="290"
-              y="128"
+              x="306"
+              y="132"
               fill={isActiveGaugeLabel('Strong Bullish', value) ? '#3b82f6' : '#6b7280'}
               fontSize="11"
               textAnchor="middle"
               fontWeight={isActiveGaugeLabel('Strong Bullish', value) ? 700 : 600}
             >
-              <tspan x="290" dy="0">Strong</tspan>
-              <tspan x="290" dy="13">Bullish</tspan>
+              <tspan x="306" dy="0">Strong</tspan>
+              <tspan x="306" dy="13">Bullish</tspan>
             </text>
 
             <line
