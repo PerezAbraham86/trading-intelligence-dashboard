@@ -6,7 +6,7 @@ import * as echarts from 'echarts'
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
 const DEFAULT_VISIBLE_CANDLES = 120
 const CACHE_TTL_MS = 1000 * 60 * 5
-const LOCAL_STORAGE_PREFIX = 'marketbos:v7:live-tick-provider-500:'
+const LOCAL_STORAGE_PREFIX = 'marketbos:v8:live-price-line-tooltip-fixed:'
 const CHART_SETTINGS_PREFIX = 'marketbos:chart-settings:v1:'
 
 const GREEN = '#26a69a'
@@ -146,6 +146,35 @@ function floorEpochToTimeframe(epoch: number, timeframe: string): number {
 
 function isoFromEpochSeconds(epoch: number): string {
   return new Date(epoch * 1000).toISOString()
+}
+
+function compactPrice(value: number): string {
+  if (!Number.isFinite(value)) return '—'
+  if (Math.abs(value) >= 1000) return value.toLocaleString(undefined, { maximumFractionDigits: 2 })
+  return value.toLocaleString(undefined, { maximumFractionDigits: 4 })
+}
+
+function extractOhlcFromTooltipParam(param: any): [number, number, number, number] | null {
+  const raw =
+    Array.isArray(param?.value)
+      ? param.value
+      : Array.isArray(param?.data?.value)
+        ? param.data.value
+        : Array.isArray(param?.data)
+          ? param.data
+          : []
+
+  const values = raw.map((item: any) => Number(item)).filter((item: number) => Number.isFinite(item))
+
+  if (values.length < 4) return null
+
+  // ECharts can return candlestick tooltip values as:
+  // [open, close, low, high]
+  // or sometimes [dataIndex/categoryIndex, open, close, low, high].
+  // The old tooltip was reading index 499 as "Open", causing Open: 499.00.
+  const ohlc = values.length >= 5 ? values.slice(-4) : values.slice(0, 4)
+
+  return [ohlc[0], ohlc[1], ohlc[2], ohlc[3]]
 }
 
 
@@ -680,6 +709,7 @@ function buildChartOption({
   loading: boolean
 }): echarts.EChartsOption {
   const activeCandles = candleMode === 'Heikin Ashi' ? convertToHeikinAshi(candles) : candles
+  const latestRealClose = candles.length > 0 ? Number(candles[candles.length - 1].close) : NaN
   const xAxisData = activeCandles.map((candle) => candle.time)
   const candleData = activeCandles.map((candle) => [
     candle.open,
@@ -738,18 +768,18 @@ function buildChartOption({
 
         if (!candleParam) return ''
 
-        const data = candleParam.data
-        const open = Number(data?.[0])
-        const close = Number(data?.[1])
-        const low = Number(data?.[2])
-        const high = Number(data?.[3])
+        const ohlc = extractOhlcFromTooltipParam(candleParam)
+
+        if (!ohlc) return ''
+
+        const [open, close, low, high] = ohlc
 
         return [
           `<strong>${candleParam.axisValue}</strong>`,
-          `Open: ${open.toFixed(2)}`,
-          `High: ${high.toFixed(2)}`,
-          `Low: ${low.toFixed(2)}`,
-          `Close: ${close.toFixed(2)}`,
+          `Open: ${compactPrice(open)}`,
+          `High: ${compactPrice(high)}`,
+          `Low: ${compactPrice(low)}`,
+          `Close: ${compactPrice(close)}`,
         ].join('<br/>')
       },
     },
@@ -891,6 +921,31 @@ function buildChartOption({
             barWidth: '58%',
             barMinWidth: 2,
             barMaxWidth: 10,
+            markLine: Number.isFinite(latestRealClose)
+              ? {
+                  silent: true,
+                  symbol: ['none', 'none'],
+                  animation: false,
+                  label: {
+                    show: true,
+                    position: 'end',
+                    formatter: () => compactPrice(latestRealClose),
+                    color: '#d1fae5',
+                    backgroundColor: '#047857',
+                    borderRadius: 4,
+                    padding: [3, 5],
+                    fontSize: 9,
+                    fontWeight: 700,
+                  },
+                  lineStyle: {
+                    color: '#10b981',
+                    width: 1,
+                    type: 'dashed',
+                    opacity: 0.85,
+                  },
+                  data: [{ yAxis: latestRealClose }],
+                }
+              : undefined,
           },
         ]
       : [
@@ -907,6 +962,31 @@ function buildChartOption({
             barWidth: '58%',
             barMinWidth: 3,
             barMaxWidth: 15,
+            markLine: Number.isFinite(latestRealClose)
+              ? {
+                  silent: true,
+                  symbol: ['none', 'none'],
+                  animation: false,
+                  label: {
+                    show: true,
+                    position: 'end',
+                    formatter: () => compactPrice(latestRealClose),
+                    color: '#d1fae5',
+                    backgroundColor: '#047857',
+                    borderRadius: 4,
+                    padding: [4, 6],
+                    fontSize: 11,
+                    fontWeight: 700,
+                  },
+                  lineStyle: {
+                    color: '#10b981',
+                    width: 1,
+                    type: 'dashed',
+                    opacity: 0.9,
+                  },
+                  data: [{ yAxis: latestRealClose }],
+                }
+              : undefined,
           },
           {
             name: 'Volume',
