@@ -740,12 +740,13 @@ function applyLivePriceToCandles(
   return next.slice(-maxCandles)
 }
 
-function getInitialZoom(candleCount: number) {
-  const visible = Math.min(DEFAULT_VISIBLE_CANDLES, Math.max(candleCount, 1))
+function getInitialZoom(candleCount: number, totalCount = candleCount) {
+  const safeTotal = Math.max(totalCount, candleCount, 1)
+  const visible = Math.min(DEFAULT_VISIBLE_CANDLES, safeTotal)
 
   return {
-    startValue: Math.max(0, candleCount - visible),
-    endValue: Math.max(0, candleCount - 1),
+    startValue: Math.max(0, safeTotal - visible),
+    endValue: Math.max(0, safeTotal - 1),
   }
 }
 
@@ -911,6 +912,69 @@ function buildGhostCandleData(activeLength: number, ghosts: GhostCandle[]) {
   return [...empty, ...ghostData]
 }
 
+function buildAlphaProfileFutureLabels(startIndex: number, count = 18) {
+  return Array.from({ length: count }, (_, index) => `AlphaProfile-${startIndex + index + 1}`)
+}
+
+function buildAlphaProfileCustomData(
+  bins: any[] | undefined,
+  xStartIndex: number,
+  activeCandles: Candle[]
+) {
+  if (!Array.isArray(bins) || bins.length === 0 || activeCandles.length === 0) return []
+
+  return bins
+    .map((bin) => {
+      const price = toNumber(bin.price)
+      const volumePct = toNumber(bin.volumePct)
+      const buyPct = toNumber(bin.buyPct)
+      const sellPct = toNumber(bin.sellPct)
+      if (price === null || volumePct === null) return null
+
+      const direction = String(bin.direction ?? (buyPct !== null && sellPct !== null && buyPct >= sellPct ? 'bullish' : 'bearish')).toLowerCase()
+      const clampedVolume = Math.max(2, Math.min(100, volumePct))
+
+      return {
+        value: [xStartIndex, price, clampedVolume, direction.includes('bear') ? -1 : 1],
+        bin,
+      }
+    })
+    .filter(Boolean) as any[]
+}
+
+function buildAlphaProfileRenderItem() {
+  return (params: any, api: any) => {
+    const xIndex = api.value(0)
+    const price = api.value(1)
+    const volumePct = api.value(2)
+    const side = api.value(3)
+
+    const point = api.coord([xIndex, price])
+    const maxWidth = Math.max(42, Math.min(170, api.getWidth() * 0.18))
+    const width = Math.max(8, (Number(volumePct) / 100) * maxWidth)
+    const height = 6
+    const fill = side < 0
+      ? `rgba(239, 83, 80, ${0.24 + Math.min(Number(volumePct), 100) / 180})`
+      : `rgba(38, 166, 154, ${0.24 + Math.min(Number(volumePct), 100) / 180})`
+
+    return {
+      type: 'rect',
+      shape: {
+        x: point[0],
+        y: point[1] - height / 2,
+        width,
+        height,
+      },
+      style: {
+        fill,
+        stroke: side < 0 ? 'rgba(239, 83, 80, 0.72)' : 'rgba(38, 166, 154, 0.72)',
+        lineWidth: 0.5,
+      },
+      silent: true,
+    }
+  }
+}
+
 async function fetchEngineState(
   symbol: string,
   timeframe: string,
@@ -959,8 +1023,11 @@ function buildChartOption({
   const activeCandles = candleMode === 'Heikin Ashi' ? convertToHeikinAshi(candles) : candles
   const latestRealClose = candles.length > 0 ? Number(candles[candles.length - 1].close) : NaN
   const overlayGhostCandles = !compact && Array.isArray(chartOverlays?.ghostCandles) ? chartOverlays?.ghostCandles ?? [] : []
+  const alphaProfileBins = !compact && Array.isArray(chartOverlays?.alphaProfileBins) ? chartOverlays?.alphaProfileBins ?? [] : []
   const futureGhostLabels = buildFutureGhostAxisLabels(activeCandles, overlayGhostCandles, timeframe)
-  const xAxisData = [...activeCandles.map((candle) => candle.time), ...futureGhostLabels]
+  const alphaProfileStartIndex = activeCandles.length + futureGhostLabels.length + 1
+  const alphaProfileLabels = alphaProfileBins.length > 0 ? buildAlphaProfileFutureLabels(alphaProfileStartIndex, 18) : []
+  const xAxisData = [...activeCandles.map((candle) => candle.time), ...futureGhostLabels, ...alphaProfileLabels]
   const candleData = activeCandles.map((candle) => [
     candle.open,
     candle.close,
@@ -981,9 +1048,10 @@ function buildChartOption({
   const liquidityMarkerData = !compact ? buildMarkerData(chartOverlays?.liquidityEvents, activeCandles) : []
   const scoreMarkerData = !compact ? buildMarkerData(chartOverlays?.scoreMarkers, activeCandles) : []
   const dlmMarkLines = !compact ? buildDlmMarkLines(chartOverlays?.dlmLevels) : []
+  const alphaProfileData = !compact ? buildAlphaProfileCustomData(alphaProfileBins, alphaProfileStartIndex, activeCandles) : []
   const ghostData = !compact ? buildGhostCandleData(activeCandles.length, overlayGhostCandles) : []
 
-  const zoom = getInitialZoom(activeCandles.length)
+  const zoom = getInitialZoom(activeCandles.length, xAxisData.length)
 
   return {
     backgroundColor: BG,
@@ -995,8 +1063,8 @@ function buildChartOption({
         ]
       : [
           // Slider scrollbar removed. Keep a clean price pane + volume pane layout.
-          { left: 58, right: 72, top: 44, bottom: 84 },
-          { left: 58, right: 72, height: 46, bottom: 18 },
+          { left: 58, right: 104, top: 44, bottom: 84 },
+          { left: 58, right: 104, height: 46, bottom: 18 },
         ],
     title: compact
       ? undefined
@@ -1309,6 +1377,31 @@ function buildChartOption({
                 },
               ]
             : []),
+          ...(alphaProfileData.length > 0
+            ? [
+                {
+                  name: 'AlphaX DLM Liquidity Profile',
+                  type: 'custom',
+                  data: alphaProfileData,
+                  renderItem: buildAlphaProfileRenderItem(),
+                  encode: { x: 0, y: 1 },
+                  silent: true,
+                  z: 16,
+                  tooltip: {
+                    formatter: (param: any) => {
+                      const bin = param?.data?.bin ?? {}
+                      return [
+                        '<strong>AlphaX DLM Liquidity</strong>',
+                        `Price: ${compactPrice(Number(bin.price))}`,
+                        `Volume: ${Number(bin.volumePct ?? 0).toFixed(0)}%`,
+                        `Buy: ${Number(bin.buyPct ?? 0).toFixed(0)}%`,
+                        `Sell: ${Number(bin.sellPct ?? 0).toFixed(0)}%`,
+                      ].join('<br/>')
+                    },
+                  },
+                },
+              ]
+            : []),
           ...(ghostData.length > activeCandles.length
             ? [
                 {
@@ -1606,6 +1699,13 @@ export default function EChartsCandlestickChart({
       chartInstance.current.setOption(option, true)
     } else {
       // Fast path for live tick updates and status refreshes.
+      // Preserve the user's current zoom/pan so the chart does not snap back
+      // when they scroll right to inspect ghost candles or the liquidity profile.
+      const currentOption = chartInstance.current.getOption() as any
+      if (Array.isArray(currentOption?.dataZoom) && currentOption.dataZoom.length > 0) {
+        option.dataZoom = currentOption.dataZoom
+      }
+
       chartInstance.current.setOption(option, {
         notMerge: false,
         lazyUpdate: true,
