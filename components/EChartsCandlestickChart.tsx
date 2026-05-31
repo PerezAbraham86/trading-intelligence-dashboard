@@ -1197,6 +1197,18 @@ function saveOverlayMemoryCache(symbol: string, timeframe: string, payload: any)
   })
 }
 
+function overlayPayloadMatches(payload: any, symbol: string, timeframe: string) {
+  if (!payload || typeof payload !== 'object') return false
+
+  const payloadSymbol = normalizeDefaultSymbol(payload.symbol ?? symbol)
+  const payloadTimeframe = normalizeDefaultTimeframe(payload.timeframe ?? timeframe)
+
+  return (
+    payloadSymbol === normalizeDefaultSymbol(symbol) &&
+    payloadTimeframe === normalizeDefaultTimeframe(timeframe)
+  )
+}
+
 async function fetchChartOverlays(
   symbol: string,
   timeframe: string,
@@ -1216,6 +1228,17 @@ async function fetchChartOverlays(
 
     if (!response.ok) return null
     const json = await response.json()
+
+    if (!overlayPayloadMatches(json, symbol, timeframe)) {
+      console.warn('Ignored mismatched chart overlay payload:', {
+        requestedSymbol: symbol,
+        requestedTimeframe: timeframe,
+        payloadSymbol: json?.symbol,
+        payloadTimeframe: json?.timeframe,
+      })
+      return null
+    }
+
     saveOverlayMemoryCache(symbol, timeframe, json)
     return json
   } catch (error: any) {
@@ -2021,13 +2044,20 @@ export default function EChartsCandlestickChart({
   }, [symbol, timeframe, historicalCandles.length, candleFetchLimit])
 
   useEffect(() => {
+    // Clear old overlays immediately on every symbol/timeframe change.
+    // This prevents BTCUSD SMC/AlphaX/Ghost levels from staying on MES1! candles.
+    setChartOverlays(null)
+
     if (compact || historicalCandles.length === 0) {
-      setChartOverlays(null)
       return
     }
 
     const cached = readOverlayMemoryCache(symbol, timeframe, 60000)
-    if (cached?.chartOverlays && typeof cached.chartOverlays === 'object') {
+    if (
+      cached?.chartOverlays &&
+      typeof cached.chartOverlays === 'object' &&
+      overlayPayloadMatches(cached, symbol, timeframe)
+    ) {
       setChartOverlays(cached.chartOverlays as ChartOverlays)
     }
 
@@ -2038,6 +2068,11 @@ export default function EChartsCandlestickChart({
       try {
         const engine = await fetchChartOverlays(symbol, timeframe, controller.signal)
         if (cancelled) return
+        if (!overlayPayloadMatches(engine, symbol, timeframe)) {
+          setChartOverlays(null)
+          return
+        }
+
         const overlays = engine?.chartOverlays && typeof engine.chartOverlays === 'object'
           ? engine.chartOverlays as ChartOverlays
           : null
