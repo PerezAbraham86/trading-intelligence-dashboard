@@ -51,6 +51,17 @@ type TradingSignal = {
   ghostDirection?: string
   alphaxBullPressure?: number
   alphaxBearPressure?: number
+  optionsFlow?: string
+  optionsFlowStrength?: number
+  optionsFlowDirection?: string
+  optionsBullPressure?: number
+  optionsBearPressure?: number
+  putCallRatio?: number | null
+  unusualOptionsVolume?: number
+  gammaRisk?: number
+  dealerPinZone?: number | null
+  optionsConflictRisk?: number
+  optionsReversalRisk?: number
   indicators?: TechnicalIndicator[]
   technicalIndicators?: TechnicalIndicator[]
   technicalMeter?: TechnicalIndicator[]
@@ -465,6 +476,13 @@ export default function PressureGauges({ signal }: PressureGaugesProps) {
   const linkedGhostConfidence = clamp(Number(signal?.ghostConfidence ?? signal?.confidence ?? 0))
   const alphaxBullPressure = clamp(Number(signal?.alphaxBullPressure ?? 0))
   const alphaxBearPressure = clamp(Number(signal?.alphaxBearPressure ?? 0))
+  const optionsBullPressure = clamp(Number(signal?.optionsBullPressure ?? 0))
+  const optionsBearPressure = clamp(Number(signal?.optionsBearPressure ?? 0))
+  const optionsStrength = clamp(Number(signal?.optionsFlowStrength ?? 0))
+  const optionsConflictRisk = clamp(Number(signal?.optionsConflictRisk ?? 0))
+  const optionsReversalRisk = clamp(Number(signal?.optionsReversalRisk ?? 0))
+  const gammaRisk = clamp(Number(signal?.gammaRisk ?? 0))
+  const unusualOptionsVolume = clamp(Number(signal?.unusualOptionsVolume ?? 0))
 
   const bullPressure = clamp(
     Math.max(
@@ -472,7 +490,8 @@ export default function PressureGauges({ signal }: PressureGaugesProps) {
       Number(signal?.bullScore ?? 50),
       String(signal?.smcDirection ?? '').toLowerCase().includes('bull') ? smcStrength : 0,
       String(signal?.alphaxDirection ?? '').toLowerCase().includes('bull') ? Math.max(alphaxStrength, alphaxBullPressure) : 0,
-      String(signal?.ghostDirection ?? '').toLowerCase().includes('bull') ? linkedGhostConfidence : 0
+      String(signal?.ghostDirection ?? '').toLowerCase().includes('bull') ? linkedGhostConfidence : 0,
+      String(signal?.optionsFlowDirection ?? '').toLowerCase().includes('bull') ? Math.max(optionsStrength, optionsBullPressure) : 0
     )
   )
 
@@ -482,7 +501,8 @@ export default function PressureGauges({ signal }: PressureGaugesProps) {
       Number(signal?.bearScore ?? 50),
       String(signal?.smcDirection ?? '').toLowerCase().includes('bear') ? smcStrength : 0,
       String(signal?.alphaxDirection ?? '').toLowerCase().includes('bear') ? Math.max(alphaxStrength, alphaxBearPressure) : 0,
-      String(signal?.ghostDirection ?? '').toLowerCase().includes('bear') ? linkedGhostConfidence : 0
+      String(signal?.ghostDirection ?? '').toLowerCase().includes('bear') ? linkedGhostConfidence : 0,
+      String(signal?.optionsFlowDirection ?? '').toLowerCase().includes('bear') ? Math.max(optionsStrength, optionsBearPressure) : 0
     )
   )
 
@@ -491,15 +511,29 @@ export default function PressureGauges({ signal }: PressureGaugesProps) {
     ? Number(signal?.netBias)
     : bullPressure - bearPressure
 
+  const directionalOptionsConflict =
+    (String(signal?.optionsFlowDirection ?? '').toLowerCase().includes('bear') &&
+      String(signal?.smcDirection ?? '').toLowerCase().includes('bull')) ||
+    (String(signal?.optionsFlowDirection ?? '').toLowerCase().includes('bull') &&
+      String(signal?.smcDirection ?? '').toLowerCase().includes('bear')) ||
+    (String(signal?.optionsFlowDirection ?? '').toLowerCase().includes('bear') &&
+      String(signal?.ghostDirection ?? '').toLowerCase().includes('bull')) ||
+    (String(signal?.optionsFlowDirection ?? '').toLowerCase().includes('bull') &&
+      String(signal?.ghostDirection ?? '').toLowerCase().includes('bear'))
+
   const conflictRisk = clamp(
-    summary.activeCount > 0
-      ? Math.abs(Number(signal?.bearScore ?? 50) - summary.bullishShare) >= 25 ||
-        Math.abs(Number(signal?.bullScore ?? 50) - summary.bearishShare) >= 25
-        ? 75
-        : Math.abs(bullPressure - bearPressure) < 12 || summary.timeframeAgreementRisk >= 60
-          ? 45
-          : 15
-      : 0
+    Math.max(
+      optionsConflictRisk,
+      directionalOptionsConflict ? 80 : 0,
+      summary.activeCount > 0
+        ? Math.abs(Number(signal?.bearScore ?? 50) - summary.bullishShare) >= 25 ||
+          Math.abs(Number(signal?.bullScore ?? 50) - summary.bearishShare) >= 25
+          ? 75
+          : Math.abs(bullPressure - bearPressure) < 12 || summary.timeframeAgreementRisk >= 60
+            ? 45
+            : 15
+        : 0
+    )
   )
 
   const chopRisk = calculateChopRisk(
@@ -518,13 +552,13 @@ export default function PressureGauges({ signal }: PressureGaugesProps) {
       label: 'Bull Pressure',
       value: bullPressure,
       barClass: 'bg-emerald-400',
-      note: `${summary.bullCount} technicals + linked SMC/AlphaX/Ghost bullish pressure`,
+      note: `${summary.bullCount} technicals + SMC/AlphaX/Ghost/Options bullish pressure`,
     },
     {
       label: 'Bear Pressure',
       value: bearPressure,
       barClass: 'bg-red-400',
-      note: `${summary.bearCount} technicals + linked SMC/AlphaX/Ghost bearish pressure`,
+      note: `${summary.bearCount} technicals + SMC/AlphaX/Ghost/Options bearish pressure`,
     },
     {
       label: 'Ghost Confidence',
@@ -540,6 +574,18 @@ export default function PressureGauges({ signal }: PressureGaugesProps) {
         summary.timeframeCount > 1
           ? 'Mismatch between pressure, technical meter, and mini-chart timeframes'
           : 'Mismatch between dashboard pressure and technical meter',
+    },
+    {
+      label: 'Options Reversal Risk',
+      value: optionsReversalRisk,
+      barClass: optionsReversalRisk >= 60 ? 'bg-red-400' : optionsReversalRisk >= 35 ? 'bg-yellow-400' : 'bg-emerald-400',
+      note: 'Put/call, unusual volume, and gamma pressure reversal risk',
+    },
+    {
+      label: 'Gamma Risk',
+      value: gammaRisk,
+      barClass: gammaRisk >= 60 ? 'bg-red-400' : gammaRisk >= 35 ? 'bg-yellow-400' : 'bg-emerald-400',
+      note: signal?.dealerPinZone ? `Dealer pin zone near ${signal.dealerPinZone}` : 'Dealer pin zone unavailable',
     },
     {
       label: 'Chop Risk',
