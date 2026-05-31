@@ -6,7 +6,7 @@ import * as echarts from 'echarts'
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
 const DEFAULT_VISIBLE_CANDLES = 120
 const CACHE_TTL_MS = 1000 * 60 * 5
-const LOCAL_STORAGE_PREFIX = 'marketbos:v6:latest-provider-500:'
+const LOCAL_STORAGE_PREFIX = 'marketbos:v7:live-tick-provider-500:'
 const CHART_SETTINGS_PREFIX = 'marketbos:chart-settings:v1:'
 
 const GREEN = '#26a69a'
@@ -26,6 +26,20 @@ type Candle = {
   symbol?: string
   timeframe?: string
   provider?: string
+}
+
+type LivePricePayload = {
+  symbol?: string
+  timeframe?: string
+  price?: number
+  time?: string
+  timestamp?: string
+  epoch?: number
+  bucketEpoch?: number
+  timeframeSeconds?: number
+  provider?: string | null
+  source?: string
+  createdAt?: string
 }
 
 type CandleMode = 'Regular' | 'Heikin Ashi'
@@ -110,6 +124,28 @@ function normalizeTimeframe(value: any): string {
 function normalizeDefaultTimeframe(value: any, fallback = '1m'): string {
   const normalized = normalizeTimeframe(value || fallback)
   return timeframeOptions.includes(normalized) ? normalized : fallback
+}
+
+function timeframeSeconds(timeframe: string): number {
+  const tf = normalizeTimeframe(timeframe)
+  const mapping: Record<string, number> = {
+    '1m': 60,
+    '5m': 300,
+    '10m': 600,
+    '15m': 900,
+    '30m': 1800,
+  }
+
+  return mapping[tf] ?? 60
+}
+
+function floorEpochToTimeframe(epoch: number, timeframe: string): number {
+  const seconds = timeframeSeconds(timeframe)
+  return Math.floor(epoch / seconds) * seconds
+}
+
+function isoFromEpochSeconds(epoch: number): string {
+  return new Date(epoch * 1000).toISOString()
 }
 
 
@@ -525,6 +561,100 @@ async function fetchCandles(
 }
 
 
+
+async function fetchLivePrice(
+  symbol: string,
+  timeframe: string,
+  signal?: AbortSignal
+): Promise<LivePricePayload | null> {
+  const params = new URLSearchParams({
+    symbol: normalizeDefaultSymbol(symbol),
+    timeframe: normalizeTimeframe(timeframe),
+  })
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/live-price?${params.toString()}`, {
+      cache: 'no-store',
+      signal,
+    })
+
+    if (!response.ok) return null
+
+    const json = await response.json()
+    const price = Number(json?.price)
+
+    if (!Number.isFinite(price) || price <= 0) return null
+
+    return json as LivePricePayload
+  } catch (error: any) {
+    if (error?.name === 'AbortError') throw error
+    console.error(`Live price fetch error: /api/live-price ${symbol} ${timeframe}`, error)
+    return null
+  }
+}
+
+function applyLivePriceToCandles(
+  candles: Candle[],
+  livePrice: LivePricePayload | null,
+  timeframe: string,
+  maxCandles = 500
+): Candle[] {
+  if (!livePrice || candles.length === 0) return candles
+
+  const price = Number(livePrice.price)
+  if (!Number.isFinite(price) || price <= 0) return candles
+
+  const liveEpoch =
+    toEpochSeconds(livePrice.epoch) ??
+    toEpochSeconds(livePrice.time) ??
+    toEpochSeconds(livePrice.timestamp) ??
+    Math.floor(Date.now() / 1000)
+
+  const liveBucket =
+    Number.isFinite(Number(livePrice.bucketEpoch)) && Number(livePrice.bucketEpoch) > 0
+      ? Math.floor(Number(livePrice.bucketEpoch))
+      : floorEpochToTimeframe(liveEpoch, timeframe)
+
+  const last = candles[candles.length - 1]
+  const lastEpoch = last.epoch ?? toEpochSeconds(last.time) ?? liveBucket
+  const lastBucket = floorEpochToTimeframe(lastEpoch, timeframe)
+
+  // Ignore old live payloads so they never pull the chart backwards.
+  if (liveBucket < lastBucket) return candles
+
+  const next = candles.slice()
+
+  if (liveBucket === lastBucket) {
+    const updated: Candle = {
+      ...last,
+      high: Math.max(Number(last.high), price),
+      low: Math.min(Number(last.low), price),
+      close: price,
+      volume: Number(last.volume ?? 0),
+      provider: livePrice.provider || last.provider,
+    }
+
+    next[next.length - 1] = updated
+    return next
+  }
+
+  const newCandle: Candle = {
+    time: isoFromEpochSeconds(liveBucket),
+    epoch: liveBucket,
+    open: Number(last.close),
+    high: Math.max(Number(last.close), price),
+    low: Math.min(Number(last.close), price),
+    close: price,
+    volume: 0,
+    symbol: normalizeDefaultSymbol(livePrice.symbol ?? last.symbol),
+    timeframe: normalizeTimeframe(livePrice.timeframe ?? timeframe),
+    provider: livePrice.provider ?? 'live',
+  }
+
+  next.push(newCandle)
+  return next.slice(-maxCandles)
+}
+
 function getInitialZoom(candleCount: number) {
   const visible = Math.min(DEFAULT_VISIBLE_CANDLES, Math.max(candleCount, 1))
 
@@ -832,6 +962,7 @@ export default function EChartsCandlestickChart({
   const [candleMode, setCandleMode] = useState<CandleMode>(() => initialCandleMode)
   const [historicalCandles, setHistoricalCandles] = useState<Candle[]>([])
   const [status, setStatus] = useState<'idle' | 'loading' | 'cached' | 'loaded' | 'empty' | 'error'>('idle')
+  const [liveProvider, setLiveProvider] = useState<string>('')
 
   const candleFetchLimit = '500'
 
@@ -942,6 +1073,50 @@ export default function EChartsCandlestickChart({
     }
   }, [symbol, timeframe, compact, allowCompactHistory, candleFetchLimit])
 
+  useEffect(() => {
+    if (historicalCandles.length === 0) return
+
+    const controller = new AbortController()
+    let cancelled = false
+
+    async function pollLivePrice() {
+      try {
+        const live = await fetchLivePrice(symbol, timeframe, controller.signal)
+
+        if (cancelled || !live) return
+
+        setLiveProvider(String(live.source || live.provider || 'live'))
+
+        setHistoricalCandles((current) => {
+          if (current.length === 0) return current
+
+          const updated = applyLivePriceToCandles(
+            current,
+            live,
+            timeframe,
+            requestedLimitNumber(candleFetchLimit)
+          )
+
+          const cacheKey = getCandleCacheKey(symbol, timeframe)
+          saveCandleCache(cacheKey, updated)
+
+          return updated
+        })
+      } catch (error: any) {
+        if (error?.name === 'AbortError') return
+      }
+    }
+
+    pollLivePrice()
+    const intervalId = window.setInterval(pollLivePrice, 1000)
+
+    return () => {
+      cancelled = true
+      controller.abort()
+      window.clearInterval(intervalId)
+    }
+  }, [symbol, timeframe, historicalCandles.length, candleFetchLimit])
+
   const candles = useMemo(
     () => historicalCandles,
     [historicalCandles]
@@ -970,18 +1145,17 @@ export default function EChartsCandlestickChart({
     chartIdentityRef.current = chartIdentity
     dataSignatureRef.current = dataSignature
 
-    if (identityChanged || dataChanged) {
-      // Full reset on symbol/timeframe/candle-type/data changes.
-      // This forces every chart back to the most recent candles and prevents old
-      // BTCUSD/MES cached windows from keeping a stale price scale or old date range.
+    if (identityChanged) {
+      // Full reset only when symbol/timeframe/candle type changes.
+      // Live ticks should update the current candle without wiping the chart.
       chartInstance.current.clear()
       chartInstance.current.setOption(option, true)
     } else {
-      // Fast path for pure visual/status updates.
+      // Fast path for live tick updates and status refreshes.
       chartInstance.current.setOption(option, {
         notMerge: false,
         lazyUpdate: true,
-        replaceMerge: ['graphic'],
+        replaceMerge: ['graphic', 'series', 'xAxis', 'yAxis'],
       })
     }
 
@@ -1007,7 +1181,7 @@ export default function EChartsCandlestickChart({
   const hasVisibleCandles = candles.length > 0
 
   const statusBadge = hasVisibleCandles
-    ? `${candles.length} Candles`
+    ? `${candles.length} Candles${liveProvider ? ' · Live' : ''}`
     : status === 'loading'
       ? 'Loading Candles'
       : status === 'empty'
