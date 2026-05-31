@@ -9,9 +9,8 @@ const CACHE_TTL_MS = 1000 * 60 * 5
 const LOCAL_STORAGE_PREFIX = 'marketbos:v9:python-smc-alphax-ghost:'
 const CHART_SETTINGS_PREFIX = 'marketbos:chart-settings:v1:'
 const MAIN_CANDLES_READY_KEY = 'marketbos:main-candles-ready:v1'
-const PRIMARY_CANDLE_SYMBOLS = ['BTCUSD', 'MES1!', 'SPY']
 const PRIMARY_CANDLE_TIMEFRAMES = ['1m', '5m', '10m', '15m']
-let primaryCandlePreloadStarted = false
+let primaryCandlePreloadStarted: string | null = null
 
 const GREEN = '#26a69a'
 const RED = '#ef5350'
@@ -671,26 +670,28 @@ async function preloadPrimaryCandles(
   priorityTimeframe = '1m'
 ) {
   if (typeof window === 'undefined') return
-  if (primaryCandlePreloadStarted) return
 
-  primaryCandlePreloadStarted = true
+  const normalizedPrioritySymbol = normalizeDefaultSymbol(prioritySymbol)
+  const normalizedPriorityTimeframe = normalizeDefaultTimeframe(priorityTimeframe)
+  const preloadKey = `${normalizedPrioritySymbol}::${normalizedPriorityTimeframe}`
 
-  const symbols = Array.from(
-    new Set([
-      normalizeDefaultSymbol(prioritySymbol),
-      ...PRIMARY_CANDLE_SYMBOLS,
-    ])
-  )
+  // One priority preload per selected symbol/timeframe session.
+  // Important: do NOT preload other symbols here. The selected chart symbol owns
+  // priority after deployment/load, and other symbols should wait until the user
+  // actually switches to them.
+  if (primaryCandlePreloadStarted === preloadKey) return
+
+  primaryCandlePreloadStarted = preloadKey
 
   const timeframes = Array.from(
     new Set([
-      normalizeDefaultTimeframe(priorityTimeframe),
+      normalizedPriorityTimeframe,
       ...PRIMARY_CANDLE_TIMEFRAMES,
     ])
   )
 
   const params = new URLSearchParams({
-    symbols: symbols.join(','),
+    symbols: normalizedPrioritySymbol,
     timeframes: timeframes.join(','),
     limit: '500',
   })
@@ -702,7 +703,7 @@ async function preloadPrimaryCandles(
     })
   } catch (error: any) {
     if (error?.name === 'AbortError') throw error
-    console.warn('Primary candle preload failed:', error)
+    console.warn('Current-symbol candle preload failed:', error)
   }
 }
 
