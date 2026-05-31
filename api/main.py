@@ -1413,6 +1413,310 @@ def build_python_ghost_candles(candles: List[Dict[str, Any]], count: int = 3) ->
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PYTHON-ONLY SMC + ALPHAX DLM + GHOST CHART OVERLAYS
+# No webhook. Built directly from backend candles.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _overlay_time(candle: Dict[str, Any]) -> str:
+    return str(candle.get("time") or candle.get("timestamp") or format_bar_time(candle.get("epoch")))
+
+
+def _pivot_highs(candles: List[Dict[str, Any]], left: int = 3, right: int = 3) -> List[Tuple[int, float]]:
+    pivots: List[Tuple[int, float]] = []
+    for index in range(left, max(left, len(candles) - right)):
+        high = to_float(candles[index].get("high"))
+        window = [to_float(candles[j].get("high")) for j in range(index - left, index + right + 1)]
+        if window and high == max(window):
+            pivots.append((index, high))
+    return pivots
+
+
+def _pivot_lows(candles: List[Dict[str, Any]], left: int = 3, right: int = 3) -> List[Tuple[int, float]]:
+    pivots: List[Tuple[int, float]] = []
+    for index in range(left, max(left, len(candles) - right)):
+        low = to_float(candles[index].get("low"))
+        window = [to_float(candles[j].get("low")) for j in range(index - left, index + right + 1)]
+        if window and low == min(window):
+            pivots.append((index, low))
+    return pivots
+
+
+def build_python_smc_events(candles: List[Dict[str, Any]], lookback: int = 220) -> List[Dict[str, Any]]:
+    sample = candles[-lookback:] if len(candles) > lookback else candles[:]
+    if len(sample) < 25:
+        return []
+
+    piv_hi = _pivot_highs(sample, 3, 3)
+    piv_lo = _pivot_lows(sample, 3, 3)
+    events: List[Dict[str, Any]] = []
+    last_high: Optional[Tuple[int, float]] = None
+    last_low: Optional[Tuple[int, float]] = None
+    trend = 0
+
+    high_by_index = {idx: price for idx, price in piv_hi}
+    low_by_index = {idx: price for idx, price in piv_lo}
+
+    for index in range(len(sample)):
+        if index in high_by_index:
+            last_high = (index, high_by_index[index])
+        if index in low_by_index:
+            last_low = (index, low_by_index[index])
+
+        close = to_float(sample[index].get("close"))
+        if last_high and index > last_high[0] and close > last_high[1]:
+            tag = "BOS" if trend >= 0 else "CHoCH"
+            events.append({
+                "time": _overlay_time(sample[index]),
+                "fromTime": _overlay_time(sample[last_high[0]]),
+                "price": round(last_high[1], 5),
+                "tag": tag,
+                "direction": "bullish",
+                "scope": "swing",
+            })
+            trend = 1
+            last_high = None
+
+        if last_low and index > last_low[0] and close < last_low[1]:
+            tag = "BOS" if trend <= 0 else "CHoCH"
+            events.append({
+                "time": _overlay_time(sample[index]),
+                "fromTime": _overlay_time(sample[last_low[0]]),
+                "price": round(last_low[1], 5),
+                "tag": tag,
+                "direction": "bearish",
+                "scope": "swing",
+            })
+            trend = -1
+            last_low = None
+
+    return events[-24:]
+
+
+def build_python_smc_zones(candles: List[Dict[str, Any]], lookback: int = 180) -> List[Dict[str, Any]]:
+    sample = candles[-lookback:] if len(candles) > lookback else candles[:]
+    if len(sample) < 20:
+        return []
+
+    zones: List[Dict[str, Any]] = []
+    atr = average_true_range(sample, 14) or max(to_float(sample[-1].get("close")) * 0.001, 0.01)
+    highs = [to_float(c.get("high")) for c in sample]
+    lows = [to_float(c.get("low")) for c in sample]
+    top = max(highs)
+    bottom = min(lows)
+    mid = (top + bottom) / 2.0
+    start_time = _overlay_time(sample[0])
+    end_time = _overlay_time(sample[-1])
+
+    zones.append({"startTime": start_time, "endTime": end_time, "top": round(top, 5), "bottom": round(mid, 5), "label": "Premium", "direction": "bearish", "kind": "premium"})
+    zones.append({"startTime": start_time, "endTime": end_time, "top": round(mid, 5), "bottom": round(bottom, 5), "label": "Discount", "direction": "bullish", "kind": "discount"})
+
+    # Latest bullish/bearish order block approximation: final opposite candle before local impulse.
+    for direction in ["bullish", "bearish"]:
+        found = None
+        for index in range(len(sample) - 8, 5, -1):
+            c = sample[index]
+            body = abs(to_float(c.get("close")) - to_float(c.get("open")))
+            candle_range = max(to_float(c.get("high")) - to_float(c.get("low")), 1e-9)
+            if body / candle_range < 0.35:
+                continue
+            if direction == "bullish" and to_float(c.get("close")) < to_float(c.get("open")):
+                future_high = max(to_float(x.get("high")) for x in sample[index + 1:min(len(sample), index + 8)])
+                if future_high - to_float(c.get("high")) >= atr * 0.6:
+                    found = (index, c)
+                    break
+            if direction == "bearish" and to_float(c.get("close")) > to_float(c.get("open")):
+                future_low = min(to_float(x.get("low")) for x in sample[index + 1:min(len(sample), index + 8)])
+                if to_float(c.get("low")) - future_low >= atr * 0.6:
+                    found = (index, c)
+                    break
+        if found:
+            index, c = found
+            zones.append({
+                "startTime": _overlay_time(c),
+                "endTime": end_time,
+                "top": round(to_float(c.get("high")), 5),
+                "bottom": round(to_float(c.get("low")), 5),
+                "label": "Bullish OB" if direction == "bullish" else "Bearish OB",
+                "direction": direction,
+                "kind": "order_block",
+            })
+
+    # Recent fair value gaps.
+    for index in range(2, len(sample)):
+        prev2 = sample[index - 2]
+        cur = sample[index]
+        if to_float(cur.get("low")) > to_float(prev2.get("high")) + atr * 0.05:
+            zones.append({
+                "startTime": _overlay_time(prev2),
+                "endTime": end_time,
+                "top": round(to_float(cur.get("low")), 5),
+                "bottom": round(to_float(prev2.get("high")), 5),
+                "label": "Bullish FVG",
+                "direction": "bullish",
+                "kind": "fvg",
+            })
+        if to_float(cur.get("high")) < to_float(prev2.get("low")) - atr * 0.05:
+            zones.append({
+                "startTime": _overlay_time(prev2),
+                "endTime": end_time,
+                "top": round(to_float(prev2.get("low")), 5),
+                "bottom": round(to_float(cur.get("high")), 5),
+                "label": "Bearish FVG",
+                "direction": "bearish",
+                "kind": "fvg",
+            })
+
+    # Keep the visual clean.
+    pd = [z for z in zones if z["kind"] in {"premium", "discount"}]
+    ob = [z for z in zones if z["kind"] == "order_block"][-2:]
+    fvg = [z for z in zones if z["kind"] == "fvg"][-3:]
+    return pd + ob + fvg
+
+
+def build_python_liquidity_events(candles: List[Dict[str, Any]], lookback: int = 180) -> List[Dict[str, Any]]:
+    sample = candles[-lookback:] if len(candles) > lookback else candles[:]
+    if len(sample) < 25:
+        return []
+
+    atr = average_true_range(sample, 14) or max(to_float(sample[-1].get("close")) * 0.001, 0.01)
+    piv_hi = _pivot_highs(sample, 3, 3)
+    piv_lo = _pivot_lows(sample, 3, 3)
+    events: List[Dict[str, Any]] = []
+
+    for pivots, direction, label in [(piv_hi, "bearish", "Buy-Side Sweep"), (piv_lo, "bullish", "Sell-Side Sweep")]:
+        for pivot_index, level in pivots[-10:]:
+            for index in range(pivot_index + 1, len(sample)):
+                high = to_float(sample[index].get("high"))
+                low = to_float(sample[index].get("low"))
+                close = to_float(sample[index].get("close"))
+                if direction == "bearish" and high > level + atr * 0.04 and close < level:
+                    events.append({"time": _overlay_time(sample[index]), "price": round(level, 5), "label": label, "direction": direction, "kind": "sweep"})
+                    break
+                if direction == "bullish" and low < level - atr * 0.04 and close > level:
+                    events.append({"time": _overlay_time(sample[index]), "price": round(level, 5), "label": label, "direction": direction, "kind": "sweep"})
+                    break
+
+    return events[-12:]
+
+
+def build_python_alphax_dlm(candles: List[Dict[str, Any]], lookback: int = 300, bins: int = 36) -> Dict[str, Any]:
+    sample = candles[-lookback:] if len(candles) > lookback else candles[:]
+    if len(sample) < 20:
+        return {"levels": [], "markers": [], "profileBins": [], "meta": {}}
+
+    high = max(to_float(c.get("high")) for c in sample)
+    low = min(to_float(c.get("low")) for c in sample)
+    step = max((high - low) / max(bins, 1), 1e-9)
+    volume_bins = [0.0] * bins
+    buy_bins = [0.0] * bins
+    sell_bins = [0.0] * bins
+
+    for candle in sample:
+        price = (to_float(candle.get("high")) + to_float(candle.get("low")) + to_float(candle.get("close"))) / 3.0
+        idx = int((price - low) / step)
+        idx = max(0, min(bins - 1, idx))
+        volume = max(to_float(candle.get("volume")), 1.0)
+        volume_bins[idx] += volume
+        if to_float(candle.get("close")) >= to_float(candle.get("open")):
+            buy_bins[idx] += volume
+        else:
+            sell_bins[idx] += volume
+
+    max_vol = max(volume_bins) if volume_bins else 0.0
+    max_buy = max(buy_bins) if buy_bins else 0.0
+    max_sell = max(sell_bins) if sell_bins else 0.0
+    poc_index = volume_bins.index(max_vol) if max_vol > 0 else bins // 2
+    buy_index = buy_bins.index(max_buy) if max_buy > 0 else poc_index
+    sell_index = sell_bins.index(max_sell) if max_sell > 0 else poc_index
+
+    def level_for(index: int) -> float:
+        return low + step * index + step * 0.5
+
+    bull_pressure = max_buy / max(max_buy + max_sell, 1.0) * 100.0
+    bear_pressure = max_sell / max(max_buy + max_sell, 1.0) * 100.0
+    direction = "bullish" if bull_pressure >= bear_pressure else "bearish"
+    pressure = max(bull_pressure, bear_pressure)
+
+    levels = [
+        {"label": "AlphaX POC", "price": round(level_for(poc_index), 5), "direction": "neutral"},
+        {"label": "DLM Buy Liquidity", "price": round(level_for(buy_index), 5), "direction": "bullish"},
+        {"label": "DLM Sell Liquidity", "price": round(level_for(sell_index), 5), "direction": "bearish"},
+    ]
+
+    profile_bins = []
+    for index in range(bins):
+        price = level_for(index)
+        profile_bins.append({
+            "price": round(price, 5),
+            "volumePct": round(volume_bins[index] / max(max_vol, 1.0) * 100.0, 2),
+            "buyPct": round(buy_bins[index] / max(max_buy, 1.0) * 100.0, 2),
+            "sellPct": round(sell_bins[index] / max(max_sell, 1.0) * 100.0, 2),
+            "direction": "bullish" if buy_bins[index] >= sell_bins[index] else "bearish",
+        })
+
+    markers = [{
+        "time": _overlay_time(sample[-1]),
+        "price": round(to_float(sample[-1].get("close")), 5),
+        "label": "AlphaX Pressure",
+        "direction": direction,
+        "kind": "pressure",
+        "pressurePct": round(pressure, 2),
+    }]
+
+    return {
+        "levels": levels,
+        "markers": markers,
+        "profileBins": profile_bins,
+        "meta": {
+            "bullPressurePct": round(bull_pressure, 2),
+            "bearPressurePct": round(bear_pressure, 2),
+            "pocPrice": round(level_for(poc_index), 5),
+            "lookback": len(sample),
+            "bins": bins,
+        },
+    }
+
+
+def build_python_chart_overlays(candles: List[Dict[str, Any]], ghosts: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    if len(candles) < 30:
+        payload = empty_overlay_payload()
+        payload["ghostCandles"] = ghosts or []
+        return payload
+
+    dlm = build_python_alphax_dlm(candles)
+    smc_events = build_python_smc_events(candles)
+    zones = build_python_smc_zones(candles)
+    liquidity = build_python_liquidity_events(candles)
+    latest_close = to_float(candles[-1].get("close"))
+    meta = dlm.get("meta", {}) if isinstance(dlm, dict) else {}
+    bull_pressure = to_float(meta.get("bullPressurePct"), 50)
+    bear_pressure = to_float(meta.get("bearPressurePct"), 50)
+    direction = "bullish" if bull_pressure >= bear_pressure else "bearish"
+    score = round(max(bull_pressure, bear_pressure))
+
+    return {
+        "smcEvents": smc_events,
+        "dlmLevels": dlm.get("levels", []),
+        "zones": zones,
+        "liquidityEvents": liquidity,
+        "dlmConfluenceMarkers": dlm.get("markers", []),
+        "scoreMarkers": [{
+            "time": _overlay_time(candles[-1]),
+            "price": round(latest_close, 5),
+            "label": "Python SMC+AlphaX",
+            "direction": direction,
+            "kind": "python_score",
+            "score": score,
+            "grade": "A" if score >= 70 else "B" if score >= 55 else "C",
+        }],
+        "alphaProfileBins": dlm.get("profileBins", []),
+        "alphaProfileMeta": meta,
+        "ghostCandles": ghosts or [],
+        "source": "python_only_no_webhook",
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PYTHON-ONLY 12 INDICATOR TECHNICAL SENTIMENT ENGINE
 # Matches the TradingView meter concept without requiring a webhook.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2764,7 +3068,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v16_ticker_news_feed",
+        "engine": "main_v17_python_smc_alphax_ghost_overlays",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
@@ -2966,7 +3270,7 @@ def engine_state(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500
         "candlesCount": len(candles),
         "sentiment": sentiment,
         "ghostCandles": ghosts,
-        "chartOverlays": empty_overlay_payload(),
+        "chartOverlays": build_python_chart_overlays(candles, ghosts),
         "sentimentDebug": sentiment.get("debug", {}),
         "createdAt": now_iso(),
     }
