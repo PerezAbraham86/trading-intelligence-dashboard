@@ -6,7 +6,8 @@ import * as echarts from 'echarts'
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
 const DEFAULT_VISIBLE_CANDLES = 120
 const CACHE_TTL_MS = 1000 * 60 * 5
-const LOCAL_STORAGE_PREFIX = 'marketbos:v5:clean-provider-500:'
+const LOCAL_STORAGE_PREFIX = 'marketbos:v6:latest-provider-500:'
+const CHART_SETTINGS_PREFIX = 'marketbos:chart-settings:v1:'
 
 const GREEN = '#26a69a'
 const RED = '#ef5350'
@@ -347,6 +348,52 @@ function getCandleCacheKey(symbol: string, timeframe: string) {
 function requestedLimitNumber(limit: string): number {
   const parsed = Number(limit)
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 500
+}
+
+function getChartSettingsKey(compact: boolean, chartTitle?: string, fallbackTimeframe = '1m') {
+  const identity = compact ? chartTitle || `mini-${fallbackTimeframe}` : 'main'
+  return `${CHART_SETTINGS_PREFIX}${identity}`
+}
+
+function readChartSettings(key: string): Partial<{ symbol: string; timeframe: string; candleMode: CandleMode }> {
+  if (typeof window === 'undefined') return {}
+
+  try {
+    const raw = window.localStorage.getItem(key)
+    if (!raw) return {}
+
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return {}
+
+    return parsed
+  } catch {
+    return {}
+  }
+}
+
+function saveChartSettings(
+  key: string,
+  settings: Partial<{ symbol: string; timeframe: string; candleMode: CandleMode }>
+) {
+  if (typeof window === 'undefined') return
+
+  try {
+    window.localStorage.setItem(key, JSON.stringify(settings))
+  } catch {
+    // Ignore storage quota/private-mode failures.
+  }
+}
+
+function candleDataSignature(candles: Candle[]) {
+  if (candles.length === 0) return 'empty'
+
+  const first = candles[0]
+  const last = candles[candles.length - 1]
+  const firstEpoch = first.epoch ?? toEpochSeconds(first.time) ?? first.time
+  const lastEpoch = last.epoch ?? toEpochSeconds(last.time) ?? last.time
+  const lastClose = Number.isFinite(Number(last.close)) ? Number(last.close).toFixed(4) : 'na'
+
+  return `${candles.length}:${firstEpoch}:${lastEpoch}:${lastClose}`
 }
 
 function readMemoryCache(cacheKey: string): Candle[] | null {
@@ -761,13 +808,24 @@ export default function EChartsCandlestickChart({
   const chartInstance = useRef<echarts.ECharts | null>(null)
   const activeCacheKeyRef = useRef<string>('')
   const chartIdentityRef = useRef<string>('')
+  const dataSignatureRef = useRef<string>('')
+
+  const chartSettingsKey = getChartSettingsKey(compact, chartTitle, defaultTimeframe)
+  const savedChartSettings = typeof window === 'undefined' ? {} : readChartSettings(chartSettingsKey)
 
   const initialSymbol = normalizeDefaultSymbol(
-    defaultSymbol ?? latestSignal?.symbol ?? 'BTCUSD',
+    savedChartSettings.symbol ?? defaultSymbol ?? latestSignal?.symbol ?? 'BTCUSD',
     'BTCUSD'
   )
-  const initialTimeframe = normalizeDefaultTimeframe(defaultTimeframe ?? latestSignal?.timeframe, '1m')
-  const initialCandleMode = candleModeOptions.includes(defaultCandleMode) ? defaultCandleMode : 'Heikin Ashi'
+  const initialTimeframe = normalizeDefaultTimeframe(
+    savedChartSettings.timeframe ?? defaultTimeframe ?? latestSignal?.timeframe,
+    '1m'
+  )
+  const initialCandleMode = candleModeOptions.includes(savedChartSettings.candleMode as CandleMode)
+    ? savedChartSettings.candleMode as CandleMode
+    : candleModeOptions.includes(defaultCandleMode)
+      ? defaultCandleMode
+      : 'Heikin Ashi'
 
   const [symbol, setSymbol] = useState(() => initialSymbol)
   const [timeframe, setTimeframe] = useState(() => initialTimeframe)
@@ -798,6 +856,14 @@ export default function EChartsCandlestickChart({
       setSymbol(nextSymbol)
     }
   }, [defaultSymbol, latestSignal?.symbol, followDefaultSymbol, symbol])
+
+  useEffect(() => {
+    saveChartSettings(chartSettingsKey, {
+      symbol,
+      timeframe,
+      candleMode,
+    })
+  }, [chartSettingsKey, symbol, timeframe, candleMode])
 
   useEffect(() => {
     onChartSelectionChange?.({
@@ -898,17 +964,20 @@ export default function EChartsCandlestickChart({
     })
 
     const chartIdentity = `${symbol}::${timeframe}::${candleMode}::${compact}`
+    const dataSignature = candleDataSignature(candles)
     const identityChanged = chartIdentityRef.current !== chartIdentity
+    const dataChanged = dataSignatureRef.current !== dataSignature
     chartIdentityRef.current = chartIdentity
+    dataSignatureRef.current = dataSignature
 
-    if (identityChanged) {
-      // Full reset on symbol/timeframe/candle-type changes.
-      // This prevents ECharts/zrender from keeping the previous timeframe's x-axis,
-      // series data, zoom window, or stale drawing state.
+    if (identityChanged || dataChanged) {
+      // Full reset on symbol/timeframe/candle-type/data changes.
+      // This forces every chart back to the most recent candles and prevents old
+      // BTCUSD/MES cached windows from keeping a stale price scale or old date range.
       chartInstance.current.clear()
       chartInstance.current.setOption(option, true)
     } else {
-      // Fast path for live candle updates.
+      // Fast path for pure visual/status updates.
       chartInstance.current.setOption(option, {
         notMerge: false,
         lazyUpdate: true,
