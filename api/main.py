@@ -3047,6 +3047,255 @@ def build_ticker_news_payload(symbol: str, limit: int = 10) -> Dict[str, Any]:
         "articles": articles,
     }
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PYTHON-ONLY DASHBOARD SCORECARD BRIDGE
+# Links SMC + AlphaX DLM + HA Ghost overlays into dashboard scorecards.
+# No webhooks required.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _factor_direction_from_text(value: Any, fallback: str = "neutral") -> str:
+    text = str(value or "").lower()
+    if "bull" in text or "buy" in text or "up" in text or "long" in text:
+        return "bullish"
+    if "bear" in text or "sell" in text or "down" in text or "short" in text:
+        return "bearish"
+    return fallback
+
+
+def _factor_label(direction: str, label: str) -> str:
+    side = _factor_direction_from_text(direction)
+    if side == "bullish":
+        return f"Bullish {label}"
+    if side == "bearish":
+        return f"Bearish {label}"
+    return f"Neutral {label}"
+
+
+def analyze_python_core_scorecards(
+    candles: List[Dict[str, Any]],
+    sentiment: Dict[str, Any],
+    ghosts: List[Dict[str, Any]],
+    overlays: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not candles:
+        return {
+            "signal": "NEUTRAL",
+            "confidence": 0,
+            "bullScore": 50,
+            "bearScore": 50,
+            "netBias": 0,
+            "smc": "Neutral SMC",
+            "alphax": "Neutral AlphaX DLM",
+            "ghost": "Neutral Ghost",
+            "smcStrength": 0,
+            "alphaxStrength": 0,
+            "ghostConfidence": 0,
+            "smcDirection": "neutral",
+            "alphaxDirection": "neutral",
+            "ghostDirection": "neutral",
+        }
+
+    latest_close = to_float(candles[-1].get("close"))
+    technical_sentiment = clamp(to_float(sentiment.get("sentiment"), 50), 0, 100)
+    technical_bull = to_float(sentiment.get("bullCount"), 0)
+    technical_bear = to_float(sentiment.get("bearCount"), 0)
+
+    smc_events = overlays.get("smcEvents", []) if isinstance(overlays, dict) else []
+    liquidity_events = overlays.get("liquidityEvents", []) if isinstance(overlays, dict) else []
+    zones = overlays.get("zones", []) if isinstance(overlays, dict) else []
+    meta = overlays.get("alphaProfileMeta", {}) if isinstance(overlays, dict) else {}
+    dlm_levels = overlays.get("dlmLevels", []) if isinstance(overlays, dict) else []
+
+    recent_smc = smc_events[-5:] if isinstance(smc_events, list) else []
+    recent_liquidity = liquidity_events[-5:] if isinstance(liquidity_events, list) else []
+
+    smc_bull = sum(1 for item in recent_smc + recent_liquidity if _factor_direction_from_text(item.get("direction") if isinstance(item, dict) else "") == "bullish")
+    smc_bear = sum(1 for item in recent_smc + recent_liquidity if _factor_direction_from_text(item.get("direction") if isinstance(item, dict) else "") == "bearish")
+
+    # Premium/discount context. Discount supports bullish setups; premium supports bearish setups.
+    zone_bias = "neutral"
+    for zone in zones[-4:] if isinstance(zones, list) else []:
+        if not isinstance(zone, dict):
+            continue
+        top = to_float(zone.get("top"))
+        bottom = to_float(zone.get("bottom"))
+        kind = str(zone.get("kind") or zone.get("label") or "").lower()
+        if min(top, bottom) <= latest_close <= max(top, bottom):
+            if "discount" in kind:
+                zone_bias = "bullish"
+            elif "premium" in kind:
+                zone_bias = "bearish"
+
+    if smc_bull > smc_bear:
+        smc_direction = "bullish"
+    elif smc_bear > smc_bull:
+        smc_direction = "bearish"
+    else:
+        smc_direction = zone_bias
+
+    smc_event_strength = min(28, (len(recent_smc) * 5) + (len(recent_liquidity) * 3))
+    smc_zone_strength = 12 if zone_bias != "neutral" else 0
+    smc_strength = clamp(42 + smc_event_strength + smc_zone_strength, 0, 100) if smc_direction != "neutral" else clamp(30 + smc_event_strength, 0, 55)
+
+    bull_pressure = clamp(to_float(meta.get("bullPressurePct"), 50), 0, 100)
+    bear_pressure = clamp(to_float(meta.get("bearPressurePct"), 50), 0, 100)
+    alphax_pressure = max(bull_pressure, bear_pressure)
+    alphax_direction = "bullish" if bull_pressure > bear_pressure else "bearish" if bear_pressure > bull_pressure else "neutral"
+
+    # DLM level proximity strengthens AlphaX score.
+    nearest_dlm_distance_pct = 100.0
+    if isinstance(dlm_levels, list) and dlm_levels:
+        distances = []
+        for level in dlm_levels:
+            if not isinstance(level, dict):
+                continue
+            price = to_float(level.get("price"))
+            if latest_close > 0 and price > 0:
+                distances.append(abs(latest_close - price) / latest_close * 100.0)
+        if distances:
+            nearest_dlm_distance_pct = min(distances)
+
+    proximity_boost = 12 if nearest_dlm_distance_pct <= 0.15 else 7 if nearest_dlm_distance_pct <= 0.35 else 0
+    alphax_strength = clamp(alphax_pressure + proximity_boost, 0, 100)
+
+    first_ghost = ghosts[0] if ghosts else {}
+    ghost_direction = _factor_direction_from_text(first_ghost.get("direction") if isinstance(first_ghost, dict) else "", "neutral")
+    ghost_confidence = clamp(to_float(first_ghost.get("confidence") if isinstance(first_ghost, dict) else 0), 0, 100)
+    avg_ghost_confidence = clamp(
+        sum(to_float(item.get("confidence"), 0) for item in ghosts if isinstance(item, dict)) / max(len(ghosts), 1),
+        0,
+        100,
+    ) if ghosts else 0
+    ghost_strength = max(ghost_confidence, avg_ghost_confidence)
+
+    directional_votes = [
+        smc_direction,
+        alphax_direction,
+        ghost_direction,
+        "bullish" if technical_sentiment >= 60 else "bearish" if technical_sentiment <= 40 else "neutral",
+    ]
+    bull_votes = directional_votes.count("bullish")
+    bear_votes = directional_votes.count("bearish")
+
+    bull_score = 50.0
+    bear_score = 50.0
+
+    if bull_votes or bear_votes:
+        bull_score += bull_votes * 10
+        bear_score += bear_votes * 10
+        bull_score += max(0, technical_sentiment - 50) * 0.35
+        bear_score += max(0, 50 - technical_sentiment) * 0.35
+        if alphax_direction == "bullish":
+            bull_score += (alphax_strength - 50) * 0.30
+        elif alphax_direction == "bearish":
+            bear_score += (alphax_strength - 50) * 0.30
+        if ghost_direction == "bullish":
+            bull_score += ghost_strength * 0.12
+        elif ghost_direction == "bearish":
+            bear_score += ghost_strength * 0.12
+        if smc_direction == "bullish":
+            bull_score += smc_strength * 0.12
+        elif smc_direction == "bearish":
+            bear_score += smc_strength * 0.12
+
+    bull_score = clamp(bull_score, 0, 100)
+    bear_score = clamp(bear_score, 0, 100)
+    net_bias = round(bull_score - bear_score)
+
+    if net_bias >= 10:
+        signal = "BUY"
+    elif net_bias <= -10:
+        signal = "SELL"
+    else:
+        signal = "NEUTRAL"
+
+    confidence = clamp(
+        max(abs(net_bias), ghost_strength * 0.55, smc_strength * 0.45, alphax_strength * 0.42),
+        0,
+        100,
+    )
+
+    return {
+        "signal": signal,
+        "confidence": round(confidence),
+        "bullScore": round(bull_score),
+        "bearScore": round(bear_score),
+        "netBias": net_bias,
+        "smc": _factor_label(smc_direction, "SMC Structure"),
+        "alphax": _factor_label(alphax_direction, "AlphaX DLM"),
+        "ghost": _factor_label(ghost_direction, "Ghost Candles"),
+        "smcStrength": round(smc_strength),
+        "alphaxStrength": round(alphax_strength),
+        "ghostConfidence": round(ghost_strength),
+        "smcDirection": smc_direction,
+        "alphaxDirection": alphax_direction,
+        "ghostDirection": ghost_direction,
+        "alphaxBullPressure": round(bull_pressure),
+        "alphaxBearPressure": round(bear_pressure),
+        "alphaxNearestDistancePct": round(nearest_dlm_distance_pct, 4),
+        "technicalBullCount": technical_bull,
+        "technicalBearCount": technical_bear,
+    }
+
+
+def build_python_dashboard_signal(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500) -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    candles, sentiment_debug = get_sentiment_candles(normalized_symbol, normalized_timeframe, max(500, min(int(limit or 500), 5000)))
+    sentiment = calculate_latest_sentiment(candles)
+    sentiment["debug"] = sentiment_debug
+    ghosts = build_python_ghost_candles(candles, 3)
+    overlays = build_python_chart_overlays(candles, ghosts)
+    scorecards = analyze_python_core_scorecards(candles, sentiment, ghosts, overlays)
+    price = to_float(candles[-1].get("close")) if candles else 0
+
+    status = "Live Snapshot" if candles else "Waiting"
+    created_at = now_iso()
+
+    return {
+        "eventType": "PYTHON_SMC_ALPHAX_GHOST_SIGNAL",
+        "status": status,
+        "symbol": normalized_symbol,
+        "timeframe": normalized_timeframe,
+        "primaryTimeframe": normalized_timeframe,
+        "analysisTimeframes": [normalized_timeframe],
+        "signal": scorecards["signal"],
+        "type": scorecards["signal"],
+        "confidence": scorecards["confidence"],
+        "bullScore": scorecards["bullScore"],
+        "bearScore": scorecards["bearScore"],
+        "netBias": scorecards["netBias"],
+        "price": price,
+        "entry": price,
+        "current": price,
+        "pnl": 0,
+        "percent": 0,
+        "smc": scorecards["smc"],
+        "alphax": scorecards["alphax"],
+        "ghost": scorecards["ghost"],
+        "smcStrength": scorecards["smcStrength"],
+        "alphaxStrength": scorecards["alphaxStrength"],
+        "ghostConfidence": scorecards["ghostConfidence"],
+        "smcDirection": scorecards["smcDirection"],
+        "alphaxDirection": scorecards["alphaxDirection"],
+        "ghostDirection": scorecards["ghostDirection"],
+        "alphaxBullPressure": scorecards["alphaxBullPressure"],
+        "alphaxBearPressure": scorecards["alphaxBearPressure"],
+        "technicalSentiment": sentiment,
+        "chartOverlays": overlays,
+        "ghostCandles": ghosts,
+        "openInterest": "Inactive",
+        "footprint": "Inactive",
+        "session": "Neutral Session",
+        "fredMacro": "Neutral Macro",
+        "finraShortVolume": "Inactive",
+        "cot": "Inactive",
+        "warnings": [],
+        "createdAt": created_at,
+        "source": "python_only_no_webhook",
+    }
+
 # ─────────────────────────────────────────────────────────────────────────────
 # BASIC ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3068,7 +3317,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v17_python_smc_alphax_ghost_overlays",
+        "engine": "main_v18_scorecards_linked_to_python_smc_alphax_ghost",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
@@ -3103,29 +3352,28 @@ def health() -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/api/latest-signal")
-def latest_signal() -> Dict[str, Any]:
-    return LATEST_SIGNAL or {
-        "eventType": "LATEST_SIGNAL",
-        "status": "Waiting",
-        "symbol": "BTCUSD",
-        "timeframe": "1m",
-        "signal": "NEUTRAL",
-        "confidence": 0,
-        "bullScore": 50,
-        "bearScore": 50,
-        "netBias": 0,
-        "price": 0,
-        "createdAt": now_iso(),
-        "warnings": ["No webhook received yet"],
-    }
+def latest_signal(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500) -> Dict[str, Any]:
+    # Webhook payloads are no longer required. Always return a Python-generated
+    # SMC + AlphaX DLM + Ghost signal so all scorecards stay linked to the chart engine.
+    return build_python_dashboard_signal(symbol, timeframe, limit)
 
 
 @app.get("/api/recent-signals")
-def recent_signals(limit: int = 50) -> Dict[str, Any]:
+def recent_signals(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 50) -> Dict[str, Any]:
     safe_limit = max(1, min(int(limit or 50), 200))
+    live_signal = build_python_dashboard_signal(symbol, timeframe, 500)
+
+    webhook_rows = [
+        item for item in RECENT_SIGNALS[-safe_limit:]
+        if isinstance(item, dict) and str(item.get("eventType") or "").upper() == "TRADE_SIGNAL"
+    ]
+
+    signals = webhook_rows if webhook_rows else [live_signal]
+
     return {
-        "count": len(RECENT_SIGNALS[-safe_limit:]),
-        "signals": RECENT_SIGNALS[-safe_limit:],
+        "count": len(signals),
+        "signals": signals,
+        "source": "python_smc_alphax_ghost_snapshot" if not webhook_rows else "trade_alerts",
     }
 
 
@@ -3261,6 +3509,9 @@ def engine_state(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500
     sentiment["debug"] = sentiment_debug
     ghosts = build_python_ghost_candles(candles, 3)
 
+    overlays = build_python_chart_overlays(candles, ghosts)
+    scorecards = analyze_python_core_scorecards(candles, sentiment, ghosts, overlays)
+
     return {
         "eventType": "ENGINE_STATE",
         "status": "Live" if candles else "Waiting",
@@ -3270,7 +3521,14 @@ def engine_state(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500
         "candlesCount": len(candles),
         "sentiment": sentiment,
         "ghostCandles": ghosts,
-        "chartOverlays": build_python_chart_overlays(candles, ghosts),
+        "chartOverlays": overlays,
+        "scorecards": scorecards,
+        "smc": scorecards.get("smc"),
+        "alphax": scorecards.get("alphax"),
+        "ghost": scorecards.get("ghost"),
+        "smcStrength": scorecards.get("smcStrength"),
+        "alphaxStrength": scorecards.get("alphaxStrength"),
+        "ghostConfidence": scorecards.get("ghostConfidence"),
         "sentimentDebug": sentiment.get("debug", {}),
         "createdAt": now_iso(),
     }
