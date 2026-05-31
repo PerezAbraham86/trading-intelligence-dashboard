@@ -43,6 +43,14 @@ type TradingSignal = {
   finraShortVolume?: string
   cot?: string
   technicalSentiment?: TechnicalSentiment
+  smcStrength?: number
+  alphaxStrength?: number
+  ghostConfidence?: number
+  smcDirection?: string
+  alphaxDirection?: string
+  ghostDirection?: string
+  alphaxBullPressure?: number
+  alphaxBearPressure?: number
   indicators?: TechnicalIndicator[]
   technicalIndicators?: TechnicalIndicator[]
   technicalMeter?: TechnicalIndicator[]
@@ -452,19 +460,33 @@ export default function PressureGauges({ signal }: PressureGaugesProps) {
     [technicalSentiment]
   )
 
+  const smcStrength = clamp(Number(signal?.smcStrength ?? 0))
+  const alphaxStrength = clamp(Number(signal?.alphaxStrength ?? 0))
+  const linkedGhostConfidence = clamp(Number(signal?.ghostConfidence ?? signal?.confidence ?? 0))
+  const alphaxBullPressure = clamp(Number(signal?.alphaxBullPressure ?? 0))
+  const alphaxBearPressure = clamp(Number(signal?.alphaxBearPressure ?? 0))
+
   const bullPressure = clamp(
-    summary.activeCount > 0
-      ? Math.max(Number(signal?.bullScore ?? 50), summary.bullishShare)
-      : Number(signal?.bullScore ?? 50)
+    Math.max(
+      summary.activeCount > 0 ? summary.bullishShare : 0,
+      Number(signal?.bullScore ?? 50),
+      String(signal?.smcDirection ?? '').toLowerCase().includes('bull') ? smcStrength : 0,
+      String(signal?.alphaxDirection ?? '').toLowerCase().includes('bull') ? Math.max(alphaxStrength, alphaxBullPressure) : 0,
+      String(signal?.ghostDirection ?? '').toLowerCase().includes('bull') ? linkedGhostConfidence : 0
+    )
   )
 
   const bearPressure = clamp(
-    summary.activeCount > 0
-      ? Math.max(Number(signal?.bearScore ?? 50), summary.bearishShare)
-      : Number(signal?.bearScore ?? 50)
+    Math.max(
+      summary.activeCount > 0 ? summary.bearishShare : 0,
+      Number(signal?.bearScore ?? 50),
+      String(signal?.smcDirection ?? '').toLowerCase().includes('bear') ? smcStrength : 0,
+      String(signal?.alphaxDirection ?? '').toLowerCase().includes('bear') ? Math.max(alphaxStrength, alphaxBearPressure) : 0,
+      String(signal?.ghostDirection ?? '').toLowerCase().includes('bear') ? linkedGhostConfidence : 0
+    )
   )
 
-  const ghostConfidence = clamp(Number(signal?.confidence ?? 0))
+  const ghostConfidence = linkedGhostConfidence
   const netBias = Number.isFinite(Number(signal?.netBias))
     ? Number(signal?.netBias)
     : bullPressure - bearPressure
@@ -496,19 +518,19 @@ export default function PressureGauges({ signal }: PressureGaugesProps) {
       label: 'Bull Pressure',
       value: bullPressure,
       barClass: 'bg-emerald-400',
-      note: `${summary.bullCount} of ${summary.activeCount || 12} technicals bullish`,
+      note: `${summary.bullCount} technicals + linked SMC/AlphaX/Ghost bullish pressure`,
     },
     {
       label: 'Bear Pressure',
       value: bearPressure,
       barClass: 'bg-red-400',
-      note: `${summary.bearCount} of ${summary.activeCount || 12} technicals bearish`,
+      note: `${summary.bearCount} technicals + linked SMC/AlphaX/Ghost bearish pressure`,
     },
     {
       label: 'Ghost Confidence',
       value: ghostConfidence,
       barClass: 'bg-blue-400',
-      note: 'Python ghost projection confidence',
+      note: 'Linked from Python HA Ghost projection engine',
     },
     {
       label: 'Technical Conflict Risk',
