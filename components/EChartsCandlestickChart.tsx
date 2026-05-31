@@ -589,6 +589,85 @@ function saveCandleCache(cacheKey: string, candles: Candle[]) {
   }
 }
 
+
+function emitMainCandleGateEvent(detail: Record<string, any>) {
+  if (typeof window === 'undefined') return
+
+  window.dispatchEvent(
+    new CustomEvent('marketbos:candle-gate', {
+      detail,
+    })
+  )
+}
+
+function setMainCandlesReady(detail: Record<string, any>) {
+  if (typeof window === 'undefined') return
+
+  try {
+    window.localStorage.setItem(
+      MAIN_CANDLES_READY_KEY,
+      JSON.stringify({
+        ...detail,
+        ready: true,
+        savedAt: Date.now(),
+      })
+    )
+  } catch {
+    // Ignore private-mode/quota errors.
+  }
+
+  emitMainCandleGateEvent({
+    ...detail,
+    ready: true,
+  })
+}
+
+function setMainCandlesLoading(detail: Record<string, any>) {
+  if (typeof window === 'undefined') return
+
+  try {
+    window.localStorage.setItem(
+      MAIN_CANDLES_READY_KEY,
+      JSON.stringify({
+        ...detail,
+        ready: false,
+        savedAt: Date.now(),
+      })
+    )
+  } catch {
+    // Ignore private-mode/quota errors.
+  }
+
+  emitMainCandleGateEvent({
+    ...detail,
+    ready: false,
+  })
+}
+
+async function preloadPrimaryCandles(signal?: AbortSignal) {
+  if (typeof window === 'undefined') return
+  if (primaryCandlePreloadStarted) return
+
+  primaryCandlePreloadStarted = true
+
+  const params = new URLSearchParams({
+    symbols: PRIMARY_CANDLE_SYMBOLS.join(','),
+    timeframes: PRIMARY_CANDLE_TIMEFRAMES.join(','),
+    limit: '500',
+  })
+
+  try {
+    await fetch(`${API_BASE_URL}/api/preload-candles?${params.toString()}`, {
+      cache: 'no-store',
+      signal,
+    })
+  } catch (error: any) {
+    if (error?.name === 'AbortError') throw error
+    console.warn('Primary candle preload failed:', error)
+  }
+}
+
+
 async function fetchCandlesFromNetwork(
   symbol: string,
   timeframe: string,
@@ -1686,6 +1765,20 @@ export default function EChartsCandlestickChart({
   }, [chartSettingsKey, symbol, timeframe, candleMode])
 
   useEffect(() => {
+    const controller = new AbortController()
+
+    preloadPrimaryCandles(controller.signal).catch((error: any) => {
+      if (error?.name !== 'AbortError') {
+        console.warn('Primary candle preload effect failed:', error)
+      }
+    })
+
+    return () => {
+      controller.abort()
+    }
+  }, [])
+
+  useEffect(() => {
     onChartSelectionChange?.({
       symbol,
       timeframe,
@@ -1705,6 +1798,16 @@ export default function EChartsCandlestickChart({
       const cacheKey = getCandleCacheKey(symbol, timeframe)
       activeCacheKeyRef.current = cacheKey
 
+      if (!compact) {
+        setMainCandlesLoading({
+          symbol,
+          timeframe,
+          candleMode,
+          count: 0,
+          status: 'loading',
+        })
+      }
+
       const cached = readMemoryCache(cacheKey) ?? readLocalStorageCache(cacheKey)
 
       const requestedLimit = requestedLimitNumber(candleFetchLimit)
@@ -1714,6 +1817,16 @@ export default function EChartsCandlestickChart({
         // Show cache instantly if available, but still refresh below if it is short.
         setHistoricalCandles(cached)
         setStatus(cachedIsComplete ? 'cached' : 'loading')
+
+        if (!compact) {
+          setMainCandlesReady({
+            symbol,
+            timeframe,
+            candleMode,
+            count: cached.length,
+            status: cachedIsComplete ? 'cached' : 'cached-refreshing',
+          })
+        }
       } else {
         // Important: clear the previous timeframe's candles immediately.
         // This prevents a 5m or 15m dropdown from visually showing old 1m candles.
@@ -1730,9 +1843,29 @@ export default function EChartsCandlestickChart({
           saveCandleCache(cacheKey, candles)
           setHistoricalCandles(candles)
           setStatus('loaded')
+
+          if (!compact) {
+            setMainCandlesReady({
+              symbol,
+              timeframe,
+              candleMode,
+              count: candles.length,
+              status: 'loaded',
+            })
+          }
         } else if (!cached || cached.length === 0) {
           setHistoricalCandles([])
           setStatus('empty')
+
+          if (!compact) {
+            setMainCandlesLoading({
+              symbol,
+              timeframe,
+              candleMode,
+              count: 0,
+              status: 'empty',
+            })
+          }
         } else {
           // Background refresh returned empty, but valid cached candles are visible.
           // Keep the correct cached timeframe and do not stay stuck on refreshing/loading.
@@ -1749,6 +1882,16 @@ export default function EChartsCandlestickChart({
           } else {
             setHistoricalCandles([])
             setStatus('error')
+
+            if (!compact) {
+              setMainCandlesLoading({
+                symbol,
+                timeframe,
+                candleMode,
+                count: 0,
+                status: 'error',
+              })
+            }
           }
         }
       }
@@ -1788,6 +1931,16 @@ export default function EChartsCandlestickChart({
 
           const cacheKey = getCandleCacheKey(symbol, timeframe)
           saveCandleCache(cacheKey, updated)
+
+          if (!compact && updated.length > 0) {
+            setMainCandlesReady({
+              symbol,
+              timeframe,
+              candleMode,
+              count: updated.length,
+              status: 'live-updated',
+            })
+          }
 
           return updated
         })
