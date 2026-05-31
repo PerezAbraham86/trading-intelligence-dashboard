@@ -753,6 +753,7 @@ export default function Dashboard() {
   }, [apiBaseUrl, isClient, selectedSymbol, selectedTimeframe, dashboardTimeframes, mainCandleGate.ready])
 
   const augmentedLatestSignal = useMemo(() => {
+    const latestSignalAny = latestSignal as any
     const mainGhostConfidence = getAverageGhostConfidence(pythonEngineState)
     const overallGhostConfidence = getOverallGhostConfidence(timeframeEngineStates, dashboardTimeframes)
     const ghostConfidence = Math.max(mainGhostConfidence, overallGhostConfidence)
@@ -763,7 +764,7 @@ export default function Dashboard() {
     const scorecards = pythonEngineState?.scorecards ?? {}
 
     return {
-      ...latestSignal,
+      ...latestSignalAny,
       ...(pythonEngineState ?? {}),
 
       symbol: selectedSymbol,
@@ -774,17 +775,17 @@ export default function Dashboard() {
       multiTimeframeMode: true,
 
       confidence: Math.max(Number(latestSignal?.confidence ?? 0), ghostConfidence),
-      ghost: pythonGhostText || pythonEngineState?.ghost || latestSignal?.ghost || 'Multi-Timeframe Python Ghost Projection',
+      ghost: pythonGhostText || pythonEngineState?.ghost || latestSignalAny?.ghost || 'Multi-Timeframe Python Ghost Projection',
       ghostConfidence,
       pythonGhostEngine: Boolean(ghostConfidence || pythonGhostText),
 
-      smc: pythonEngineState?.smc ?? (scorecards as any)?.smc ?? latestSignal?.smc,
-      alphax: pythonEngineState?.alphax ?? (scorecards as any)?.alphax ?? latestSignal?.alphax,
-      smcStrength: pythonEngineState?.smcStrength ?? (scorecards as any)?.smcStrength ?? latestSignal?.smcStrength,
-      alphaxStrength: pythonEngineState?.alphaxStrength ?? (scorecards as any)?.alphaxStrength ?? latestSignal?.alphaxStrength,
-      smcDirection: pythonEngineState?.smcDirection ?? (scorecards as any)?.smcDirection ?? latestSignal?.smcDirection,
-      alphaxDirection: pythonEngineState?.alphaxDirection ?? (scorecards as any)?.alphaxDirection ?? latestSignal?.alphaxDirection,
-      ghostDirection: pythonEngineState?.ghostDirection ?? (scorecards as any)?.ghostDirection ?? latestSignal?.ghostDirection,
+      smc: pythonEngineState?.smc ?? (scorecards as any)?.smc ?? latestSignalAny?.smc,
+      alphax: pythonEngineState?.alphax ?? (scorecards as any)?.alphax ?? latestSignalAny?.alphax,
+      smcStrength: pythonEngineState?.smcStrength ?? (scorecards as any)?.smcStrength ?? latestSignalAny?.smcStrength,
+      alphaxStrength: pythonEngineState?.alphaxStrength ?? (scorecards as any)?.alphaxStrength ?? latestSignalAny?.alphaxStrength,
+      smcDirection: pythonEngineState?.smcDirection ?? (scorecards as any)?.smcDirection ?? latestSignalAny?.smcDirection,
+      alphaxDirection: pythonEngineState?.alphaxDirection ?? (scorecards as any)?.alphaxDirection ?? latestSignalAny?.alphaxDirection,
+      ghostDirection: pythonEngineState?.ghostDirection ?? (scorecards as any)?.ghostDirection ?? latestSignalAny?.ghostDirection,
 
       technicalSentiment: sharedTechnicalSentiment ?? undefined,
       indicators: sharedTechnicalSentiment?.indicators,
