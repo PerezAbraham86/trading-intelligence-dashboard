@@ -479,10 +479,12 @@ export default function Dashboard() {
               compact
               chartTitle="Mini Chart 1"
               enableAdvancedOverlays={false}
-              defaultSymbol="SPY"
-              defaultTimeframe="1m"
+              defaultSymbol={selectedSymbol}
+              defaultTimeframe="5m"
               defaultCandleMode="Heikin Ashi"
               allowCompactHistory
+              lockSymbolToDefault
+              followDefaultSymbol
               latestSignal={augmentedLatestSignal}
               recentSignals={recentSignals}
               recentCandles={recentCandles}
@@ -493,10 +495,12 @@ export default function Dashboard() {
               compact
               chartTitle="Mini Chart 2"
               enableAdvancedOverlays={false}
-              defaultSymbol="ES1!"
-              defaultTimeframe="1m"
+              defaultSymbol={selectedSymbol}
+              defaultTimeframe="15m"
               defaultCandleMode="Heikin Ashi"
               allowCompactHistory
+              lockSymbolToDefault
+              followDefaultSymbol
               latestSignal={augmentedLatestSignal}
               recentSignals={recentSignals}
               recentCandles={recentCandles}
