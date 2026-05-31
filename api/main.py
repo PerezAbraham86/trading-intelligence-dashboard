@@ -65,6 +65,8 @@ LATEST_SIGNAL: Dict[str, Any] = {}
 RECENT_SIGNALS: List[Dict[str, Any]] = []
 RECENT_CANDLES: List[Dict[str, Any]] = []
 
+CHART_OVERLAY_CACHE: Dict[str, Any] = {}
+
 MAX_RECENT_SIGNALS = 50
 MAX_RECENT_CANDLES = 5000
 
@@ -2442,6 +2444,26 @@ def http_get_text_or_none(url: str, headers: Optional[Dict[str, str]] = None, pr
         return None
 
 
+
+def http_get_json_quick(url: str, headers: Optional[Dict[str, str]] = None, provider: str = "Quick JSON", timeout: int = 7) -> Optional[Dict[str, Any]]:
+    request = Request(url, headers=headers or {})
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8", errors="ignore"))
+    except Exception as error:
+        print(f"[{provider}] quick failed: {error}")
+        return None
+
+
+def http_get_text_quick(url: str, headers: Optional[Dict[str, str]] = None, provider: str = "Quick text", timeout: int = 7) -> Optional[str]:
+    request = Request(url, headers=headers or {})
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return response.read().decode("utf-8", errors="ignore")
+    except Exception as error:
+        print(f"[{provider}] quick failed: {error}")
+        return None
+
 def parse_yahoo_chart_row(symbol: str, chart: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     try:
         result = chart.get("chart", {}).get("result", [])
@@ -2548,7 +2570,7 @@ def fetch_stooq_quote_batch(symbols: List[str]) -> List[Dict[str, Any]]:
     # Fields requested: symbol,date,time,open,high,low,close,volume,name.
     stooq_symbols = ",".join(stooq_symbol(symbol) for symbol in safe_symbols)
     url = f"https://stooq.com/q/l/?s={quote(stooq_symbols, safe=',')}&f=sd2t2ohlcvn&h&e=csv"
-    text = http_get_text_or_none(url, headers=headers, provider="Stooq quotes")
+    text = http_get_text_quick(url, headers=headers, provider="Stooq quotes", timeout=7)
 
     if not text or "," not in text:
         return []
@@ -2601,7 +2623,7 @@ def fetch_yahoo_quote_batch(symbols: List[str]) -> List[Dict[str, Any]]:
         "Accept": "application/json,text/plain,*/*",
     }
 
-    # 1) Yahoo quote endpoint.
+    # 1) Yahoo quote endpoint — fast timeout so dashboard does not hang.
     primary_params = urlencode({
         "symbols": ",".join(safe_symbols),
         "formatted": "false",
@@ -2612,24 +2634,22 @@ def fetch_yahoo_quote_batch(symbols: List[str]) -> List[Dict[str, Any]]:
     })
 
     for host in ["query1.finance.yahoo.com", "query2.finance.yahoo.com"]:
-        try:
-            data = http_get_json_or_none(
-                f"https://{host}/v7/finance/quote?{primary_params}",
-                headers=headers,
-                provider="Yahoo Finance quote",
-            )
-            result = data.get("quoteResponse", {}).get("result", []) if isinstance(data, dict) else []
-            if isinstance(result, list):
-                valid = [
-                    row for row in result
-                    if to_float(row.get("regularMarketPrice"), 0.0) > 0
-                ]
-                if valid:
-                    return valid
-        except Exception as error:
-            print(f"[S&P 500 Heatmap] Yahoo quote batch failed: {error}")
+        data = http_get_json_quick(
+            f"https://{host}/v7/finance/quote?{primary_params}",
+            headers=headers,
+            provider="Yahoo Finance quote",
+            timeout=6,
+        )
+        result = data.get("quoteResponse", {}).get("result", []) if isinstance(data, dict) else []
+        if isinstance(result, list):
+            valid = [
+                row for row in result
+                if to_float(row.get("regularMarketPrice"), 0.0) > 0
+            ]
+            if valid:
+                return valid
 
-    # 2) Yahoo spark endpoint.
+    # 2) Yahoo spark endpoint — batch fallback.
     spark_params = urlencode({
         "symbols": ",".join(safe_symbols),
         "range": "1d",
@@ -2639,53 +2659,78 @@ def fetch_yahoo_quote_batch(symbols: List[str]) -> List[Dict[str, Any]]:
     })
 
     for host in ["query1.finance.yahoo.com", "query2.finance.yahoo.com"]:
-        try:
-            data = http_get_json_or_none(
-                f"https://{host}/v7/finance/spark?{spark_params}",
-                headers=headers,
-                provider="Yahoo Finance spark",
-            )
+        data = http_get_json_quick(
+            f"https://{host}/v7/finance/spark?{spark_params}",
+            headers=headers,
+            provider="Yahoo Finance spark",
+            timeout=6,
+        )
 
-            rows: List[Dict[str, Any]] = []
-            spark_result = data.get("spark", {}).get("result", []) if isinstance(data, dict) else []
+        rows: List[Dict[str, Any]] = []
+        spark_result = data.get("spark", {}).get("result", []) if isinstance(data, dict) else []
 
-            if isinstance(spark_result, list):
-                for item in spark_result:
-                    if not isinstance(item, dict):
-                        continue
+        if isinstance(spark_result, list):
+            for item in spark_result:
+                if not isinstance(item, dict):
+                    continue
 
-                    symbol = str(item.get("symbol") or "").upper().strip()
-                    response = item.get("response", [])
-                    response_item = response[0] if isinstance(response, list) and response else {}
+                symbol = str(item.get("symbol") or "").upper().strip()
+                response = item.get("response", [])
+                response_item = response[0] if isinstance(response, list) and response else {}
 
-                    if not symbol or not isinstance(response_item, dict):
-                        continue
+                if not symbol or not isinstance(response_item, dict):
+                    continue
 
-                    row = parse_yahoo_chart_row(symbol, {"chart": {"result": [response_item]}})
-                    if row:
-                        row["quoteSourceName"] = "yahoo_spark"
-                        rows.append(row)
+                row = parse_yahoo_chart_row(symbol, {"chart": {"result": [response_item]}})
+                if row:
+                    row["quoteSourceName"] = "yahoo_spark"
+                    rows.append(row)
 
-            if rows:
-                return rows
-        except Exception as error:
-            print(f"[S&P 500 Heatmap] Yahoo spark fallback failed: {error}")
+        if rows:
+            return rows
 
-    # 3) Yahoo chart endpoint one symbol at a time.
-    chart_rows = fetch_yahoo_chart_quotes(safe_symbols)
-    if chart_rows:
-        return chart_rows
-
-    # 4) Stooq delayed quote fallback.
+    # 3) Stooq delayed batch fallback. This is faster than one-symbol chart calls
+    # and prevents the dashboard from staying stuck on "Loading".
     stooq_rows = fetch_stooq_quote_batch(safe_symbols)
     if stooq_rows:
         return stooq_rows
+
+    # 4) Yahoo chart one-symbol-at-a-time fallback. This is the slowest option,
+    # so only use it after batch providers fail.
+    chart_rows = fetch_yahoo_chart_quotes(safe_symbols)
+    if chart_rows:
+        return chart_rows
 
     return []
 
 
 
-def build_sp500_heatmap_payload() -> Dict[str, Any]:
+def _sp500_cache_is_fresh(max_age_seconds: int = 90) -> bool:
+    try:
+        cached_created_at = str(SP500_HEATMAP_CACHE.get("createdAt") or "")
+        cached_payload = SP500_HEATMAP_CACHE.get("payload")
+        if not cached_created_at or not cached_payload:
+            return False
+
+        cached_dt = datetime.fromisoformat(cached_created_at.replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - cached_dt).total_seconds() <= max_age_seconds
+    except Exception:
+        return False
+
+
+def _get_sp500_cached_payload() -> Optional[Dict[str, Any]]:
+    payload = SP500_HEATMAP_CACHE.get("payload")
+    return payload if isinstance(payload, dict) else None
+
+
+def build_sp500_heatmap_payload(force_refresh: bool = False) -> Dict[str, Any]:
+    if not force_refresh and _sp500_cache_is_fresh(90):
+        cached = _get_sp500_cached_payload()
+        if cached:
+            cached_copy = dict(cached)
+            cached_copy["cache"] = "fresh"
+            return cached_copy
+
     all_symbols = flatten_sp500_heatmap_symbols()
     quote_rows: Dict[str, Dict[str, Any]] = {}
 
@@ -2697,7 +2742,13 @@ def build_sp500_heatmap_payload() -> Dict[str, Any]:
                 if symbol:
                     quote_rows[symbol] = quote_row
     except Exception as error:
-        print(f"[S&P 500 Heatmap] Yahoo quote fetch failed: {error}")
+        print(f"[S&P 500 Heatmap] quote fetch failed: {error}")
+        cached = _get_sp500_cached_payload()
+        if cached:
+            cached_copy = dict(cached)
+            cached_copy["cache"] = "stale_on_error"
+            cached_copy["error"] = str(error)
+            return cached_copy
 
     sectors: List[Dict[str, Any]] = []
     total_market_cap = 0.0
@@ -2754,11 +2805,12 @@ def build_sp500_heatmap_payload() -> Dict[str, Any]:
     total_cap = max(sum(to_float(stock.get("marketCap")) for stock in all_stocks), 1)
     overall_change = sum(to_float(stock.get("changePercent")) * to_float(stock.get("marketCap")) for stock in all_stocks) / total_cap
 
-    return {
+    payload = {
         "eventType": "SP500_HEATMAP",
-        "source": "yahoo_quote_spark_chart_or_stooq_plus_static_cap_weights",
+        "source": "fast_yahoo_quote_spark_stooq_chart_plus_static_cap_weights",
         "note": "Free quote source. Data may be delayed depending on exchange/vendor rules. Tile size uses static approximate market-cap weights when live market cap is unavailable.",
         "isLiveSnapshot": True,
+        "cache": "refreshed",
         "createdAt": now_iso(),
         "count": len(all_stocks),
         "sectorCount": len(sectors),
@@ -2769,6 +2821,17 @@ def build_sp500_heatmap_payload() -> Dict[str, Any]:
         "totalMarketCapBillions": round(total_market_cap / 1_000_000_000.0, 2),
         "sectors": sectors,
     }
+
+    # Only replace cache with a real populated payload.
+    if len(all_stocks) > 0 and any(to_float(stock.get("price")) > 0 for stock in all_stocks):
+        SP500_HEATMAP_CACHE["createdAt"] = now_iso()
+        SP500_HEATMAP_CACHE["payload"] = payload
+    elif _get_sp500_cached_payload():
+        cached_copy = dict(_get_sp500_cached_payload() or {})
+        cached_copy["cache"] = "stale_no_prices"
+        return cached_copy
+
+    return payload
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3494,6 +3557,8 @@ def build_fred_macro_context() -> Dict[str, Any]:
 
 OPTIONS_PRESSURE_CACHE: Dict[str, Any] = {}
 
+SP500_HEATMAP_CACHE: Dict[str, Any] = {"createdAt": "", "payload": None}
+
 
 def map_symbol_to_options_underlying(symbol: str) -> str:
     normalized = normalize_symbol(symbol)
@@ -3759,6 +3824,132 @@ def build_options_pressure_context(symbol: str, underlying_override: str = "") -
     OPTIONS_PRESSURE_CACHE[cache_key] = payload
     return payload
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FAST CHART OVERLAY ROUTE
+# Phase 1 speed fix:
+# - main chart candles load first from /api/historical-candles
+# - SMC + AlphaX DLM + HA Ghost overlays load separately from /api/chart-overlays
+# - cached/stale overlay response prevents chart from waiting on heavy calculations
+# ─────────────────────────────────────────────────────────────────────────────
+
+def chart_overlay_cache_key(symbol: str, timeframe: str, limit: int) -> str:
+    return f"{normalize_symbol(symbol)}::{normalize_timeframe(timeframe)}::{int(limit or 500)}"
+
+
+def chart_overlay_cache_is_fresh(key: str, max_age_seconds: int = 12) -> bool:
+    cached = CHART_OVERLAY_CACHE.get(key)
+    if not isinstance(cached, dict):
+        return False
+
+    try:
+        created_at = datetime.fromisoformat(str(cached.get("createdAt", "")).replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - created_at).total_seconds() <= max_age_seconds
+    except Exception:
+        return False
+
+
+def trim_chart_overlays_for_dashboard(overlays: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(overlays, dict):
+        return empty_overlay_payload()
+
+    trimmed = dict(overlays)
+
+    # Keep the visual payload light. Frontend still limits labels, but trimming here
+    # reduces JSON size and improves ECharts setOption speed.
+    if isinstance(trimmed.get("smcEvents"), list):
+        trimmed["smcEvents"] = trimmed["smcEvents"][-12:]
+
+    if isinstance(trimmed.get("liquidityEvents"), list):
+        trimmed["liquidityEvents"] = trimmed["liquidityEvents"][-10:]
+
+    if isinstance(trimmed.get("zones"), list):
+        trimmed["zones"] = trimmed["zones"][-8:]
+
+    if isinstance(trimmed.get("dlmConfluenceMarkers"), list):
+        trimmed["dlmConfluenceMarkers"] = trimmed["dlmConfluenceMarkers"][-6:]
+
+    if isinstance(trimmed.get("scoreMarkers"), list):
+        trimmed["scoreMarkers"] = trimmed["scoreMarkers"][-1:]
+
+    if isinstance(trimmed.get("alphaProfileBins"), list):
+        # Remove empty profile rows and cap to a clean profile size.
+        bins = [
+            item for item in trimmed["alphaProfileBins"]
+            if isinstance(item, dict) and to_float(item.get("volumePct"), 0) > 1
+        ]
+        trimmed["alphaProfileBins"] = bins[-28:]
+
+    if isinstance(trimmed.get("ghostCandles"), list):
+        trimmed["ghostCandles"] = trimmed["ghostCandles"][:5]
+
+    trimmed["payloadMode"] = "trimmed_fast_chart_overlay"
+    return trimmed
+
+
+def build_fast_chart_overlay_payload(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500, force_refresh: bool = False) -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    safe_limit = max(120, min(int(limit or 500), 700))
+    cache_key = chart_overlay_cache_key(normalized_symbol, normalized_timeframe, safe_limit)
+
+    if not force_refresh and chart_overlay_cache_is_fresh(cache_key):
+        cached = CHART_OVERLAY_CACHE.get(cache_key)
+        if isinstance(cached, dict):
+            payload = dict(cached)
+            payload["cache"] = "fresh"
+            return payload
+
+    cached_payload = CHART_OVERLAY_CACHE.get(cache_key)
+
+    try:
+        # Use the same dashboard candle router as the chart, but keep this route separate
+        # so candles can render before overlays finish.
+        candles = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit)
+        ghosts = build_python_ghost_candles(candles, 3)
+        raw_overlays = build_python_chart_overlays(candles, ghosts)
+        overlays = trim_chart_overlays_for_dashboard(raw_overlays)
+
+        payload = {
+            "eventType": "CHART_OVERLAYS",
+            "status": "Live" if candles else "Waiting",
+            "symbol": normalized_symbol,
+            "timeframe": normalized_timeframe,
+            "candlesCount": len(candles),
+            "chartOverlays": overlays,
+            "ghostCandles": overlays.get("ghostCandles", []),
+            "alphaProfileMeta": overlays.get("alphaProfileMeta", {}),
+            "cache": "refreshed",
+            "source": "python_fast_chart_overlay_cache",
+            "createdAt": now_iso(),
+        }
+
+        CHART_OVERLAY_CACHE[cache_key] = payload
+        return payload
+    except Exception as error:
+        print(f"[Chart Overlays] build failed: {error}")
+        if isinstance(cached_payload, dict):
+            payload = dict(cached_payload)
+            payload["cache"] = "stale_on_error"
+            payload["error"] = str(error)
+            return payload
+
+        payload = {
+            "eventType": "CHART_OVERLAYS",
+            "status": "Error",
+            "symbol": normalized_symbol,
+            "timeframe": normalized_timeframe,
+            "candlesCount": 0,
+            "chartOverlays": empty_overlay_payload(),
+            "ghostCandles": [],
+            "alphaProfileMeta": {},
+            "cache": "empty_error",
+            "source": "python_fast_chart_overlay_cache",
+            "error": str(error),
+            "createdAt": now_iso(),
+        }
+        return payload
+
 # ─────────────────────────────────────────────────────────────────────────────
 # BASIC ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3770,6 +3961,12 @@ def build_options_pressure_context(symbol: str, underlying_override: str = "") -
 
 
 
+
+
+
+@app.get("/api/chart-overlays")
+def chart_overlays(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500, force: bool = False) -> Dict[str, Any]:
+    return build_fast_chart_overlay_payload(symbol, timeframe, limit, force_refresh=force)
 
 @app.get("/api/options-pressure")
 def options_pressure(symbol: str = "SPY", underlying: str = "") -> Dict[str, Any]:
@@ -3784,15 +3981,15 @@ def ticker_news(symbol: str = "SPY", limit: int = 10) -> Dict[str, Any]:
     return build_ticker_news_payload(symbol, limit)
 
 @app.get("/api/sp500-heatmap")
-def sp500_heatmap() -> Dict[str, Any]:
-    return build_sp500_heatmap_payload()
+def sp500_heatmap(force: bool = False) -> Dict[str, Any]:
+    return build_sp500_heatmap_payload(force_refresh=force)
 
 @app.get("/")
 def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v20_options_pressure_linked",
+        "engine": "main_v22_phase1_fast_chart_overlays",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
