@@ -3248,6 +3248,7 @@ def build_python_dashboard_signal(symbol: str = "BTCUSD", timeframe: str = "1m",
     ghosts = build_python_ghost_candles(candles, 3)
     overlays = build_python_chart_overlays(candles, ghosts)
     scorecards = analyze_python_core_scorecards(candles, sentiment, ghosts, overlays)
+    fred_macro = build_fred_macro_context()
     price = to_float(candles[-1].get("close")) if candles else 0
 
     status = "Live Snapshot" if candles else "Waiting"
@@ -3288,13 +3289,187 @@ def build_python_dashboard_signal(symbol: str = "BTCUSD", timeframe: str = "1m",
         "openInterest": "Inactive",
         "footprint": "Inactive",
         "session": "Neutral Session",
-        "fredMacro": "Neutral Macro",
+        "fredMacro": fred_macro.get("label", "Active FRED Macro"),
+        "fredMacroStrength": fred_macro.get("strength", 45),
+        "fredMacroDirection": fred_macro.get("direction", "active"),
+        "fredMacroRisk": fred_macro.get("risk", 35),
+        "macroRisk": fred_macro.get("risk", 35),
+        "fredMacroNotes": fred_macro.get("notes", []),
+        "fredMacroData": fred_macro,
         "finraShortVolume": "Inactive",
         "cot": "Inactive",
         "warnings": [],
         "createdAt": created_at,
         "source": "python_only_no_webhook",
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PYTHON-ONLY FRED MACRO CONTEXT
+# No webhook. Uses public FRED CSV endpoints when available.
+# ─────────────────────────────────────────────────────────────────────────────
+
+FRED_MACRO_CACHE: Dict[str, Any] = {
+    "createdAt": "",
+    "payload": None,
+}
+
+
+def _parse_fred_csv_latest(series_id: str, lookback: int = 12) -> List[float]:
+    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={quote(series_id)}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; MARKETBOS-Dashboard/1.0)",
+        "Accept": "text/csv,*/*",
+    }
+
+    text = http_get_text_or_none(url, headers=headers, provider=f"FRED {series_id}")
+    if not text:
+        return []
+
+    values: List[float] = []
+    try:
+        for line in text.splitlines()[1:]:
+            parts = line.strip().split(",")
+            if len(parts) < 2:
+                continue
+            value_text = parts[-1].strip()
+            if value_text == "." or value_text == "":
+                continue
+            value = to_float(value_text, None)
+            if value is None:
+                continue
+            values.append(float(value))
+    except Exception as error:
+        print(f"[FRED Macro] parse failed for {series_id}: {error}")
+        return []
+
+    return values[-max(lookback, 2):]
+
+
+def _series_delta(values: List[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    return values[-1] - values[-2]
+
+
+def _series_trend(values: List[float], lookback: int = 5) -> float:
+    if len(values) < 2:
+        return 0.0
+    left = values[-min(len(values), lookback)]
+    right = values[-1]
+    return right - left
+
+
+def build_fred_macro_context() -> Dict[str, Any]:
+    # Keep FRED calls light; refresh roughly every 30 minutes.
+    cached_payload = FRED_MACRO_CACHE.get("payload")
+    cached_created_at = str(FRED_MACRO_CACHE.get("createdAt") or "")
+
+    try:
+        if cached_payload and cached_created_at:
+            cached_dt = datetime.fromisoformat(cached_created_at.replace("Z", "+00:00"))
+            if (datetime.now(timezone.utc) - cached_dt).total_seconds() < 1800:
+                return cached_payload
+    except Exception:
+        pass
+
+    dgs10 = _parse_fred_csv_latest("DGS10", 10)      # 10-year treasury yield
+    dff = _parse_fred_csv_latest("DFF", 10)          # effective fed funds rate
+    vix = _parse_fred_csv_latest("VIXCLS", 10)       # CBOE volatility index
+    sp500 = _parse_fred_csv_latest("SP500", 10)      # S&P 500 index
+
+    yield_delta = _series_delta(dgs10)
+    yield_trend = _series_trend(dgs10, 5)
+    fed_delta = _series_delta(dff)
+    vix_delta = _series_delta(vix)
+    vix_value = vix[-1] if vix else 0.0
+    spx_trend = _series_trend(sp500, 5)
+
+    risk_score = 35.0
+    bull_points = 0
+    bear_points = 0
+    notes: List[str] = []
+
+    if vix_value:
+        if vix_value >= 25:
+            bear_points += 2
+            risk_score += 20
+            notes.append("VIX elevated")
+        elif vix_value <= 16:
+            bull_points += 1
+            risk_score -= 8
+            notes.append("VIX calm")
+
+    if vix_delta > 1.5:
+        bear_points += 1
+        risk_score += 10
+        notes.append("VIX rising")
+    elif vix_delta < -1.5:
+        bull_points += 1
+        risk_score -= 6
+        notes.append("VIX falling")
+
+    if yield_trend > 0.15:
+        bear_points += 1
+        risk_score += 8
+        notes.append("10Y yield rising")
+    elif yield_trend < -0.15:
+        bull_points += 1
+        risk_score -= 5
+        notes.append("10Y yield easing")
+
+    if fed_delta > 0.02:
+        bear_points += 1
+        risk_score += 6
+        notes.append("Fed funds rising")
+    elif fed_delta < -0.02:
+        bull_points += 1
+        risk_score -= 4
+        notes.append("Fed funds easing")
+
+    if spx_trend > 0:
+        bull_points += 1
+        notes.append("SPX trend positive")
+    elif spx_trend < 0:
+        bear_points += 1
+        notes.append("SPX trend negative")
+
+    risk_score = clamp(risk_score, 5, 95)
+
+    if bull_points > bear_points:
+        direction = "bullish"
+        label = "Bullish FRED Macro"
+    elif bear_points > bull_points:
+        direction = "bearish"
+        label = "Bearish FRED Macro"
+    else:
+        direction = "active"
+        label = "Active FRED Macro"
+
+    if not notes:
+        notes.append("FRED macro data active")
+
+    payload = {
+        "label": label,
+        "direction": direction,
+        "risk": round(risk_score),
+        "strength": round(max(35, 100 - risk_score if direction == "bullish" else risk_score if direction == "bearish" else 45)),
+        "bullPoints": bull_points,
+        "bearPoints": bear_points,
+        "notes": notes[:5],
+        "series": {
+            "DGS10": dgs10[-1] if dgs10 else None,
+            "DFF": dff[-1] if dff else None,
+            "VIXCLS": vix[-1] if vix else None,
+            "SP500": sp500[-1] if sp500 else None,
+        },
+        "createdAt": now_iso(),
+        "source": "fred_public_csv",
+    }
+
+    FRED_MACRO_CACHE["createdAt"] = now_iso()
+    FRED_MACRO_CACHE["payload"] = payload
+    return payload
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BASIC ROUTES
@@ -3303,6 +3478,12 @@ def build_python_dashboard_signal(symbol: str = "BTCUSD", timeframe: str = "1m",
 
 
 
+
+
+
+@app.get("/api/fred-macro")
+def fred_macro() -> Dict[str, Any]:
+    return build_fred_macro_context()
 
 @app.get("/api/ticker-news")
 def ticker_news(symbol: str = "SPY", limit: int = 10) -> Dict[str, Any]:
@@ -3317,7 +3498,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v18_scorecards_linked_to_python_smc_alphax_ghost",
+        "engine": "main_v19_fred_macro_linked",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
