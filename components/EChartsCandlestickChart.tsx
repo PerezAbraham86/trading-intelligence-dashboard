@@ -833,6 +833,8 @@ export default function EChartsCandlestickChart({
 }: EChartsCandlestickChartProps) {
   const chartRef = useRef<HTMLDivElement | null>(null)
   const chartInstance = useRef<echarts.ECharts | null>(null)
+  const activeCacheKeyRef = useRef<string>('')
+  const chartIdentityRef = useRef<string>('')
 
   const initialSymbol = normalizeDefaultSymbol(
     defaultSymbol ?? latestSignal?.symbol ?? 'BTCUSD',
@@ -889,19 +891,25 @@ export default function EChartsCandlestickChart({
 
     async function loadCandles() {
       const cacheKey = getCandleCacheKey(symbol, timeframe, candleFetchLimit)
+      activeCacheKeyRef.current = cacheKey
+
       const cached = readMemoryCache(cacheKey) ?? readLocalStorageCache(cacheKey)
 
       if (cached && cached.length > 0) {
+        // Correct symbol/timeframe cache: show instantly.
         setHistoricalCandles(cached)
         setStatus('cached')
       } else {
+        // Important: clear the previous timeframe's candles immediately.
+        // This prevents a 5m or 15m dropdown from visually showing old 1m candles.
+        setHistoricalCandles([])
         setStatus('loading')
       }
 
       try {
         const candles = await fetchCandlesFromNetwork(symbol, timeframe, candleFetchLimit, controller.signal)
 
-        if (cancelled) return
+        if (cancelled || activeCacheKeyRef.current !== cacheKey) return
 
         if (candles.length > 0) {
           saveCandleCache(cacheKey, candles)
@@ -910,15 +918,23 @@ export default function EChartsCandlestickChart({
         } else if (!cached || cached.length === 0) {
           setHistoricalCandles([])
           setStatus('empty')
+        } else {
+          // Background refresh returned empty, but valid cached candles are visible.
+          // Keep the correct cached timeframe and do not stay stuck on refreshing/loading.
+          setStatus('loaded')
         }
       } catch (error: any) {
         if (error?.name === 'AbortError') return
 
         console.error('Historical candle fetch error:', error)
 
-        if (!cancelled && (!cached || cached.length === 0)) {
-          setHistoricalCandles([])
-          setStatus('error')
+        if (!cancelled && activeCacheKeyRef.current === cacheKey) {
+          if (cached && cached.length > 0) {
+            setStatus('loaded')
+          } else {
+            setHistoricalCandles([])
+            setStatus('error')
+          }
         }
       }
     }
@@ -967,11 +983,24 @@ export default function EChartsCandlestickChart({
       loading: status === 'loading' && candles.length === 0,
     })
 
-    chartInstance.current.setOption(option, {
-      notMerge: false,
-      lazyUpdate: true,
-      replaceMerge: ['graphic'],
-    })
+    const chartIdentity = `${symbol}::${timeframe}::${candleMode}::${compact}`
+    const identityChanged = chartIdentityRef.current !== chartIdentity
+    chartIdentityRef.current = chartIdentity
+
+    if (identityChanged) {
+      // Full reset on symbol/timeframe/candle-type changes.
+      // This prevents ECharts/zrender from keeping the previous timeframe's x-axis,
+      // series data, zoom window, or stale drawing state.
+      chartInstance.current.clear()
+      chartInstance.current.setOption(option, true)
+    } else {
+      // Fast path for live candle updates.
+      chartInstance.current.setOption(option, {
+        notMerge: false,
+        lazyUpdate: true,
+        replaceMerge: ['graphic'],
+      })
+    }
 
     const resize = () => chartInstance.current?.resize()
     window.addEventListener('resize', resize)
