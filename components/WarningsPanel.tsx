@@ -11,6 +11,7 @@ import {
   Zap,
 } from 'lucide-react'
 import SP500Heatmap from '@/components/SP500Heatmap'
+import TickerNewsFeed from '@/components/TickerNewsFeed'
 
 type TradingSignal = {
   symbol?: string
@@ -453,6 +454,8 @@ export default function WarningsPanel({ signal }: WarningsPanelProps) {
       </motion.div>
 
       <SP500Heatmap />
+
+      <TickerNewsFeed symbol={symbol} limit={8} />
     </>
   )
 }
