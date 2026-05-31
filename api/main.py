@@ -12,15 +12,6 @@ from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-try:
-    from trading_engine import run_phase1_engine
-except Exception:
-    run_phase1_engine = None
-
-try:
-    import yfinance as yf
-except Exception:
-    yf = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -228,30 +219,6 @@ def alpaca_timeframe(timeframe: str) -> str:
     return mapping.get(normalize_timeframe(timeframe), "1Min")
 
 
-def yfinance_interval(timeframe: str) -> str:
-    mapping = {
-        "1m": "1m",
-        "3m": "2m",
-        "5m": "5m",
-        "10m": "5m",
-        "15m": "15m",
-        "30m": "30m",
-        "1h": "60m",
-        "2h": "60m",
-        "4h": "60m",
-        "1d": "1d",
-        "1w": "1wk",
-    }
-    return mapping.get(normalize_timeframe(timeframe), "1m")
-
-
-def yfinance_period(timeframe: str) -> str:
-    tf = normalize_timeframe(timeframe)
-    if tf in {"1m", "3m", "5m", "10m", "15m", "30m"}:
-        return "5d"
-    if tf in {"1h", "2h", "4h"}:
-        return "60d"
-    return "2y"
 
 
 def is_crypto_symbol(symbol: str) -> bool:
@@ -328,18 +295,6 @@ def to_alpaca_crypto_symbol(symbol: str) -> str:
         return "ETH/USD"
     return normalized
 
-
-def to_yfinance_symbol(symbol: str) -> str:
-    normalized = normalize_symbol(symbol)
-    if normalized == "ES1!":
-        return "ES=F"
-    if normalized == "MES1!":
-        return "MES=F"
-    if normalized == "BTCUSD":
-        return "BTC-USD"
-    if normalized == "ETHUSD":
-        return "ETH-USD"
-    return normalized
 
 
 def to_epoch_seconds(value: Any) -> float:
@@ -466,47 +421,6 @@ def merge_candles_by_time(candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return sorted(merged.values(), key=lambda item: to_epoch_seconds(item.get("epoch") or item.get("time")))
 
 
-def resample_candles(candles: List[Dict[str, Any]], target_timeframe: str, limit: int = 500) -> List[Dict[str, Any]]:
-    tf = normalize_timeframe(target_timeframe)
-    seconds = timeframe_seconds(tf)
-
-    if seconds <= 60:
-        return merge_candles_by_time(candles)[-limit:]
-
-    source = merge_candles_by_time(candles)
-    buckets: Dict[int, Dict[str, Any]] = {}
-
-    for candle in source:
-        epoch = int(to_epoch_seconds(candle.get("epoch") or candle.get("time") or candle.get("timestamp")))
-        if epoch <= 0:
-            continue
-
-        bucket_epoch = (epoch // seconds) * seconds
-        existing = buckets.get(bucket_epoch)
-
-        if existing is None:
-            buckets[bucket_epoch] = {
-                "time": format_bar_time(bucket_epoch),
-                "timestamp": format_bar_time(bucket_epoch),
-                "epoch": float(bucket_epoch),
-                "open": to_float(candle.get("open")),
-                "high": to_float(candle.get("high")),
-                "low": to_float(candle.get("low")),
-                "close": to_float(candle.get("close")),
-                "volume": to_float(candle.get("volume")),
-                "symbol": normalize_symbol(str(candle.get("symbol") or "")),
-                "timeframe": tf,
-                "createdAt": now_iso(),
-                "provider": f"{candle.get('provider', 'provider')}_resampled",
-            }
-        else:
-            existing["high"] = max(to_float(existing.get("high")), to_float(candle.get("high")))
-            existing["low"] = min(to_float(existing.get("low")), to_float(candle.get("low")))
-            existing["close"] = to_float(candle.get("close"))
-            existing["volume"] = to_float(existing.get("volume")) + to_float(candle.get("volume"))
-
-    return sorted(buckets.values(), key=lambda item: to_epoch_seconds(item.get("epoch")))[-limit:]
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HTTP / DATA PROVIDER HELPERS
@@ -574,44 +488,6 @@ def normalize_alpaca_bar(raw: Dict[str, Any], symbol: str, timeframe: str) -> Di
         "provider": "alpaca",
     }
 
-
-def normalize_yfinance_row(index_value: Any, row: Any, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
-    try:
-        open_value = row.get("Open") if hasattr(row, "get") else row["Open"]
-        high_value = row.get("High") if hasattr(row, "get") else row["High"]
-        low_value = row.get("Low") if hasattr(row, "get") else row["Low"]
-        close_value = row.get("Close") if hasattr(row, "get") else row["Close"]
-        volume_value = row.get("Volume", 0) if hasattr(row, "get") else row["Volume"]
-    except Exception:
-        return None
-
-    if any(value is None for value in [open_value, high_value, low_value, close_value]):
-        return None
-
-    formatted_time = format_bar_time(index_value.to_pydatetime() if hasattr(index_value, "to_pydatetime") else index_value)
-
-    candle = {
-        "time": formatted_time,
-        "timestamp": formatted_time,
-        "epoch": to_epoch_seconds(formatted_time),
-        "open": to_float(open_value),
-        "high": to_float(high_value),
-        "low": to_float(low_value),
-        "close": to_float(close_value),
-        "volume": to_float(volume_value),
-        "symbol": normalize_symbol(symbol),
-        "timeframe": normalize_timeframe(timeframe),
-        "createdAt": now_iso(),
-        "provider": "yfinance",
-    }
-
-    if candle["open"] <= 0 or candle["high"] <= 0 or candle["low"] <= 0 or candle["close"] <= 0:
-        return None
-
-    if not is_candle_valid_for_symbol(candle, symbol):
-        return None
-
-    return candle
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -870,31 +746,20 @@ def fetch_insightsentry_direct_candles(symbol: str, timeframe: str = "1m", limit
 
 
 def fetch_insightsentry_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 500) -> List[Dict[str, Any]]:
+    """
+    MES/ES futures candles use the verified InsightSentry Time Series OHLCV route.
+
+    Removed old fallback behavior:
+    - No interval=5min style requests.
+    - No fake relabeling.
+    - No resampling fallback unless the provider returns valid direct candles.
+    """
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = max(1, min(int(limit or 500), 5000))
 
     direct = fetch_insightsentry_direct_candles(normalized_symbol, normalized_timeframe, safe_limit)
-    if direct:
-        return direct[-safe_limit:]
-
-    if is_futures_symbol(normalized_symbol) and normalized_timeframe != "1m":
-        seconds = timeframe_seconds(normalized_timeframe)
-        multiplier = max(1, seconds // 60)
-        one_minute_limit = min(5000, max(safe_limit * multiplier + multiplier * 3, safe_limit * 2, 500))
-        one_minute = fetch_insightsentry_direct_candles(normalized_symbol, "1m", one_minute_limit)
-        if one_minute:
-            resampled = resample_candles(one_minute, normalized_timeframe, safe_limit)
-            resampled = filter_valid_candles_for_symbol(resampled, normalized_symbol)
-            if resampled and candles_match_requested_timeframe(resampled, normalized_timeframe):
-                print(
-                    f"[InsightSentry] resampled futures {normalized_symbol} from 1m "
-                    f"to {normalized_timeframe}; source={len(one_minute)} output={len(resampled)}"
-                )
-                return resampled[-safe_limit:]
-
-    return []
-
+    return direct[-safe_limit:] if direct else []
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CANDLE PROVIDERS
@@ -996,85 +861,42 @@ def fetch_alpaca_historical_candles(symbol: str, timeframe: str = "1m", limit: i
 
     return []
 
-def fetch_yfinance_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 500) -> List[Dict[str, Any]]:
-    if yf is None:
-        return []
-
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-    yf_symbol = to_yfinance_symbol(normalized_symbol)
-    interval = yfinance_interval(normalized_timeframe)
-    period = yfinance_period(normalized_timeframe)
-    safe_limit = max(1, min(int(limit or 500), 5000))
-
-    try:
-        ticker = yf.Ticker(yf_symbol)
-        frame = ticker.history(period=period, interval=interval, prepost=True, auto_adjust=False)
-    except Exception:
-        return []
-
-    if frame is None or getattr(frame, "empty", True):
-        return []
-
-    candles: List[Dict[str, Any]] = []
-    for index_value, row in frame.iterrows():
-        candle = normalize_yfinance_row(index_value, row, normalized_symbol, normalized_timeframe)
-        if candle is not None:
-            candles.append(candle)
-
-    candles = merge_candles_by_time(candles)[-safe_limit:]
-
-    if normalized_timeframe == "10m" and candles:
-        candles = resample_candles(candles, "10m", safe_limit)
-
-    return filter_valid_candles_for_symbol(candles, normalized_symbol)
-
 
 def fetch_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 500) -> List[Dict[str, Any]]:
+    """
+    Clean provider router.
+
+    Current dashboard symbols:
+    - BTCUSD -> Alpaca crypto
+    - MES1!  -> InsightSentry Time Series OHLCV
+
+    Removed unnecessary fallback patches that were only masking the old MES endpoint issue.
+    """
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = max(1, min(int(limit or 500), 5000))
 
     if is_futures_symbol(normalized_symbol):
         candles = fetch_insightsentry_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
-        if candles:
-            return candles
-        return fetch_yfinance_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
+        return candles[-safe_limit:]
+
+    if is_crypto_symbol(normalized_symbol):
+        try:
+            candles = fetch_alpaca_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
+        except Exception as error:
+            print(f"[Alpaca crypto] failed for {normalized_symbol} {normalized_timeframe}: {error}")
+            candles = []
+        return candles[-safe_limit:]
 
     if normalized_symbol == "SPY":
         try:
             candles = fetch_alpaca_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
-        except Exception:
-            candles = []
-        if candles:
-            return candles
-        return fetch_yfinance_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
-
-    if is_crypto_symbol(normalized_symbol):
-        try:
-            alpaca_candles = fetch_alpaca_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
         except Exception as error:
-            print(f"[Alpaca crypto] fallback triggered for {normalized_symbol} {normalized_timeframe}: {error}")
-            alpaca_candles = []
+            print(f"[Alpaca stock] failed for {normalized_symbol} {normalized_timeframe}: {error}")
+            candles = []
+        return candles[-safe_limit:]
 
-        # Alpaca is the primary BTCUSD source, but it can sometimes return a short
-        # page even when limit=500. If that happens, fill the missing history from
-        # yfinance, merge by timestamp, and still return the latest 500 candles.
-        if len(alpaca_candles) >= safe_limit:
-            return alpaca_candles[-safe_limit:]
-
-        yfinance_candles = fetch_yfinance_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
-
-        merged = merge_candles_by_time([*yfinance_candles, *alpaca_candles])[-safe_limit:]
-        merged = filter_valid_candles_for_symbol(merged, normalized_symbol)
-
-        if merged:
-            return merged[-safe_limit:]
-
-        return alpaca_candles[-safe_limit:]
-
-    return fetch_yfinance_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
-
+    return []
 
 def get_live_recent_candles(symbol: str, timeframe: str) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
