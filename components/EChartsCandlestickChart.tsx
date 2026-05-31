@@ -110,6 +110,21 @@ type ChartOverlays = {
 
 type CandleMode = 'Regular' | 'Heikin Ashi'
 
+type OverlayToggleKey = 'smc' | 'ghost' | 'liquidityProfile' | 'orderBlocks'
+
+type OverlayToggles = Record<OverlayToggleKey, boolean>
+
+const DEFAULT_OVERLAY_TOGGLES: OverlayToggles = {
+  smc: false,
+  ghost: false,
+  liquidityProfile: false,
+  orderBlocks: false,
+}
+
+function hasAnyOverlayEnabled(toggles: OverlayToggles) {
+  return toggles.smc || toggles.ghost || toggles.liquidityProfile || toggles.orderBlocks
+}
+
 type EChartsCandlestickChartProps = {
   heightClass?: string
   compact?: boolean
@@ -486,7 +501,7 @@ function getChartSettingsKey(compact: boolean, chartTitle?: string, fallbackTime
   return `${CHART_SETTINGS_PREFIX}${identity}`
 }
 
-function readChartSettings(key: string): Partial<{ symbol: string; timeframe: string; candleMode: CandleMode }> {
+function readChartSettings(key: string): Partial<{ symbol: string; timeframe: string; candleMode: CandleMode; overlayToggles: OverlayToggles }> {
   if (typeof window === 'undefined') return {}
 
   try {
@@ -504,7 +519,7 @@ function readChartSettings(key: string): Partial<{ symbol: string; timeframe: st
 
 function saveChartSettings(
   key: string,
-  settings: Partial<{ symbol: string; timeframe: string; candleMode: CandleMode }>
+  settings: Partial<{ symbol: string; timeframe: string; candleMode: CandleMode; overlayToggles: OverlayToggles }>
 ) {
   if (typeof window === 'undefined') return
 
@@ -1270,8 +1285,8 @@ function buildChartOption({
 }): any {
   const activeCandles = candleMode === 'Heikin Ashi' ? convertToHeikinAshi(candles) : candles
   const latestRealClose = candles.length > 0 ? Number(candles[candles.length - 1].close) : NaN
-  const overlayGhostCandles = !compact && Array.isArray(chartOverlays?.ghostCandles) ? chartOverlays?.ghostCandles ?? [] : []
-  const alphaProfileBins = !compact && Array.isArray(chartOverlays?.alphaProfileBins) ? chartOverlays?.alphaProfileBins ?? [] : []
+  const overlayGhostCandles = !compact && overlayToggles.ghost && Array.isArray(chartOverlays?.ghostCandles) ? chartOverlays?.ghostCandles ?? [] : []
+  const alphaProfileBins = !compact && overlayToggles.liquidityProfile && Array.isArray(chartOverlays?.alphaProfileBins) ? chartOverlays?.alphaProfileBins ?? [] : []
   const ghostSpacerLabels = overlayGhostCandles.length > 0
     ? buildFutureSpacerLabels(activeCandles.length, GHOST_LEADING_GAP_BARS, 'GhostGap')
     : []
@@ -1310,11 +1325,11 @@ function buildChartOption({
     xAxis: index,
   }))
 
-  const zoneMarkAreas = !compact ? buildZoneMarkAreas(chartOverlays?.zones, activeCandles) : []
-  const smcMarkerData = !compact ? buildMarkerData(chartOverlays?.smcEvents, activeCandles, MAX_SMC_LABELS, true) : []
-  const liquidityMarkerData = !compact ? buildMarkerData(chartOverlays?.liquidityEvents, activeCandles, MAX_LIQUIDITY_LABELS, true) : []
+  const zoneMarkAreas = !compact && overlayToggles.orderBlocks ? buildZoneMarkAreas(chartOverlays?.zones, activeCandles) : []
+  const smcMarkerData = !compact && overlayToggles.smc ? buildMarkerData(chartOverlays?.smcEvents, activeCandles, MAX_SMC_LABELS, true) : []
+  const liquidityMarkerData = !compact && overlayToggles.smc ? buildMarkerData(chartOverlays?.liquidityEvents, activeCandles, MAX_LIQUIDITY_LABELS, true) : []
   const scoreMarkerData: any[] = []
-  const dlmMarkLines = !compact ? buildDlmMarkLines(chartOverlays?.dlmLevels) : []
+  const dlmMarkLines = !compact && overlayToggles.liquidityProfile ? buildDlmMarkLines(chartOverlays?.dlmLevels) : []
   const alphaProfileData = !compact ? buildAlphaProfileCustomData(alphaProfileBins, alphaProfileStartIndex, activeCandles) : []
   const ghostData = !compact ? buildGhostCandleData(activeCandles.length, overlayGhostCandles, ghostSpacerLabels.length) : []
 
@@ -1788,9 +1803,17 @@ export default function EChartsCandlestickChart({
       ? defaultCandleMode
       : 'Heikin Ashi'
 
+  const initialOverlayToggles: OverlayToggles = {
+    ...DEFAULT_OVERLAY_TOGGLES,
+    ...(savedChartSettings.overlayToggles && typeof savedChartSettings.overlayToggles === 'object'
+      ? savedChartSettings.overlayToggles
+      : {}),
+  }
+
   const [symbol, setSymbol] = useState(() => initialSymbol)
   const [timeframe, setTimeframe] = useState(() => initialTimeframe)
   const [candleMode, setCandleMode] = useState<CandleMode>(() => initialCandleMode)
+  const [overlayToggles, setOverlayToggles] = useState<OverlayToggles>(() => initialOverlayToggles)
   const [historicalCandles, setHistoricalCandles] = useState<Candle[]>([])
   const [status, setStatus] = useState<'idle' | 'loading' | 'cached' | 'loaded' | 'empty' | 'error'>('idle')
   const [liveProvider, setLiveProvider] = useState<string>('')
@@ -1825,8 +1848,9 @@ export default function EChartsCandlestickChart({
       symbol,
       timeframe,
       candleMode,
+      overlayToggles,
     })
-  }, [chartSettingsKey, symbol, timeframe, candleMode])
+  }, [chartSettingsKey, symbol, timeframe, candleMode, overlayToggles])
 
   useEffect(() => {
     onChartSelectionChange?.({
@@ -2045,11 +2069,11 @@ export default function EChartsCandlestickChart({
   }, [symbol, timeframe, historicalCandles.length, candleFetchLimit])
 
   useEffect(() => {
-    // Clear old overlays immediately on every symbol/timeframe change.
-    // This prevents BTCUSD SMC/AlphaX/Ghost levels from staying on MES1! candles.
+    // Clear old overlays immediately on every symbol/timeframe/toggle change.
+    // This prevents stale SMC/AlphaX/Ghost levels from staying on the wrong chart.
     setChartOverlays(null)
 
-    if (compact || historicalCandles.length === 0) {
+    if (compact || historicalCandles.length === 0 || !hasAnyOverlayEnabled(overlayToggles)) {
       return
     }
 
@@ -2096,7 +2120,7 @@ export default function EChartsCandlestickChart({
       window.clearTimeout(firstLoadId)
       window.clearInterval(intervalId)
     }
-  }, [symbol, timeframe, compact, historicalCandles.length])
+  }, [symbol, timeframe, compact, historicalCandles.length, overlayToggles.smc, overlayToggles.ghost, overlayToggles.liquidityProfile, overlayToggles.orderBlocks])
 
   const candles = useMemo(
     () => historicalCandles,
@@ -2121,6 +2145,7 @@ export default function EChartsCandlestickChart({
       compact,
       loading: status === 'loading' && candles.length === 0,
       chartOverlays,
+      overlayToggles,
     })
 
     const chartIdentity = `${symbol}::${timeframe}::${candleMode}::${compact}`
@@ -2167,7 +2192,7 @@ export default function EChartsCandlestickChart({
     return () => {
       window.removeEventListener('resize', resize)
     }
-  }, [symbol, timeframe, candleMode, candles, compact, status, chartOverlays])
+  }, [symbol, timeframe, candleMode, candles, compact, status, chartOverlays, overlayToggles])
 
   useEffect(() => {
     return () => {
@@ -2260,7 +2285,32 @@ export default function EChartsCandlestickChart({
             </select>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {!compact && enableAdvancedOverlays && (
+              <div className="flex flex-wrap items-center gap-1">
+                {([
+                  ['smc', 'SMC'],
+                  ['ghost', 'Ghost'],
+                  ['liquidityProfile', 'Profile'],
+                  ['orderBlocks', 'OB'],
+                ] as Array<[OverlayToggleKey, string]>).map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => handleOverlayToggle(key)}
+                    className={`rounded-full border px-2 py-1 text-[10px] font-bold transition ${
+                      overlayToggles[key]
+                        ? 'border-emerald-400/60 bg-emerald-400/10 text-emerald-300'
+                        : 'border-dark-600 bg-dark-900/60 text-gray-500 hover:border-gray-500 hover:text-gray-300'
+                    }`}
+                    title={`${label} overlay ${overlayToggles[key] ? 'enabled' : 'disabled'}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+
             <div className={badgeClass}>
               {statusBadge}
             </div>
