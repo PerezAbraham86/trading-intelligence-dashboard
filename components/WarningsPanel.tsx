@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
 import {
-  AlertTriangle,
   CheckCircle2,
   Info,
   ShieldAlert,
@@ -11,6 +10,7 @@ import {
   TrendingUp,
   Zap,
 } from 'lucide-react'
+import SP500Heatmap from '@/components/SP500Heatmap'
 
 type TradingSignal = {
   symbol?: string
@@ -91,6 +91,7 @@ function normalizeTimeframe(value: unknown) {
   if (tf === '1') return '1m'
   if (tf === '3') return '3m'
   if (tf === '5') return '5m'
+  if (tf === '10') return '10m'
   if (tf === '15') return '15m'
   if (tf === '30') return '30m'
   if (tf === '60') return '1h'
@@ -103,18 +104,9 @@ function normalizeTimeframe(value: unknown) {
 }
 
 function getSeverityClass(severity: WarningItem['severity']) {
-  if (severity === 'danger') {
-    return 'border-red-500/50 bg-red-500/15 text-red-300'
-  }
-
-  if (severity === 'warning') {
-    return 'border-yellow-500/50 bg-yellow-500/15 text-yellow-300'
-  }
-
-  if (severity === 'success') {
-    return 'border-emerald-500/50 bg-emerald-500/15 text-emerald-300'
-  }
-
+  if (severity === 'danger') return 'border-red-500/50 bg-red-500/15 text-red-300'
+  if (severity === 'warning') return 'border-yellow-500/50 bg-yellow-500/15 text-yellow-300'
+  if (severity === 'success') return 'border-emerald-500/50 bg-emerald-500/15 text-emerald-300'
   return 'border-blue-500/50 bg-blue-500/15 text-blue-300'
 }
 
@@ -124,7 +116,6 @@ function getIcon(type: WarningItem['icon']) {
   if (type === 'bear') return TrendingDown
   if (type === 'zap') return Zap
   if (type === 'success') return CheckCircle2
-
   return Info
 }
 
@@ -134,10 +125,8 @@ function asIndicatorArray(value: unknown): TechnicalIndicator[] {
   return value
     .map((item) => {
       if (!item || typeof item !== 'object') return null
-
       const raw = item as Record<string, unknown>
       const name = String(raw.name ?? raw.factor ?? raw.label ?? raw.indicator ?? '').trim()
-
       if (!name) return null
 
       return {
@@ -163,9 +152,7 @@ function extractTechnicalIndicators(data: TechnicalSentiment | null): TechnicalI
 
   for (const indicator of merged) {
     const key = indicator.name.trim().toLowerCase()
-    if (!byName.has(key)) {
-      byName.set(key, indicator)
-    }
+    if (!byName.has(key)) byName.set(key, indicator)
   }
 
   return Array.from(byName.values())
@@ -173,29 +160,16 @@ function extractTechnicalIndicators(data: TechnicalSentiment | null): TechnicalI
 
 function isBearishText(value?: string) {
   const lower = String(value ?? '').toLowerCase()
-
-  return (
-    lower.includes('bear') ||
-    lower.includes('sell') ||
-    lower.includes('down') ||
-    lower.includes('short')
-  )
+  return lower.includes('bear') || lower.includes('sell') || lower.includes('down') || lower.includes('short')
 }
 
 function isBullishText(value?: string) {
   const lower = String(value ?? '').toLowerCase()
-
-  return (
-    lower.includes('bull') ||
-    lower.includes('buy') ||
-    lower.includes('up') ||
-    lower.includes('long')
-  )
+  return lower.includes('bull') || lower.includes('buy') || lower.includes('up') || lower.includes('long')
 }
 
 function isNeutralText(value?: string) {
   const lower = String(value ?? '').toLowerCase()
-
   return (
     !lower ||
     lower.includes('neutral') ||
@@ -210,17 +184,13 @@ function technicalSummary(data: TechnicalSentiment | null) {
   const activeCount = data?.activeCount ?? indicators.length
   const bullCount =
     data?.bullCount ??
-    indicators.filter((indicator) => String(indicator.signal).toUpperCase() === 'BULLISH')
-      .length
+    indicators.filter((indicator) => String(indicator.signal).toUpperCase() === 'BULLISH').length
   const bearCount =
     data?.bearCount ??
-    indicators.filter((indicator) => String(indicator.signal).toUpperCase() === 'BEARISH')
-      .length
+    indicators.filter((indicator) => String(indicator.signal).toUpperCase() === 'BEARISH').length
   const neutralCount =
     data?.neutralCount ??
-    indicators.filter((indicator) => String(indicator.signal).toUpperCase() === 'NEUTRAL')
-      .length
-
+    indicators.filter((indicator) => String(indicator.signal).toUpperCase() === 'NEUTRAL').length
   const sentiment = clamp(Number(data?.sentiment ?? 50))
   const status = String(data?.sentimentStatus ?? 'Waiting')
 
@@ -264,11 +234,12 @@ function buildWarnings(signal: TradingSignal | undefined, data: TechnicalSentime
       ? 'bearish'
       : 'neutral'
 
-  const technicalSide = summary.bullCount > summary.bearCount
-    ? 'bullish'
-    : summary.bearCount > summary.bullCount
-      ? 'bearish'
-      : 'neutral'
+  const technicalSide =
+    summary.bullCount > summary.bearCount
+      ? 'bullish'
+      : summary.bearCount > summary.bullCount
+        ? 'bearish'
+        : 'neutral'
 
   if (confidence > 0 && confidence < 35) {
     items.push({
@@ -435,49 +406,53 @@ export default function WarningsPanel({ signal }: WarningsPanelProps) {
   )
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 16 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.35 }}
-      className="rounded-xl border border-dark-700 bg-dark-800/70 p-6 shadow-lg"
-    >
-      <div className="mb-5 flex items-start justify-between gap-3">
-        <div>
-          <h2 className="text-xl font-bold text-white">Warnings & Alerts</h2>
-          <p className="mt-1 text-xs text-gray-500">
-            Ranked by live signal, Python ghost, and technical meter conflict
-          </p>
+    <>
+      <motion.div
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35 }}
+        className="rounded-xl border border-dark-700 bg-dark-800/70 p-6 shadow-lg"
+      >
+        <div className="mb-5 flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-xl font-bold text-white">Warnings & Alerts</h2>
+            <p className="mt-1 text-xs text-gray-500">
+              Ranked by live signal, Python ghost, and technical meter conflict
+            </p>
+          </div>
+
+          <div className="rounded-lg border border-dark-600 bg-dark-900/40 px-3 py-2 text-right">
+            <p className="text-xs text-gray-500">Alerts</p>
+            <p className="text-sm font-bold text-white">{warnings.length}</p>
+          </div>
         </div>
 
-        <div className="rounded-lg border border-dark-600 bg-dark-900/40 px-3 py-2 text-right">
-          <p className="text-xs text-gray-500">Alerts</p>
-          <p className="text-sm font-bold text-white">{warnings.length}</p>
-        </div>
-      </div>
+        <div className="space-y-3">
+          {warnings.map((warning, index) => {
+            const Icon = getIcon(warning.icon)
 
-      <div className="space-y-3">
-        {warnings.map((warning, index) => {
-          const Icon = getIcon(warning.icon)
-
-          return (
-            <motion.div
-              key={`${warning.title}-${index}`}
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ delay: 0.04 * index }}
-              className={`rounded-lg border p-4 ${getSeverityClass(warning.severity)}`}
-            >
-              <div className="flex items-start gap-3">
-                <Icon size={15} className="mt-0.5 shrink-0" />
-                <div>
-                  <p className="text-sm font-bold">{warning.title}</p>
-                  <p className="text-xs opacity-80">{warning.subtitle}</p>
+            return (
+              <motion.div
+                key={`${warning.title}-${index}`}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 0.04 * index }}
+                className={`rounded-lg border p-4 ${getSeverityClass(warning.severity)}`}
+              >
+                <div className="flex items-start gap-3">
+                  <Icon size={15} className="mt-0.5 shrink-0" />
+                  <div>
+                    <p className="text-sm font-bold">{warning.title}</p>
+                    <p className="text-xs opacity-80">{warning.subtitle}</p>
+                  </div>
                 </div>
-              </div>
-            </motion.div>
-          )
-        })}
-      </div>
-    </motion.div>
+              </motion.div>
+            )
+          })}
+        </div>
+      </motion.div>
+
+      <SP500Heatmap />
+    </>
   )
 }
