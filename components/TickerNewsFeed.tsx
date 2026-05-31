@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { ExternalLink, Newspaper } from 'lucide-react'
 
@@ -21,6 +21,7 @@ type NewsPayload = {
   newsSymbol?: string
   category?: string
   source?: string
+  cache?: string
   createdAt?: string
   count?: number
   limit?: number
@@ -40,6 +41,10 @@ type TickerNewsFeedProps = {
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ||
   'https://trading-intelligence-dashboard.onrender.com'
+
+const NEWS_CACHE_PREFIX = 'marketbos:ticker-news-cache:v2:'
+const NEWS_CACHE_TTL_MS = 1000 * 60 * 5
+const NEWS_REFRESH_MS = 1000 * 60 * 5
 
 function normalizeSymbol(value: unknown) {
   return String(value ?? 'SPY')
@@ -113,25 +118,142 @@ function cleanSummary(value: string | undefined) {
   return `${raw.slice(0, 120)}...`
 }
 
+function newsCacheKey(symbol: string, limit: number) {
+  return `${NEWS_CACHE_PREFIX}${normalizeSymbol(symbol)}:${limit}`
+}
+
+function isValidNewsPayload(value: unknown): value is NewsPayload {
+  if (!value || typeof value !== 'object') return false
+
+  const payload = value as NewsPayload
+  return Array.isArray(payload.articles)
+}
+
+function readCachedNews(symbol: string, limit: number) {
+  if (typeof window === 'undefined') return null
+
+  try {
+    const raw = window.localStorage.getItem(newsCacheKey(symbol, limit))
+    if (!raw) return null
+
+    const parsed = JSON.parse(raw)
+    const payload = parsed?.payload
+    const savedAt = Number(parsed?.savedAt ?? 0)
+
+    if (!isValidNewsPayload(payload)) return null
+
+    return {
+      payload: payload as NewsPayload,
+      savedAt,
+      isFresh: Date.now() - savedAt <= NEWS_CACHE_TTL_MS,
+    }
+  } catch {
+    return null
+  }
+}
+
+function saveCachedNews(symbol: string, limit: number, payload: NewsPayload) {
+  if (typeof window === 'undefined') return
+  if (!isValidNewsPayload(payload)) return
+
+  try {
+    window.localStorage.setItem(
+      newsCacheKey(symbol, limit),
+      JSON.stringify({
+        payload,
+        savedAt: Date.now(),
+      })
+    )
+  } catch {
+    // Ignore localStorage quota/private-mode failures.
+  }
+}
+
 export default function TickerNewsFeed({ symbol = 'SPY', limit = 8 }: TickerNewsFeedProps) {
-  const [data, setData] = useState<NewsPayload | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const normalizedSymbol = normalizeSymbol(symbol)
+  const [data, setData] = useState<NewsPayload | null>(() => {
+    const cached = readCachedNews(normalizedSymbol, limit)
+    return cached?.payload ?? null
+  })
+  const [hasMounted, setHasMounted] = useState(false)
+  const [isVisible, setIsVisible] = useState(false)
+  const [isRefreshing, setIsRefreshing] = useState(false)
   const [error, setError] = useState('')
 
-  const normalizedSymbol = normalizeSymbol(symbol)
+  useEffect(() => {
+    setHasMounted(true)
+
+    const cached = readCachedNews(normalizedSymbol, limit)
+    if (cached?.payload) {
+      setData(cached.payload)
+    }
+  }, [normalizedSymbol, limit])
 
   useEffect(() => {
+    if (!hasMounted) return
+    if (!rootRef.current) return
+
+    const current = rootRef.current
+
+    if (!('IntersectionObserver' in window)) {
+      setIsVisible(true)
+      return
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setIsVisible(true)
+          observer.disconnect()
+        }
+      },
+      {
+        root: null,
+        rootMargin: '420px',
+        threshold: 0.01,
+      }
+    )
+
+    observer.observe(current)
+
+    return () => {
+      observer.disconnect()
+    }
+  }, [hasMounted])
+
+  useEffect(() => {
+    if (!hasMounted || !isVisible) return
+
+    const cached = readCachedNews(normalizedSymbol, limit)
+    if (cached?.payload) {
+      setData(cached.payload)
+    }
+
     let cancelled = false
     let intervalId: ReturnType<typeof setInterval> | null = null
 
-    async function fetchNews() {
+    async function fetchNews(force = false) {
+      const cachedNow = readCachedNews(normalizedSymbol, limit)
+
+      if (!force && cachedNow?.payload && cachedNow.isFresh) {
+        setData(cachedNow.payload)
+        setError('')
+        return
+      }
+
       try {
+        setIsRefreshing(true)
         setError('')
 
         const params = new URLSearchParams({
           symbol: normalizedSymbol,
           limit: String(limit),
         })
+
+        if (force) {
+          params.set('force', 'true')
+        }
 
         const response = await fetch(`${API_BASE_URL}/api/ticker-news?${params.toString()}`, {
           cache: 'no-store',
@@ -143,33 +265,52 @@ export default function TickerNewsFeed({ symbol = 'SPY', limit = 8 }: TickerNews
 
         const json = await response.json()
 
-        if (!cancelled) {
-          setData(json && typeof json === 'object' ? json : null)
-          setIsLoading(false)
+        if (!cancelled && isValidNewsPayload(json)) {
+          setData(json)
+          saveCachedNews(normalizedSymbol, limit, json)
+          setError('')
         }
       } catch (err) {
         console.error('Ticker news feed error:', err)
+
         if (!cancelled) {
-          setError('Ticker news unavailable')
-          setIsLoading(false)
+          const stale = readCachedNews(normalizedSymbol, limit)
+          if (stale?.payload) {
+            setData(stale.payload)
+            setError('')
+          } else {
+            setError('Ticker news unavailable')
+          }
+        }
+      } finally {
+        if (!cancelled) {
+          setIsRefreshing(false)
         }
       }
     }
 
-    fetchNews()
-    intervalId = setInterval(fetchNews, 120000)
+    // Stale-while-refresh behavior:
+    // show cached news immediately, then refresh quietly in the background.
+    fetchNews(false)
+    intervalId = setInterval(() => fetchNews(false), NEWS_REFRESH_MS)
 
     return () => {
       cancelled = true
       if (intervalId) clearInterval(intervalId)
     }
-  }, [normalizedSymbol, limit])
+  }, [hasMounted, isVisible, normalizedSymbol, limit])
 
   const articles = useMemo(() => data?.articles ?? [], [data])
   const score = Number(data?.newsScore ?? 50)
+  const sourceLabel = data?.cache
+    ? `Cache: ${data.cache}`
+    : data?.source
+      ? data.source
+      : 'ticker news'
 
   return (
     <motion.div
+      ref={rootRef}
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.35 }}
@@ -184,7 +325,7 @@ export default function TickerNewsFeed({ symbol = 'SPY', limit = 8 }: TickerNews
           <div>
             <h2 className="text-lg font-bold text-white">Ticker News Feed</h2>
             <p className="text-xs text-gray-500">
-              {data?.newsSymbol ?? normalizedSymbol} • {data?.category ?? 'market'} news
+              {data?.newsSymbol ?? normalizedSymbol} • cached news after candles
             </p>
           </div>
         </div>
@@ -209,25 +350,19 @@ export default function TickerNewsFeed({ symbol = 'SPY', limit = 8 }: TickerNews
         </div>
       </div>
 
-      {isLoading && (
-        <div className="flex h-40 items-center justify-center rounded-lg border border-dark-700 bg-dark-900/40 text-sm text-gray-500">
-          Loading ticker news...
+      {articles.length === 0 && !error && (
+        <div className="flex h-40 items-center justify-center rounded-lg border border-dark-700 bg-dark-900/40 text-center text-sm text-gray-500">
+          {isVisible ? 'Preparing cached ticker news...' : 'News waits until this card is near view'}
         </div>
       )}
 
-      {!isLoading && error && (
+      {articles.length === 0 && error && (
         <div className="flex h-40 items-center justify-center rounded-lg border border-red-400/30 bg-red-950/20 text-sm text-red-300">
           {error}
         </div>
       )}
 
-      {!isLoading && !error && articles.length === 0 && (
-        <div className="flex h-40 items-center justify-center rounded-lg border border-dark-700 bg-dark-900/40 text-sm text-gray-500">
-          No ticker news returned yet.
-        </div>
-      )}
-
-      {!isLoading && !error && articles.length > 0 && (
+      {articles.length > 0 && (
         <div className="max-h-[430px] space-y-2 overflow-hidden">
           {articles.slice(0, limit).map((article, index) => {
             const classes = sentimentClasses(article.sentiment)
@@ -301,8 +436,11 @@ export default function TickerNewsFeed({ symbol = 'SPY', limit = 8 }: TickerNews
       )}
 
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[10px] text-gray-500">
-        <span>{data?.status ?? 'News'} • {data?.count ?? 0} articles</span>
-        <span>Source: {data?.source ?? 'ticker news'}</span>
+        <span>
+          {data?.status ?? 'News'} • {data?.count ?? 0} articles
+          {isRefreshing ? ' • refreshing...' : ''}
+        </span>
+        <span>Source: {sourceLabel}</span>
       </div>
     </motion.div>
   )
