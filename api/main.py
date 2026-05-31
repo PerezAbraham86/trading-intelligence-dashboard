@@ -951,6 +951,100 @@ def get_dashboard_candles(symbol: str, timeframe: str = "1m", limit: int = 500) 
     return filter_valid_candles_for_symbol(merged, normalized_symbol)
 
 
+def resample_candles_to_timeframe(candles: List[Dict[str, Any]], timeframe: str, limit: int = 500) -> List[Dict[str, Any]]:
+    normalized_timeframe = normalize_timeframe(timeframe)
+    seconds = timeframe_seconds(normalized_timeframe)
+    if seconds <= 60:
+        return candles[-max(1, min(int(limit or 500), 5000)):]
+
+    buckets: Dict[int, Dict[str, Any]] = {}
+
+    for candle in candles:
+        epoch = to_epoch_seconds(candle.get("epoch") or candle.get("time") or candle.get("timestamp"))
+        if epoch <= 0:
+            continue
+
+        bucket_epoch = int(epoch // seconds) * seconds
+
+        existing = buckets.get(bucket_epoch)
+        open_value = to_float(candle.get("open"))
+        high_value = to_float(candle.get("high"))
+        low_value = to_float(candle.get("low"))
+        close_value = to_float(candle.get("close"))
+        volume_value = to_float(candle.get("volume"))
+
+        if open_value <= 0 or high_value <= 0 or low_value <= 0 or close_value <= 0:
+            continue
+
+        if existing is None:
+            buckets[bucket_epoch] = {
+                "time": format_bar_time(bucket_epoch),
+                "timestamp": format_bar_time(bucket_epoch),
+                "epoch": bucket_epoch,
+                "open": open_value,
+                "high": high_value,
+                "low": low_value,
+                "close": close_value,
+                "volume": volume_value,
+                "symbol": candle.get("symbol"),
+                "timeframe": normalized_timeframe,
+                "createdAt": now_iso(),
+                "provider": str(candle.get("provider") or "resampled"),
+                "source": "python_resampled_1m",
+            }
+        else:
+            existing["high"] = max(to_float(existing.get("high")), high_value)
+            existing["low"] = min(to_float(existing.get("low")), low_value)
+            existing["close"] = close_value
+            existing["volume"] = to_float(existing.get("volume")) + volume_value
+
+    merged = merge_candles_by_time(list(buckets.values()))
+    return merged[-max(1, min(int(limit or 500), 5000)):]
+
+
+def get_sentiment_candles(symbol: str, timeframe: str = "1m", limit: int = 500) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    safe_limit = max(120, min(int(limit or 500), 5000))
+
+    candles = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit)
+    source = "dashboard_candles"
+
+    # If the sentiment route does not get enough candles from the direct timeframe,
+    # retry with a wider request. This keeps the 12-indicator meter independent from
+    # any temporary chart cache/front-end state.
+    if len(candles) < 80:
+        wider = get_dashboard_candles(normalized_symbol, normalized_timeframe, max(safe_limit, 1000))
+        if len(wider) > len(candles):
+            candles = wider
+            source = "dashboard_candles_wide_retry"
+
+    # Last fallback: build higher timeframes from working 1m candles.
+    # This prevents the technical meter from defaulting to 50% when one provider
+    # returns thin higher-timeframe data but the 1m route is working.
+    if len(candles) < 80 and normalized_timeframe != "1m":
+        one_minute = get_dashboard_candles(normalized_symbol, "1m", max(safe_limit * 8, 1500))
+        resampled = resample_candles_to_timeframe(one_minute, normalized_timeframe, safe_limit)
+        if len(resampled) > len(candles):
+            candles = resampled
+            source = "resampled_from_1m"
+
+    candles = filter_valid_candles_for_symbol(merge_candles_by_time(candles), normalized_symbol)[-safe_limit:]
+
+    latest = candles[-1] if candles else {}
+    debug = {
+        "sentimentCandleSource": source,
+        "candlesCount": len(candles),
+        "requestedSymbol": normalized_symbol,
+        "requestedTimeframe": normalized_timeframe,
+        "firstCandleTime": candles[0].get("time") if candles else None,
+        "lastCandleTime": latest.get("time") if latest else None,
+        "lastClose": to_float(latest.get("close")) if latest else 0,
+    }
+
+    return candles, debug
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1960,7 +2054,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v10_python_12_indicator_sentiment",
+        "engine": "main_v11_python_12_indicator_real_values",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
@@ -2128,15 +2222,19 @@ def live_price(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]:
 def latest_sentiment(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(30, min(int(limit or 500), 1000))
-    candles = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit)
+    safe_limit = max(500, min(int(limit or 500), 5000))
+
+    candles, debug = get_sentiment_candles(normalized_symbol, normalized_timeframe, safe_limit)
     sentiment = calculate_latest_sentiment(candles)
+
     sentiment.update({
         "symbol": normalized_symbol,
         "timeframe": normalized_timeframe,
         "count": len(candles),
         "createdAt": now_iso(),
+        "debug": debug,
     })
+
     return sentiment
 
 
@@ -2144,8 +2242,9 @@ def latest_sentiment(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int =
 def engine_state(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    candles = get_dashboard_candles(normalized_symbol, normalized_timeframe, max(50, min(int(limit or 500), 1000)))
+    candles, sentiment_debug = get_sentiment_candles(normalized_symbol, normalized_timeframe, max(500, min(int(limit or 500), 5000)))
     sentiment = calculate_latest_sentiment(candles)
+    sentiment["debug"] = sentiment_debug
     ghosts = build_python_ghost_candles(candles, 3)
 
     return {
@@ -2158,6 +2257,7 @@ def engine_state(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500
         "sentiment": sentiment,
         "ghostCandles": ghosts,
         "chartOverlays": empty_overlay_payload(),
+        "sentimentDebug": sentiment.get("debug", {}),
         "createdAt": now_iso(),
     }
 
