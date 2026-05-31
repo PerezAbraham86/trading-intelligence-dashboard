@@ -988,20 +988,21 @@ export default function EChartsCandlestickChart({
     }
   }, [])
 
-  const statusBadge =
-    status === 'loading'
-      ? candles.length > 0
-        ? 'Refreshing'
-        : 'Loading Candles'
-      : status === 'cached'
-        ? `${candles.length} Cached`
-        : status === 'loaded'
-          ? `${candles.length} Candles`
-          : status === 'empty'
-            ? 'No Candles'
-            : status === 'error'
-              ? 'Candle Error'
-              : 'Ready'
+  // Status display rule:
+  // If candles are visible, always show the candle count.
+  // Background refreshes should never leave the badge stuck on "Refreshing"
+  // and should never keep a stale center "Loading candles..." label on the chart.
+  const hasVisibleCandles = candles.length > 0
+
+  const statusBadge = hasVisibleCandles
+    ? `${candles.length} Candles`
+    : status === 'loading'
+      ? 'Loading Candles'
+      : status === 'empty'
+        ? 'No Candles'
+        : status === 'error'
+          ? 'Candle Error'
+          : 'Ready'
 
   const headerClass = compact
     ? 'flex flex-wrap items-center justify-between gap-2 border-b border-dark-700 px-2 py-2'
@@ -1016,8 +1017,8 @@ export default function EChartsCandlestickChart({
     : 'rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-sm font-bold text-amber-300'
 
   const badgeClass = compact
-    ? `rounded-full border px-2 py-1 text-[10px] ${status === 'loaded' || status === 'cached' ? 'border-emerald-500/50 text-emerald-400' : 'border-yellow-500/50 text-yellow-400'}`
-    : `rounded-full border px-3 py-1 text-sm ${status === 'loaded' || status === 'cached' ? 'border-emerald-500/50 text-emerald-400' : 'border-yellow-500/50 text-yellow-400'}`
+    ? `rounded-full border px-2 py-1 text-[10px] ${hasVisibleCandles ? 'border-emerald-500/50 text-emerald-400' : 'border-yellow-500/50 text-yellow-400'}`
+    : `rounded-full border px-3 py-1 text-sm ${hasVisibleCandles ? 'border-emerald-500/50 text-emerald-400' : 'border-yellow-500/50 text-yellow-400'}`
 
   return (
     <div className={`flex ${heightClass} w-full flex-col overflow-hidden rounded-2xl border border-dark-700 bg-[#0f1115]`}>
