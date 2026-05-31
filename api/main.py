@@ -66,6 +66,7 @@ RECENT_SIGNALS: List[Dict[str, Any]] = []
 RECENT_CANDLES: List[Dict[str, Any]] = []
 
 CHART_OVERLAY_CACHE: Dict[str, Any] = {}
+CANDLE_RESPONSE_CACHE: Dict[str, Any] = {}
 
 MAX_RECENT_SIGNALS = 50
 MAX_RECENT_CANDLES = 5000
@@ -888,6 +889,55 @@ def fetch_alpaca_historical_candles(symbol: str, timeframe: str = "1m", limit: i
     return []
 
 
+def candle_cache_key(route: str, symbol: str, timeframe: str, limit: int) -> str:
+    return f"{route}::{normalize_symbol(symbol)}::{normalize_timeframe(timeframe)}::{int(limit or 500)}"
+
+
+def candle_cache_get(route: str, symbol: str, timeframe: str, limit: int, max_age_seconds: int = 60) -> Optional[Dict[str, Any]]:
+    key = candle_cache_key(route, symbol, timeframe, limit)
+    cached = CANDLE_RESPONSE_CACHE.get(key)
+    if not isinstance(cached, dict):
+        return None
+
+    try:
+        created_at = datetime.fromisoformat(str(cached.get("createdAt", "")).replace("Z", "+00:00"))
+        if (datetime.now(timezone.utc) - created_at).total_seconds() > max_age_seconds:
+            return None
+    except Exception:
+        return None
+
+    payload = dict(cached)
+    payload["cache"] = "fresh"
+    return payload
+
+
+def candle_cache_set(route: str, symbol: str, timeframe: str, limit: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+    key = candle_cache_key(route, symbol, timeframe, limit)
+    stored = dict(payload)
+    stored["createdAt"] = now_iso()
+    stored["cache"] = "stored"
+    CANDLE_RESPONSE_CACHE[key] = stored
+    return stored
+
+
+def candle_cache_stale(route: str, symbol: str, timeframe: str, limit: int) -> Optional[Dict[str, Any]]:
+    key = candle_cache_key(route, symbol, timeframe, limit)
+    cached = CANDLE_RESPONSE_CACHE.get(key)
+    if not isinstance(cached, dict):
+        return None
+
+    payload = dict(cached)
+    payload["cache"] = "stale"
+    return payload
+
+
+def timeframe_to_1m_fetch_limit(timeframe: str, limit: int) -> int:
+    seconds = timeframe_seconds(timeframe)
+    mult = max(1, int(seconds / 60))
+    return max(limit * mult + 100, limit, 500)
+
+
+
 def fetch_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 500) -> List[Dict[str, Any]]:
     """
     Clean provider router.
@@ -904,11 +954,23 @@ def fetch_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 50
 
     if is_futures_symbol(normalized_symbol):
         candles = fetch_insightsentry_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
+
+        # Important speed/reliability fallback:
+        # if a higher timeframe returns empty, fetch 1m once and resample locally.
+        if not candles and normalized_timeframe != "1m":
+            one_min_limit = timeframe_to_1m_fetch_limit(normalized_timeframe, safe_limit)
+            one_min = fetch_insightsentry_historical_candles(normalized_symbol, "1m", one_min_limit)
+            candles = resample_candles_to_timeframe(one_min, normalized_timeframe, safe_limit)
+
         return candles[-safe_limit:]
 
     if is_crypto_symbol(normalized_symbol):
         try:
             candles = fetch_alpaca_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
+            if not candles and normalized_timeframe != "1m":
+                one_min_limit = timeframe_to_1m_fetch_limit(normalized_timeframe, safe_limit)
+                one_min = fetch_alpaca_historical_candles(normalized_symbol, "1m", one_min_limit)
+                candles = resample_candles_to_timeframe(one_min, normalized_timeframe, safe_limit)
         except Exception as error:
             print(f"[Alpaca crypto] failed for {normalized_symbol} {normalized_timeframe}: {error}")
             candles = []
@@ -917,6 +979,10 @@ def fetch_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 50
     if normalized_symbol == "SPY":
         try:
             candles = fetch_alpaca_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
+            if not candles and normalized_timeframe != "1m":
+                one_min_limit = timeframe_to_1m_fetch_limit(normalized_timeframe, safe_limit)
+                one_min = fetch_alpaca_historical_candles(normalized_symbol, "1m", one_min_limit)
+                candles = resample_candles_to_timeframe(one_min, normalized_timeframe, safe_limit)
         except Exception as error:
             print(f"[Alpaca stock] failed for {normalized_symbol} {normalized_timeframe}: {error}")
             candles = []
@@ -3989,7 +4055,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v22_phase1_fast_chart_overlays",
+        "engine": "main_v23_primary_candle_store_gate",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
@@ -4067,40 +4133,100 @@ def recent_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 3
 
 
 @app.get("/api/historical-candles")
-def historical_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500) -> Dict[str, Any]:
+def historical_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500, force: bool = False) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = max(1, min(int(limit or 500), 5000))
+
+    if not force:
+        cached = candle_cache_get("historical", normalized_symbol, normalized_timeframe, safe_limit, 90)
+        if cached:
+            return cached
+
     candles = fetch_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
     provider = candles[-1].get("provider") if candles else None
 
-    return {
+    payload = {
         "symbol": normalized_symbol,
         "timeframe": normalized_timeframe,
         "count": len(candles),
         "candles": candles,
         "source": "historical_candle_route",
         "provider": provider,
+        "cache": "refreshed",
+        "createdAt": now_iso(),
     }
+
+    if candles:
+        return candle_cache_set("historical", normalized_symbol, normalized_timeframe, safe_limit, payload)
+
+    stale = candle_cache_stale("historical", normalized_symbol, normalized_timeframe, safe_limit)
+    return stale or payload
 
 
 @app.get("/api/candles")
-def candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500) -> Dict[str, Any]:
+def candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500, force: bool = False) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = max(1, min(int(limit or 500), 5000))
+
+    if not force:
+        cached = candle_cache_get("dashboard", normalized_symbol, normalized_timeframe, safe_limit, 90)
+        if cached:
+            return cached
+
     merged = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit)
     provider = merged[-1].get("provider") if merged else None
 
-    return {
+    payload = {
         "symbol": normalized_symbol,
         "timeframe": normalized_timeframe,
         "count": len(merged),
         "candles": merged,
         "source": "dashboard_merged_candles",
         "provider": provider,
+        "cache": "refreshed",
+        "createdAt": now_iso(),
     }
 
+    if merged:
+        return candle_cache_set("dashboard", normalized_symbol, normalized_timeframe, safe_limit, payload)
+
+    stale = candle_cache_stale("dashboard", normalized_symbol, normalized_timeframe, safe_limit)
+    return stale or payload
+
+
+
+
+@app.get("/api/preload-candles")
+def preload_candles(
+    symbols: str = "BTCUSD,MES1!,SPY",
+    timeframes: str = "1m,5m,10m,15m",
+    limit: int = 500,
+) -> Dict[str, Any]:
+    symbol_list = [normalize_symbol(item) for item in symbols.split(",") if item.strip()]
+    timeframe_list = [normalize_timeframe(item) for item in timeframes.split(",") if item.strip()]
+    safe_limit = max(1, min(int(limit or 500), 1000))
+
+    results: List[Dict[str, Any]] = []
+
+    for item_symbol in symbol_list:
+        for item_timeframe in timeframe_list:
+            payload = candles(symbol=item_symbol, timeframe=item_timeframe, limit=safe_limit)
+            results.append({
+                "symbol": item_symbol,
+                "timeframe": item_timeframe,
+                "count": payload.get("count", 0),
+                "cache": payload.get("cache"),
+                "provider": payload.get("provider"),
+            })
+
+    return {
+        "eventType": "CANDLE_PRELOAD",
+        "count": len(results),
+        "results": results,
+        "createdAt": now_iso(),
+    }
 
 @app.get("/api/merged-candles")
 def merged_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500) -> Dict[str, Any]:
