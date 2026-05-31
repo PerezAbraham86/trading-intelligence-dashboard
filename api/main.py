@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import os
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
@@ -2465,11 +2466,294 @@ def build_sp500_heatmap_payload() -> Dict[str, Any]:
         "sectors": sectors,
     }
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TICKER NEWS FEED — FREE RSS FALLBACK + OPTIONAL ALPHA VANTAGE
+# ─────────────────────────────────────────────────────────────────────────────
+
+NEWS_BULLISH_WORDS = [
+    "beats", "beat", "surge", "surges", "rally", "rallies", "gain", "gains", "higher",
+    "upgrade", "upgraded", "bullish", "strong", "record", "growth", "profit", "profits",
+    "rebound", "breakout", "optimism", "buy", "outperform", "raises", "raised",
+]
+
+NEWS_BEARISH_WORDS = [
+    "misses", "miss", "falls", "fall", "drops", "drop", "plunge", "plunges", "lower",
+    "downgrade", "downgraded", "bearish", "weak", "loss", "losses", "lawsuit", "probe",
+    "investigation", "warning", "cuts", "cut", "sell", "underperform", "risk", "slump",
+    "crash", "recession", "inflation", "default", "layoffs",
+]
+
+
+def normalize_news_symbol(symbol: str) -> str:
+    normalized = normalize_symbol(symbol)
+
+    if normalized in {"BTCUSD", "BTCUSDT", "XBTUSD"}:
+        return "BTC-USD"
+
+    if normalized in {"ETHUSD", "ETHUSDT"}:
+        return "ETH-USD"
+
+    if normalized in {"MES1", "MES1!", "ES1", "ES1!", "ES", "MES", "SPX", "SPX500"}:
+        return "SPY"
+
+    if normalized in {"NQ1", "NQ1!", "NQ", "MNQ"}:
+        return "QQQ"
+
+    if normalized in {"RTY1", "RTY1!", "RTY", "M2K"}:
+        return "IWM"
+
+    if normalized.endswith("!"):
+        return normalized.replace("!", "")
+
+    return normalized
+
+
+def news_category_for_symbol(symbol: str) -> str:
+    normalized = normalize_symbol(symbol)
+    if normalized in {"BTCUSD", "BTCUSDT", "XBTUSD", "ETHUSD", "ETHUSDT"}:
+        return "crypto"
+    if normalized in {"MES1", "MES1!", "ES1", "ES1!", "ES", "MES", "SPX", "SPX500", "SPY", "QQQ", "IWM"}:
+        return "market"
+    return "stock"
+
+
+def score_news_sentiment(title: str, summary: str = "") -> Dict[str, Any]:
+    text = f"{title} {summary}".lower()
+    bullish = sum(1 for word in NEWS_BULLISH_WORDS if word in text)
+    bearish = sum(1 for word in NEWS_BEARISH_WORDS if word in text)
+
+    raw_score = bullish - bearish
+
+    if raw_score > 0:
+        signal = "BULLISH"
+        score = min(100, 55 + raw_score * 10)
+    elif raw_score < 0:
+        signal = "BEARISH"
+        score = max(0, 45 + raw_score * 10)
+    else:
+        signal = "NEUTRAL"
+        score = 50
+
+    return {
+        "signal": signal,
+        "score": score,
+        "bullishHits": bullish,
+        "bearishHits": bearish,
+    }
+
+
+def parse_datetime_to_iso(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return now_iso()
+
+    formats = [
+        "%a, %d %b %Y %H:%M:%S %z",
+        "%a, %d %b %Y %H:%M:%S %Z",
+        "%Y%m%dT%H%M%S",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S%z",
+    ]
+
+    for fmt in formats:
+        try:
+            parsed = datetime.strptime(raw, fmt)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc).isoformat()
+        except Exception:
+            pass
+
+    return now_iso()
+
+
+def fetch_yahoo_rss_news(symbol: str, limit: int = 10) -> List[Dict[str, Any]]:
+    news_symbol = normalize_news_symbol(symbol)
+    encoded_symbol = quote(news_symbol)
+    url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={encoded_symbol}&region=US&lang=en-US"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; MARKETBOS-Dashboard/1.0)",
+        "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    }
+
+    text = http_get_text_or_none(url, headers=headers, provider="Yahoo Finance RSS")
+    if not text:
+        return []
+
+    try:
+        root = ET.fromstring(text)
+    except Exception as error:
+        print(f"[Ticker News] Yahoo RSS parse failed: {error}")
+        return []
+
+    articles: List[Dict[str, Any]] = []
+
+    for item in root.findall(".//item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        published = (item.findtext("pubDate") or "").strip()
+        description = (item.findtext("description") or "").strip()
+
+        if not title:
+            continue
+
+        sentiment = score_news_sentiment(title, description)
+
+        articles.append({
+            "title": title,
+            "summary": description,
+            "url": link,
+            "source": "Yahoo Finance",
+            "publishedAt": parse_datetime_to_iso(published),
+            "tickers": [news_symbol],
+            "sentiment": sentiment["signal"],
+            "sentimentScore": sentiment["score"],
+            "bullishHits": sentiment["bullishHits"],
+            "bearishHits": sentiment["bearishHits"],
+        })
+
+        if len(articles) >= limit:
+            break
+
+    return articles
+
+
+def fetch_alpha_vantage_news(symbol: str, limit: int = 10) -> List[Dict[str, Any]]:
+    api_key = os.getenv("ALPHA_VANTAGE_API_KEY", "").strip()
+    if not api_key:
+        return []
+
+    news_symbol = normalize_news_symbol(symbol)
+
+    # Alpha Vantage uses CRYPTO:BTC for BTC; stocks/ETFs use ticker directly.
+    alpha_ticker = "CRYPTO:BTC" if news_symbol == "BTC-USD" else "CRYPTO:ETH" if news_symbol == "ETH-USD" else news_symbol
+
+    params = urlencode({
+        "function": "NEWS_SENTIMENT",
+        "tickers": alpha_ticker,
+        "limit": str(max(1, min(int(limit or 10), 50))),
+        "apikey": api_key,
+    })
+
+    url = f"https://www.alphavantage.co/query?{params}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; MARKETBOS-Dashboard/1.0)",
+        "Accept": "application/json",
+    }
+
+    data = http_get_json_or_none(url, headers=headers, provider="Alpha Vantage news")
+    if not isinstance(data, dict):
+        return []
+
+    feed = data.get("feed", [])
+    if not isinstance(feed, list):
+        return []
+
+    articles: List[Dict[str, Any]] = []
+
+    for item in feed[:max(1, min(int(limit or 10), 50))]:
+        if not isinstance(item, dict):
+            continue
+
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+
+        ticker_sentiment = item.get("ticker_sentiment", [])
+        ticker_symbols = []
+        if isinstance(ticker_sentiment, list):
+            ticker_symbols = [
+                str(row.get("ticker") or "").strip()
+                for row in ticker_sentiment
+                if isinstance(row, dict) and str(row.get("ticker") or "").strip()
+            ]
+
+        raw_label = str(item.get("overall_sentiment_label") or "").upper()
+        raw_score = to_float(item.get("overall_sentiment_score"), 0.0)
+
+        if "BULL" in raw_label:
+            sentiment = "BULLISH"
+        elif "BEAR" in raw_label:
+            sentiment = "BEARISH"
+        else:
+            sentiment = "NEUTRAL"
+
+        sentiment_score = clamp(50 + raw_score * 50, 0, 100)
+
+        articles.append({
+            "title": title,
+            "summary": str(item.get("summary") or "").strip(),
+            "url": str(item.get("url") or "").strip(),
+            "source": str(item.get("source") or "Alpha Vantage").strip(),
+            "publishedAt": parse_datetime_to_iso(str(item.get("time_published") or "")),
+            "tickers": ticker_symbols[:8] or [news_symbol],
+            "sentiment": sentiment,
+            "sentimentScore": round(sentiment_score, 2),
+            "bullishHits": 0,
+            "bearishHits": 0,
+        })
+
+    return articles
+
+
+def build_ticker_news_payload(symbol: str, limit: int = 10) -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    news_symbol = normalize_news_symbol(normalized_symbol)
+    safe_limit = max(1, min(int(limit or 10), 25))
+
+    source = "yahoo_finance_rss"
+    articles = fetch_alpha_vantage_news(normalized_symbol, safe_limit)
+
+    if articles:
+        source = "alpha_vantage_news_sentiment"
+    else:
+        articles = fetch_yahoo_rss_news(normalized_symbol, safe_limit)
+
+    bullish = len([item for item in articles if str(item.get("sentiment")) == "BULLISH"])
+    bearish = len([item for item in articles if str(item.get("sentiment")) == "BEARISH"])
+    neutral = max(0, len(articles) - bullish - bearish)
+
+    if articles:
+        news_score = round(sum(to_float(item.get("sentimentScore"), 50) for item in articles) / len(articles), 2)
+    else:
+        news_score = 50.0
+
+    if news_score >= 60:
+        status = "Bullish News"
+    elif news_score <= 40:
+        status = "Bearish News"
+    else:
+        status = "Neutral News"
+
+    return {
+        "eventType": "TICKER_NEWS_FEED",
+        "symbol": normalized_symbol,
+        "newsSymbol": news_symbol,
+        "category": news_category_for_symbol(normalized_symbol),
+        "source": source,
+        "createdAt": now_iso(),
+        "count": len(articles),
+        "limit": safe_limit,
+        "newsScore": news_score,
+        "status": status,
+        "bullish": bullish,
+        "bearish": bearish,
+        "neutral": neutral,
+        "articles": articles,
+    }
+
 # ─────────────────────────────────────────────────────────────────────────────
 # BASIC ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+
+
+
+@app.get("/api/ticker-news")
+def ticker_news(symbol: str = "SPY", limit: int = 10) -> Dict[str, Any]:
+    return build_ticker_news_payload(symbol, limit)
 
 @app.get("/api/sp500-heatmap")
 def sp500_heatmap() -> Dict[str, Any]:
@@ -2480,7 +2764,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v15_sp500_heatmap_static_cap_weights",
+        "engine": "main_v16_ticker_news_feed",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
