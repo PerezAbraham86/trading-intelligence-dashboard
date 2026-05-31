@@ -58,10 +58,12 @@ type CachedCandles = {
   savedAt: number
 }
 
+// Shared across every chart instance on the page.
+// One network request per symbol + timeframe; every chart reuses the same stored 500 candles.
 const memoryCandleCache = new Map<string, CachedCandles>()
 const inflightCandleRequests = new Map<string, Promise<Candle[]>>()
 
-const timeframeOptions = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1D']
+const timeframeOptions = ['1m', '5m', '10m', '15m', '30m']
 const candleModeOptions: CandleMode[] = ['Regular', 'Heikin Ashi']
 const symbolOptions = ['BTCUSD', 'MES1!']
 
@@ -96,14 +98,11 @@ function normalizeTimeframe(value: any): string {
   if (tf === '1') return '1m'
   if (tf === '3') return '3m'
   if (tf === '5') return '5m'
+  if (tf === '10') return '10m'
   if (tf === '15') return '15m'
   if (tf === '30') return '30m'
-  if (tf === '60') return '1h'
-  if (tf === '120') return '2h'
-  if (tf === '240') return '4h'
-  if (tf === 'd' || tf === '1d') return '1D'
 
-  return tf
+  return timeframeOptions.includes(tf) ? tf : '1m'
 }
 
 function normalizeDefaultTimeframe(value: any, fallback = '1m'): string {
@@ -391,8 +390,8 @@ function getApiSymbolCandidates(symbol: string): string[] {
   return candidates
 }
 
-function getCandleCacheKey(symbol: string, timeframe: string, limit: string) {
-  return `${normalizeDefaultSymbol(symbol)}::${normalizeTimeframe(timeframe)}::${limit}`
+function getCandleCacheKey(symbol: string, timeframe: string) {
+  return `${normalizeDefaultSymbol(symbol)}::${normalizeTimeframe(timeframe)}`
 }
 
 function readMemoryCache(cacheKey: string): Candle[] | null {
@@ -500,7 +499,7 @@ async function fetchCandles(
   limit: string,
   signal?: AbortSignal
 ): Promise<Candle[]> {
-  const cacheKey = getCandleCacheKey(symbol, timeframe, limit)
+  const cacheKey = getCandleCacheKey(symbol, timeframe)
 
   const cached = readMemoryCache(cacheKey) ?? readLocalStorageCache(cacheKey)
   if (cached && cached.length > 0) return cached
@@ -849,7 +848,7 @@ export default function EChartsCandlestickChart({
   const [historicalCandles, setHistoricalCandles] = useState<Candle[]>([])
   const [status, setStatus] = useState<'idle' | 'loading' | 'cached' | 'loaded' | 'empty' | 'error'>('idle')
 
-  const candleFetchLimit = compact ? '300' : '1500'
+  const candleFetchLimit = '500'
 
   const handleSymbolChange = (value: string) => {
     if (lockSymbolToDefault) return
@@ -890,7 +889,7 @@ export default function EChartsCandlestickChart({
     let cancelled = false
 
     async function loadCandles() {
-      const cacheKey = getCandleCacheKey(symbol, timeframe, candleFetchLimit)
+      const cacheKey = getCandleCacheKey(symbol, timeframe)
       activeCacheKeyRef.current = cacheKey
 
       const cached = readMemoryCache(cacheKey) ?? readLocalStorageCache(cacheKey)
