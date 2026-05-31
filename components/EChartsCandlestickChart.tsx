@@ -5,6 +5,8 @@ import * as echarts from 'echarts'
 
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
 const DEFAULT_VISIBLE_CANDLES = 120
+const CACHE_TTL_MS = 1000 * 60 * 5
+const LOCAL_STORAGE_PREFIX = 'marketbos:candles:'
 
 const GREEN = '#26a69a'
 const RED = '#ef5350'
@@ -37,6 +39,8 @@ type EChartsCandlestickChartProps = {
   defaultCandleMode?: CandleMode
   allowCompactHistory?: boolean
   showControls?: boolean
+  lockSymbolToDefault?: boolean
+  followDefaultSymbol?: boolean
   onChartSelectionChange?: (selection: {
     symbol: string
     timeframe: string
@@ -48,6 +52,14 @@ type EChartsCandlestickChartProps = {
   recentSignals?: any[]
   recentCandles?: any[]
 }
+
+type CachedCandles = {
+  candles: Candle[]
+  savedAt: number
+}
+
+const memoryCandleCache = new Map<string, CachedCandles>()
+const inflightCandleRequests = new Map<string, Promise<Candle[]>>()
 
 const timeframeOptions = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1D']
 const candleModeOptions: CandleMode[] = ['Regular', 'Heikin Ashi']
@@ -167,7 +179,6 @@ function shortAxisLabel(value: any): string {
 function candleFromAny(raw: any, index: number): Candle | null {
   if (Array.isArray(raw)) {
     const timeFirst = typeof raw[0] === 'string' || Number(raw[0]) > 100000
-
     const time = timeFirst ? raw[0] : undefined
     const offset = timeFirst ? 1 : 0
 
@@ -380,7 +391,69 @@ function getApiSymbolCandidates(symbol: string): string[] {
   return candidates
 }
 
-async function fetchCandles(symbol: string, timeframe: string, limit: string): Promise<Candle[]> {
+function getCandleCacheKey(symbol: string, timeframe: string, limit: string) {
+  return `${normalizeDefaultSymbol(symbol)}::${normalizeTimeframe(timeframe)}::${limit}`
+}
+
+function readMemoryCache(cacheKey: string): Candle[] | null {
+  const cached = memoryCandleCache.get(cacheKey)
+  if (!cached) return null
+
+  if (Date.now() - cached.savedAt > CACHE_TTL_MS) {
+    memoryCandleCache.delete(cacheKey)
+    return null
+  }
+
+  return cached.candles
+}
+
+function readLocalStorageCache(cacheKey: string): Candle[] | null {
+  if (typeof window === 'undefined') return null
+
+  try {
+    const raw = window.localStorage.getItem(`${LOCAL_STORAGE_PREFIX}${cacheKey}`)
+    if (!raw) return null
+
+    const parsed = JSON.parse(raw) as CachedCandles
+    if (!parsed || !Array.isArray(parsed.candles)) return null
+
+    if (Date.now() - Number(parsed.savedAt ?? 0) > CACHE_TTL_MS) {
+      window.localStorage.removeItem(`${LOCAL_STORAGE_PREFIX}${cacheKey}`)
+      return null
+    }
+
+    memoryCandleCache.set(cacheKey, parsed)
+    return parsed.candles
+  } catch {
+    return null
+  }
+}
+
+function saveCandleCache(cacheKey: string, candles: Candle[]) {
+  if (candles.length === 0) return
+
+  const payload: CachedCandles = {
+    candles,
+    savedAt: Date.now(),
+  }
+
+  memoryCandleCache.set(cacheKey, payload)
+
+  if (typeof window === 'undefined') return
+
+  try {
+    window.localStorage.setItem(`${LOCAL_STORAGE_PREFIX}${cacheKey}`, JSON.stringify(payload))
+  } catch {
+    // Ignore storage quota/private-mode failures.
+  }
+}
+
+async function fetchCandlesFromNetwork(
+  symbol: string,
+  timeframe: string,
+  limit: string,
+  signal?: AbortSignal
+): Promise<Candle[]> {
   const endpoints = [
     '/api/historical-candles',
     '/api/candles',
@@ -400,6 +473,7 @@ async function fetchCandles(symbol: string, timeframe: string, limit: string): P
       try {
         const response = await fetch(`${API_BASE_URL}${path}?${params.toString()}`, {
           cache: 'no-store',
+          signal,
         })
 
         if (!response.ok) continue
@@ -410,13 +484,41 @@ async function fetchCandles(symbol: string, timeframe: string, limit: string): P
           .filter((candle): candle is Candle => candle !== null)
 
         if (candles.length > 0) return mergeCandlesByTime(candles)
-      } catch (error) {
+      } catch (error: any) {
+        if (error?.name === 'AbortError') throw error
         console.error(`Candle fetch error: ${path} ${candidate}`, error)
       }
     }
   }
 
   return []
+}
+
+async function fetchCandles(
+  symbol: string,
+  timeframe: string,
+  limit: string,
+  signal?: AbortSignal
+): Promise<Candle[]> {
+  const cacheKey = getCandleCacheKey(symbol, timeframe, limit)
+
+  const cached = readMemoryCache(cacheKey) ?? readLocalStorageCache(cacheKey)
+  if (cached && cached.length > 0) return cached
+
+  const existingRequest = inflightCandleRequests.get(cacheKey)
+  if (existingRequest) return existingRequest
+
+  const request = fetchCandlesFromNetwork(symbol, timeframe, limit, signal)
+    .then((candles) => {
+      saveCandleCache(cacheKey, candles)
+      return candles
+    })
+    .finally(() => {
+      inflightCandleRequests.delete(cacheKey)
+    })
+
+  inflightCandleRequests.set(cacheKey, request)
+  return request
 }
 
 function buildCandlesFromRecentCandles(
@@ -724,6 +826,8 @@ export default function EChartsCandlestickChart({
   defaultCandleMode = 'Heikin Ashi',
   allowCompactHistory = true,
   showControls = true,
+  lockSymbolToDefault = false,
+  followDefaultSymbol = false,
   onChartSelectionChange,
   latestSignal,
   recentSignals,
@@ -732,9 +836,6 @@ export default function EChartsCandlestickChart({
   const chartRef = useRef<HTMLDivElement | null>(null)
   const chartInstance = useRef<echarts.ECharts | null>(null)
 
-  // IMPORTANT:
-  // Use default props/latestSignal only for the FIRST render.
-  // After mount, each chart instance is separate and will not follow main-chart changes.
   const initialSymbol = normalizeDefaultSymbol(
     defaultSymbol ?? latestSignal?.symbol ?? 'BTCUSD',
     'BTCUSD'
@@ -746,11 +847,12 @@ export default function EChartsCandlestickChart({
   const [timeframe, setTimeframe] = useState(() => initialTimeframe)
   const [candleMode, setCandleMode] = useState<CandleMode>(() => initialCandleMode)
   const [historicalCandles, setHistoricalCandles] = useState<Candle[]>([])
-  const [status, setStatus] = useState<'idle' | 'loading' | 'loaded' | 'empty' | 'error'>('idle')
+  const [status, setStatus] = useState<'idle' | 'loading' | 'cached' | 'loaded' | 'empty' | 'error'>('idle')
 
   const candleFetchLimit = compact ? '500' : '1500'
 
   const handleSymbolChange = (value: string) => {
+    if (lockSymbolToDefault) return
     setSymbol(normalizeDefaultSymbol(value, symbol))
   }
 
@@ -763,6 +865,15 @@ export default function EChartsCandlestickChart({
   }
 
   useEffect(() => {
+    if (!followDefaultSymbol) return
+
+    const nextSymbol = normalizeDefaultSymbol(defaultSymbol ?? latestSignal?.symbol ?? symbol, symbol)
+    if (nextSymbol && nextSymbol !== symbol) {
+      setSymbol(nextSymbol)
+    }
+  }, [defaultSymbol, latestSignal?.symbol, followDefaultSymbol, symbol])
+
+  useEffect(() => {
     onChartSelectionChange?.({
       symbol,
       timeframe,
@@ -772,33 +883,42 @@ export default function EChartsCandlestickChart({
     })
   }, [symbol, timeframe, candleMode, compact, chartTitle, onChartSelectionChange])
 
-  // IMPORTANT:
-  // This component is intentionally self-contained after first render.
-  // It does NOT sync again from defaultSymbol/defaultTimeframe/defaultCandleMode/latestSignal.
-  // That prevents mini charts from changing when the main chart symbol changes.
-  // To reset a chart from the parent, remount it with a different React key on purpose.
-
   useEffect(() => {
-    // Always fetch history now. Compact charts use the same Render/InsightSentry feed as the main chart.
-    // This prevents mini charts from showing 'No candles loaded' when ES1!/MES1! are selected.
     void allowCompactHistory
 
+    const controller = new AbortController()
     let cancelled = false
 
     async function loadCandles() {
-      setStatus('loading')
+      const cacheKey = getCandleCacheKey(symbol, timeframe, candleFetchLimit)
+      const cached = readMemoryCache(cacheKey) ?? readLocalStorageCache(cacheKey)
+
+      if (cached && cached.length > 0) {
+        setHistoricalCandles(cached)
+        setStatus('cached')
+      } else {
+        setStatus('loading')
+      }
 
       try {
-        const candles = await fetchCandles(symbol, timeframe, candleFetchLimit)
+        const candles = await fetchCandlesFromNetwork(symbol, timeframe, candleFetchLimit, controller.signal)
 
         if (cancelled) return
 
-        setHistoricalCandles(candles)
-        setStatus(candles.length > 0 ? 'loaded' : 'empty')
-      } catch (error) {
+        if (candles.length > 0) {
+          saveCandleCache(cacheKey, candles)
+          setHistoricalCandles(candles)
+          setStatus('loaded')
+        } else if (!cached || cached.length === 0) {
+          setHistoricalCandles([])
+          setStatus('empty')
+        }
+      } catch (error: any) {
+        if (error?.name === 'AbortError') return
+
         console.error('Historical candle fetch error:', error)
 
-        if (!cancelled) {
+        if (!cancelled && (!cached || cached.length === 0)) {
           setHistoricalCandles([])
           setStatus('error')
         }
@@ -809,6 +929,7 @@ export default function EChartsCandlestickChart({
 
     return () => {
       cancelled = true
+      controller.abort()
     }
   }, [symbol, timeframe, compact, allowCompactHistory, candleFetchLimit])
 
@@ -848,7 +969,10 @@ export default function EChartsCandlestickChart({
       loading: status === 'loading',
     })
 
-    chartInstance.current.setOption(option, true)
+    chartInstance.current.setOption(option, {
+      notMerge: false,
+      lazyUpdate: true,
+    })
 
     const resize = () => chartInstance.current?.resize()
     window.addEventListener('resize', resize)
@@ -867,14 +991,18 @@ export default function EChartsCandlestickChart({
 
   const statusBadge =
     status === 'loading'
-      ? 'Loading Candles'
-      : status === 'loaded'
-        ? `${candles.length} Candles`
-        : status === 'empty'
-          ? 'No Candles'
-          : status === 'error'
-            ? 'Candle Error'
-            : 'Ready'
+      ? candles.length > 0
+        ? 'Refreshing'
+        : 'Loading Candles'
+      : status === 'cached'
+        ? `${candles.length} Cached`
+        : status === 'loaded'
+          ? `${candles.length} Candles`
+          : status === 'empty'
+            ? 'No Candles'
+            : status === 'error'
+              ? 'Candle Error'
+              : 'Ready'
 
   const headerClass = compact
     ? 'flex flex-wrap items-center justify-between gap-2 border-b border-dark-700 px-2 py-2'
@@ -884,9 +1012,13 @@ export default function EChartsCandlestickChart({
     ? 'rounded-md border border-dark-700 bg-[#151922] px-2 py-1 text-[10px] text-gray-100 outline-none'
     : 'rounded-md border border-dark-700 bg-[#151922] px-3 py-1.5 text-sm text-gray-100 outline-none'
 
+  const lockedSymbolClass = compact
+    ? 'rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] font-bold text-amber-300'
+    : 'rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-sm font-bold text-amber-300'
+
   const badgeClass = compact
-    ? `rounded-full border px-2 py-1 text-[10px] ${status === 'loaded' ? 'border-emerald-500/50 text-emerald-400' : 'border-yellow-500/50 text-yellow-400'}`
-    : `rounded-full border px-3 py-1 text-sm ${status === 'loaded' ? 'border-emerald-500/50 text-emerald-400' : 'border-yellow-500/50 text-yellow-400'}`
+    ? `rounded-full border px-2 py-1 text-[10px] ${status === 'loaded' || status === 'cached' ? 'border-emerald-500/50 text-emerald-400' : 'border-yellow-500/50 text-yellow-400'}`
+    : `rounded-full border px-3 py-1 text-sm ${status === 'loaded' || status === 'cached' ? 'border-emerald-500/50 text-emerald-400' : 'border-yellow-500/50 text-yellow-400'}`
 
   return (
     <div className={`flex ${heightClass} w-full flex-col overflow-hidden rounded-2xl border border-dark-700 bg-[#0f1115]`}>
@@ -899,17 +1031,21 @@ export default function EChartsCandlestickChart({
 
             {chartTitle && !compact && <span className="text-xs font-semibold text-gray-300">{chartTitle}</span>}
 
-            <select
-              value={symbol}
-              onChange={(event) => handleSymbolChange(event.target.value)}
-              className={selectClass}
-            >
-              {symbolOptions.map((item) => (
-                <option key={item} value={item}>
-                  {item}
-                </option>
-              ))}
-            </select>
+            {lockSymbolToDefault ? (
+              <span className={lockedSymbolClass}>{symbol}</span>
+            ) : (
+              <select
+                value={symbol}
+                onChange={(event) => handleSymbolChange(event.target.value)}
+                className={selectClass}
+              >
+                {symbolOptions.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </select>
+            )}
 
             <select
               value={timeframe}
@@ -940,17 +1076,11 @@ export default function EChartsCandlestickChart({
             <div className={badgeClass}>
               {statusBadge}
             </div>
-
-            {!compact && (
-              <div className="rounded-full border border-slate-500/50 px-3 py-1 text-sm text-slate-300">
-                Basic Chart Reset
-              </div>
-            )}
           </div>
         </div>
       )}
 
-      <div ref={chartRef} className="h-full w-full flex-1" />
+      <div ref={chartRef} className="min-h-0 flex-1" />
     </div>
   )
 }
