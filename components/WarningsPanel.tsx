@@ -28,6 +28,20 @@ type TradingSignal = {
   alphax?: string
   smc?: string
   ghostConfidence?: number
+  smcDirection?: string
+  alphaxDirection?: string
+  ghostDirection?: string
+  optionsFlow?: string
+  optionsFlowStrength?: number
+  optionsFlowDirection?: string
+  optionsBullPressure?: number
+  optionsBearPressure?: number
+  putCallRatio?: number | null
+  unusualOptionsVolume?: number
+  gammaRisk?: number
+  dealerPinZone?: number | null
+  optionsConflictRisk?: number
+  optionsReversalRisk?: number
 }
 
 type TechnicalIndicator = {
@@ -321,6 +335,60 @@ function buildWarnings(signal: TradingSignal | undefined, data: TechnicalSentime
       severity: 'warning',
       icon: 'zap',
       score: 82,
+    })
+  }
+
+  const optionsDirection = String(signal?.optionsFlowDirection ?? '').toLowerCase()
+  const smcDirection = String(signal?.smcDirection ?? '').toLowerCase()
+  const ghostDirection = String(signal?.ghostDirection ?? '').toLowerCase()
+  const optionsConflictRisk = clamp(Number(signal?.optionsConflictRisk ?? 0))
+  const optionsReversalRisk = clamp(Number(signal?.optionsReversalRisk ?? 0))
+  const gammaRisk = clamp(Number(signal?.gammaRisk ?? 0))
+  const putCallRatio = Number(signal?.putCallRatio ?? NaN)
+
+  if (
+    optionsDirection.includes('bear') &&
+    (smcDirection.includes('bull') || ghostDirection.includes('bull'))
+  ) {
+    items.push({
+      title: 'Options Conflict: Puts Against Bullish Setup',
+      subtitle: `SMC/Ghost are bullish but options flow is bearish${Number.isFinite(putCallRatio) ? ` with put/call ${putCallRatio.toFixed(2)}` : ''}.`,
+      severity: 'danger',
+      icon: 'alert',
+      score: 98,
+    })
+  }
+
+  if (
+    optionsDirection.includes('bull') &&
+    (smcDirection.includes('bear') || ghostDirection.includes('bear'))
+  ) {
+    items.push({
+      title: 'Options Conflict: Calls Against Bearish Setup',
+      subtitle: `SMC/Ghost are bearish but options flow is bullish${Number.isFinite(putCallRatio) ? ` with put/call ${putCallRatio.toFixed(2)}` : ''}.`,
+      severity: 'danger',
+      icon: 'alert',
+      score: 98,
+    })
+  }
+
+  if (optionsConflictRisk >= 60) {
+    items.push({
+      title: 'High Options Conflict Risk',
+      subtitle: `Options pressure conflict is ${optionsConflictRisk}%. Confirm direction before entry.`,
+      severity: 'danger',
+      icon: 'alert',
+      score: 94,
+    })
+  }
+
+  if (optionsReversalRisk >= 60 || gammaRisk >= 60) {
+    items.push({
+      title: 'Options Reversal / Gamma Risk',
+      subtitle: `Reversal risk ${optionsReversalRisk}% • Gamma risk ${gammaRisk}%${signal?.dealerPinZone ? ` • Pin ${signal.dealerPinZone}` : ''}.`,
+      severity: 'warning',
+      icon: 'zap',
+      score: 89,
     })
   }
 
