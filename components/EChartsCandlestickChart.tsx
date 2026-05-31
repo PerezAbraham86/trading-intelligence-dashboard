@@ -613,8 +613,9 @@ function buildChartOption({
           { left: 8, right: 8, top: 8, bottom: 20 },
         ]
       : [
-          { left: 58, right: 72, top: 44, bottom: 98 },
-          { left: 58, right: 72, height: 46, bottom: 34 },
+          // Slider scrollbar removed. Keep a clean price pane + volume pane layout.
+          { left: 58, right: 72, top: 44, bottom: 84 },
+          { left: 58, right: 72, height: 46, bottom: 18 },
         ],
     title: compact
       ? undefined
@@ -738,23 +739,13 @@ function buildChartOption({
         ]
       : [
           {
+            // Inside zoom/pan remains active, but the visible slider scrollbar is removed.
             type: 'inside',
             xAxisIndex: [0, 1],
             ...zoom,
             zoomOnMouseWheel: false,
             moveOnMouseMove: true,
             moveOnMouseWheel: true,
-          },
-          {
-            type: 'slider',
-            xAxisIndex: [0, 1],
-            height: 18,
-            bottom: 8,
-            ...zoom,
-            borderColor: GRID,
-            fillerColor: 'rgba(148, 163, 184, 0.14)',
-            handleStyle: { color: '#64748b' },
-            textStyle: { color: TEXT },
           },
         ],
     // Keep one stable graphic element so old "Loading candles..." text is actively hidden
