@@ -23,7 +23,7 @@ type TradingSignal = {
   cot?: string
 
   // Python technical meter payload. This lets Market Sentiment use the same
-  // 12-indicator source that Factor Confirmation already shows for ES1!/MES1!.
+  // technical source that Factor Confirmation already shows.
   indicators?: SentimentIndicator[]
   technicalIndicators?: SentimentIndicator[]
   technicalMeter?: SentimentIndicator[]
@@ -65,34 +65,6 @@ type MarketSentimentGaugeProps = {
   technicalSentiment?: SentimentData | null
 }
 
-function normalizeSymbol(value: unknown) {
-  return String(value ?? 'WAITING')
-    .trim()
-    .toUpperCase()
-    .replace('BINANCE:', '')
-    .replace('COINBASE:', '')
-    .replace('CRYPTO:', '')
-    .replace('CME_MINI:', '')
-    .replace('CME:', '')
-}
-
-function normalizeTimeframe(value: unknown) {
-  const tf = String(value ?? '1m').trim().toLowerCase()
-
-  if (tf === '1') return '1m'
-  if (tf === '3') return '3m'
-  if (tf === '5') return '5m'
-  if (tf === '15') return '15m'
-  if (tf === '30') return '30m'
-  if (tf === '60') return '1h'
-  if (tf === '120') return '2h'
-  if (tf === '240') return '4h'
-  if (tf === 'd' || tf === '1d') return '1d'
-  if (tf === 'w' || tf === '1w') return '1w'
-
-  return tf || '1m'
-}
-
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ||
   'https://trading-intelligence-dashboard.onrender.com'
@@ -128,6 +100,40 @@ const TECHNICAL_ORDER = [
   'Market Structure',
 ]
 
+function normalizeSymbol(value: unknown) {
+  return String(value ?? 'WAITING')
+    .trim()
+    .toUpperCase()
+    .replace('BINANCE:', '')
+    .replace('COINBASE:', '')
+    .replace('CRYPTO:', '')
+    .replace('CME_MINI:', '')
+    .replace('CME:', '')
+}
+
+function normalizeTimeframe(value: unknown) {
+  const tf = String(value ?? '1m').trim().toLowerCase()
+
+  if (tf === '1') return '1m'
+  if (tf === '3') return '3m'
+  if (tf === '5') return '5m'
+  if (tf === '10') return '10m'
+  if (tf === '15') return '15m'
+  if (tf === '30') return '30m'
+  if (tf === '60') return '1h'
+  if (tf === '120') return '2h'
+  if (tf === '240') return '4h'
+  if (tf === 'd' || tf === '1d') return '1d'
+  if (tf === 'w' || tf === '1w') return '1w'
+
+  return tf || '1m'
+}
+
+function clamp(value: number) {
+  if (!Number.isFinite(value)) return 0
+  return Math.max(0, Math.min(100, value))
+}
+
 function asIndicatorArray(value: unknown): SentimentIndicator[] {
   if (!Array.isArray(value)) return []
 
@@ -160,7 +166,7 @@ function asIndicatorArray(value: unknown): SentimentIndicator[] {
     .filter((item): item is SentimentIndicator => Boolean(item))
 }
 
-function extractTechnicalIndicators(data: SentimentData | null | undefined): SentimentIndicator[] {
+function extractTechnicalIndicators(data: SentimentData | Partial<SentimentData> | null | undefined): SentimentIndicator[] {
   if (!data) return []
 
   const merged = [
@@ -242,11 +248,6 @@ function buildTechnicalSentimentFromSignal(
   return extractTechnicalIndicators(candidate).length > 0 ? candidate : null
 }
 
-function clamp(value: number) {
-  if (!Number.isFinite(value)) return 0
-  return Math.max(0, Math.min(100, value))
-}
-
 function isBullishText(value?: string) {
   const lower = String(value ?? '').toLowerCase()
 
@@ -325,7 +326,6 @@ function buildSentimentFromSignal(signal?: TradingSignal): SentimentData | null 
     } else if (isBearishText(factor)) {
       bearCount += 1
     } else if (!isNeutralText(factor)) {
-      // Non-waiting custom text counts as active neutral.
       neutralCount += 1
     }
   })
@@ -386,7 +386,6 @@ function buildSentimentFromSignal(signal?: TradingSignal): SentimentData | null 
     price: 0,
   }
 }
-
 
 function normalizeTechnicalSentiment(
   sentiment: SentimentData,
@@ -475,6 +474,26 @@ function normalizeTechnicalSentiment(
   }
 }
 
+function polarToCartesian(cx: number, cy: number, radius: number, angleDeg: number) {
+  const angleRad = (angleDeg * Math.PI) / 180
+
+  return {
+    x: cx + radius * Math.cos(angleRad),
+    y: cy - radius * Math.sin(angleRad),
+  }
+}
+
+function getGaugeZone(value: number) {
+  if (value <= 20) return 'Strong Bearish'
+  if (value <= 40) return 'Bearish'
+  if (value <= 60) return 'Neutral'
+  if (value <= 80) return 'Bullish'
+  return 'Strong Bullish'
+}
+
+function isActiveGaugeLabel(label: string, value: number) {
+  return getGaugeZone(value) === label
+}
 
 export default function MarketSentimentGauge({
   signal,
@@ -506,7 +525,6 @@ export default function MarketSentimentGauge({
     }
 
     fetchSentiment()
-
     const interval = window.setInterval(fetchSentiment, 10000)
 
     return () => {
@@ -583,7 +601,6 @@ export default function MarketSentimentGauge({
     }
 
     fetchEngineSentiment()
-
     const interval = window.setInterval(fetchEngineSentiment, 10000)
 
     return () => {
@@ -619,9 +636,7 @@ export default function MarketSentimentGauge({
 
   // HARD RULE:
   // If app/page.tsx provides technicalSentiment from FactorConfirmationTable,
-  // use that exact 12-indicator object.
-  // Do not compare it against /api/latest-sentiment, /api/engine-state, or signal fallback.
-  // This keeps Market Sentiment and Factor Confirmation perfectly synced.
+  // use that exact indicator object so Market Sentiment and Factor Confirmation stay synced.
   const bestTechnicalSentiment =
     sharedTechnicalIndicators.length > 0
       ? sharedTechnicalSentiment
@@ -634,7 +649,7 @@ export default function MarketSentimentGauge({
             : null
 
   const sentiment = bestTechnicalSentiment
-    ? normalizeTechnicalSentiment(bestTechnicalSentiment, selectedSymbol, selectedTimeframe)
+    ? normalizeTechnicalSentiment(bestTechnicalSentiment as SentimentData, selectedSymbol, selectedTimeframe)
     : {
         ...(signalSentiment ?? apiSentiment),
         symbol: selectedSymbol,
@@ -642,9 +657,13 @@ export default function MarketSentimentGauge({
       }
 
   const value = clamp(Number(sentiment.sentiment ?? 50))
-  const needleRotation = -90 + (value / 100) * 180
-
   const statusColor = getStatusColor(sentiment.sentimentStatus)
+  const technicalIndicators = extractTechnicalIndicators(sentiment)
+
+  const gaugeStartAngle = 160
+  const gaugeEndAngle = 20
+  const needleAngle = gaugeStartAngle - (value / 100) * (gaugeStartAngle - gaugeEndAngle)
+  const needleEnd = polarToCartesian(150, 145, 83, needleAngle)
 
   return (
     <motion.div
@@ -666,160 +685,206 @@ export default function MarketSentimentGauge({
         </div>
       </div>
 
-      <div className="relative mx-auto h-44 w-full max-w-sm">
-        <svg viewBox="0 0 240 150" className="h-full w-full">
+      <div className="relative mx-auto h-56 w-full max-w-sm">
+        <svg viewBox="0 0 300 210" className="h-full w-full overflow-visible">
+          <defs>
+            <linearGradient id="marketbos-sentiment-gradient" x1="45" y1="145" x2="255" y2="145" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stopColor="#ff2d55" />
+              <stop offset="50%" stopColor="#444444" />
+              <stop offset="100%" stopColor="#3b82f6" />
+            </linearGradient>
+
+            <filter id="marketbos-needle-shadow" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="1" stdDeviation="1.2" floodColor="#000000" floodOpacity="0.65" />
+            </filter>
+          </defs>
+
+          {/* Base arc */}
           <path
-            d="M 30 120 A 90 90 0 0 1 210 120"
+            d="M 45 145 A 105 105 0 0 1 255 145"
             fill="none"
-            stroke="rgba(255,255,255,0.12)"
-            strokeWidth="8"
-            strokeLinecap="round"
+            stroke="rgba(255,255,255,0.14)"
+            strokeWidth="7"
+            strokeLinecap="butt"
+            pathLength={100}
           />
 
+          {/* Colored sentiment progress arc, similar to the TradingView LuxAlgo visual */}
           <path
-            d="M 30 120 A 90 90 0 0 1 75 42"
+            d="M 45 145 A 105 105 0 0 1 255 145"
             fill="none"
-            stroke="#ef4444"
-            strokeWidth="8"
-            strokeLinecap="round"
-            opacity={value <= 40 ? 1 : 0.35}
+            stroke="url(#marketbos-sentiment-gradient)"
+            strokeWidth="7"
+            strokeLinecap="butt"
+            pathLength={100}
+            strokeDasharray={`${value} ${100 - value}`}
+            className="transition-all duration-500"
           />
 
-          <path
-            d="M 75 42 A 90 90 0 0 1 165 42"
-            fill="none"
-            stroke="#9ca3af"
-            strokeWidth="8"
-            strokeLinecap="round"
-            opacity={value > 40 && value <= 60 ? 1 : 0.35}
-          />
+          {/* Hard left/right end caps to match the angular TradingView look */}
+          <line x1="45" y1="145" x2="50" y2="121" stroke={value <= 40 ? '#ff2d55' : 'rgba(255,255,255,0.14)'} strokeWidth="7" strokeLinecap="butt" />
+          <line x1="255" y1="145" x2="250" y2="121" stroke={value > 60 ? '#3b82f6' : 'rgba(255,255,255,0.14)'} strokeWidth="7" strokeLinecap="butt" />
 
-          <path
-            d="M 165 42 A 90 90 0 0 1 210 120"
-            fill="none"
-            stroke="#3b82f6"
-            strokeWidth="8"
-            strokeLinecap="round"
-            opacity={value > 60 ? 1 : 0.35}
-          />
+          <text
+            x="32"
+            y="132"
+            fill={isActiveGaugeLabel('Strong Bearish', value) ? '#ff2d55' : '#6b7280'}
+            fontSize="11"
+            textAnchor="middle"
+            fontWeight={isActiveGaugeLabel('Strong Bearish', value) ? 700 : 600}
+          >
+            <tspan x="32" dy="0">Strong</tspan>
+            <tspan x="32" dy="13">Bearish</tspan>
+          </text>
 
-          <text x="30" y="98" fill="#ef4444" fontSize="10" textAnchor="middle">
+          <text
+            x="77"
+            y="58"
+            fill={isActiveGaugeLabel('Bearish', value) ? '#ff2d55' : '#6b7280'}
+            fontSize="11"
+            textAnchor="middle"
+            fontWeight={isActiveGaugeLabel('Bearish', value) ? 700 : 600}
+          >
             Bearish
           </text>
-          <text x="120" y="28" fill="#9ca3af" fontSize="10" textAnchor="middle">
+
+          <text
+            x="150"
+            y="35"
+            fill={isActiveGaugeLabel('Neutral', value) ? '#e5e7eb' : '#6b7280'}
+            fontSize="11"
+            textAnchor="middle"
+            fontWeight={isActiveGaugeLabel('Neutral', value) ? 700 : 600}
+          >
             Neutral
           </text>
-          <text x="210" y="98" fill="#3b82f6" fontSize="10" textAnchor="middle">
+
+          <text
+            x="223"
+            y="58"
+            fill={isActiveGaugeLabel('Bullish', value) ? '#3b82f6' : '#6b7280'}
+            fontSize="11"
+            textAnchor="middle"
+            fontWeight={isActiveGaugeLabel('Bullish', value) ? 700 : 600}
+          >
             Bullish
           </text>
 
-          <g
-            style={{
-              transform: `rotate(${needleRotation}deg)`,
-              transformOrigin: '120px 120px',
-              transition: 'transform 0.5s ease',
-            }}
+          <text
+            x="268"
+            y="132"
+            fill={isActiveGaugeLabel('Strong Bullish', value) ? '#3b82f6' : '#6b7280'}
+            fontSize="11"
+            textAnchor="middle"
+            fontWeight={isActiveGaugeLabel('Strong Bullish', value) ? 700 : 600}
           >
-            <line
-              x1="120"
-              y1="120"
-              x2="120"
-              y2="46"
-              stroke="rgba(255,255,255,0.9)"
-              strokeWidth="3"
-              strokeLinecap="round"
-            />
-          </g>
+            <tspan x="268" dy="0">Strong</tspan>
+            <tspan x="268" dy="13">Bullish</tspan>
+          </text>
 
-          <circle cx="120" cy="120" r="7" fill="rgba(255,255,255,0.85)" />
+          <line
+            x1="150"
+            y1="145"
+            x2={needleEnd.x}
+            y2={needleEnd.y}
+            stroke="rgba(255,255,255,0.78)"
+            strokeWidth="3"
+            strokeLinecap="round"
+            filter="url(#marketbos-needle-shadow)"
+            className="transition-all duration-500"
+          />
+          <line
+            x1="150"
+            y1="145"
+            x2={needleEnd.x}
+            y2={needleEnd.y}
+            stroke="rgba(255,255,255,0.95)"
+            strokeWidth="1.2"
+            strokeLinecap="round"
+            className="transition-all duration-500"
+          />
+
+          <circle cx="150" cy="145" r="8" fill="rgba(255,255,255,0.86)" />
+          <circle cx="150" cy="145" r="3" fill="rgba(15,17,21,0.55)" />
         </svg>
-      </div>
 
-      <div className="text-center">
-        <p className={`text-xl font-bold ${statusColor}`}>
-          {sentiment.sentimentStatus}
-        </p>
+        <div className="absolute inset-x-0 bottom-0 text-center">
+          <p className={`text-xl font-bold ${statusColor}`}>
+            {sentiment.sentimentStatus}
+          </p>
 
-        <div className="mt-4 grid grid-cols-3 gap-3 text-center">
-          <div>
-            <p className="text-2xl font-bold text-red-400">
-              {sentiment.bearCount}
-            </p>
-            <p className="text-[10px] uppercase text-red-400">Bearish</p>
-            <p className="text-xs text-gray-500">
-              {sentiment.bearPct.toFixed(1)}%
-            </p>
-          </div>
+          <div className="mx-auto mt-2 grid max-w-[250px] grid-cols-3 gap-5 text-center">
+            <div>
+              <p className="text-2xl font-bold text-red-400">
+                {sentiment.bearCount}
+              </p>
+              <p className="text-[10px] uppercase tracking-wide text-red-400">Bearish</p>
+            </div>
 
-          <div>
-            <p className="text-2xl font-bold text-gray-300">
-              {sentiment.neutralCount}
-            </p>
-            <p className="text-[10px] uppercase text-gray-400">Neutral</p>
-            <p className="text-xs text-gray-500">
-              {sentiment.neutralPct.toFixed(1)}%
-            </p>
-          </div>
+            <div>
+              <p className="text-2xl font-bold text-gray-300">
+                {sentiment.neutralCount}
+              </p>
+              <p className="text-[10px] uppercase tracking-wide text-gray-400">Neutral</p>
+            </div>
 
-          <div>
-            <p className="text-2xl font-bold text-blue-400">
-              {sentiment.bullCount}
-            </p>
-            <p className="text-[10px] uppercase text-blue-400">Bullish</p>
-            <p className="text-xs text-gray-500">
-              {sentiment.bullPct.toFixed(1)}%
-            </p>
+            <div>
+              <p className="text-2xl font-bold text-blue-400">
+                {sentiment.bullCount}
+              </p>
+              <p className="text-[10px] uppercase tracking-wide text-blue-400">Bullish</p>
+            </div>
           </div>
         </div>
-
-        <p className="mt-3 text-xs text-gray-500">
-          Technical indicators: {extractTechnicalIndicators(sentiment).length > 0
-            ? extractTechnicalIndicators(sentiment).length
-            : sentiment.activeCount}
-        </p>
-
-        {extractTechnicalIndicators(sentiment).length > 0 && (
-          <div className="mt-4 rounded-lg border border-dark-600 bg-dark-900/35 p-3 text-left">
-            <div className="mb-2 flex items-center justify-between">
-              <p className="text-xs font-bold uppercase tracking-wide text-gray-400">
-                Technical Meter
-              </p>
-              <p className="text-xs text-gray-500">
-                {extractTechnicalIndicators(sentiment).length} indicators
-              </p>
-            </div>
-
-            <div className="grid grid-cols-1 gap-1">
-              {extractTechnicalIndicators(sentiment).map((indicator) => {
-                const side = String(indicator.signal ?? '').toUpperCase()
-                const sideClass =
-                  side === 'BULLISH'
-                    ? 'text-blue-400'
-                    : side === 'BEARISH'
-                      ? 'text-red-400'
-                      : 'text-gray-300'
-
-                return (
-                  <div
-                    key={indicator.name}
-                    className="grid grid-cols-[1fr_auto_auto] items-center gap-2 text-[11px]"
-                  >
-                    <span className="truncate text-gray-400">
-                      {indicator.name}
-                    </span>
-                    <span className={`font-bold ${sideClass}`}>
-                      {side}
-                    </span>
-                    <span className="min-w-[42px] text-right font-bold text-white">
-                      {Math.round(Number(indicator.value ?? 0))}%
-                    </span>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )}
       </div>
+
+      <p className="mt-4 text-center text-xs text-gray-500">
+        Technical indicators: {technicalIndicators.length > 0
+          ? technicalIndicators.length
+          : sentiment.activeCount}
+      </p>
+
+      {technicalIndicators.length > 0 && (
+        <div className="mt-4 rounded-lg border border-dark-600 bg-dark-900/35 p-3 text-left">
+          <div className="mb-2 flex items-center justify-between">
+            <p className="text-xs font-bold uppercase tracking-wide text-gray-400">
+              Technical Meter
+            </p>
+            <p className="text-xs text-gray-500">
+              {technicalIndicators.length} indicators
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 gap-1">
+            {technicalIndicators.map((indicator) => {
+              const side = String(indicator.signal ?? '').toUpperCase()
+              const sideClass =
+                side === 'BULLISH'
+                  ? 'text-blue-400'
+                  : side === 'BEARISH'
+                    ? 'text-red-400'
+                    : 'text-gray-300'
+
+              return (
+                <div
+                  key={indicator.name}
+                  className="grid grid-cols-[1fr_auto_auto] items-center gap-2 text-[11px]"
+                >
+                  <span className="truncate text-gray-400">
+                    {indicator.name}
+                  </span>
+                  <span className={`font-bold ${sideClass}`}>
+                    {side}
+                  </span>
+                  <span className="min-w-[42px] text-right font-bold text-white">
+                    {Math.round(Number(indicator.value ?? 0))}%
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
     </motion.div>
   )
 }
