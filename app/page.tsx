@@ -377,6 +377,55 @@ function getOverallGhostText(engineStates: Record<string, PythonEngineState | nu
   return ''
 }
 
+const DASHBOARD_SETTINGS_KEY = 'marketbos:dashboard-settings:v1'
+
+type DashboardSettings = {
+  mainChartSelection?: ChartSelection
+  miniChartOneSelection?: ChartSelection
+  miniChartTwoSelection?: ChartSelection
+  scrollY?: number
+}
+
+function normalizeCandleMode(value: unknown): 'Regular' | 'Heikin Ashi' {
+  return value === 'Regular' ? 'Regular' : 'Heikin Ashi'
+}
+
+function normalizeChartSelection(value: unknown, fallback: ChartSelection): ChartSelection {
+  if (!value || typeof value !== 'object') return fallback
+
+  const raw = value as Partial<ChartSelection>
+
+  return {
+    symbol: normalizeSymbol(raw.symbol ?? fallback.symbol),
+    timeframe: normalizeTimeframe(raw.timeframe ?? fallback.timeframe),
+    candleMode: normalizeCandleMode(raw.candleMode ?? fallback.candleMode),
+  }
+}
+
+function readDashboardSettings(): DashboardSettings {
+  if (typeof window === 'undefined') return {}
+
+  try {
+    const raw = window.localStorage.getItem(DASHBOARD_SETTINGS_KEY)
+    if (!raw) return {}
+
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function saveDashboardSettings(settings: DashboardSettings) {
+  if (typeof window === 'undefined') return
+
+  try {
+    window.localStorage.setItem(DASHBOARD_SETTINGS_KEY, JSON.stringify(settings))
+  } catch {
+    // Ignore storage quota/private-mode failures.
+  }
+}
+
 export default function Dashboard() {
   const [isClient, setIsClient] = useState(false)
   const [pythonEngineState, setPythonEngineState] =
@@ -390,22 +439,31 @@ export default function Dashboard() {
   const [factorTechnicalSentiment, setFactorTechnicalSentiment] =
     useState<TechnicalSentiment | null>(null)
 
-  const [mainChartSelection, setMainChartSelection] = useState<ChartSelection>({
-    symbol: 'BTCUSD',
-    timeframe: '1m',
-    candleMode: 'Heikin Ashi',
+  const [mainChartSelection, setMainChartSelection] = useState<ChartSelection>(() => {
+    const saved = readDashboardSettings()
+    return normalizeChartSelection(saved.mainChartSelection, {
+      symbol: 'BTCUSD',
+      timeframe: '1m',
+      candleMode: 'Heikin Ashi',
+    })
   })
 
-  const [miniChartOneSelection, setMiniChartOneSelection] = useState<ChartSelection>({
-    symbol: 'BTCUSD',
-    timeframe: '5m',
-    candleMode: 'Heikin Ashi',
+  const [miniChartOneSelection, setMiniChartOneSelection] = useState<ChartSelection>(() => {
+    const saved = readDashboardSettings()
+    return normalizeChartSelection(saved.miniChartOneSelection, {
+      symbol: 'BTCUSD',
+      timeframe: '5m',
+      candleMode: 'Heikin Ashi',
+    })
   })
 
-  const [miniChartTwoSelection, setMiniChartTwoSelection] = useState<ChartSelection>({
-    symbol: 'BTCUSD',
-    timeframe: '15m',
-    candleMode: 'Heikin Ashi',
+  const [miniChartTwoSelection, setMiniChartTwoSelection] = useState<ChartSelection>(() => {
+    const saved = readDashboardSettings()
+    return normalizeChartSelection(saved.miniChartTwoSelection, {
+      symbol: 'BTCUSD',
+      timeframe: '15m',
+      candleMode: 'Heikin Ashi',
+    })
   })
 
   const {
@@ -419,7 +477,42 @@ export default function Dashboard() {
 
   useEffect(() => {
     setIsClient(true)
+
+    const saved = readDashboardSettings()
+    if (typeof saved.scrollY === 'number' && saved.scrollY > 0) {
+      window.requestAnimationFrame(() => {
+        window.scrollTo({ top: saved.scrollY, behavior: 'auto' })
+      })
+    }
+
+    const saveScrollPosition = () => {
+      const current = readDashboardSettings()
+      saveDashboardSettings({
+        ...current,
+        scrollY: window.scrollY,
+      })
+    }
+
+    window.addEventListener('beforeunload', saveScrollPosition)
+    window.addEventListener('pagehide', saveScrollPosition)
+
+    return () => {
+      saveScrollPosition()
+      window.removeEventListener('beforeunload', saveScrollPosition)
+      window.removeEventListener('pagehide', saveScrollPosition)
+    }
   }, [])
+
+  useEffect(() => {
+    const saved = readDashboardSettings()
+    saveDashboardSettings({
+      ...saved,
+      mainChartSelection,
+      miniChartOneSelection,
+      miniChartTwoSelection,
+      scrollY: typeof window !== 'undefined' ? window.scrollY : saved.scrollY,
+    })
+  }, [mainChartSelection, miniChartOneSelection, miniChartTwoSelection])
 
   const selectedSymbol = normalizeSymbol(mainChartSelection.symbol || latestSignal?.symbol)
   const selectedTimeframe = normalizeTimeframe(mainChartSelection.timeframe || latestSignal?.timeframe)
