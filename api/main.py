@@ -951,6 +951,273 @@ def get_dashboard_candles(symbol: str, timeframe: str = "1m", limit: int = 500) 
     return filter_valid_candles_for_symbol(merged, normalized_symbol)
 
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LIVE PRICE HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def floor_epoch_to_timeframe(epoch: float, timeframe: str) -> int:
+    seconds = max(timeframe_seconds(timeframe), 60)
+    return int(epoch // seconds) * seconds
+
+
+def recursive_find_number(payload: Any, keys: set[str]) -> Optional[float]:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            lowered = str(key).lower()
+            if lowered in keys:
+                parsed = to_float(value, 0.0)
+                if parsed > 0:
+                    return parsed
+
+        # Common bid/ask midpoint support.
+        bid = None
+        ask = None
+        for key, value in payload.items():
+            lowered = str(key).lower()
+            if lowered in {"bid", "bidprice", "bp", "bid_price"}:
+                candidate = to_float(value, 0.0)
+                if candidate > 0:
+                    bid = candidate
+            if lowered in {"ask", "askprice", "ap", "ask_price"}:
+                candidate = to_float(value, 0.0)
+                if candidate > 0:
+                    ask = candidate
+        if bid and ask:
+            return (bid + ask) / 2.0
+
+        for value in payload.values():
+            found = recursive_find_number(value, keys)
+            if found is not None:
+                return found
+
+    if isinstance(payload, list):
+        for item in payload:
+            found = recursive_find_number(item, keys)
+            if found is not None:
+                return found
+
+    return None
+
+
+def recursive_find_time(payload: Any) -> Optional[Any]:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            lowered = str(key).lower()
+            if lowered in {"t", "time", "timestamp", "datetime", "date"} and value:
+                return value
+
+        for value in payload.values():
+            found = recursive_find_time(value)
+            if found is not None:
+                return found
+
+    if isinstance(payload, list):
+        for item in payload:
+            found = recursive_find_time(item)
+            if found is not None:
+                return found
+
+    return None
+
+
+def normalize_live_price_payload(
+    symbol: str,
+    timeframe: str,
+    price: float,
+    raw_time: Any = None,
+    provider: str = "unknown",
+    source: str = "live_price",
+    raw: Any = None,
+) -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    normalized_time = format_bar_time(raw_time or now_iso())
+    epoch = to_epoch_seconds(normalized_time)
+    if epoch <= 0:
+        epoch = datetime.now(timezone.utc).timestamp()
+        normalized_time = format_bar_time(epoch)
+
+    return {
+        "symbol": normalized_symbol,
+        "timeframe": normalized_timeframe,
+        "price": round(to_float(price), 8),
+        "time": normalized_time,
+        "timestamp": normalized_time,
+        "epoch": epoch,
+        "bucketEpoch": floor_epoch_to_timeframe(epoch, normalized_timeframe),
+        "timeframeSeconds": timeframe_seconds(normalized_timeframe),
+        "provider": provider,
+        "source": source,
+        "raw": raw,
+        "createdAt": now_iso(),
+    }
+
+
+def fetch_alpaca_crypto_live_price(symbol: str, timeframe: str = "1m") -> Optional[Dict[str, Any]]:
+    normalized_symbol = normalize_symbol(symbol)
+    if not is_crypto_symbol(normalized_symbol):
+        return None
+
+    headers = alpaca_headers()
+    slash_symbol = to_alpaca_crypto_symbol(normalized_symbol)
+
+    # Prefer latest trade because it behaves closest to TradingView's moving last price.
+    trade_params = urlencode({"symbols": slash_symbol})
+    trade_url = f"{ALPACA_CRYPTO_BASE_URL}/crypto/us/latest/trades?{trade_params}"
+
+    try:
+        data = http_get_json(trade_url, headers=headers, provider="Alpaca crypto latest trade")
+        trades = data.get("trades", {}) if isinstance(data, dict) else {}
+        trade = trades.get(slash_symbol) or trades.get(normalized_symbol) or trades
+        price = recursive_find_number(trade, {"p", "price", "last", "lastprice", "close"})
+        raw_time = recursive_find_time(trade)
+        if price and is_price_valid_for_symbol(price, normalized_symbol):
+            return normalize_live_price_payload(
+                normalized_symbol,
+                timeframe,
+                price,
+                raw_time=raw_time,
+                provider="alpaca",
+                source="alpaca_latest_trade",
+                raw=trade,
+            )
+    except Exception as error:
+        print(f"[Alpaca live trade] failed for {normalized_symbol}: {error}")
+
+    # Fallback to latest quote midpoint.
+    quote_params = urlencode({"symbols": slash_symbol})
+    quote_url = f"{ALPACA_CRYPTO_BASE_URL}/crypto/us/latest/quotes?{quote_params}"
+
+    try:
+        data = http_get_json(quote_url, headers=headers, provider="Alpaca crypto latest quote")
+        quotes = data.get("quotes", {}) if isinstance(data, dict) else {}
+        quote_payload = quotes.get(slash_symbol) or quotes.get(normalized_symbol) or quotes
+        price = recursive_find_number(
+            quote_payload,
+            {"p", "price", "last", "lastprice", "ap", "ask", "bp", "bid", "close"},
+        )
+        raw_time = recursive_find_time(quote_payload)
+        if price and is_price_valid_for_symbol(price, normalized_symbol):
+            return normalize_live_price_payload(
+                normalized_symbol,
+                timeframe,
+                price,
+                raw_time=raw_time,
+                provider="alpaca",
+                source="alpaca_latest_quote",
+                raw=quote_payload,
+            )
+    except Exception as error:
+        print(f"[Alpaca live quote] failed for {normalized_symbol}: {error}")
+
+    return None
+
+
+def build_insightsentry_live_quote_urls(api_symbol: str) -> List[str]:
+    encoded_path_symbol = quote(api_symbol, safe="")
+    encoded_query_symbol = quote(api_symbol, safe="")
+    return [
+        f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_path_symbol}/quotes/l1",
+        f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_path_symbol}/quote",
+        f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_path_symbol}/quotes",
+        f"{INSIGHTSENTRY_BASE_URL}/v3/quotes/l1?symbol={encoded_query_symbol}",
+    ]
+
+
+def fetch_insightsentry_live_price(symbol: str, timeframe: str = "1m") -> Optional[Dict[str, Any]]:
+    normalized_symbol = normalize_symbol(symbol)
+    if not is_futures_symbol(normalized_symbol):
+        return None
+
+    headers = insightsentry_headers()
+    api_symbol = to_insightsentry_symbol(normalized_symbol)
+
+    for url in build_insightsentry_live_quote_urls(api_symbol):
+        try:
+            data = http_get_json_or_none(url, headers=headers, provider="InsightSentry live quote")
+            if data is None:
+                continue
+
+            price = recursive_find_number(
+                data,
+                {
+                    "last",
+                    "lastprice",
+                    "price",
+                    "tradeprice",
+                    "close",
+                    "settlement",
+                    "bid",
+                    "ask",
+                    "bidprice",
+                    "askprice",
+                    "bp",
+                    "ap",
+                },
+            )
+            raw_time = recursive_find_time(data)
+
+            if price and is_price_valid_for_symbol(price, normalized_symbol):
+                return normalize_live_price_payload(
+                    normalized_symbol,
+                    timeframe,
+                    price,
+                    raw_time=raw_time,
+                    provider="insightsentry",
+                    source="insightsentry_live_quote",
+                    raw=None,
+                )
+        except Exception as error:
+            print(f"[InsightSentry live quote] failed for {normalized_symbol}: {error}")
+
+    return None
+
+
+def get_live_price_payload(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    live: Optional[Dict[str, Any]] = None
+
+    if is_crypto_symbol(normalized_symbol):
+        live = fetch_alpaca_crypto_live_price(normalized_symbol, normalized_timeframe)
+    elif is_futures_symbol(normalized_symbol):
+        live = fetch_insightsentry_live_price(normalized_symbol, normalized_timeframe)
+
+    if live is not None:
+        return live
+
+    # Last-resort fallback: latest historical close, so charts continue to work if live quote is unavailable.
+    candles = fetch_historical_candles(normalized_symbol, normalized_timeframe, 1)
+    latest = candles[-1] if candles else None
+
+    if latest:
+        return normalize_live_price_payload(
+            normalized_symbol,
+            normalized_timeframe,
+            to_float(latest.get("close")),
+            raw_time=latest.get("time") or latest.get("timestamp") or latest.get("epoch"),
+            provider=str(latest.get("provider") or "historical"),
+            source="historical_latest_close_fallback",
+            raw=None,
+        )
+
+    return {
+        "symbol": normalized_symbol,
+        "timeframe": normalized_timeframe,
+        "price": 0,
+        "time": now_iso(),
+        "timestamp": now_iso(),
+        "epoch": datetime.now(timezone.utc).timestamp(),
+        "bucketEpoch": floor_epoch_to_timeframe(datetime.now(timezone.utc).timestamp(), normalized_timeframe),
+        "timeframeSeconds": timeframe_seconds(normalized_timeframe),
+        "provider": None,
+        "source": "no_live_price",
+        "createdAt": now_iso(),
+    }
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SIMPLE TECHNICAL / GHOST HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1142,7 +1409,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v8_alpaca_latest_desc_btc_mes",
+        "engine": "main_v9_live_price_tick_updates",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
@@ -1151,6 +1418,7 @@ def root() -> Dict[str, Any]:
             "/api/candles",
             "/api/merged-candles",
             "/api/live-candle",
+            "/api/live-price",
             "/api/provider-debug",
             "/api/engine-state",
             "/api/latest-sentiment",
@@ -1267,6 +1535,27 @@ def live_candle(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]
     live = get_live_recent_candles(normalized_symbol, normalized_timeframe)
     latest = live[-1] if live else None
 
+    if latest is None:
+        live_price = get_live_price_payload(normalized_symbol, normalized_timeframe)
+        if to_float(live_price.get("price"), 0) > 0:
+            bucket_epoch = int(live_price.get("bucketEpoch") or floor_epoch_to_timeframe(to_epoch_seconds(live_price.get("epoch")), normalized_timeframe))
+            price = to_float(live_price.get("price"))
+            latest = {
+                "time": format_bar_time(bucket_epoch),
+                "timestamp": format_bar_time(bucket_epoch),
+                "epoch": bucket_epoch,
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume": 0,
+                "symbol": normalized_symbol,
+                "timeframe": normalized_timeframe,
+                "createdAt": now_iso(),
+                "provider": live_price.get("provider"),
+                "source": live_price.get("source"),
+            }
+
     return {
         "symbol": normalized_symbol,
         "timeframe": normalized_timeframe,
@@ -1275,6 +1564,13 @@ def live_candle(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]
         "count": len(live),
         "source": "live_candle",
     }
+
+
+@app.get("/api/live-price")
+def live_price(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    return get_live_price_payload(normalized_symbol, normalized_timeframe)
 
 
 @app.get("/api/latest-sentiment")
