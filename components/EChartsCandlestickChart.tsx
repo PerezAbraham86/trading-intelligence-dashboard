@@ -1046,7 +1046,30 @@ function buildAlphaProfileRenderItem() {
   }
 }
 
-async function fetchEngineState(
+const overlayMemoryCache = new Map<string, { createdAt: number; payload: any }>()
+
+function getOverlayCacheKey(symbol: string, timeframe: string) {
+  return `${normalizeDefaultSymbol(symbol)}::${normalizeTimeframe(timeframe)}`
+}
+
+function readOverlayMemoryCache(symbol: string, timeframe: string, maxAgeMs = 15000) {
+  const key = getOverlayCacheKey(symbol, timeframe)
+  const cached = overlayMemoryCache.get(key)
+  if (!cached) return null
+
+  if (Date.now() - cached.createdAt > maxAgeMs) return null
+  return cached.payload
+}
+
+function saveOverlayMemoryCache(symbol: string, timeframe: string, payload: any) {
+  const key = getOverlayCacheKey(symbol, timeframe)
+  overlayMemoryCache.set(key, {
+    createdAt: Date.now(),
+    payload,
+  })
+}
+
+async function fetchChartOverlays(
   symbol: string,
   timeframe: string,
   signal?: AbortSignal
@@ -1058,17 +1081,19 @@ async function fetchEngineState(
   })
 
   try {
-    const response = await fetch(`${API_BASE_URL}/api/engine-state?${params.toString()}`, {
+    const response = await fetch(`${API_BASE_URL}/api/chart-overlays?${params.toString()}`, {
       cache: 'no-store',
       signal,
     })
 
     if (!response.ok) return null
-    return await response.json()
+    const json = await response.json()
+    saveOverlayMemoryCache(symbol, timeframe, json)
+    return json
   } catch (error: any) {
     if (error?.name === 'AbortError') throw error
-    console.error(`Engine-state fetch error: /api/engine-state ${symbol} ${timeframe}`, error)
-    return null
+    console.error(`Chart overlay fetch error: /api/chart-overlays ${symbol} ${timeframe}`, error)
+    return readOverlayMemoryCache(symbol, timeframe, 60000)
   }
 }
 
@@ -1777,28 +1802,38 @@ export default function EChartsCandlestickChart({
       return
     }
 
+    const cached = readOverlayMemoryCache(symbol, timeframe, 60000)
+    if (cached?.chartOverlays && typeof cached.chartOverlays === 'object') {
+      setChartOverlays(cached.chartOverlays as ChartOverlays)
+    }
+
     const controller = new AbortController()
     let cancelled = false
 
-    async function pollEngineState() {
+    async function pollChartOverlays() {
       try {
-        const engine = await fetchEngineState(symbol, timeframe, controller.signal)
+        const engine = await fetchChartOverlays(symbol, timeframe, controller.signal)
         if (cancelled) return
         const overlays = engine?.chartOverlays && typeof engine.chartOverlays === 'object'
           ? engine.chartOverlays as ChartOverlays
           : null
-        setChartOverlays(overlays)
+
+        if (overlays) {
+          setChartOverlays(overlays)
+        }
       } catch (error: any) {
         if (error?.name === 'AbortError') return
       }
     }
 
-    pollEngineState()
-    const intervalId = window.setInterval(pollEngineState, 5000)
+    // Delay overlays slightly so the candle chart paints first.
+    const firstLoadId = window.setTimeout(pollChartOverlays, 250)
+    const intervalId = window.setInterval(pollChartOverlays, 15000)
 
     return () => {
       cancelled = true
       controller.abort()
+      window.clearTimeout(firstLoadId)
       window.clearInterval(intervalId)
     }
   }, [symbol, timeframe, compact, historicalCandles.length])
