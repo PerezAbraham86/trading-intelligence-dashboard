@@ -15,8 +15,8 @@ const GRID = '#1f2937'
 const TEXT = '#9ca3af'
 const BG = '#0f1115'
 
-const GHOST_LEADING_GAP_BARS = 8
-const PROFILE_LEADING_GAP_BARS = 8
+const GHOST_LEADING_GAP_BARS = 0
+const PROFILE_LEADING_GAP_BARS = 14
 const ALPHA_PROFILE_WIDTH_BARS = 22
 const MAX_SMC_LABELS = 7
 const MAX_LIQUIDITY_LABELS = 5
@@ -767,7 +767,7 @@ function getInitialZoom(candleCount: number, totalCount = candleCount) {
   // Anchor the default view around the current live candle, not the far-right
   // synthetic AlphaX profile labels. This keeps candle bodies readable while
   // still leaving enough space to see ghost candles and the liquidity profile.
-  const rightPadding = Math.max(0, Math.min(safeTotal - safeCandleCount, GHOST_LEADING_GAP_BARS + 8))
+  const rightPadding = Math.max(0, Math.min(safeTotal - safeCandleCount, GHOST_LEADING_GAP_BARS + 5))
   const endValue = Math.min(safeTotal - 1, safeCandleCount - 1 + rightPadding)
 
   return {
@@ -1505,15 +1505,57 @@ function buildChartOption({
                   type: 'candlestick',
                   data: ghostData,
                   itemStyle: {
-                    color: 'rgba(38, 166, 154, 0.55)',
-                    color0: 'rgba(239, 83, 80, 0.55)',
-                    borderColor: 'rgba(38, 166, 154, 0.95)',
-                    borderColor0: 'rgba(239, 83, 80, 0.95)',
+                    color: 'rgba(38, 166, 154, 0.24)',
+                    color0: 'rgba(239, 83, 80, 0.24)',
+                    borderColor: 'rgba(167, 243, 208, 0.98)',
+                    borderColor0: 'rgba(252, 165, 165, 0.98)',
+                    borderWidth: 2,
+                    opacity: 0.92,
                   },
-                  barWidth: '42%',
+                  emphasis: {
+                    itemStyle: {
+                      color: 'rgba(38, 166, 154, 0.34)',
+                      color0: 'rgba(239, 83, 80, 0.34)',
+                      borderColor: 'rgba(209, 250, 229, 1)',
+                      borderColor0: 'rgba(254, 202, 202, 1)',
+                      borderWidth: 2,
+                    },
+                  },
+                  barWidth: '34%',
                   barMinWidth: 3,
-                  barMaxWidth: 12,
-                  z: 19,
+                  barMaxWidth: 9,
+                  z: 23,
+                },
+                {
+                  name: 'Ghost Start Separator',
+                  type: 'line',
+                  data: [],
+                  silent: true,
+                  markLine: {
+                    silent: true,
+                    symbol: ['none', 'none'],
+                    label: {
+                      show: true,
+                      formatter: 'Ghost',
+                      color: '#a7f3d0',
+                      fontSize: 10,
+                      fontWeight: 800,
+                      backgroundColor: 'rgba(15,17,21,0.72)',
+                      borderRadius: 3,
+                      padding: [2, 4],
+                    },
+                    lineStyle: {
+                      color: 'rgba(167, 243, 208, 0.72)',
+                      width: 1,
+                      type: 'dashed',
+                    },
+                    data: [
+                      {
+                        xAxis: xAxisData[Math.max(0, activeCandles.length)],
+                      },
+                    ],
+                  },
+                  z: 22,
                 },
               ]
             : []),
