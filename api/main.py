@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -2076,6 +2078,175 @@ def flatten_sp500_heatmap_symbols() -> List[str]:
     return symbols
 
 
+def yahoo_chart_symbol(symbol: str) -> str:
+    # Yahoo chart uses BRK-B style while dashboard display can use BRK.B.
+    return str(symbol).upper().strip().replace(".", "-")
+
+
+def stooq_symbol(symbol: str) -> str:
+    # Stooq US stocks use lowercase ticker + .us. BRK-B is accepted as brk-b.us.
+    return f"{str(symbol).lower().strip().replace('.', '-')}.us"
+
+
+def http_get_text_or_none(url: str, headers: Optional[Dict[str, str]] = None, provider: str = "Data provider") -> Optional[str]:
+    request = Request(url, headers=headers or {})
+    try:
+        with urlopen(request, timeout=25) as response:
+            return response.read().decode("utf-8", errors="ignore")
+    except Exception as error:
+        print(f"[{provider}] failed: {error}")
+        return None
+
+
+def parse_yahoo_chart_row(symbol: str, chart: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    try:
+        result = chart.get("chart", {}).get("result", [])
+        if not isinstance(result, list) or not result:
+            return None
+
+        item = result[0]
+        meta = item.get("meta", {}) if isinstance(item, dict) else {}
+        timestamps = item.get("timestamp", []) if isinstance(item.get("timestamp"), list) else []
+        quote = item.get("indicators", {}).get("quote", [])
+        quote_item = quote[0] if isinstance(quote, list) and quote else {}
+
+        closes = quote_item.get("close", []) if isinstance(quote_item.get("close"), list) else []
+        latest_price = 0.0
+        latest_index = -1
+
+        for index in range(len(closes) - 1, -1, -1):
+            parsed = to_float(closes[index], 0.0)
+            if parsed > 0:
+                latest_price = parsed
+                latest_index = index
+                break
+
+        previous_close = to_float(
+            meta.get("previousClose") or
+            meta.get("chartPreviousClose") or
+            meta.get("regularMarketPreviousClose"),
+            0.0,
+        )
+
+        if latest_price <= 0:
+            latest_price = to_float(meta.get("regularMarketPrice"), 0.0)
+
+        if previous_close <= 0:
+            first_valid = next((to_float(close, 0.0) for close in closes if to_float(close, 0.0) > 0), 0.0)
+            previous_close = first_valid
+
+        if latest_price <= 0:
+            return None
+
+        change = latest_price - previous_close if previous_close > 0 else 0.0
+        change_pct = (change / previous_close) * 100.0 if previous_close > 0 else 0.0
+
+        market_time = timestamps[latest_index] if latest_index >= 0 and latest_index < len(timestamps) else meta.get("regularMarketTime")
+        market_cap = to_float(meta.get("marketCap"), 0.0)
+
+        return {
+            "symbol": symbol,
+            "shortName": symbol,
+            "longName": symbol,
+            "regularMarketPrice": latest_price,
+            "regularMarketChange": change,
+            "regularMarketChangePercent": change_pct,
+            "regularMarketPreviousClose": previous_close,
+            "regularMarketTime": market_time,
+            "marketCap": market_cap,
+            "quoteSourceName": "yahoo_chart",
+        }
+    except Exception as error:
+        print(f"[S&P 500 Heatmap] Yahoo chart parse failed for {symbol}: {error}")
+        return None
+
+
+def fetch_yahoo_chart_quotes(symbols: List[str]) -> List[Dict[str, Any]]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; MARKETBOS-Dashboard/1.0)",
+        "Accept": "application/json",
+    }
+
+    rows: List[Dict[str, Any]] = []
+
+    for symbol in symbols:
+        yahoo_symbol = yahoo_chart_symbol(symbol)
+        params = urlencode({
+            "range": "1d",
+            "interval": "1m",
+            "includePrePost": "true",
+            "events": "div,splits",
+        })
+
+        for host in ["query1.finance.yahoo.com", "query2.finance.yahoo.com"]:
+            url = f"https://{host}/v8/finance/chart/{quote(yahoo_symbol)}?{params}"
+            data = http_get_json_or_none(url, headers=headers, provider="Yahoo Finance chart")
+            if isinstance(data, dict):
+                row = parse_yahoo_chart_row(symbol, data)
+                if row:
+                    rows.append(row)
+                    break
+
+    return rows
+
+
+def fetch_stooq_quote_batch(symbols: List[str]) -> List[Dict[str, Any]]:
+    safe_symbols = [str(symbol).upper().strip() for symbol in symbols if str(symbol).strip()]
+    if not safe_symbols:
+        return []
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; MARKETBOS-Dashboard/1.0)",
+        "Accept": "text/csv,*/*",
+    }
+
+    # Stooq is a no-key fallback. It is delayed, but it usually works on server hosts.
+    # Fields requested: symbol,date,time,open,high,low,close,volume,name.
+    stooq_symbols = ",".join(stooq_symbol(symbol) for symbol in safe_symbols)
+    url = f"https://stooq.com/q/l/?s={quote(stooq_symbols, safe=',')}&f=sd2t2ohlcvn&h&e=csv"
+    text = http_get_text_or_none(url, headers=headers, provider="Stooq quotes")
+
+    if not text or "," not in text:
+        return []
+
+    rows: List[Dict[str, Any]] = []
+
+    try:
+        reader = csv.DictReader(io.StringIO(text))
+        for item in reader:
+            raw_symbol = str(item.get("Symbol") or item.get("symbol") or "").upper().replace(".US", "")
+            if not raw_symbol:
+                continue
+
+            dashboard_symbol = raw_symbol.replace(".", "-")
+            price = to_float(item.get("Close") or item.get("Last") or item.get("close") or item.get("last"), 0.0)
+            open_price = to_float(item.get("Open") or item.get("open"), 0.0)
+
+            if price <= 0:
+                continue
+
+            change = price - open_price if open_price > 0 else 0.0
+            change_pct = (change / open_price) * 100.0 if open_price > 0 else 0.0
+
+            rows.append({
+                "symbol": dashboard_symbol,
+                "shortName": dashboard_symbol,
+                "longName": str(item.get("Name") or dashboard_symbol),
+                "regularMarketPrice": price,
+                "regularMarketChange": change,
+                "regularMarketChangePercent": change_pct,
+                "regularMarketPreviousClose": open_price,
+                "regularMarketTime": None,
+                "marketCap": 0.0,
+                "quoteSourceName": "stooq_quote",
+            })
+    except Exception as error:
+        print(f"[S&P 500 Heatmap] Stooq CSV parse failed: {error}")
+        return []
+
+    return rows
+
+
 def fetch_yahoo_quote_batch(symbols: List[str]) -> List[Dict[str, Any]]:
     safe_symbols = [str(symbol).upper().strip() for symbol in symbols if str(symbol).strip()]
     if not safe_symbols:
@@ -2083,11 +2254,10 @@ def fetch_yahoo_quote_batch(symbols: List[str]) -> List[Dict[str, Any]]:
 
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; MARKETBOS-Dashboard/1.0)",
-        "Accept": "application/json",
+        "Accept": "application/json,text/plain,*/*",
     }
 
-    # Primary: standard Yahoo quote endpoint.
-    # Some hosts return an empty result unless the request is shaped like the public site.
+    # 1) Yahoo quote endpoint.
     primary_params = urlencode({
         "symbols": ",".join(safe_symbols),
         "formatted": "false",
@@ -2097,23 +2267,25 @@ def fetch_yahoo_quote_batch(symbols: List[str]) -> List[Dict[str, Any]]:
         "fields": "symbol,shortName,longName,regularMarketPrice,regularMarketChangePercent,regularMarketChange,regularMarketPreviousClose,regularMarketTime,marketCap",
     })
 
-    primary_urls = [
-        f"https://query1.finance.yahoo.com/v7/finance/quote?{primary_params}",
-        f"https://query2.finance.yahoo.com/v7/finance/quote?{primary_params}",
-    ]
-
-    for url in primary_urls:
+    for host in ["query1.finance.yahoo.com", "query2.finance.yahoo.com"]:
         try:
-            data = http_get_json_or_none(url, headers=headers, provider="Yahoo Finance quote")
+            data = http_get_json_or_none(
+                f"https://{host}/v7/finance/quote?{primary_params}",
+                headers=headers,
+                provider="Yahoo Finance quote",
+            )
             result = data.get("quoteResponse", {}).get("result", []) if isinstance(data, dict) else []
-            if isinstance(result, list) and len(result) > 0:
-                return result
+            if isinstance(result, list):
+                valid = [
+                    row for row in result
+                    if to_float(row.get("regularMarketPrice"), 0.0) > 0
+                ]
+                if valid:
+                    return valid
         except Exception as error:
             print(f"[S&P 500 Heatmap] Yahoo quote batch failed: {error}")
 
-    # Fallback: Yahoo spark endpoint. This usually works even when the quote endpoint
-    # returns empty on server hosts. It gives current/previous close and enough data
-    # to calculate a real live/near-live percent change.
+    # 2) Yahoo spark endpoint.
     spark_params = urlencode({
         "symbols": ",".join(safe_symbols),
         "range": "1d",
@@ -2122,80 +2294,48 @@ def fetch_yahoo_quote_batch(symbols: List[str]) -> List[Dict[str, Any]]:
         "includeTimestamps": "true",
     })
 
-    spark_urls = [
-        f"https://query1.finance.yahoo.com/v7/finance/spark?{spark_params}",
-        f"https://query2.finance.yahoo.com/v7/finance/spark?{spark_params}",
-    ]
-
-    for url in spark_urls:
+    for host in ["query1.finance.yahoo.com", "query2.finance.yahoo.com"]:
         try:
-            data = http_get_json_or_none(url, headers=headers, provider="Yahoo Finance spark")
-            if not isinstance(data, dict):
-                continue
+            data = http_get_json_or_none(
+                f"https://{host}/v7/finance/spark?{spark_params}",
+                headers=headers,
+                provider="Yahoo Finance spark",
+            )
 
             rows: List[Dict[str, Any]] = []
-            spark_result = data.get("spark", {}).get("result", [])
+            spark_result = data.get("spark", {}).get("result", []) if isinstance(data, dict) else []
 
-            if not isinstance(spark_result, list):
-                continue
+            if isinstance(spark_result, list):
+                for item in spark_result:
+                    if not isinstance(item, dict):
+                        continue
 
-            for item in spark_result:
-                if not isinstance(item, dict):
-                    continue
+                    symbol = str(item.get("symbol") or "").upper().strip()
+                    response = item.get("response", [])
+                    response_item = response[0] if isinstance(response, list) and response else {}
 
-                symbol = str(item.get("symbol") or "").upper().strip()
-                response = item.get("response", [])
-                response_item = response[0] if isinstance(response, list) and response else {}
+                    if not symbol or not isinstance(response_item, dict):
+                        continue
 
-                if not symbol or not isinstance(response_item, dict):
-                    continue
-
-                meta = response_item.get("meta", {}) if isinstance(response_item.get("meta"), dict) else {}
-                close_values = response_item.get("close", []) if isinstance(response_item.get("close"), list) else []
-                timestamps = response_item.get("timestamp", []) if isinstance(response_item.get("timestamp"), list) else []
-
-                latest_price = 0.0
-                for close in reversed(close_values):
-                    parsed = to_float(close, 0.0)
-                    if parsed > 0:
-                        latest_price = parsed
-                        break
-
-                previous_close = to_float(
-                    meta.get("previousClose") or
-                    meta.get("chartPreviousClose") or
-                    meta.get("regularMarketPreviousClose"),
-                    0.0,
-                )
-
-                if latest_price <= 0:
-                    latest_price = to_float(meta.get("regularMarketPrice"), 0.0)
-
-                if previous_close <= 0 and len(close_values) > 1:
-                    first_valid = next((to_float(close, 0.0) for close in close_values if to_float(close, 0.0) > 0), 0.0)
-                    previous_close = first_valid
-
-                change = latest_price - previous_close if latest_price > 0 and previous_close > 0 else 0.0
-                change_pct = (change / previous_close) * 100.0 if previous_close > 0 else 0.0
-
-                market_time = timestamps[-1] if timestamps else meta.get("regularMarketTime")
-
-                rows.append({
-                    "symbol": symbol,
-                    "shortName": symbol,
-                    "longName": symbol,
-                    "regularMarketPrice": latest_price,
-                    "regularMarketChange": change,
-                    "regularMarketChangePercent": change_pct,
-                    "regularMarketPreviousClose": previous_close,
-                    "regularMarketTime": market_time,
-                    "marketCap": to_float(meta.get("marketCap"), 0.0),
-                })
+                    row = parse_yahoo_chart_row(symbol, {"chart": {"result": [response_item]}})
+                    if row:
+                        row["quoteSourceName"] = "yahoo_spark"
+                        rows.append(row)
 
             if rows:
                 return rows
         except Exception as error:
             print(f"[S&P 500 Heatmap] Yahoo spark fallback failed: {error}")
+
+    # 3) Yahoo chart endpoint one symbol at a time.
+    chart_rows = fetch_yahoo_chart_quotes(safe_symbols)
+    if chart_rows:
+        return chart_rows
+
+    # 4) Stooq delayed quote fallback.
+    stooq_rows = fetch_stooq_quote_batch(safe_symbols)
+    if stooq_rows:
+        return stooq_rows
 
     return []
 
@@ -2272,7 +2412,7 @@ def build_sp500_heatmap_payload() -> Dict[str, Any]:
 
     return {
         "eventType": "SP500_HEATMAP",
-        "source": "yahoo_finance_quote_or_spark",
+        "source": "yahoo_quote_spark_chart_or_stooq",
         "note": "Free quote source. Data may be delayed depending on exchange/vendor rules.",
         "isLiveSnapshot": True,
         "createdAt": now_iso(),
@@ -2301,7 +2441,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v13_sp500_heatmap_yahoo_spark_fallback",
+        "engine": "main_v14_sp500_heatmap_chart_and_stooq_fallback",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
