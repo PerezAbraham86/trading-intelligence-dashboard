@@ -6,7 +6,7 @@ import * as echarts from 'echarts'
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
 const DEFAULT_VISIBLE_CANDLES = 120
 const CACHE_TTL_MS = 1000 * 60 * 5
-const LOCAL_STORAGE_PREFIX = 'marketbos:v2:clean-candles:'
+const LOCAL_STORAGE_PREFIX = 'marketbos:v3:shared-500-candles:'
 
 const GREEN = '#26a69a'
 const RED = '#ef5350'
@@ -906,7 +906,7 @@ export default function EChartsCandlestickChart({
       }
 
       try {
-        const candles = await fetchCandlesFromNetwork(symbol, timeframe, candleFetchLimit, controller.signal)
+        const candles = await fetchCandles(symbol, timeframe, candleFetchLimit, controller.signal)
 
         if (cancelled || activeCacheKeyRef.current !== cacheKey) return
 
