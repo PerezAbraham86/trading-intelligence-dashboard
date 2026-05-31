@@ -1052,12 +1052,26 @@ def fetch_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 50
 
     if is_crypto_symbol(normalized_symbol):
         try:
-            candles = fetch_alpaca_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
-        except Exception:
-            candles = []
-        if candles:
-            return candles
-        return fetch_yfinance_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
+            alpaca_candles = fetch_alpaca_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
+        except Exception as error:
+            print(f"[Alpaca crypto] fallback triggered for {normalized_symbol} {normalized_timeframe}: {error}")
+            alpaca_candles = []
+
+        # Alpaca is the primary BTCUSD source, but it can sometimes return a short
+        # page even when limit=500. If that happens, fill the missing history from
+        # yfinance, merge by timestamp, and still return the latest 500 candles.
+        if len(alpaca_candles) >= safe_limit:
+            return alpaca_candles[-safe_limit:]
+
+        yfinance_candles = fetch_yfinance_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
+
+        merged = merge_candles_by_time([*yfinance_candles, *alpaca_candles])[-safe_limit:]
+        merged = filter_valid_candles_for_symbol(merged, normalized_symbol)
+
+        if merged:
+            return merged[-safe_limit:]
+
+        return alpaca_candles[-safe_limit:]
 
     return fetch_yfinance_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
 
