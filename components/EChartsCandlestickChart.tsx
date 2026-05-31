@@ -595,36 +595,46 @@ async function fetchCandlesFromNetwork(
   limit: string,
   signal?: AbortSignal
 ): Promise<Candle[]> {
-  // One clean route only.
-  // Backend chooses the correct provider:
-  // BTCUSD -> Alpaca crypto
-  // MES1!  -> InsightSentry Time Series OHLCV
   const params = new URLSearchParams({
     symbol: normalizeDefaultSymbol(symbol),
     timeframe: normalizeTimeframe(timeframe),
     limit,
   })
 
-  try {
-    const response = await fetch(`${API_BASE_URL}/api/historical-candles?${params.toString()}`, {
-      cache: 'no-store',
-      signal,
-    })
+  const routes = [
+    '/api/candles',
+    '/api/merged-candles',
+    '/api/historical-candles',
+  ]
 
-    if (!response.ok) return []
+  for (const route of routes) {
+    try {
+      const response = await fetch(`${API_BASE_URL}${route}?${params.toString()}`, {
+        cache: 'no-store',
+        signal,
+      })
 
-    const json = await response.json()
-    const candles = extractCandleArray(json)
-      .map(candleFromAny)
-      .filter((candle): candle is Candle => candle !== null)
+      if (!response.ok) continue
 
-    return mergeCandlesByTime(candles)
-  } catch (error: any) {
-    if (error?.name === 'AbortError') throw error
-    console.error(`Candle fetch error: /api/historical-candles ${symbol} ${timeframe}`, error)
-    return []
+      const json = await response.json()
+      const candles = extractCandleArray(json)
+        .map(candleFromAny)
+        .filter((candle): candle is Candle => candle !== null)
+
+      const merged = mergeCandlesByTime(candles)
+
+      if (merged.length > 0) {
+        return merged
+      }
+    } catch (error: any) {
+      if (error?.name === 'AbortError') throw error
+      console.error(`Candle fetch error: ${route} ${symbol} ${timeframe}`, error)
+    }
   }
+
+  return []
 }
+
 
 async function fetchCandles(
   symbol: string,
