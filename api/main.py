@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -900,28 +900,78 @@ def fetch_insightsentry_historical_candles(symbol: str, timeframe: str = "1m", l
 # CANDLE PROVIDERS
 # ─────────────────────────────────────────────────────────────────────────────
 
+def alpaca_start_time_for_limit(timeframe: str, limit: int) -> str:
+    """
+    Alpaca crypto can return fewer bars if no start window is supplied.
+    Use a wide enough UTC start window so BTCUSD returns close to the requested
+    500 candles for every dashboard timeframe.
+    """
+    tf = normalize_timeframe(timeframe)
+    safe_limit = max(1, min(int(limit or 500), 5000))
+    seconds = timeframe_seconds(tf)
+
+    # Need at least limit * timeframe seconds, plus a provider/session buffer.
+    # Crypto trades 24/7, but the buffer helps avoid short pages and provider gaps.
+    required_seconds = safe_limit * max(seconds, 60)
+    buffer_seconds = max(required_seconds * 3, 2 * 24 * 60 * 60)
+
+    # Wider minimum windows for higher timeframes.
+    minimum_by_tf = {
+        "1m": 2,
+        "3m": 4,
+        "5m": 7,
+        "10m": 14,
+        "15m": 21,
+        "30m": 35,
+        "1h": 90,
+        "2h": 120,
+        "4h": 180,
+        "1d": 900,
+        "1w": 2500,
+    }
+    min_days = minimum_by_tf.get(tf, 14)
+    lookback_seconds = max(buffer_seconds, min_days * 24 * 60 * 60)
+
+    start = datetime.now(timezone.utc) - timedelta(seconds=lookback_seconds)
+    return start.isoformat().replace("+00:00", "Z")
+
+
 def fetch_alpaca_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 500) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     alpaca_tf = alpaca_timeframe(normalized_timeframe)
     safe_limit = max(1, min(int(limit or 500), 5000))
     headers = alpaca_headers()
+    start_time = alpaca_start_time_for_limit(normalized_timeframe, safe_limit)
 
     if is_crypto_symbol(normalized_symbol):
         slash_symbol = to_alpaca_crypto_symbol(normalized_symbol)
         candidates = [slash_symbol, normalized_symbol]
 
         for candidate in candidates:
-            params = urlencode({"symbols": candidate, "timeframe": alpaca_tf, "limit": safe_limit, "sort": "desc"})
+            params = urlencode({
+                "symbols": candidate,
+                "timeframe": alpaca_tf,
+                "limit": safe_limit,
+                "start": start_time,
+                "sort": "asc",
+            })
             url = f"{ALPACA_CRYPTO_BASE_URL}/crypto/us/bars?{params}"
             data = http_get_json(url, headers=headers, provider="Alpaca crypto")
             bars_by_symbol = data.get("bars", {}) if isinstance(data, dict) else {}
-            bars = bars_by_symbol.get(candidate) or bars_by_symbol.get(slash_symbol) or bars_by_symbol.get(normalized_symbol) or []
+            bars = (
+                bars_by_symbol.get(candidate)
+                or bars_by_symbol.get(slash_symbol)
+                or bars_by_symbol.get(normalized_symbol)
+                or []
+            )
 
             if bars:
                 normalized = [normalize_alpaca_bar(bar, normalized_symbol, normalized_timeframe) for bar in bars]
                 candles = merge_candles_by_time(normalized)[-safe_limit:]
-                return filter_valid_candles_for_symbol(candles, normalized_symbol)
+                candles = filter_valid_candles_for_symbol(candles, normalized_symbol)
+                if candles:
+                    return candles
 
         return []
 
@@ -931,9 +981,10 @@ def fetch_alpaca_historical_candles(symbol: str, timeframe: str = "1m", limit: i
             "symbols": normalized_symbol,
             "timeframe": alpaca_tf,
             "limit": min(request_limit, 10000),
+            "start": start_time,
             "adjustment": "raw",
             "feed": "iex",
-            "sort": "desc",
+            "sort": "asc",
         })
         url = f"{ALPACA_STOCKS_BASE_URL}/stocks/bars?{params}"
         data = http_get_json(url, headers=headers, provider="Alpaca stock")
@@ -944,7 +995,6 @@ def fetch_alpaca_historical_candles(symbol: str, timeframe: str = "1m", limit: i
         return filter_valid_candles_for_symbol(candles, normalized_symbol)
 
     return []
-
 
 def fetch_yfinance_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 500) -> List[Dict[str, Any]]:
     if yf is None:
