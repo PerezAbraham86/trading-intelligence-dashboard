@@ -648,15 +648,50 @@ function setMainCandlesLoading(detail: Record<string, any>) {
   })
 }
 
-async function preloadPrimaryCandles(signal?: AbortSignal) {
+function readMainCandlesReadyForSymbol(symbol: string) {
+  if (typeof window === 'undefined') return false
+
+  try {
+    const raw = window.localStorage.getItem(MAIN_CANDLES_READY_KEY)
+    if (!raw) return false
+
+    const parsed = JSON.parse(raw)
+    const storedSymbol = normalizeDefaultSymbol(parsed?.symbol ?? '')
+    const count = Number(parsed?.count ?? 0)
+
+    return Boolean(parsed?.ready) && count > 0 && storedSymbol === normalizeDefaultSymbol(symbol)
+  } catch {
+    return false
+  }
+}
+
+async function preloadPrimaryCandles(
+  signal?: AbortSignal,
+  prioritySymbol = 'BTCUSD',
+  priorityTimeframe = '1m'
+) {
   if (typeof window === 'undefined') return
   if (primaryCandlePreloadStarted) return
 
   primaryCandlePreloadStarted = true
 
+  const symbols = Array.from(
+    new Set([
+      normalizeDefaultSymbol(prioritySymbol),
+      ...PRIMARY_CANDLE_SYMBOLS,
+    ])
+  )
+
+  const timeframes = Array.from(
+    new Set([
+      normalizeDefaultTimeframe(priorityTimeframe),
+      ...PRIMARY_CANDLE_TIMEFRAMES,
+    ])
+  )
+
   const params = new URLSearchParams({
-    symbols: PRIMARY_CANDLE_SYMBOLS.join(','),
-    timeframes: PRIMARY_CANDLE_TIMEFRAMES.join(','),
+    symbols: symbols.join(','),
+    timeframes: timeframes.join(','),
     limit: '500',
   })
 
@@ -1422,7 +1457,7 @@ function buildChartOption({
             moveOnMouseWheel: true,
           },
         ],
-    // Keep one stable graphic element so old "Loading candles..." text is actively hidden
+    // Keep one stable graphic element so old empty-state text is actively hidden
     // after cached or loaded candles are visible. This prevents ECharts/zrender from
     // keeping a stale loading overlay when setOption uses lazy merged updates.
     graphic: [
@@ -1436,7 +1471,7 @@ function buildChartOption({
         style: {
           text: activeCandles.length === 0
             ? loading
-              ? 'Loading candles...'
+              ? 'Preparing selected candles...'
               : 'No candles loaded'
             : '',
           fill: '#9ca3af',
@@ -1710,6 +1745,7 @@ export default function EChartsCandlestickChart({
   const dataSignatureRef = useRef<string>('')
   const overlayLayoutSignatureRef = useRef<string>('')
   const userZoomedRef = useRef(false)
+  const [mainCandleGateTick, setMainCandleGateTick] = useState(0)
 
   const chartSettingsKey = getChartSettingsKey(compact, chartTitle, defaultTimeframe)
   const savedChartSettings = typeof window === 'undefined' ? {} : readChartSettings(chartSettingsKey)
@@ -1769,20 +1805,6 @@ export default function EChartsCandlestickChart({
   }, [chartSettingsKey, symbol, timeframe, candleMode])
 
   useEffect(() => {
-    const controller = new AbortController()
-
-    preloadPrimaryCandles(controller.signal).catch((error: any) => {
-      if (error?.name !== 'AbortError') {
-        console.warn('Primary candle preload effect failed:', error)
-      }
-    })
-
-    return () => {
-      controller.abort()
-    }
-  }, [])
-
-  useEffect(() => {
     onChartSelectionChange?.({
       symbol,
       timeframe,
@@ -1791,6 +1813,19 @@ export default function EChartsCandlestickChart({
       chartTitle,
     })
   }, [symbol, timeframe, candleMode, compact, chartTitle, onChartSelectionChange])
+
+  useEffect(() => {
+    const onGate = () => setMainCandleGateTick((value) => value + 1)
+
+    window.addEventListener('marketbos:candle-gate', onGate)
+    window.addEventListener('storage', onGate)
+
+    return () => {
+      window.removeEventListener('marketbos:candle-gate', onGate)
+      window.removeEventListener('storage', onGate)
+    }
+  }, [])
+
 
   useEffect(() => {
     void allowCompactHistory
@@ -1802,7 +1837,9 @@ export default function EChartsCandlestickChart({
       const cacheKey = getCandleCacheKey(symbol, timeframe)
       activeCacheKeyRef.current = cacheKey
 
-      if (!compact) {
+      const cached = readMemoryCache(cacheKey) ?? readLocalStorageCache(cacheKey)
+
+      if (!compact && (!cached || cached.length === 0)) {
         setMainCandlesLoading({
           symbol,
           timeframe,
@@ -1811,8 +1848,6 @@ export default function EChartsCandlestickChart({
           status: 'loading',
         })
       }
-
-      const cached = readMemoryCache(cacheKey) ?? readLocalStorageCache(cacheKey)
 
       const requestedLimit = requestedLimitNumber(candleFetchLimit)
       const cachedIsComplete = Boolean(cached && cached.length >= requestedLimit)
@@ -1830,11 +1865,25 @@ export default function EChartsCandlestickChart({
             count: cached.length,
             status: cachedIsComplete ? 'cached' : 'cached-refreshing',
           })
+
+          window.setTimeout(() => {
+            preloadPrimaryCandles(controller.signal, symbol, timeframe).catch((error: any) => {
+              if (error?.name !== 'AbortError') {
+                console.warn('Primary candle preload from cache failed:', error)
+              }
+            })
+          }, 250)
         }
       } else {
         // Important: clear the previous timeframe's candles immediately.
         // This prevents a 5m or 15m dropdown from visually showing old 1m candles.
         setHistoricalCandles([])
+
+        if (compact && !readMainCandlesReadyForSymbol(symbol)) {
+          setStatus('waiting')
+          return
+        }
+
         setStatus('loading')
       }
 
@@ -1855,6 +1904,14 @@ export default function EChartsCandlestickChart({
               candleMode,
               count: candles.length,
               status: 'loaded',
+            })
+
+            // Only after the selected main chart candles are ready do we warm up
+            // other symbols/timeframes in the background.
+            preloadPrimaryCandles(controller.signal, symbol, timeframe).catch((error: any) => {
+              if (error?.name !== 'AbortError') {
+                console.warn('Primary candle preload after main ready failed:', error)
+              }
             })
           }
         } else if (!cached || cached.length === 0) {
@@ -2086,7 +2143,7 @@ export default function EChartsCandlestickChart({
   // Status display rule:
   // If candles are visible, always show the candle count.
   // Background refreshes should never leave the badge stuck on "Refreshing"
-  // and should never keep a stale center "Loading candles..." label on the chart.
+  // and should never keep a stale center "Preparing selected candles..." label on the chart.
   const hasVisibleCandles = candles.length > 0
 
   const statusBadge = hasVisibleCandles
