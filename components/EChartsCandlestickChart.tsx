@@ -526,7 +526,8 @@ function buildChartOption({
     animation: false,
     grid: compact
       ? [
-          { left: 8, right: 8, top: 8, bottom: 20 },
+          // Mini charts remain one pane only, but now include price + time scales.
+          { left: 8, right: 48, top: 8, bottom: 30 },
         ]
       : [
           // Slider scrollbar removed. Keep a clean price pane + volume pane layout.
@@ -584,9 +585,15 @@ function buildChartOption({
             type: 'category',
             data: xAxisData,
             boundaryGap: true,
-            axisLabel: { show: false },
             axisLine: { lineStyle: { color: GRID } },
             axisTick: { show: false },
+            axisLabel: {
+              color: TEXT,
+              formatter: shortAxisLabel,
+              fontSize: 9,
+              margin: 8,
+              hideOverlap: true,
+            },
             splitLine: { show: false },
           },
         ]
@@ -619,10 +626,15 @@ function buildChartOption({
           {
             scale: true,
             position: 'right',
-            axisLabel: { show: false },
-            axisLine: { show: false },
+            axisLabel: {
+              show: true,
+              color: TEXT,
+              fontSize: 9,
+              margin: 8,
+            },
+            axisLine: { lineStyle: { color: GRID } },
             axisTick: { show: false },
-            splitLine: { show: false },
+            splitLine: { lineStyle: { color: GRID, opacity: 0.35 } },
           },
         ]
       : [
