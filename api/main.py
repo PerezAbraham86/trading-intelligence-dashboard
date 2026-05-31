@@ -1315,61 +1315,610 @@ def build_python_ghost_candles(candles: List[Dict[str, Any]], count: int = 3) ->
     return [ghost for ghost in ghosts if is_candle_valid_for_symbol({**ghost, "symbol": normalize_symbol(str(candles[-1].get("symbol") or ""))}, str(candles[-1].get("symbol") or ""))]
 
 
-def calculate_latest_sentiment(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
-    indicators: List[Dict[str, Any]] = []
-    if len(candles) < 20:
-        return {
-            "eventType": "PYTHON_TECHNICAL_SENTIMENT",
-            "status": "Waiting",
-            "sentiment": 50,
-            "sentimentStatus": "Neutral",
-            "bearCount": 0,
-            "neutralCount": 12,
-            "bullCount": 0,
-            "bearPct": 0,
-            "neutralPct": 100,
-            "bullPct": 0,
-            "activeCount": 12,
-            "indicators": [],
+# ─────────────────────────────────────────────────────────────────────────────
+# PYTHON-ONLY 12 INDICATOR TECHNICAL SENTIMENT ENGINE
+# Matches the TradingView meter concept without requiring a webhook.
+# ─────────────────────────────────────────────────────────────────────────────
+
+TECHNICAL_METER_NAMES = [
+    "RSI",
+    "Stochastic",
+    "Stoch RSI",
+    "CCI",
+    "Bull Bear Power",
+    "Momentum",
+    "Moving Average",
+    "VWAP",
+    "Bollinger Bands",
+    "Supertrend",
+    "Linear Regression",
+    "Market Structure",
+]
+
+
+def technical_empty_payload(status: str = "Waiting") -> Dict[str, Any]:
+    indicators = [
+        {
+            "name": name,
+            "value": 50,
+            "signal": "NEUTRAL",
+            "status": "NEUTRAL",
         }
-
-    closes = [to_float(c.get("close")) for c in candles]
-    last_close = closes[-1]
-    sma_fast = sum(closes[-10:]) / 10
-    sma_slow = sum(closes[-20:]) / 20
-    momentum = last_close - closes[-6]
-    ha = build_heikin_ashi_candles(candles)
-    ha_bull = to_float(ha[-1].get("close")) >= to_float(ha[-1].get("open"))
-
-    checks = [
-        ("SMA", last_close > sma_fast),
-        ("Structure", sma_fast > sma_slow),
-        ("Momentum", momentum > 0),
-        ("Heikin Ashi", ha_bull),
+        for name in TECHNICAL_METER_NAMES
     ]
 
-    bull = 0
-    bear = 0
-    for name, bullish in checks:
-        if bullish:
-            bull += 1
-            state = "BULLISH"
-            value = 70
-        else:
-            bear += 1
-            state = "BEARISH"
-            value = 30
-        indicators.append({"name": name, "status": state, "value": value})
+    return {
+        "eventType": "PYTHON_TECHNICAL_SENTIMENT",
+        "status": status,
+        "sentiment": 50,
+        "sentimentStatus": "Mostly Neutral",
+        "bearCount": 0,
+        "neutralCount": len(indicators),
+        "bullCount": 0,
+        "bearPct": 0,
+        "neutralPct": 100,
+        "bullPct": 0,
+        "activeCount": len(indicators),
+        "indicators": indicators,
+        "technicalIndicators": indicators,
+        "technicalMeter": indicators,
+    }
 
-    neutral = max(0, 12 - bull - bear)
-    active = bull + bear + neutral
-    sentiment = round(((bull + neutral * 0.5) / max(active, 1)) * 100, 2)
-    if sentiment >= 60:
-        status = "Mostly Bullish"
-    elif sentiment <= 40:
-        status = "Mostly Bearish"
+
+def classify_meter_value(value: float) -> str:
+    parsed = clamp(to_float(value, 50), 0, 100)
+    if parsed > 60:
+        return "BULLISH"
+    if parsed < 40:
+        return "BEARISH"
+    return "NEUTRAL"
+
+
+def interpolate_meter(value: float, value_high: float, value_low: float, range_high: float, range_low: float) -> float:
+    if value_high == value_low:
+        return range_low
+    return range_low + (value - value_low) * (range_high - range_low) / (value_high - value_low)
+
+
+def sma_values(values: List[float], length: int) -> List[Optional[float]]:
+    safe_length = max(int(length or 1), 1)
+    output: List[Optional[float]] = []
+
+    running_sum = 0.0
+    window: List[float] = []
+
+    for value in values:
+        window.append(to_float(value))
+        running_sum += to_float(value)
+
+        if len(window) > safe_length:
+            running_sum -= window.pop(0)
+
+        output.append(running_sum / safe_length if len(window) == safe_length else None)
+
+    return output
+
+
+def ema_values(values: List[float], length: int) -> List[Optional[float]]:
+    safe_length = max(int(length or 1), 1)
+    alpha = 2.0 / (safe_length + 1.0)
+    output: List[Optional[float]] = []
+    ema: Optional[float] = None
+
+    for value in values:
+        parsed = to_float(value)
+        ema = parsed if ema is None else (parsed * alpha) + (ema * (1.0 - alpha))
+        output.append(ema)
+
+    return output
+
+
+def rma_values(values: List[float], length: int) -> List[Optional[float]]:
+    safe_length = max(int(length or 1), 1)
+    alpha = 1.0 / safe_length
+    output: List[Optional[float]] = []
+    rma: Optional[float] = None
+
+    for value in values:
+        parsed = to_float(value)
+        rma = parsed if rma is None else (parsed * alpha) + (rma * (1.0 - alpha))
+        output.append(rma)
+
+    return output
+
+
+def stdev(values: List[float]) -> float:
+    cleaned = [to_float(v) for v in values if v is not None]
+    if not cleaned:
+        return 0.0
+    mean = sum(cleaned) / len(cleaned)
+    variance = sum((item - mean) ** 2 for item in cleaned) / len(cleaned)
+    return variance ** 0.5
+
+
+def rolling_dev(values: List[float], length: int) -> List[Optional[float]]:
+    safe_length = max(int(length or 1), 1)
+    output: List[Optional[float]] = []
+
+    for index in range(len(values)):
+        if index + 1 < safe_length:
+            output.append(None)
+            continue
+        output.append(stdev(values[index + 1 - safe_length:index + 1]))
+
+    return output
+
+
+def highest(values: List[float], length: int, index: int) -> Optional[float]:
+    safe_length = max(int(length or 1), 1)
+    if index + 1 < safe_length:
+        return None
+    window = values[index + 1 - safe_length:index + 1]
+    return max(window) if window else None
+
+
+def lowest(values: List[float], length: int, index: int) -> Optional[float]:
+    safe_length = max(int(length or 1), 1)
+    if index + 1 < safe_length:
+        return None
+    window = values[index + 1 - safe_length:index + 1]
+    return min(window) if window else None
+
+
+def rsi_series(values: List[float], length: int = 14) -> List[Optional[float]]:
+    safe_length = max(int(length or 1), 1)
+    if len(values) < 2:
+        return [None for _ in values]
+
+    gains: List[float] = [0.0]
+    losses: List[float] = [0.0]
+
+    for index in range(1, len(values)):
+        change = to_float(values[index]) - to_float(values[index - 1])
+        gains.append(max(change, 0.0))
+        losses.append(max(-change, 0.0))
+
+    avg_gain = rma_values(gains, safe_length)
+    avg_loss = rma_values(losses, safe_length)
+
+    output: List[Optional[float]] = []
+    for gain, loss in zip(avg_gain, avg_loss):
+        if gain is None or loss is None:
+            output.append(None)
+            continue
+        if loss == 0:
+            output.append(100.0)
+            continue
+        rs = gain / loss
+        output.append(100.0 - (100.0 / (1.0 + rs)))
+
+    return output
+
+
+def rsi_meter_value(rsi_value: Optional[float]) -> float:
+    r = clamp(to_float(rsi_value, 50), 0, 100)
+
+    if r > 70:
+        return clamp(interpolate_meter(r, 100, 70, 100, 75), 0, 100)
+    if r > 50:
+        return clamp(interpolate_meter(r, 70, 50, 75, 50), 0, 100)
+    if r > 30:
+        return clamp(interpolate_meter(r, 50, 30, 50, 25), 0, 100)
+    return clamp(interpolate_meter(r, 30, 0, 25, 0), 0, 100)
+
+
+def stochastic_values(highs: List[float], lows: List[float], closes: List[float], length: int = 14, smooth: int = 3) -> List[Optional[float]]:
+    raw: List[Optional[float]] = []
+
+    for index, close in enumerate(closes):
+        hi = highest(highs, length, index)
+        lo = lowest(lows, length, index)
+
+        if hi is None or lo is None or hi == lo:
+            raw.append(None)
+        else:
+            raw.append(clamp(((to_float(close) - lo) / (hi - lo)) * 100.0, 0, 100))
+
+    cleaned = [50.0 if item is None else to_float(item, 50) for item in raw]
+    smoothed = sma_values(cleaned, smooth)
+
+    return smoothed
+
+
+def stochastic_meter_value(stoch_value: Optional[float]) -> float:
+    s = clamp(to_float(stoch_value, 50), 0, 100)
+
+    if s > 80:
+        return clamp(interpolate_meter(s, 100, 80, 100, 75), 0, 100)
+    if s > 50:
+        return clamp(interpolate_meter(s, 80, 50, 75, 50), 0, 100)
+    if s > 20:
+        return clamp(interpolate_meter(s, 50, 20, 50, 25), 0, 100)
+    return clamp(interpolate_meter(s, 20, 0, 25, 0), 0, 100)
+
+
+def cci_series(source: List[float], length: int = 20) -> List[Optional[float]]:
+    ma = sma_values(source, length)
+    dev = rolling_dev(source, length)
+    output: List[Optional[float]] = []
+
+    for value, avg, deviation in zip(source, ma, dev):
+        if avg is None or deviation is None or deviation == 0:
+            output.append(None)
+            continue
+
+        output.append((to_float(value) - avg) / (0.015 * deviation))
+
+    return output
+
+
+def cci_meter_value(cci_value: Optional[float]) -> float:
+    c = to_float(cci_value, 0)
+
+    if c > 100:
+        return 100 if c > 300 else clamp(interpolate_meter(c, 300, 100, 100, 75), 0, 100)
+    if c >= 0:
+        return clamp(interpolate_meter(c, 100, 0, 75, 50), 0, 100)
+    if c < -100:
+        return 0 if c < -300 else clamp(interpolate_meter(c, -100, -300, 25, 0), 0, 100)
+    return clamp(interpolate_meter(c, 0, -100, 50, 25), 0, 100)
+
+
+def pine_like_normalize(buy_flags: List[bool], sell_flags: List[bool], closes: List[float], smooth: int = 3) -> float:
+    os_state = 0
+    max_price: Optional[float] = None
+    min_price: Optional[float] = None
+    raw_values: List[float] = []
+
+    for index, close in enumerate(closes):
+        buy = bool(buy_flags[index]) if index < len(buy_flags) else False
+        sell = bool(sell_flags[index]) if index < len(sell_flags) else False
+        previous_os = os_state
+        os_state = 1 if buy else -1 if sell else os_state
+
+        parsed_close = to_float(close)
+
+        if max_price is None:
+            max_price = parsed_close
+        if min_price is None:
+            min_price = parsed_close
+
+        if os_state > previous_os:
+            max_price = parsed_close
+        elif os_state < previous_os:
+            max_price = max_price
+        else:
+            max_price = max(parsed_close, max_price)
+
+        if os_state < previous_os:
+            min_price = parsed_close
+        elif os_state > previous_os:
+            min_price = min_price
+        else:
+            min_price = min(parsed_close, min_price)
+
+        if max_price == min_price:
+            raw_values.append(50.0)
+        else:
+            raw_values.append(clamp(((parsed_close - min_price) / (max_price - min_price)) * 100.0, 0, 100))
+
+    smooth_values = sma_values(raw_values, max(int(smooth or 1), 1))
+    last = next((item for item in reversed(smooth_values) if item is not None), raw_values[-1] if raw_values else 50)
+    return clamp(to_float(last, 50), 0, 100)
+
+
+def moving_average_series(values: List[float], length: int = 20, ma_type: str = "SMA") -> List[Optional[float]]:
+    ma = ma_type.upper()
+    if ma == "EMA":
+        return ema_values(values, length)
+    if ma == "RMA":
+        return rma_values(values, length)
+
+    # Dashboard default mirrors Pine default: SMA.
+    return sma_values(values, length)
+
+
+def atr_series(highs: List[float], lows: List[float], closes: List[float], length: int = 10) -> List[Optional[float]]:
+    true_ranges: List[float] = []
+
+    for index in range(len(closes)):
+        high = to_float(highs[index])
+        low = to_float(lows[index])
+        previous_close = to_float(closes[index - 1]) if index > 0 else to_float(closes[index])
+        true_ranges.append(max(high - low, abs(high - previous_close), abs(low - previous_close)))
+
+    return rma_values(true_ranges, length)
+
+
+def supertrend_values(highs: List[float], lows: List[float], closes: List[float], period: int = 10, factor: float = 3.0) -> List[Optional[float]]:
+    atr = atr_series(highs, lows, closes, period)
+    final_upper: Optional[float] = None
+    final_lower: Optional[float] = None
+    direction = 1
+    output: List[Optional[float]] = []
+
+    for index in range(len(closes)):
+        if atr[index] is None:
+            output.append(None)
+            continue
+
+        hl2 = (to_float(highs[index]) + to_float(lows[index])) / 2.0
+        basic_upper = hl2 + factor * to_float(atr[index])
+        basic_lower = hl2 - factor * to_float(atr[index])
+        previous_close = to_float(closes[index - 1]) if index > 0 else to_float(closes[index])
+
+        if final_upper is None:
+            final_upper = basic_upper
+        else:
+            final_upper = basic_upper if basic_upper < final_upper or previous_close > final_upper else final_upper
+
+        if final_lower is None:
+            final_lower = basic_lower
+        else:
+            final_lower = basic_lower if basic_lower > final_lower or previous_close < final_lower else final_lower
+
+        close = to_float(closes[index])
+        if direction == -1 and close > final_upper:
+            direction = 1
+        elif direction == 1 and close < final_lower:
+            direction = -1
+
+        output.append(final_lower if direction == 1 else final_upper)
+
+    return output
+
+
+def correlation_with_index(values: List[float], length: int = 25) -> float:
+    safe_length = max(int(length or 1), 2)
+    if len(values) < safe_length:
+        return 50.0
+
+    y = [to_float(item) for item in values[-safe_length:]]
+    x = list(range(safe_length))
+
+    x_mean = sum(x) / safe_length
+    y_mean = sum(y) / safe_length
+
+    numerator = sum((x_item - x_mean) * (y_item - y_mean) for x_item, y_item in zip(x, y))
+    x_var = sum((x_item - x_mean) ** 2 for x_item in x)
+    y_var = sum((y_item - y_mean) ** 2 for y_item in y)
+
+    if x_var <= 0 or y_var <= 0:
+        return 50.0
+
+    corr = numerator / ((x_var ** 0.5) * (y_var ** 0.5))
+    return clamp(50.0 * corr + 50.0, 0, 100)
+
+
+def market_structure_meter_value(highs: List[float], lows: List[float], closes: List[float], length: int = 5, smooth: int = 3) -> float:
+    pivot_highs: List[Optional[float]] = [None for _ in closes]
+    pivot_lows: List[Optional[float]] = [None for _ in closes]
+
+    for index in range(length, len(closes) - length):
+        high_window = highs[index - length:index + length + 1]
+        low_window = lows[index - length:index + length + 1]
+
+        if highs[index] == max(high_window):
+            pivot_highs[index] = highs[index]
+        if lows[index] == min(low_window):
+            pivot_lows[index] = lows[index]
+
+    last_ph: Optional[float] = None
+    last_pl: Optional[float] = None
+    ph_cross = False
+    pl_cross = False
+    buy_flags: List[bool] = []
+    sell_flags: List[bool] = []
+
+    for index, close in enumerate(closes):
+        if pivot_highs[index] is not None:
+            last_ph = pivot_highs[index]
+            ph_cross = False
+        if pivot_lows[index] is not None:
+            last_pl = pivot_lows[index]
+            pl_cross = False
+
+        bull = last_ph is not None and to_float(close) > last_ph and not ph_cross
+        bear = last_pl is not None and to_float(close) < last_pl and not pl_cross
+
+        if bull:
+            ph_cross = True
+        if bear:
+            pl_cross = True
+
+        buy_flags.append(bool(bull))
+        sell_flags.append(bool(bear))
+
+    return pine_like_normalize(buy_flags, sell_flags, closes, smooth)
+
+
+def latest_valid(values: List[Optional[float]], fallback: float = 50.0) -> float:
+    for value in reversed(values):
+        if value is not None:
+            return to_float(value, fallback)
+    return fallback
+
+
+def build_meter_indicator(name: str, value: float) -> Dict[str, Any]:
+    rounded = round(clamp(value, 0, 100), 2)
+    signal = classify_meter_value(rounded)
+    return {
+        "name": name,
+        "value": rounded,
+        "signal": signal,
+        "status": signal,
+    }
+
+
+def calculate_latest_sentiment(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if len(candles) < 30:
+        return technical_empty_payload("Waiting")
+
+    opens = [to_float(c.get("open")) for c in candles]
+    highs = [to_float(c.get("high")) for c in candles]
+    lows = [to_float(c.get("low")) for c in candles]
+    closes = [to_float(c.get("close")) for c in candles]
+    volumes = [max(to_float(c.get("volume")), 0.0) for c in candles]
+    hlc3 = [(h + l + c) / 3.0 for h, l, c in zip(highs, lows, closes)]
+
+    if not closes or closes[-1] <= 0:
+        return technical_empty_payload("Waiting")
+
+    norm_smooth = 3
+
+    # 1. RSI
+    rsi_value = rsi_meter_value(latest_valid(rsi_series(closes, 14)))
+
+    # 2. Stochastic
+    stoch_value = stochastic_meter_value(latest_valid(stochastic_values(highs, lows, closes, 14, 3)))
+
+    # 3. Stoch RSI
+    rsi_for_stoch = [50.0 if item is None else to_float(item, 50) for item in rsi_series(closes, 14)]
+    stoch_rsi_raw: List[Optional[float]] = []
+    for index, rsi_item in enumerate(rsi_for_stoch):
+        hi = highest(rsi_for_stoch, 14, index)
+        lo = lowest(rsi_for_stoch, 14, index)
+        if hi is None or lo is None or hi == lo:
+            stoch_rsi_raw.append(None)
+        else:
+            stoch_rsi_raw.append(clamp(((rsi_item - lo) / (hi - lo)) * 100.0, 0, 100))
+    stoch_rsi_smoothed = sma_values([50.0 if item is None else item for item in stoch_rsi_raw], 3)
+    stoch_rsi_value = stochastic_meter_value(latest_valid(stoch_rsi_smoothed))
+
+    # 4. CCI
+    cci_value = cci_meter_value(latest_valid(cci_series(hlc3, 20), 0))
+
+    # 5. Bull Bear Power
+    ema_13 = ema_values(closes, 13)
+    bbp_series = [
+        (highs[index] + lows[index] - 2.0 * to_float(ema_13[index], closes[index]))
+        for index in range(len(closes))
+    ]
+    bbp_ma = sma_values(bbp_series, 100)
+    bbp_dev = rolling_dev(bbp_series, 100)
+    latest_bbp = bbp_series[-1]
+    latest_bbp_ma = latest_valid(bbp_ma, 0)
+    latest_bbp_dev = latest_valid(bbp_dev, 0)
+    upper = latest_bbp_ma + 2.0 * latest_bbp_dev
+    lower = latest_bbp_ma - 2.0 * latest_bbp_dev
+    if latest_bbp_dev <= 0:
+        bbp_value = 50.0
+    elif latest_bbp > upper:
+        bbp_value = 100.0 if latest_bbp > 1.5 * upper else clamp(interpolate_meter(latest_bbp, 1.5 * upper, upper, 100, 75), 0, 100)
+    elif latest_bbp > 0:
+        bbp_value = clamp(interpolate_meter(latest_bbp, upper, 0, 75, 50), 0, 100)
+    elif latest_bbp < lower:
+        bbp_value = 0.0 if latest_bbp < 1.5 * lower else clamp(interpolate_meter(latest_bbp, lower, 1.5 * lower, 25, 0), 0, 100)
     else:
+        bbp_value = clamp(interpolate_meter(latest_bbp, 0, lower, 50, 25), 0, 100)
+
+    # 6. Momentum
+    momentum_length = 10
+    momentum_series = [
+        closes[index] - closes[index - momentum_length] if index >= momentum_length else 0.0
+        for index in range(len(closes))
+    ]
+    momentum_value = pine_like_normalize(
+        [item > 0 for item in momentum_series],
+        [item < 0 for item in momentum_series],
+        closes,
+        norm_smooth,
+    )
+
+    # 7. Moving Average
+    ma_20 = moving_average_series(closes, 20, "SMA")
+    ma_value = pine_like_normalize(
+        [closes[index] > to_float(ma_20[index], closes[index]) for index in range(len(closes))],
+        [closes[index] < to_float(ma_20[index], closes[index]) for index in range(len(closes))],
+        closes,
+        norm_smooth,
+    )
+
+    # 8. VWAP bands
+    cumulative_price_volume = 0.0
+    cumulative_volume = 0.0
+    vwap_values: List[float] = []
+    for typical, volume in zip(hlc3, volumes):
+        safe_volume = volume if volume > 0 else 1.0
+        cumulative_price_volume += typical * safe_volume
+        cumulative_volume += safe_volume
+        vwap_values.append(cumulative_price_volume / max(cumulative_volume, 1.0))
+
+    vwap_basis = vwap_values[-1]
+    vwap_dev = stdev([typical - vwap for typical, vwap in zip(hlc3[-100:], vwap_values[-100:])])
+    vwap_upper = vwap_basis + 2.0 * vwap_dev
+    vwap_lower = vwap_basis - 2.0 * vwap_dev
+    vwap_value = pine_like_normalize(
+        [close > vwap_upper for close in closes],
+        [close < vwap_lower for close in closes],
+        closes,
+        norm_smooth,
+    )
+
+    # 9. Bollinger Bands
+    bb_basis = moving_average_series(closes, 20, "SMA")
+    bb_dev = rolling_dev(closes, 20)
+    bb_value = pine_like_normalize(
+        [
+            closes[index] > to_float(bb_basis[index], closes[index]) + 2.0 * to_float(bb_dev[index], 0)
+            for index in range(len(closes))
+        ],
+        [
+            closes[index] < to_float(bb_basis[index], closes[index]) - 2.0 * to_float(bb_dev[index], 0)
+            for index in range(len(closes))
+        ],
+        closes,
+        norm_smooth,
+    )
+
+    # 10. Supertrend
+    st_values = supertrend_values(highs, lows, closes, 10, 3.0)
+    st_value = pine_like_normalize(
+        [closes[index] > to_float(st_values[index], closes[index]) for index in range(len(closes))],
+        [closes[index] < to_float(st_values[index], closes[index]) for index in range(len(closes))],
+        closes,
+        norm_smooth,
+    )
+
+    # 11. Linear Regression
+    reg_value = correlation_with_index(closes, 25)
+
+    # 12. Market Structure
+    ms_value = market_structure_meter_value(highs, lows, closes, 5, norm_smooth)
+
+    indicators = [
+        build_meter_indicator("RSI", rsi_value),
+        build_meter_indicator("Stochastic", stoch_value),
+        build_meter_indicator("Stoch RSI", stoch_rsi_value),
+        build_meter_indicator("CCI", cci_value),
+        build_meter_indicator("Bull Bear Power", bbp_value),
+        build_meter_indicator("Momentum", momentum_value),
+        build_meter_indicator("Moving Average", ma_value),
+        build_meter_indicator("VWAP", vwap_value),
+        build_meter_indicator("Bollinger Bands", bb_value),
+        build_meter_indicator("Supertrend", st_value),
+        build_meter_indicator("Linear Regression", reg_value),
+        build_meter_indicator("Market Structure", ms_value),
+    ]
+
+    bull = sum(1 for item in indicators if item["signal"] == "BULLISH")
+    bear = sum(1 for item in indicators if item["signal"] == "BEARISH")
+    neutral = sum(1 for item in indicators if item["signal"] == "NEUTRAL")
+    active = len(indicators)
+    sentiment = round(sum(to_float(item["value"], 50) for item in indicators) / max(active, 1), 2)
+
+    if bull > bear and bull > neutral:
+        status = "Strong Bullish" if (bull / max(active, 1)) * 100 >= 70 else "Mostly Bullish"
+    elif bear > bull and bear > neutral:
+        status = "Strong Bearish" if (bear / max(active, 1)) * 100 >= 70 else "Mostly Bearish"
+    elif neutral > bull and neutral > bear:
         status = "Mostly Neutral"
+    elif sentiment > 60:
+        status = "Bullish Lean"
+    elif sentiment < 40:
+        status = "Bearish Lean"
+    else:
+        status = "Mixed"
 
     return {
         "eventType": "PYTHON_TECHNICAL_SENTIMENT",
@@ -1384,6 +1933,8 @@ def calculate_latest_sentiment(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
         "bullPct": round((bull / max(active, 1)) * 100, 2),
         "activeCount": active,
         "indicators": indicators,
+        "technicalIndicators": indicators,
+        "technicalMeter": indicators,
     }
 
 
@@ -1409,7 +1960,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v9_live_price_tick_updates",
+        "engine": "main_v10_python_12_indicator_sentiment",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
