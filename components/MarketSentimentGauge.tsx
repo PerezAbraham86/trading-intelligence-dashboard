@@ -635,15 +635,17 @@ export default function MarketSentimentGauge({
     apiTechnicalIndicators.length > 0
 
   // HARD RULE:
-  // If app/page.tsx provides technicalSentiment from FactorConfirmationTable,
-  // use that exact indicator object so Market Sentiment and Factor Confirmation stay synced.
+  // Market Sentiment is now the only place that displays the 12-indicator
+  // Python technical meter. Prefer the direct /api/latest-sentiment payload
+  // so this component does not depend on Factor Confirmation and does not
+  // duplicate the technical meter anywhere else.
   const bestTechnicalSentiment =
-    sharedTechnicalIndicators.length > 0
-      ? sharedTechnicalSentiment
-      : apiHasTechnicalSentiment
-        ? apiSentiment
-        : engineTechnicalIndicators.length > 0
-          ? engineSentiment
+    apiHasTechnicalSentiment
+      ? apiSentiment
+      : engineTechnicalIndicators.length > 0
+        ? engineSentiment
+        : sharedTechnicalIndicators.length > 0
+          ? sharedTechnicalSentiment
           : signalTechnicalIndicators.length > 0
             ? signalTechnicalSentiment
             : null
