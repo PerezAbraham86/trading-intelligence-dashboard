@@ -3249,6 +3249,7 @@ def build_python_dashboard_signal(symbol: str = "BTCUSD", timeframe: str = "1m",
     overlays = build_python_chart_overlays(candles, ghosts)
     scorecards = analyze_python_core_scorecards(candles, sentiment, ghosts, overlays)
     fred_macro = build_fred_macro_context()
+    options_pressure = build_options_pressure_context(normalized_symbol)
     price = to_float(candles[-1].get("close")) if candles else 0
 
     status = "Live Snapshot" if candles else "Waiting"
@@ -3296,6 +3297,19 @@ def build_python_dashboard_signal(symbol: str = "BTCUSD", timeframe: str = "1m",
         "macroRisk": fred_macro.get("risk", 35),
         "fredMacroNotes": fred_macro.get("notes", []),
         "fredMacroData": fred_macro,
+        "optionsFlow": options_pressure.get("label", "Options Flow Inactive"),
+        "optionsFlowStrength": options_pressure.get("strength", 0),
+        "optionsFlowDirection": options_pressure.get("direction", "inactive"),
+        "optionsPressure": options_pressure,
+        "optionsBullPressure": options_pressure.get("bullPressure", 0),
+        "optionsBearPressure": options_pressure.get("bearPressure", 0),
+        "putCallRatio": options_pressure.get("putCallRatio"),
+        "putCallBias": options_pressure.get("label", "Options Flow Inactive"),
+        "unusualOptionsVolume": options_pressure.get("unusualVolume", 0),
+        "gammaRisk": options_pressure.get("gammaRisk", 0),
+        "dealerPinZone": options_pressure.get("dealerPinZone"),
+        "optionsConflictRisk": options_pressure.get("conflictRisk", 0),
+        "optionsReversalRisk": options_pressure.get("reversalRisk", 0),
         "finraShortVolume": "Inactive",
         "cot": "Inactive",
         "warnings": [],
@@ -3471,6 +3485,280 @@ def build_fred_macro_context() -> Dict[str, Any]:
     FRED_MACRO_CACHE["payload"] = payload
     return payload
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PYTHON-ONLY OPTIONS PRESSURE CONTEXT
+# Uses Alpha Vantage if ALPHA_VANTAGE_API_KEY is configured.
+# No webhook. Designed first for SPY / ES / MES options pressure.
+# ─────────────────────────────────────────────────────────────────────────────
+
+OPTIONS_PRESSURE_CACHE: Dict[str, Any] = {}
+
+
+def map_symbol_to_options_underlying(symbol: str) -> str:
+    normalized = normalize_symbol(symbol)
+    if normalized in {"MES1!", "MES1", "ES1!", "ES1", "ES", "MES", "SPX", "SPX500"}:
+        return "SPY"
+    if normalized in {"NQ1!", "NQ1", "NQ", "MNQ"}:
+        return "QQQ"
+    if normalized in {"RTY1!", "RTY1", "RTY", "M2K"}:
+        return "IWM"
+    if normalized in {"BTCUSD", "BTCUSDT", "ETHUSD", "ETHUSDT"}:
+        return ""
+    return normalized.replace("!", "")
+
+
+def normalize_option_type(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"call", "calls", "c"}:
+        return "call"
+    if text in {"put", "puts", "p"}:
+        return "put"
+    return ""
+
+
+def parse_alpha_vantage_option_rows(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not isinstance(data, dict):
+        return []
+
+    candidates: List[Any] = []
+
+    for key in ["data", "options", "option_chain", "optionChain", "contracts"]:
+        value = data.get(key)
+        if isinstance(value, list):
+            candidates = value
+            break
+
+    if not candidates:
+        for value in data.values():
+            if isinstance(value, list) and value and isinstance(value[0], dict):
+                candidates = value
+                break
+
+    rows: List[Dict[str, Any]] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+
+        option_type = normalize_option_type(
+            item.get("type") or item.get("contractType") or item.get("option_type") or item.get("put_call")
+        )
+        volume = max(to_float(item.get("volume") or item.get("vol"), 0), 0)
+        open_interest = max(to_float(item.get("open_interest") or item.get("openInterest") or item.get("oi"), 0), 0)
+        strike = to_float(item.get("strike"), 0)
+        gamma = to_float(item.get("gamma"), 0)
+        delta = to_float(item.get("delta"), 0)
+        implied_volatility = to_float(item.get("implied_volatility") or item.get("impliedVolatility") or item.get("iv"), 0)
+        expiration = str(item.get("expiration") or item.get("expiration_date") or item.get("expiry") or "")
+
+        if option_type not in {"call", "put"}:
+            symbol_text = str(item.get("contractID") or item.get("symbol") or "").upper()
+            if "C" in symbol_text[-9:]:
+                option_type = "call"
+            elif "P" in symbol_text[-9:]:
+                option_type = "put"
+
+        if option_type not in {"call", "put"}:
+            continue
+
+        rows.append({
+            "type": option_type,
+            "volume": volume,
+            "openInterest": open_interest,
+            "strike": strike,
+            "gamma": gamma,
+            "delta": delta,
+            "iv": implied_volatility,
+            "expiration": expiration,
+        })
+
+    return rows
+
+
+def fetch_alpha_vantage_options_chain(underlying: str) -> Dict[str, Any]:
+    api_key = os.getenv("ALPHA_VANTAGE_API_KEY", "").strip()
+    if not api_key or not underlying:
+        return {
+            "ok": False,
+            "reason": "missing_alpha_vantage_key_or_underlying",
+            "rows": [],
+        }
+
+    params = urlencode({
+        "function": "REALTIME_OPTIONS",
+        "symbol": underlying,
+        "apikey": api_key,
+    })
+
+    url = f"https://www.alphavantage.co/query?{params}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; MARKETBOS-Dashboard/1.0)",
+        "Accept": "application/json",
+    }
+
+    data = http_get_json_or_none(url, headers=headers, provider="Alpha Vantage realtime options")
+    if not isinstance(data, dict):
+        return {
+            "ok": False,
+            "reason": "no_response",
+            "rows": [],
+        }
+
+    if "Information" in data or "Note" in data or "Error Message" in data:
+        return {
+            "ok": False,
+            "reason": str(data.get("Information") or data.get("Note") or data.get("Error Message")),
+            "rows": [],
+            "rawMeta": {key: data.get(key) for key in ["Information", "Note", "Error Message"] if key in data},
+        }
+
+    rows = parse_alpha_vantage_option_rows(data)
+    return {
+        "ok": bool(rows),
+        "reason": "ok" if rows else "empty_options_rows",
+        "rows": rows,
+    }
+
+
+def build_options_pressure_context(symbol: str, underlying_override: str = "") -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    underlying = underlying_override.strip().upper() if underlying_override else map_symbol_to_options_underlying(normalized_symbol)
+
+    if not underlying:
+        return {
+            "label": "Options Flow Inactive",
+            "direction": "inactive",
+            "status": "INACTIVE",
+            "strength": 0,
+            "risk": 0,
+            "underlying": "",
+            "putCallRatio": None,
+            "volumeToOpenInterest": None,
+            "unusualVolume": 0,
+            "gammaRisk": 0,
+            "dealerPinZone": None,
+            "bullPressure": 0,
+            "bearPressure": 0,
+            "conflictRisk": 0,
+            "reversalRisk": 0,
+            "reason": "options_not_applicable_for_symbol",
+            "source": "alpha_vantage_realtime_options",
+        }
+
+    cache_key = underlying
+    cached = OPTIONS_PRESSURE_CACHE.get(cache_key)
+    try:
+        if cached:
+            cached_dt = datetime.fromisoformat(str(cached.get("createdAt")).replace("Z", "+00:00"))
+            if (datetime.now(timezone.utc) - cached_dt).total_seconds() < 300:
+                return cached
+    except Exception:
+        pass
+
+    chain = fetch_alpha_vantage_options_chain(underlying)
+    rows = chain.get("rows", []) if isinstance(chain, dict) else []
+
+    if not rows:
+        payload = {
+            "label": "Options Flow Inactive",
+            "direction": "inactive",
+            "status": "INACTIVE",
+            "strength": 0,
+            "risk": 35 if underlying else 0,
+            "underlying": underlying,
+            "putCallRatio": None,
+            "volumeToOpenInterest": None,
+            "unusualVolume": 0,
+            "gammaRisk": 0,
+            "dealerPinZone": None,
+            "bullPressure": 0,
+            "bearPressure": 0,
+            "conflictRisk": 0,
+            "reversalRisk": 0,
+            "reason": chain.get("reason", "options_unavailable") if isinstance(chain, dict) else "options_unavailable",
+            "source": "alpha_vantage_realtime_options",
+            "createdAt": now_iso(),
+        }
+        OPTIONS_PRESSURE_CACHE[cache_key] = payload
+        return payload
+
+    call_volume = sum(to_float(row.get("volume"), 0) for row in rows if row.get("type") == "call")
+    put_volume = sum(to_float(row.get("volume"), 0) for row in rows if row.get("type") == "put")
+    call_oi = sum(to_float(row.get("openInterest"), 0) for row in rows if row.get("type") == "call")
+    put_oi = sum(to_float(row.get("openInterest"), 0) for row in rows if row.get("type") == "put")
+    total_volume = call_volume + put_volume
+    total_oi = call_oi + put_oi
+
+    put_call_ratio = put_volume / max(call_volume, 1.0)
+    volume_to_oi = total_volume / max(total_oi, 1.0)
+
+    unusual_volume = clamp(volume_to_oi * 100.0, 0, 100)
+    gamma_rows = [row for row in rows if to_float(row.get("gamma"), 0) > 0 and to_float(row.get("openInterest"), 0) > 0]
+    gamma_exposure = sum(abs(to_float(row.get("gamma"), 0)) * to_float(row.get("openInterest"), 0) for row in gamma_rows)
+    gamma_risk = clamp(gamma_exposure / max(total_oi, 1.0) * 2500.0, 0, 100)
+
+    # Dealer pin approximation: highest total open interest strike.
+    strike_oi: Dict[float, float] = {}
+    for row in rows:
+        strike = to_float(row.get("strike"), 0)
+        if strike <= 0:
+            continue
+        strike_oi[strike] = strike_oi.get(strike, 0.0) + to_float(row.get("openInterest"), 0)
+
+    dealer_pin_zone = None
+    if strike_oi:
+        dealer_pin_zone = max(strike_oi.items(), key=lambda item: item[1])[0]
+
+    call_share = call_volume / max(total_volume, 1.0) * 100.0
+    put_share = put_volume / max(total_volume, 1.0) * 100.0
+
+    bull_pressure = clamp(call_share + max(0, 1.0 - put_call_ratio) * 12.0, 0, 100)
+    bear_pressure = clamp(put_share + max(0, put_call_ratio - 1.0) * 12.0, 0, 100)
+
+    if put_call_ratio >= 1.15:
+        direction = "bearish"
+        label = "Bearish Options Flow"
+        strength = bear_pressure
+    elif put_call_ratio <= 0.85:
+        direction = "bullish"
+        label = "Bullish Options Flow"
+        strength = bull_pressure
+    else:
+        direction = "active"
+        label = "Balanced Options Flow"
+        strength = max(bull_pressure, bear_pressure, 40)
+
+    conflict_risk = clamp(abs(bull_pressure - bear_pressure) < 12 and total_volume > 0 and unusual_volume > 25 and gamma_risk > 35 and 55 or 0)
+    reversal_risk = clamp(max(unusual_volume * 0.55, gamma_risk * 0.75, 35 if 0.85 < put_call_ratio < 1.15 else 0), 0, 100)
+
+    payload = {
+        "label": label,
+        "direction": direction,
+        "status": "ACTIVE",
+        "strength": round(strength),
+        "risk": round(max(gamma_risk, reversal_risk * 0.7)),
+        "underlying": underlying,
+        "putCallRatio": round(put_call_ratio, 3),
+        "volumeToOpenInterest": round(volume_to_oi, 4),
+        "unusualVolume": round(unusual_volume),
+        "gammaRisk": round(gamma_risk),
+        "dealerPinZone": round(dealer_pin_zone, 2) if dealer_pin_zone is not None else None,
+        "callVolume": round(call_volume),
+        "putVolume": round(put_volume),
+        "callOpenInterest": round(call_oi),
+        "putOpenInterest": round(put_oi),
+        "bullPressure": round(bull_pressure),
+        "bearPressure": round(bear_pressure),
+        "conflictRisk": round(conflict_risk),
+        "reversalRisk": round(reversal_risk),
+        "reason": "ok",
+        "source": "alpha_vantage_realtime_options",
+        "createdAt": now_iso(),
+    }
+
+    OPTIONS_PRESSURE_CACHE[cache_key] = payload
+    return payload
+
 # ─────────────────────────────────────────────────────────────────────────────
 # BASIC ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3480,6 +3768,12 @@ def build_fred_macro_context() -> Dict[str, Any]:
 
 
 
+
+
+
+@app.get("/api/options-pressure")
+def options_pressure(symbol: str = "SPY", underlying: str = "") -> Dict[str, Any]:
+    return build_options_pressure_context(symbol, underlying)
 
 @app.get("/api/fred-macro")
 def fred_macro() -> Dict[str, Any]:
@@ -3498,7 +3792,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v19_fred_macro_linked",
+        "engine": "main_v20_options_pressure_linked",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
