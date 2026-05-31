@@ -63,7 +63,7 @@ const inflightCandleRequests = new Map<string, Promise<Candle[]>>()
 
 const timeframeOptions = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1D']
 const candleModeOptions: CandleMode[] = ['Regular', 'Heikin Ashi']
-const symbolOptions = ['BTCUSD', 'ETHUSD', 'SPY', 'ES1!', 'MES1!']
+const symbolOptions = ['BTCUSD', 'MES1!']
 
 function normalizeSymbol(value: any): string {
   return String(value ?? '')
@@ -613,8 +613,8 @@ function buildChartOption({
           { left: 8, right: 8, top: 8, bottom: 20 },
         ]
       : [
-          { left: 58, right: 24, top: 44, bottom: 98 },
-          { left: 58, right: 24, height: 46, bottom: 34 },
+          { left: 58, right: 72, top: 44, bottom: 98 },
+          { left: 58, right: 72, height: 46, bottom: 34 },
         ],
     title: compact
       ? undefined
@@ -712,7 +712,7 @@ function buildChartOption({
           {
             scale: true,
             position: 'right',
-            axisLabel: { color: TEXT },
+            axisLabel: { color: TEXT, margin: 14 },
             axisLine: { lineStyle: { color: GRID } },
             splitLine: { lineStyle: { color: GRID, opacity: 0.55 } },
           },
@@ -757,22 +757,29 @@ function buildChartOption({
             textStyle: { color: TEXT },
           },
         ],
-    graphic:
-      activeCandles.length === 0
-        ? [
-            {
-              type: 'text',
-              left: 'center',
-              top: 'middle',
-              style: {
-                text: loading ? 'Loading candles...' : 'No candles loaded',
-                fill: '#9ca3af',
-                fontSize: compact ? 11 : 14,
-                fontWeight: 700,
-              },
-            },
-          ]
-        : [],
+    // Keep one stable graphic element so old "Loading candles..." text is actively hidden
+    // after cached or loaded candles are visible. This prevents ECharts/zrender from
+    // keeping a stale loading overlay when setOption uses lazy merged updates.
+    graphic: [
+      {
+        id: 'empty-state-text',
+        type: 'text',
+        left: 'center',
+        top: 'middle',
+        silent: true,
+        invisible: activeCandles.length > 0,
+        style: {
+          text: activeCandles.length === 0
+            ? loading
+              ? 'Loading candles...'
+              : 'No candles loaded'
+            : '',
+          fill: '#9ca3af',
+          fontSize: compact ? 11 : 14,
+          fontWeight: 700,
+        },
+      },
+    ],
     series: compact
       ? [
           {
@@ -849,7 +856,7 @@ export default function EChartsCandlestickChart({
   const [historicalCandles, setHistoricalCandles] = useState<Candle[]>([])
   const [status, setStatus] = useState<'idle' | 'loading' | 'cached' | 'loaded' | 'empty' | 'error'>('idle')
 
-  const candleFetchLimit = compact ? '500' : '1500'
+  const candleFetchLimit = compact ? '300' : '1500'
 
   const handleSymbolChange = (value: string) => {
     if (lockSymbolToDefault) return
@@ -966,12 +973,13 @@ export default function EChartsCandlestickChart({
       candleMode,
       candles,
       compact,
-      loading: status === 'loading',
+      loading: status === 'loading' && candles.length === 0,
     })
 
     chartInstance.current.setOption(option, {
       notMerge: false,
       lazyUpdate: true,
+      replaceMerge: ['graphic'],
     })
 
     const resize = () => chartInstance.current?.resize()
