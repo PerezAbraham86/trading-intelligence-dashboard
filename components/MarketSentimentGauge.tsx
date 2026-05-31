@@ -729,26 +729,6 @@ export default function MarketSentimentGauge({
               className="transition-all duration-500"
             />
 
-            {/* Angular end caps to match the TradingView meter style */}
-            <line
-              x1="45"
-              y1="150"
-              x2="52"
-              y2="121"
-              stroke={value <= 40 ? '#ff2d55' : 'rgba(255,255,255,0.15)'}
-              strokeWidth="7"
-              strokeLinecap="butt"
-            />
-            <line
-              x1="275"
-              y1="150"
-              x2="268"
-              y2="121"
-              stroke={value > 60 ? '#3b82f6' : 'rgba(255,255,255,0.15)'}
-              strokeWidth="7"
-              strokeLinecap="butt"
-            />
-
             {/* Labels only around the arc, never over the center status text */}
             <text
               x="14"
