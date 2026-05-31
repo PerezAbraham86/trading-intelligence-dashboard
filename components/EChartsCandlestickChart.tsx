@@ -1274,6 +1274,7 @@ function buildChartOption({
   compact,
   loading,
   chartOverlays,
+  overlayToggles = DEFAULT_OVERLAY_TOGGLES,
 }: {
   symbol: string
   timeframe: string
@@ -1282,6 +1283,7 @@ function buildChartOption({
   compact: boolean
   loading: boolean
   chartOverlays?: ChartOverlays | null
+  overlayToggles?: OverlayToggles
 }): any {
   const activeCandles = candleMode === 'Heikin Ashi' ? convertToHeikinAshi(candles) : candles
   const latestRealClose = candles.length > 0 ? Number(candles[candles.length - 1].close) : NaN
