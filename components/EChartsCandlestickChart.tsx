@@ -6,7 +6,7 @@ import * as echarts from 'echarts'
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
 const DEFAULT_VISIBLE_CANDLES = 120
 const CACHE_TTL_MS = 1000 * 60 * 5
-const LOCAL_STORAGE_PREFIX = 'marketbos:candles:'
+const LOCAL_STORAGE_PREFIX = 'marketbos:v2:clean-candles:'
 
 const GREEN = '#26a69a'
 const RED = '#ef5350'
@@ -60,6 +60,7 @@ type CachedCandles = {
 
 // Shared across every chart instance on the page.
 // One network request per symbol + timeframe; every chart reuses the same stored 500 candles.
+// Cache key intentionally ignores chart size so main + mini charts share the exact same candles.
 const memoryCandleCache = new Map<string, CachedCandles>()
 const inflightCandleRequests = new Map<string, Promise<Candle[]>>()
 
@@ -453,12 +454,11 @@ async function fetchCandlesFromNetwork(
   limit: string,
   signal?: AbortSignal
 ): Promise<Candle[]> {
+  // Clean candle route only:
+  // BTCUSD and MES1! now both use the same frontend path.
+  // Provider differences are handled in api/main.py, not by browser fallback loops.
   const endpoints = [
     '/api/historical-candles',
-    '/api/candles',
-    '/api/recent-candles',
-    '/api/live-candle',
-    '/api/provider-debug',
   ]
 
   for (const path of endpoints) {
