@@ -767,20 +767,17 @@ def fetch_insightsentry_historical_candles(symbol: str, timeframe: str = "1m", l
 
 def alpaca_start_time_for_limit(timeframe: str, limit: int) -> str:
     """
-    Alpaca crypto can return fewer bars if no start window is supplied.
-    Use a wide enough UTC start window so BTCUSD returns close to the requested
-    500 candles for every dashboard timeframe.
+    Use a wide UTC lookback window so Alpaca has enough history to return the
+    requested candle count. The request itself must still be sorted descending
+    and end at now, otherwise Alpaca returns the first candles after start.
     """
     tf = normalize_timeframe(timeframe)
     safe_limit = max(1, min(int(limit or 500), 5000))
     seconds = timeframe_seconds(tf)
 
-    # Need at least limit * timeframe seconds, plus a provider/session buffer.
-    # Crypto trades 24/7, but the buffer helps avoid short pages and provider gaps.
     required_seconds = safe_limit * max(seconds, 60)
     buffer_seconds = max(required_seconds * 3, 2 * 24 * 60 * 60)
 
-    # Wider minimum windows for higher timeframes.
     minimum_by_tf = {
         "1m": 2,
         "3m": 4,
@@ -801,6 +798,21 @@ def alpaca_start_time_for_limit(timeframe: str, limit: int) -> str:
     return start.isoformat().replace("+00:00", "Z")
 
 
+def alpaca_end_time_now() -> str:
+    # Pin provider requests to the current UTC time so historical candles end at latest available bar.
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def candles_are_fresh(candles: List[Dict[str, Any]], timeframe: str, max_extra_seconds: int = 600) -> bool:
+    if not candles:
+        return False
+    latest_epoch = max(to_epoch_seconds(c.get("epoch") or c.get("time") or c.get("timestamp")) for c in candles)
+    if latest_epoch <= 0:
+        return False
+    allowed_age = max(timeframe_seconds(timeframe) * 3, max_extra_seconds)
+    return (datetime.now(timezone.utc).timestamp() - latest_epoch) <= allowed_age
+
+
 def fetch_alpaca_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 500) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
@@ -819,7 +831,10 @@ def fetch_alpaca_historical_candles(symbol: str, timeframe: str = "1m", limit: i
                 "timeframe": alpaca_tf,
                 "limit": safe_limit,
                 "start": start_time,
-                "sort": "asc",
+                "end": alpaca_end_time_now(),
+                # Critical: desc returns the newest candles first. merge_candles_by_time()
+                # sorts them back ascending before returning to the dashboard.
+                "sort": "desc",
             })
             url = f"{ALPACA_CRYPTO_BASE_URL}/crypto/us/bars?{params}"
             data = http_get_json(url, headers=headers, provider="Alpaca crypto")
@@ -836,7 +851,12 @@ def fetch_alpaca_historical_candles(symbol: str, timeframe: str = "1m", limit: i
                 candles = merge_candles_by_time(normalized)[-safe_limit:]
                 candles = filter_valid_candles_for_symbol(candles, normalized_symbol)
                 if candles:
-                    return candles
+                    if candles_are_fresh(candles, normalized_timeframe):
+                        return candles
+                    print(
+                        f"[Alpaca crypto] stale latest candle for {normalized_symbol} {normalized_timeframe}: "
+                        f"latest={candles[-1].get('time')} count={len(candles)}"
+                    )
 
         return []
 
@@ -847,9 +867,10 @@ def fetch_alpaca_historical_candles(symbol: str, timeframe: str = "1m", limit: i
             "timeframe": alpaca_tf,
             "limit": min(request_limit, 10000),
             "start": start_time,
+            "end": alpaca_end_time_now(),
             "adjustment": "raw",
             "feed": "iex",
-            "sort": "asc",
+            "sort": "desc",
         })
         url = f"{ALPACA_STOCKS_BASE_URL}/stocks/bars?{params}"
         data = http_get_json(url, headers=headers, provider="Alpaca stock")
@@ -1121,7 +1142,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v7_insightsentry_ohlcv_series_btc_mes",
+        "engine": "main_v8_alpaca_latest_desc_btc_mes",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
