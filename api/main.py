@@ -3130,18 +3130,76 @@ def fetch_alpha_vantage_news(symbol: str, limit: int = 10) -> List[Dict[str, Any
     return articles
 
 
-def build_ticker_news_payload(symbol: str, limit: int = 10) -> Dict[str, Any]:
+def ticker_news_cache_key(symbol: str, limit: int) -> str:
+    return f"{normalize_symbol(symbol)}::{int(limit or 10)}"
+
+
+def ticker_news_cache_get(symbol: str, limit: int, max_age_seconds: int = 300) -> Optional[Dict[str, Any]]:
+    key = ticker_news_cache_key(symbol, limit)
+    cached = TICKER_NEWS_CACHE.get(key)
+
+    if not isinstance(cached, dict):
+        return None
+
+    try:
+        created_at = datetime.fromisoformat(str(cached.get("createdAt", "")).replace("Z", "+00:00"))
+        if (datetime.now(timezone.utc) - created_at).total_seconds() > max_age_seconds:
+            return None
+    except Exception:
+        return None
+
+    payload = dict(cached)
+    payload["cache"] = "fresh"
+    return payload
+
+
+def ticker_news_cache_stale(symbol: str, limit: int) -> Optional[Dict[str, Any]]:
+    key = ticker_news_cache_key(symbol, limit)
+    cached = TICKER_NEWS_CACHE.get(key)
+
+    if not isinstance(cached, dict):
+        return None
+
+    payload = dict(cached)
+    payload["cache"] = "stale"
+    return payload
+
+
+def ticker_news_cache_set(symbol: str, limit: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+    key = ticker_news_cache_key(symbol, limit)
+    stored = dict(payload)
+    stored["createdAt"] = now_iso()
+    stored["cache"] = "stored"
+    TICKER_NEWS_CACHE[key] = stored
+    return stored
+
+
+def build_ticker_news_payload(symbol: str, limit: int = 10, force_refresh: bool = False) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
     news_symbol = normalize_news_symbol(normalized_symbol)
     safe_limit = max(1, min(int(limit or 10), 25))
 
-    source = "yahoo_finance_rss"
-    articles = fetch_alpha_vantage_news(normalized_symbol, safe_limit)
+    if not force_refresh:
+        cached = ticker_news_cache_get(normalized_symbol, safe_limit, 300)
+        if cached:
+            return cached
 
-    if articles:
-        source = "alpha_vantage_news_sentiment"
-    else:
-        articles = fetch_yahoo_rss_news(normalized_symbol, safe_limit)
+    source = "yahoo_finance_rss"
+    articles: List[Dict[str, Any]] = []
+
+    try:
+        articles = fetch_alpha_vantage_news(normalized_symbol, safe_limit)
+
+        if articles:
+            source = "alpha_vantage_news_sentiment"
+        else:
+            articles = fetch_yahoo_rss_news(normalized_symbol, safe_limit)
+    except Exception as error:
+        print(f"[Ticker News] fetch failed for {normalized_symbol}: {error}")
+        stale = ticker_news_cache_stale(normalized_symbol, safe_limit)
+        if stale:
+            stale["error"] = str(error)
+            return stale
 
     bullish = len([item for item in articles if str(item.get("sentiment")) == "BULLISH"])
     bearish = len([item for item in articles if str(item.get("sentiment")) == "BEARISH"])
@@ -3159,12 +3217,13 @@ def build_ticker_news_payload(symbol: str, limit: int = 10) -> Dict[str, Any]:
     else:
         status = "Neutral News"
 
-    return {
+    payload = {
         "eventType": "TICKER_NEWS_FEED",
         "symbol": normalized_symbol,
         "newsSymbol": news_symbol,
         "category": news_category_for_symbol(normalized_symbol),
         "source": source,
+        "cache": "refreshed",
         "createdAt": now_iso(),
         "count": len(articles),
         "limit": safe_limit,
@@ -3175,6 +3234,12 @@ def build_ticker_news_payload(symbol: str, limit: int = 10) -> Dict[str, Any]:
         "neutral": neutral,
         "articles": articles,
     }
+
+    if articles:
+        return ticker_news_cache_set(normalized_symbol, safe_limit, payload)
+
+    stale = ticker_news_cache_stale(normalized_symbol, safe_limit)
+    return stale or payload
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3504,15 +3569,17 @@ def _series_trend(values: List[float], lookback: int = 5) -> float:
 
 
 def build_fred_macro_context() -> Dict[str, Any]:
-    # Keep FRED calls light; refresh roughly every 30 minutes.
+    # Keep FRED calls light; refresh roughly every 60 minutes.
     cached_payload = FRED_MACRO_CACHE.get("payload")
     cached_created_at = str(FRED_MACRO_CACHE.get("createdAt") or "")
 
     try:
         if cached_payload and cached_created_at:
             cached_dt = datetime.fromisoformat(cached_created_at.replace("Z", "+00:00"))
-            if (datetime.now(timezone.utc) - cached_dt).total_seconds() < 1800:
-                return cached_payload
+            if (datetime.now(timezone.utc) - cached_dt).total_seconds() < 3600:
+                payload = dict(cached_payload)
+                payload["cache"] = "fresh"
+                return payload
     except Exception:
         pass
 
@@ -3624,6 +3691,7 @@ def build_fred_macro_context() -> Dict[str, Any]:
 OPTIONS_PRESSURE_CACHE: Dict[str, Any] = {}
 
 SP500_HEATMAP_CACHE: Dict[str, Any] = {"createdAt": "", "payload": None}
+TICKER_NEWS_CACHE: Dict[str, Any] = {}
 
 
 def map_symbol_to_options_underlying(symbol: str) -> str:
@@ -4043,8 +4111,8 @@ def fred_macro() -> Dict[str, Any]:
     return build_fred_macro_context()
 
 @app.get("/api/ticker-news")
-def ticker_news(symbol: str = "SPY", limit: int = 10) -> Dict[str, Any]:
-    return build_ticker_news_payload(symbol, limit)
+def ticker_news(symbol: str = "SPY", limit: int = 10, force: bool = False) -> Dict[str, Any]:
+    return build_ticker_news_payload(symbol, limit, force_refresh=force)
 
 @app.get("/api/sp500-heatmap")
 def sp500_heatmap(force: bool = False) -> Dict[str, Any]:
@@ -4055,7 +4123,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v23_primary_candle_store_gate",
+        "engine": "main_v24_phase3_news_options_macro_cache",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
