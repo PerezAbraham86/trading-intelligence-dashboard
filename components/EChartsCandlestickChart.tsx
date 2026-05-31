@@ -8,6 +8,7 @@ const DEFAULT_VISIBLE_CANDLES = 78
 const CACHE_TTL_MS = 1000 * 60 * 5
 const LOCAL_STORAGE_PREFIX = 'marketbos:v9:python-smc-alphax-ghost:'
 const CHART_SETTINGS_PREFIX = 'marketbos:chart-settings:v1:'
+const MAIN_CANDLES_READY_KEY = 'marketbos:main-candles-ready:v1'
 
 const GREEN = '#26a69a'
 const RED = '#ef5350'
