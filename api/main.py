@@ -2045,16 +2045,159 @@ def empty_overlay_payload() -> Dict[str, Any]:
     }
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S&P 500 HEATMAP — FREE LIVE/NEAR-LIVE QUOTE SNAPSHOT
+# Source: Yahoo Finance quote endpoint, no API key.
+# Note: free market data can be delayed by exchange/vendor rules.
+# ─────────────────────────────────────────────────────────────────────────────
+
+SP500_HEATMAP_SECTORS: Dict[str, List[str]] = {
+    "Technology": ["MSFT", "NVDA", "AAPL", "AVGO", "ORCL", "CRM", "AMD", "ADBE", "QCOM", "CSCO", "TXN", "INTC"],
+    "Communication Services": ["META", "GOOGL", "GOOG", "NFLX", "TMUS", "DIS", "VZ", "CMCSA"],
+    "Consumer Cyclical": ["AMZN", "TSLA", "HD", "MCD", "NKE", "SBUX", "LOW", "BKNG", "ORLY"],
+    "Consumer Defensive": ["WMT", "COST", "PG", "KO", "PEP", "PM", "MO", "CL", "MDLZ"],
+    "Financial": ["JPM", "V", "MA", "BAC", "WFC", "BRK-B", "GS", "MS", "AXP", "SPGI"],
+    "Healthcare": ["LLY", "UNH", "JNJ", "ABBV", "MRK", "ABT", "TMO", "DHR", "PFE", "ISRG"],
+    "Industrials": ["GE", "CAT", "RTX", "BA", "UNP", "HON", "UPS", "LMT", "ETN", "DE"],
+    "Energy": ["XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX"],
+    "Utilities": ["NEE", "SO", "DUK", "AEP", "SRE", "D"],
+    "Real Estate": ["AMT", "PLD", "EQIX", "CCI", "SPG", "DLR"],
+    "Materials": ["LIN", "SHW", "FCX", "NEM", "APD", "ECL"],
+}
+
+
+def flatten_sp500_heatmap_symbols() -> List[str]:
+    symbols: List[str] = []
+    for sector_symbols in SP500_HEATMAP_SECTORS.values():
+        for symbol in sector_symbols:
+            if symbol not in symbols:
+                symbols.append(symbol)
+    return symbols
+
+
+def fetch_yahoo_quote_batch(symbols: List[str]) -> List[Dict[str, Any]]:
+    safe_symbols = [str(symbol).upper().strip() for symbol in symbols if str(symbol).strip()]
+    if not safe_symbols:
+        return []
+
+    params = urlencode({
+        "symbols": ",".join(safe_symbols),
+        "fields": "symbol,shortName,longName,regularMarketPrice,regularMarketChangePercent,regularMarketChange,regularMarketPreviousClose,regularMarketTime,marketCap",
+    })
+
+    url = f"https://query1.finance.yahoo.com/v7/finance/quote?{params}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; MARKETBOS-Dashboard/1.0)",
+        "Accept": "application/json",
+    }
+
+    data = http_get_json(url, headers=headers, provider="Yahoo Finance quote")
+    result = data.get("quoteResponse", {}).get("result", []) if isinstance(data, dict) else []
+    return result if isinstance(result, list) else []
+
+
+def build_sp500_heatmap_payload() -> Dict[str, Any]:
+    all_symbols = flatten_sp500_heatmap_symbols()
+    quote_rows: Dict[str, Dict[str, Any]] = {}
+
+    try:
+        for index in range(0, len(all_symbols), 60):
+            batch = all_symbols[index:index + 60]
+            for quote_row in fetch_yahoo_quote_batch(batch):
+                symbol = str(quote_row.get("symbol") or "").upper().strip()
+                if symbol:
+                    quote_rows[symbol] = quote_row
+    except Exception as error:
+        print(f"[S&P 500 Heatmap] Yahoo quote fetch failed: {error}")
+
+    sectors: List[Dict[str, Any]] = []
+    total_market_cap = 0.0
+
+    for sector_name, symbols in SP500_HEATMAP_SECTORS.items():
+        stocks: List[Dict[str, Any]] = []
+        sector_market_cap = 0.0
+        weighted_change_sum = 0.0
+
+        for symbol in symbols:
+            quote_row = quote_rows.get(symbol) or {}
+            display_symbol = symbol.replace("-", ".")
+            market_cap = max(to_float(quote_row.get("marketCap")), 0.0)
+            change_pct = to_float(quote_row.get("regularMarketChangePercent"), 0.0)
+            price = to_float(quote_row.get("regularMarketPrice"), 0.0)
+            previous_close = to_float(quote_row.get("regularMarketPreviousClose"), 0.0)
+            change = to_float(quote_row.get("regularMarketChange"), price - previous_close if price and previous_close else 0.0)
+
+            if market_cap <= 0:
+                market_cap = 1_000_000_000.0
+
+            sector_market_cap += market_cap
+            weighted_change_sum += change_pct * market_cap
+
+            stocks.append({
+                "symbol": symbol,
+                "displaySymbol": display_symbol,
+                "name": quote_row.get("shortName") or quote_row.get("longName") or display_symbol,
+                "price": round(price, 4),
+                "change": round(change, 4),
+                "changePercent": round(change_pct, 3),
+                "marketCap": market_cap,
+                "marketCapBillions": round(market_cap / 1_000_000_000.0, 2),
+                "marketTime": quote_row.get("regularMarketTime"),
+            })
+
+        sector_change = weighted_change_sum / sector_market_cap if sector_market_cap > 0 else 0.0
+        total_market_cap += sector_market_cap
+
+        sectors.append({
+            "name": sector_name,
+            "changePercent": round(sector_change, 3),
+            "marketCap": sector_market_cap,
+            "marketCapBillions": round(sector_market_cap / 1_000_000_000.0, 2),
+            "stocks": sorted(stocks, key=lambda item: item.get("marketCap", 0), reverse=True),
+        })
+
+    sectors = sorted(sectors, key=lambda item: item.get("marketCap", 0), reverse=True)
+    all_stocks = [stock for sector in sectors for stock in sector.get("stocks", [])]
+    gainers = len([stock for stock in all_stocks if to_float(stock.get("changePercent")) > 0])
+    losers = len([stock for stock in all_stocks if to_float(stock.get("changePercent")) < 0])
+    neutral = max(0, len(all_stocks) - gainers - losers)
+
+    total_cap = max(sum(to_float(stock.get("marketCap")) for stock in all_stocks), 1)
+    overall_change = sum(to_float(stock.get("changePercent")) * to_float(stock.get("marketCap")) for stock in all_stocks) / total_cap
+
+    return {
+        "eventType": "SP500_HEATMAP",
+        "source": "yahoo_finance_quote",
+        "note": "Free quote source. Data may be delayed depending on exchange/vendor rules.",
+        "isLiveSnapshot": True,
+        "createdAt": now_iso(),
+        "count": len(all_stocks),
+        "sectorCount": len(sectors),
+        "overallChangePercent": round(overall_change, 3),
+        "gainers": gainers,
+        "losers": losers,
+        "neutral": neutral,
+        "totalMarketCapBillions": round(total_market_cap / 1_000_000_000.0, 2),
+        "sectors": sectors,
+    }
+
 # ─────────────────────────────────────────────────────────────────────────────
 # BASIC ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+
+@app.get("/api/sp500-heatmap")
+def sp500_heatmap() -> Dict[str, Any]:
+    return build_sp500_heatmap_payload()
 
 @app.get("/")
 def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v11_python_12_indicator_real_values",
+        "engine": "main_v12_sp500_heatmap_live_snapshot",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
