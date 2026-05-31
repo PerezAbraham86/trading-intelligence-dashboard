@@ -6,7 +6,7 @@ import * as echarts from 'echarts'
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
 const DEFAULT_VISIBLE_CANDLES = 120
 const CACHE_TTL_MS = 1000 * 60 * 5
-const LOCAL_STORAGE_PREFIX = 'marketbos:v3:shared-500-candles:'
+const LOCAL_STORAGE_PREFIX = 'marketbos:v4:strict-500-candles:'
 
 const GREEN = '#26a69a'
 const RED = '#ef5350'
@@ -395,6 +395,11 @@ function getCandleCacheKey(symbol: string, timeframe: string) {
   return `${normalizeDefaultSymbol(symbol)}::${normalizeTimeframe(timeframe)}`
 }
 
+function requestedLimitNumber(limit: string): number {
+  const parsed = Number(limit)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 500
+}
+
 function readMemoryCache(cacheKey: string): Candle[] | null {
   const cached = memoryCandleCache.get(cacheKey)
   if (!cached) return null
@@ -500,17 +505,28 @@ async function fetchCandles(
   signal?: AbortSignal
 ): Promise<Candle[]> {
   const cacheKey = getCandleCacheKey(symbol, timeframe)
+  const requestedLimit = requestedLimitNumber(limit)
 
   const cached = readMemoryCache(cacheKey) ?? readLocalStorageCache(cacheKey)
-  if (cached && cached.length > 0) return cached
+
+  // Important:
+  // Old BTCUSD caches could contain short pages like 332 / 69 / 23 candles.
+  // Do not treat those as complete when the chart is requesting 500.
+  // Show short cached candles only through the load effect while a fresh
+  // network request replaces them with the full 500 from the backend.
+  if (cached && cached.length >= requestedLimit) return cached
 
   const existingRequest = inflightCandleRequests.get(cacheKey)
   if (existingRequest) return existingRequest
 
   const request = fetchCandlesFromNetwork(symbol, timeframe, limit, signal)
     .then((candles) => {
-      saveCandleCache(cacheKey, candles)
-      return candles
+      if (candles.length > 0) {
+        saveCandleCache(cacheKey, candles)
+        return candles
+      }
+
+      return cached ?? []
     })
     .finally(() => {
       inflightCandleRequests.delete(cacheKey)
@@ -894,10 +910,13 @@ export default function EChartsCandlestickChart({
 
       const cached = readMemoryCache(cacheKey) ?? readLocalStorageCache(cacheKey)
 
+      const requestedLimit = requestedLimitNumber(candleFetchLimit)
+      const cachedIsComplete = Boolean(cached && cached.length >= requestedLimit)
+
       if (cached && cached.length > 0) {
-        // Correct symbol/timeframe cache: show instantly.
+        // Show cache instantly if available, but still refresh below if it is short.
         setHistoricalCandles(cached)
-        setStatus('cached')
+        setStatus(cachedIsComplete ? 'cached' : 'loading')
       } else {
         // Important: clear the previous timeframe's candles immediately.
         // This prevents a 5m or 15m dropdown from visually showing old 1m candles.
