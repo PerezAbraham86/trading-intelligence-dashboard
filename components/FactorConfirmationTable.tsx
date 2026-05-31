@@ -27,6 +27,9 @@ type TradingSignal = {
   ghostDirection?: string
   alphaxBullPressure?: number
   alphaxBearPressure?: number
+  fredMacroStrength?: number
+  fredMacroDirection?: string
+  fredMacroRisk?: number
 }
 
 type TechnicalIndicator = {
@@ -193,11 +196,12 @@ function buildCoreRows(signal?: TradingSignal): FactorRow[] {
 
 function buildExternalRows(signal?: TradingSignal): FactorRow[] {
   const bullScore = clamp(Number(signal?.bullScore ?? 50))
+  const fredStrength = factorStrength(signal?.fredMacroStrength, Number(signal?.fredMacroRisk ?? 45))
 
   const rows: Array<[string, string | undefined, number]> = [
     ['Open Interest', signal?.openInterest, 65],
     ['Footprint Delta', signal?.footprint, bullScore],
-    ['FRED Macro', signal?.fredMacro, 52],
+    ['FRED Macro', signal?.fredMacro ?? 'Active FRED Macro', fredStrength],
     ['FINRA Short Volume', signal?.finraShortVolume, 71],
     ['COT', signal?.cot, 81],
   ]
