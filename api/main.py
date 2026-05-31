@@ -2068,6 +2068,45 @@ SP500_HEATMAP_SECTORS: Dict[str, List[str]] = {
     "Materials": ["LIN", "SHW", "FCX", "NEM", "APD", "ECL"],
 }
 
+# Approximate market-cap fallback in billions.
+# Purpose: tile sizing only. Live/near-live price and % change still come from the quote source.
+SP500_HEATMAP_MARKET_CAP_FALLBACK_BILLIONS: Dict[str, float] = {
+    "MSFT": 3400, "NVDA": 3300, "AAPL": 3100, "AVGO": 1400, "ORCL": 650, "CRM": 300,
+    "AMD": 260, "ADBE": 190, "QCOM": 190, "CSCO": 230, "TXN": 180, "INTC": 130,
+
+    "META": 1500, "GOOGL": 1100, "GOOG": 1100, "NFLX": 500, "TMUS": 270, "DIS": 200,
+    "VZ": 180, "CMCSA": 140,
+
+    "AMZN": 2100, "TSLA": 1100, "HD": 410, "MCD": 220, "NKE": 120, "SBUX": 110,
+    "LOW": 140, "BKNG": 170, "ORLY": 80,
+
+    "WMT": 760, "COST": 430, "PG": 400, "KO": 300, "PEP": 220, "PM": 210, "MO": 85,
+    "CL": 80, "MDLZ": 95,
+
+    "JPM": 650, "V": 650, "MA": 500, "BAC": 320, "WFC": 260, "BRK-B": 1000, "GS": 200,
+    "MS": 180, "AXP": 220, "SPGI": 160,
+
+    "LLY": 800, "UNH": 520, "JNJ": 380, "ABBV": 360, "MRK": 240, "ABT": 230,
+    "TMO": 210, "DHR": 180, "PFE": 150, "ISRG": 200,
+
+    "GE": 250, "CAT": 180, "RTX": 180, "BA": 120, "UNP": 150, "HON": 140,
+    "UPS": 110, "LMT": 110, "ETN": 150, "DE": 120,
+
+    "XOM": 500, "CVX": 300, "COP": 130, "SLB": 65, "EOG": 70, "MPC": 55, "PSX": 50,
+
+    "NEE": 150, "SO": 100, "DUK": 85, "AEP": 55, "SRE": 50, "D": 45,
+
+    "AMT": 90, "PLD": 100, "EQIX": 90, "CCI": 45, "SPG": 60, "DLR": 60,
+
+    "LIN": 220, "SHW": 95, "FCX": 60, "NEM": 50, "APD": 65, "ECL": 70,
+}
+
+
+def get_sp500_fallback_market_cap(symbol: str) -> float:
+    normalized = str(symbol or "").upper().strip().replace(".", "-")
+    billions = SP500_HEATMAP_MARKET_CAP_FALLBACK_BILLIONS.get(normalized, 10.0)
+    return max(float(billions), 1.0) * 1_000_000_000.0
+
 
 def flatten_sp500_heatmap_symbols() -> List[str]:
     symbols: List[str] = []
@@ -2373,7 +2412,7 @@ def build_sp500_heatmap_payload() -> Dict[str, Any]:
             change = to_float(quote_row.get("regularMarketChange"), price - previous_close if price and previous_close else 0.0)
 
             if market_cap <= 0:
-                market_cap = 1_000_000_000.0
+                market_cap = get_sp500_fallback_market_cap(symbol)
 
             sector_market_cap += market_cap
             weighted_change_sum += change_pct * market_cap
@@ -2412,8 +2451,8 @@ def build_sp500_heatmap_payload() -> Dict[str, Any]:
 
     return {
         "eventType": "SP500_HEATMAP",
-        "source": "yahoo_quote_spark_chart_or_stooq",
-        "note": "Free quote source. Data may be delayed depending on exchange/vendor rules.",
+        "source": "yahoo_quote_spark_chart_or_stooq_plus_static_cap_weights",
+        "note": "Free quote source. Data may be delayed depending on exchange/vendor rules. Tile size uses static approximate market-cap weights when live market cap is unavailable.",
         "isLiveSnapshot": True,
         "createdAt": now_iso(),
         "count": len(all_stocks),
@@ -2441,7 +2480,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v14_sp500_heatmap_chart_and_stooq_fallback",
+        "engine": "main_v15_sp500_heatmap_static_cap_weights",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
