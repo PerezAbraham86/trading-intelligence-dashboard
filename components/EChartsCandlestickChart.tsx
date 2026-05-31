@@ -6,7 +6,7 @@ import * as echarts from 'echarts'
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
 const DEFAULT_VISIBLE_CANDLES = 120
 const CACHE_TTL_MS = 1000 * 60 * 5
-const LOCAL_STORAGE_PREFIX = 'marketbos:v8:live-price-line-tooltip-fixed:'
+const LOCAL_STORAGE_PREFIX = 'marketbos:v9:python-smc-alphax-ghost:'
 const CHART_SETTINGS_PREFIX = 'marketbos:chart-settings:v1:'
 
 const GREEN = '#26a69a'
@@ -40,6 +40,62 @@ type LivePricePayload = {
   provider?: string | null
   source?: string
   createdAt?: string
+}
+
+type OverlayDirection = 'bullish' | 'bearish' | 'neutral' | string
+
+type ChartZone = {
+  startTime?: string
+  endTime?: string
+  top?: number
+  bottom?: number
+  label?: string
+  direction?: OverlayDirection
+  kind?: string
+}
+
+type ChartMarker = {
+  time?: string
+  fromTime?: string
+  price?: number
+  label?: string
+  tag?: string
+  direction?: OverlayDirection
+  scope?: string
+  kind?: string
+  score?: number
+  grade?: string
+  pressurePct?: number
+}
+
+type DlmLevel = {
+  label?: string
+  price?: number
+  direction?: OverlayDirection
+}
+
+type GhostCandle = {
+  label?: string
+  open?: number
+  high?: number
+  low?: number
+  close?: number
+  confidence?: number
+  direction?: OverlayDirection
+  source?: string
+}
+
+type ChartOverlays = {
+  smcEvents?: ChartMarker[]
+  zones?: ChartZone[]
+  liquidityEvents?: ChartMarker[]
+  dlmLevels?: DlmLevel[]
+  dlmConfluenceMarkers?: ChartMarker[]
+  scoreMarkers?: ChartMarker[]
+  ghostCandles?: GhostCandle[]
+  alphaProfileBins?: any[]
+  alphaProfileMeta?: any
+  source?: string
 }
 
 type CandleMode = 'Regular' | 'Heikin Ashi'
@@ -693,6 +749,194 @@ function getInitialZoom(candleCount: number) {
   }
 }
 
+function overlayColor(direction: any, opacity = 1) {
+  const side = String(direction ?? '').toLowerCase()
+  if (side.includes('bull')) return `rgba(38, 166, 154, ${opacity})`
+  if (side.includes('bear')) return `rgba(239, 83, 80, ${opacity})`
+  return `rgba(156, 163, 175, ${opacity})`
+}
+
+function overlayTextColor(direction: any) {
+  const side = String(direction ?? '').toLowerCase()
+  if (side.includes('bull')) return '#26a69a'
+  if (side.includes('bear')) return '#ef5350'
+  return '#9ca3af'
+}
+
+function nearestAxisTime(rawTime: any, axisCandles: Candle[]): string | undefined {
+  if (!rawTime || axisCandles.length === 0) return undefined
+
+  const rawEpoch = toEpochSeconds(rawTime)
+  if (rawEpoch === undefined) return String(rawTime)
+
+  let best = axisCandles[0]
+  let bestDistance = Math.abs((best.epoch ?? toEpochSeconds(best.time) ?? 0) - rawEpoch)
+
+  for (const candle of axisCandles) {
+    const epoch = candle.epoch ?? toEpochSeconds(candle.time)
+    if (epoch === undefined) continue
+    const distance = Math.abs(epoch - rawEpoch)
+    if (distance < bestDistance) {
+      best = candle
+      bestDistance = distance
+    }
+  }
+
+  return best.time
+}
+
+function buildFutureGhostAxisLabels(candles: Candle[], ghosts: GhostCandle[], timeframe: string) {
+  if (candles.length === 0 || ghosts.length === 0) return []
+
+  const last = candles[candles.length - 1]
+  const lastEpoch = last.epoch ?? toEpochSeconds(last.time) ?? Math.floor(Date.now() / 1000)
+  const seconds = timeframeSeconds(timeframe)
+
+  return ghosts.map((_, index) => isoFromEpochSeconds(lastEpoch + seconds * (index + 1)))
+}
+
+function buildZoneMarkAreas(zones: ChartZone[] | undefined, axisCandles: Candle[]) {
+  if (!Array.isArray(zones)) return []
+
+  return zones
+    .map((zone) => {
+      const top = toNumber(zone.top)
+      const bottom = toNumber(zone.bottom)
+      if (top === null || bottom === null) return null
+
+      const start = nearestAxisTime(zone.startTime, axisCandles) ?? axisCandles[0]?.time
+      const end = nearestAxisTime(zone.endTime, axisCandles) ?? axisCandles[axisCandles.length - 1]?.time
+      if (!start || !end) return null
+
+      return [
+        {
+          xAxis: start,
+          yAxis: Math.max(top, bottom),
+          itemStyle: {
+            color: overlayColor(zone.direction, zone.kind === 'fvg' ? 0.16 : 0.12),
+            borderColor: overlayColor(zone.direction, 0.42),
+            borderWidth: 1,
+          },
+          label: {
+            show: true,
+            color: overlayTextColor(zone.direction),
+            fontSize: 10,
+            fontWeight: 700,
+            formatter: zone.label ?? zone.kind ?? '',
+          },
+        },
+        {
+          xAxis: end,
+          yAxis: Math.min(top, bottom),
+        },
+      ]
+    })
+    .filter(Boolean) as any[]
+}
+
+function buildMarkerData(markers: ChartMarker[] | undefined, axisCandles: Candle[]) {
+  if (!Array.isArray(markers)) return []
+
+  return markers
+    .map((marker) => {
+      const price = toNumber(marker.price)
+      const time = nearestAxisTime(marker.time, axisCandles)
+      if (price === null || !time) return null
+
+      return {
+        value: [time, price],
+        name: marker.tag ?? marker.label ?? marker.kind ?? '',
+        marker,
+        itemStyle: {
+          color: overlayTextColor(marker.direction),
+          borderColor: '#111827',
+          borderWidth: 1,
+        },
+        label: {
+          show: true,
+          formatter: marker.tag ?? marker.label ?? '',
+          color: overlayTextColor(marker.direction),
+          fontSize: 10,
+          fontWeight: 700,
+          position: String(marker.direction).toLowerCase().includes('bear') ? 'top' : 'bottom',
+        },
+      }
+    })
+    .filter(Boolean) as any[]
+}
+
+function buildDlmMarkLines(levels: DlmLevel[] | undefined) {
+  if (!Array.isArray(levels)) return []
+
+  return levels
+    .map((level) => {
+      const price = toNumber(level.price)
+      if (price === null) return null
+
+      return {
+        yAxis: price,
+        name: level.label ?? 'DLM',
+        lineStyle: {
+          color: overlayTextColor(level.direction),
+          width: level.label?.toLowerCase().includes('poc') ? 2 : 1,
+          type: level.label?.toLowerCase().includes('poc') ? 'solid' : 'dotted',
+          opacity: 0.85,
+        },
+        label: {
+          show: true,
+          formatter: level.label ?? 'DLM',
+          color: overlayTextColor(level.direction),
+          fontSize: 10,
+          fontWeight: 700,
+          backgroundColor: 'rgba(15,17,21,0.72)',
+          borderRadius: 3,
+          padding: [2, 4],
+        },
+      }
+    })
+    .filter(Boolean) as any[]
+}
+
+function buildGhostCandleData(activeLength: number, ghosts: GhostCandle[]) {
+  const empty = Array.from({ length: activeLength }, () => '-')
+  const ghostData = ghosts.map((ghost) => {
+    const open = toNumber(ghost.open)
+    const close = toNumber(ghost.close)
+    const low = toNumber(ghost.low)
+    const high = toNumber(ghost.high)
+    if (open === null || close === null || low === null || high === null) return '-'
+    return [open, close, low, high]
+  })
+
+  return [...empty, ...ghostData]
+}
+
+async function fetchEngineState(
+  symbol: string,
+  timeframe: string,
+  signal?: AbortSignal
+): Promise<any | null> {
+  const params = new URLSearchParams({
+    symbol: normalizeDefaultSymbol(symbol),
+    timeframe: normalizeTimeframe(timeframe),
+    limit: '500',
+  })
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/engine-state?${params.toString()}`, {
+      cache: 'no-store',
+      signal,
+    })
+
+    if (!response.ok) return null
+    return await response.json()
+  } catch (error: any) {
+    if (error?.name === 'AbortError') throw error
+    console.error(`Engine-state fetch error: /api/engine-state ${symbol} ${timeframe}`, error)
+    return null
+  }
+}
+
 function buildChartOption({
   symbol,
   timeframe,
@@ -700,6 +944,7 @@ function buildChartOption({
   candles,
   compact,
   loading,
+  chartOverlays,
 }: {
   symbol: string
   timeframe: string
@@ -707,10 +952,13 @@ function buildChartOption({
   candles: Candle[]
   compact: boolean
   loading: boolean
+  chartOverlays?: ChartOverlays | null
 }): echarts.EChartsOption {
   const activeCandles = candleMode === 'Heikin Ashi' ? convertToHeikinAshi(candles) : candles
   const latestRealClose = candles.length > 0 ? Number(candles[candles.length - 1].close) : NaN
-  const xAxisData = activeCandles.map((candle) => candle.time)
+  const overlayGhostCandles = !compact && Array.isArray(chartOverlays?.ghostCandles) ? chartOverlays?.ghostCandles ?? [] : []
+  const futureGhostLabels = buildFutureGhostAxisLabels(activeCandles, overlayGhostCandles, timeframe)
+  const xAxisData = [...activeCandles.map((candle) => candle.time), ...futureGhostLabels]
   const candleData = activeCandles.map((candle) => [
     candle.open,
     candle.close,
@@ -725,6 +973,13 @@ function buildChartOption({
     },
     xAxis: index,
   }))
+
+  const zoneMarkAreas = !compact ? buildZoneMarkAreas(chartOverlays?.zones, activeCandles) : []
+  const smcMarkerData = !compact ? buildMarkerData(chartOverlays?.smcEvents, activeCandles) : []
+  const liquidityMarkerData = !compact ? buildMarkerData(chartOverlays?.liquidityEvents, activeCandles) : []
+  const scoreMarkerData = !compact ? buildMarkerData(chartOverlays?.scoreMarkers, activeCandles) : []
+  const dlmMarkLines = !compact ? buildDlmMarkLines(chartOverlays?.dlmLevels) : []
+  const ghostData = !compact ? buildGhostCandleData(activeCandles.length, overlayGhostCandles) : []
 
   const zoom = getInitialZoom(activeCandles.length)
 
@@ -988,6 +1243,89 @@ function buildChartOption({
                 }
               : undefined,
           },
+          ...(zoneMarkAreas.length > 0
+            ? [
+                {
+                  name: 'Python SMC Zones',
+                  type: 'line',
+                  data: [],
+                  silent: true,
+                  markArea: {
+                    silent: true,
+                    data: zoneMarkAreas,
+                  },
+                },
+              ]
+            : []),
+          ...(dlmMarkLines.length > 0
+            ? [
+                {
+                  name: 'AlphaX DLM Levels',
+                  type: 'line',
+                  data: [],
+                  silent: true,
+                  markLine: {
+                    silent: true,
+                    symbol: ['none', 'none'],
+                    data: dlmMarkLines,
+                  },
+                },
+              ]
+            : []),
+          ...(smcMarkerData.length > 0
+            ? [
+                {
+                  name: 'SMC BOS / CHoCH',
+                  type: 'scatter',
+                  data: smcMarkerData,
+                  symbolSize: 7,
+                  z: 20,
+                },
+              ]
+            : []),
+          ...(liquidityMarkerData.length > 0
+            ? [
+                {
+                  name: 'Liquidity Sweeps',
+                  type: 'scatter',
+                  data: liquidityMarkerData,
+                  symbol: 'diamond',
+                  symbolSize: 8,
+                  z: 21,
+                },
+              ]
+            : []),
+          ...(scoreMarkerData.length > 0
+            ? [
+                {
+                  name: 'Python Score',
+                  type: 'scatter',
+                  data: scoreMarkerData,
+                  symbol: 'pin',
+                  symbolSize: 20,
+                  z: 22,
+                },
+              ]
+            : []),
+          ...(ghostData.length > activeCandles.length
+            ? [
+                {
+                  name: 'Python HA Ghost Candles',
+                  type: 'candlestick',
+                  data: ghostData,
+                  itemStyle: {
+                    color: 'rgba(38, 166, 154, 0.55)',
+                    color0: 'rgba(239, 83, 80, 0.55)',
+                    borderColor: 'rgba(38, 166, 154, 0.95)',
+                    borderColor0: 'rgba(239, 83, 80, 0.95)',
+                  },
+                  barWidth: '42%',
+                  barMinWidth: 3,
+                  barMaxWidth: 12,
+                  z: 18,
+                },
+              ]
+            : []),
           {
             name: 'Volume',
             type: 'bar',
@@ -1043,6 +1381,7 @@ export default function EChartsCandlestickChart({
   const [historicalCandles, setHistoricalCandles] = useState<Candle[]>([])
   const [status, setStatus] = useState<'idle' | 'loading' | 'cached' | 'loaded' | 'empty' | 'error'>('idle')
   const [liveProvider, setLiveProvider] = useState<string>('')
+  const [chartOverlays, setChartOverlays] = useState<ChartOverlays | null>(null)
 
   const candleFetchLimit = '500'
 
@@ -1197,6 +1536,38 @@ export default function EChartsCandlestickChart({
     }
   }, [symbol, timeframe, historicalCandles.length, candleFetchLimit])
 
+  useEffect(() => {
+    if (compact || historicalCandles.length === 0) {
+      setChartOverlays(null)
+      return
+    }
+
+    const controller = new AbortController()
+    let cancelled = false
+
+    async function pollEngineState() {
+      try {
+        const engine = await fetchEngineState(symbol, timeframe, controller.signal)
+        if (cancelled) return
+        const overlays = engine?.chartOverlays && typeof engine.chartOverlays === 'object'
+          ? engine.chartOverlays as ChartOverlays
+          : null
+        setChartOverlays(overlays)
+      } catch (error: any) {
+        if (error?.name === 'AbortError') return
+      }
+    }
+
+    pollEngineState()
+    const intervalId = window.setInterval(pollEngineState, 5000)
+
+    return () => {
+      cancelled = true
+      controller.abort()
+      window.clearInterval(intervalId)
+    }
+  }, [symbol, timeframe, compact, historicalCandles.length])
+
   const candles = useMemo(
     () => historicalCandles,
     [historicalCandles]
@@ -1216,6 +1587,7 @@ export default function EChartsCandlestickChart({
       candles,
       compact,
       loading: status === 'loading' && candles.length === 0,
+      chartOverlays,
     })
 
     const chartIdentity = `${symbol}::${timeframe}::${candleMode}::${compact}`
@@ -1245,7 +1617,7 @@ export default function EChartsCandlestickChart({
     return () => {
       window.removeEventListener('resize', resize)
     }
-  }, [symbol, timeframe, candleMode, candles, compact, status])
+  }, [symbol, timeframe, candleMode, candles, compact, status, chartOverlays])
 
   useEffect(() => {
     return () => {
