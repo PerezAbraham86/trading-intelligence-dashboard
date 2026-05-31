@@ -1903,7 +1903,7 @@ export default function EChartsCandlestickChart({
         setHistoricalCandles([])
 
         if (compact && !readMainCandlesReadyForSymbol(symbol)) {
-          setStatus('waiting')
+          setStatus('idle')
           return
         }
 
