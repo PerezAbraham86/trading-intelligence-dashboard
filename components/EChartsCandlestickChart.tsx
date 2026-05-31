@@ -6,7 +6,7 @@ import * as echarts from 'echarts'
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
 const DEFAULT_VISIBLE_CANDLES = 120
 const CACHE_TTL_MS = 1000 * 60 * 5
-const LOCAL_STORAGE_PREFIX = 'marketbos:v4:strict-500-candles:'
+const LOCAL_STORAGE_PREFIX = 'marketbos:v5:clean-provider-500:'
 
 const GREEN = '#26a69a'
 const RED = '#ef5350'
@@ -111,20 +111,6 @@ function normalizeDefaultTimeframe(value: any, fallback = '1m'): string {
   return timeframeOptions.includes(normalized) ? normalized : fallback
 }
 
-function symbolsMatch(inputSymbol: any, selectedSymbol: any): boolean {
-  const input = normalizeSymbol(inputSymbol)
-  const selected = normalizeSymbol(selectedSymbol)
-
-  if (!input || !selected) return false
-  if (input === selected) return true
-  if (selected === 'BTCUSD' && input.includes('BTC')) return true
-  if (selected === 'ETHUSD' && input.includes('ETH')) return true
-  if (selected === 'SPY' && input.includes('SPY')) return true
-  if (selected === 'MES1!' && input.includes('MES')) return true
-  if (selected === 'ES1!' && input.includes('ES') && !input.includes('MES')) return true
-
-  return false
-}
 
 function toNumber(value: any): number | null {
   const parsed = Number(value)
@@ -353,43 +339,6 @@ function convertToHeikinAshi(candles: Candle[]): Candle[] {
   return haCandles
 }
 
-function getApiSymbolCandidates(symbol: string): string[] {
-  const normalized = normalizeDefaultSymbol(symbol, symbol)
-  const compact = normalizeSymbol(normalized).replace('!', '')
-  const candidates: string[] = []
-
-  const add = (value: string) => {
-    const cleaned = String(value ?? '').trim()
-    if (cleaned && !candidates.includes(cleaned)) candidates.push(cleaned)
-  }
-
-  add(normalized)
-
-  if (normalized === 'MES1!' || compact === 'MES1' || compact.includes('MES')) {
-    add('MES1!')
-    add('MES1')
-    add('MES')
-    add('/MES')
-    add('CME_MINI:MES1!')
-  } else if (normalized === 'ES1!' || compact === 'ES1' || (compact.includes('ES') && !compact.includes('MES'))) {
-    add('ES1!')
-    add('ES1')
-    add('ES')
-    add('/ES')
-    add('CME_MINI:ES1!')
-  } else if (compact.includes('SPY')) {
-    add('SPY')
-  } else if (compact.includes('BTC')) {
-    add('BTCUSD')
-    add('BTC/USD')
-    add('XBTUSD')
-  } else if (compact.includes('ETH')) {
-    add('ETHUSD')
-    add('ETH/USD')
-  }
-
-  return candidates
-}
 
 function getCandleCacheKey(symbol: string, timeframe: string) {
   return `${normalizeDefaultSymbol(symbol)}::${normalizeTimeframe(timeframe)}`
@@ -459,43 +408,35 @@ async function fetchCandlesFromNetwork(
   limit: string,
   signal?: AbortSignal
 ): Promise<Candle[]> {
-  // Clean candle route only:
-  // BTCUSD and MES1! now both use the same frontend path.
-  // Provider differences are handled in api/main.py, not by browser fallback loops.
-  const endpoints = [
-    '/api/historical-candles',
-  ]
+  // One clean route only.
+  // Backend chooses the correct provider:
+  // BTCUSD -> Alpaca crypto
+  // MES1!  -> InsightSentry Time Series OHLCV
+  const params = new URLSearchParams({
+    symbol: normalizeDefaultSymbol(symbol),
+    timeframe: normalizeTimeframe(timeframe),
+    limit,
+  })
 
-  for (const path of endpoints) {
-    for (const candidate of getApiSymbolCandidates(symbol)) {
-      const params = new URLSearchParams({
-        symbol: candidate,
-        timeframe: normalizeTimeframe(timeframe),
-        limit,
-      })
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/historical-candles?${params.toString()}`, {
+      cache: 'no-store',
+      signal,
+    })
 
-      try {
-        const response = await fetch(`${API_BASE_URL}${path}?${params.toString()}`, {
-          cache: 'no-store',
-          signal,
-        })
+    if (!response.ok) return []
 
-        if (!response.ok) continue
+    const json = await response.json()
+    const candles = extractCandleArray(json)
+      .map(candleFromAny)
+      .filter((candle): candle is Candle => candle !== null)
 
-        const json = await response.json()
-        const candles = extractCandleArray(json)
-          .map(candleFromAny)
-          .filter((candle): candle is Candle => candle !== null)
-
-        if (candles.length > 0) return mergeCandlesByTime(candles)
-      } catch (error: any) {
-        if (error?.name === 'AbortError') throw error
-        console.error(`Candle fetch error: ${path} ${candidate}`, error)
-      }
-    }
+    return mergeCandlesByTime(candles)
+  } catch (error: any) {
+    if (error?.name === 'AbortError') throw error
+    console.error(`Candle fetch error: /api/historical-candles ${symbol} ${timeframe}`, error)
+    return []
   }
-
-  return []
 }
 
 async function fetchCandles(
@@ -536,46 +477,6 @@ async function fetchCandles(
   return request
 }
 
-function buildCandlesFromRecentCandles(
-  candlesInput: any[] | undefined,
-  selectedSymbol: string,
-  selectedTimeframe: string
-): Candle[] {
-  if (!Array.isArray(candlesInput) || candlesInput.length === 0) return []
-
-  const normalizedTimeframe = normalizeTimeframe(selectedTimeframe)
-
-  return candlesInput
-    .filter((candle) => {
-      const candleSymbol = candle?.symbol ?? candle?.ticker ?? candle?.S ?? candle?.s ?? candle?.contract ?? candle?.instrument
-      const candleTimeframe = candle?.timeframe ?? candle?.tf ?? candle?.interval
-
-      const symbolOk = candleSymbol ? symbolsMatch(candleSymbol, selectedSymbol) : true
-      const timeframeOk = candleTimeframe ? normalizeTimeframe(candleTimeframe) === normalizedTimeframe : true
-
-      return symbolOk && timeframeOk
-    })
-    .map(candleFromAny)
-    .filter((candle): candle is Candle => candle !== null)
-}
-
-function buildCandlesFromSignals(
-  signals: any[] | undefined,
-  selectedSymbol: string,
-  selectedTimeframe: string
-): Candle[] {
-  if (!Array.isArray(signals) || signals.length === 0) return []
-
-  const normalizedTimeframe = normalizeTimeframe(selectedTimeframe)
-
-  return signals
-    .filter((signal) => {
-      const timeframeOk = signal?.timeframe ? normalizeTimeframe(signal.timeframe) === normalizedTimeframe : true
-      return symbolsMatch(signal?.symbol, selectedSymbol) && timeframeOk
-    })
-    .map(candleFromAny)
-    .filter((candle): candle is Candle => candle !== null)
-}
 
 function getInitialZoom(candleCount: number) {
   const visible = Math.min(DEFAULT_VISIBLE_CANDLES, Math.max(candleCount, 1))
@@ -843,8 +744,6 @@ export default function EChartsCandlestickChart({
   followDefaultSymbol = false,
   onChartSelectionChange,
   latestSignal,
-  recentSignals,
-  recentCandles,
 }: EChartsCandlestickChartProps) {
   const chartRef = useRef<HTMLDivElement | null>(null)
   const chartInstance = useRef<echarts.ECharts | null>(null)
@@ -965,24 +864,9 @@ export default function EChartsCandlestickChart({
     }
   }, [symbol, timeframe, compact, allowCompactHistory, candleFetchLimit])
 
-  const liveCandlesFromCandlesEndpoint = useMemo(
-    () => buildCandlesFromRecentCandles(recentCandles, symbol, timeframe),
-    [recentCandles, symbol, timeframe]
-  )
-
-  const liveCandlesFromSignalsEndpoint = useMemo(
-    () => buildCandlesFromSignals(recentSignals, symbol, timeframe),
-    [recentSignals, symbol, timeframe]
-  )
-
   const candles = useMemo(
-    () =>
-      mergeCandlesByTime([
-        ...historicalCandles,
-        ...liveCandlesFromCandlesEndpoint,
-        ...liveCandlesFromSignalsEndpoint,
-      ]),
-    [historicalCandles, liveCandlesFromCandlesEndpoint, liveCandlesFromSignalsEndpoint]
+    () => historicalCandles,
+    [historicalCandles]
   )
 
   useEffect(() => {
