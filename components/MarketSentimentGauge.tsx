@@ -751,20 +751,20 @@ export default function MarketSentimentGauge({
 
             {/* Labels only around the arc, never over the center status text */}
             <text
-              x="42"
-              y="120"
+              x="30"
+              y="128"
               fill={isActiveGaugeLabel('Strong Bearish', value) ? '#ff2d55' : '#6b7280'}
               fontSize="11"
               textAnchor="middle"
               fontWeight={isActiveGaugeLabel('Strong Bearish', value) ? 700 : 600}
             >
-              <tspan x="42" dy="0">Strong</tspan>
-              <tspan x="42" dy="13">Bearish</tspan>
+              <tspan x="30" dy="0">Strong</tspan>
+              <tspan x="30" dy="13">Bearish</tspan>
             </text>
 
             <text
-              x="82"
-              y="54"
+              x="76"
+              y="48"
               fill={isActiveGaugeLabel('Bearish', value) ? '#ff2d55' : '#6b7280'}
               fontSize="11"
               textAnchor="middle"
@@ -775,7 +775,7 @@ export default function MarketSentimentGauge({
 
             <text
               x="160"
-              y="30"
+              y="24"
               fill={isActiveGaugeLabel('Neutral', value) ? '#e5e7eb' : '#6b7280'}
               fontSize="11"
               textAnchor="middle"
@@ -785,8 +785,8 @@ export default function MarketSentimentGauge({
             </text>
 
             <text
-              x="238"
-              y="54"
+              x="244"
+              y="48"
               fill={isActiveGaugeLabel('Bullish', value) ? '#3b82f6' : '#6b7280'}
               fontSize="11"
               textAnchor="middle"
@@ -796,15 +796,15 @@ export default function MarketSentimentGauge({
             </text>
 
             <text
-              x="278"
-              y="120"
+              x="290"
+              y="128"
               fill={isActiveGaugeLabel('Strong Bullish', value) ? '#3b82f6' : '#6b7280'}
               fontSize="11"
               textAnchor="middle"
               fontWeight={isActiveGaugeLabel('Strong Bullish', value) ? 700 : 600}
             >
-              <tspan x="278" dy="0">Strong</tspan>
-              <tspan x="278" dy="13">Bullish</tspan>
+              <tspan x="290" dy="0">Strong</tspan>
+              <tspan x="290" dy="13">Bullish</tspan>
             </text>
 
             <line
