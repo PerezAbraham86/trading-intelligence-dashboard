@@ -3,24 +3,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
 
-type TradingSignal = {
-  symbol?: string
-  timeframe?: string
-  confidence?: number
-  bullScore?: number
-  bearScore?: number
-  netBias?: number
-  signal?: string
-  chopRisk?: number
-  macroRisk?: number
-  fredMacro?: string
-  session?: string
-}
-
-type PressureGaugesProps = {
-  signal?: TradingSignal
-}
-
 type TechnicalIndicator = {
   name: string
   value: number
@@ -38,6 +20,37 @@ type TechnicalSentiment = {
   technicalIndicators?: TechnicalIndicator[]
   technicalMeter?: TechnicalIndicator[]
   factors?: TechnicalIndicator[]
+  sourceTimeframes?: string[]
+  timeframeBreakdown?: Record<string, TechnicalSentiment | null>
+}
+
+type TradingSignal = {
+  symbol?: string
+  timeframe?: string
+  primaryTimeframe?: string
+  analysisTimeframes?: string[]
+  confidence?: number
+  bullScore?: number
+  bearScore?: number
+  netBias?: number
+  signal?: string
+  chopRisk?: number
+  macroRisk?: number
+  fredMacro?: string
+  session?: string
+  openInterest?: string
+  footprint?: string
+  finraShortVolume?: string
+  cot?: string
+  technicalSentiment?: TechnicalSentiment
+  indicators?: TechnicalIndicator[]
+  technicalIndicators?: TechnicalIndicator[]
+  technicalMeter?: TechnicalIndicator[]
+  factors?: TechnicalIndicator[]
+}
+
+type PressureGaugesProps = {
+  signal?: TradingSignal
 }
 
 type GaugeItem = {
@@ -45,6 +58,20 @@ type GaugeItem = {
   value: number
   barClass: string
   note: string
+}
+
+type TechnicalSummary = {
+  indicators: TechnicalIndicator[]
+  activeCount: number
+  bullCount: number
+  bearCount: number
+  neutralCount: number
+  sentiment: number
+  bullishShare: number
+  bearishShare: number
+  neutralShare: number
+  timeframeCount: number
+  timeframeAgreementRisk: number
 }
 
 const API_BASE_URL =
@@ -57,7 +84,7 @@ function clamp(value: number) {
 }
 
 function normalizeSymbol(value: unknown) {
-  return String(value ?? 'BTCUSD')
+  const raw = String(value ?? 'BTCUSD')
     .trim()
     .toUpperCase()
     .split('BINANCE:')
@@ -70,14 +97,26 @@ function normalizeSymbol(value: unknown) {
     .join('')
     .split('CME:')
     .join('')
+
+  if (raw === 'MES1' || raw === 'MES1!') return 'MES1!'
+  if (raw === 'ES1' || raw === 'ES1!') return 'ES1!'
+  if (raw.includes('MES')) return 'MES1!'
+  if (raw.includes('ES') && !raw.includes('MES')) return 'ES1!'
+  if (raw.includes('BTC')) return 'BTCUSD'
+  if (raw.includes('ETH')) return 'ETHUSD'
+  if (raw.includes('SPY')) return 'SPY'
+
+  return raw || 'BTCUSD'
 }
 
 function normalizeTimeframe(value: unknown) {
-  const tf = String(value ?? '1m').trim().toLowerCase()
+  const raw = String(value ?? '1m').trim().toLowerCase()
+  const tf = raw.includes('/') ? raw.split('/')[0].trim() : raw
 
   if (tf === '1') return '1m'
   if (tf === '3') return '3m'
   if (tf === '5') return '5m'
+  if (tf === '10') return '10m'
   if (tf === '15') return '15m'
   if (tf === '30') return '30m'
   if (tf === '60') return '1h'
@@ -110,7 +149,7 @@ function asIndicatorArray(value: unknown): TechnicalIndicator[] {
     .filter((item): item is TechnicalIndicator => Boolean(item))
 }
 
-function extractTechnicalIndicators(data: TechnicalSentiment | null): TechnicalIndicator[] {
+function extractTechnicalIndicators(data: TechnicalSentiment | null | undefined): TechnicalIndicator[] {
   if (!data) return []
 
   const merged = [
@@ -132,6 +171,33 @@ function extractTechnicalIndicators(data: TechnicalSentiment | null): TechnicalI
   return Array.from(byName.values())
 }
 
+function normalizeIndicatorSignal(signal: unknown, value: number): 'BULLISH' | 'BEARISH' | 'NEUTRAL' {
+  const text = String(signal ?? '').toUpperCase()
+
+  if (text.includes('BULL')) return 'BULLISH'
+  if (text.includes('BEAR')) return 'BEARISH'
+  if (text.includes('NEUTRAL')) return 'NEUTRAL'
+
+  if (value >= 60) return 'BULLISH'
+  if (value <= 40) return 'BEARISH'
+  return 'NEUTRAL'
+}
+
+function hasPositiveNumber(value: unknown) {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) && numeric > 0
+}
+
+function riskFromOptionalNumber(value: unknown): number | null {
+  const numeric = Number(value)
+
+  // A 0 from the webhook usually means "not provided / inactive" in this dashboard.
+  // Positive values are treated as intentionally supplied risk scores.
+  if (!Number.isFinite(numeric) || numeric <= 0) return null
+
+  return clamp(numeric)
+}
+
 function isNeutralText(value?: string) {
   const lower = String(value ?? '').toLowerCase()
 
@@ -140,30 +206,123 @@ function isNeutralText(value?: string) {
     lower.includes('neutral') ||
     lower.includes('waiting') ||
     lower.includes('none') ||
-    lower.includes('no signal')
+    lower.includes('no signal') ||
+    lower.includes('missing') ||
+    lower.includes('inactive')
   )
 }
 
-function technicalSummary(data: TechnicalSentiment | null) {
+function isBearishOrRiskText(value?: string) {
+  const lower = String(value ?? '').toLowerCase()
+
+  return (
+    lower.includes('bear') ||
+    lower.includes('risk') ||
+    lower.includes('negative') ||
+    lower.includes('hot') ||
+    lower.includes('recession') ||
+    lower.includes('conflict') ||
+    lower.includes('hawkish')
+  )
+}
+
+function buildSignalTechnicalSentiment(signal?: TradingSignal): TechnicalSentiment | null {
+  if (!signal) return null
+
+  if (signal.technicalSentiment && typeof signal.technicalSentiment === 'object') {
+    return signal.technicalSentiment
+  }
+
+  const indicators = [
+    ...asIndicatorArray(signal.indicators),
+    ...asIndicatorArray(signal.technicalIndicators),
+    ...asIndicatorArray(signal.technicalMeter),
+    ...asIndicatorArray(signal.factors),
+  ]
+
+  if (indicators.length === 0) return null
+
+  const bullCount = indicators.filter((indicator) => normalizeIndicatorSignal(indicator.signal, indicator.value) === 'BULLISH').length
+  const bearCount = indicators.filter((indicator) => normalizeIndicatorSignal(indicator.signal, indicator.value) === 'BEARISH').length
+  const neutralCount = Math.max(0, indicators.length - bullCount - bearCount)
+  const sentiment = clamp(((bullCount + neutralCount * 0.5) / Math.max(indicators.length, 1)) * 100)
+
+  return {
+    sentiment,
+    sentimentStatus:
+      sentiment >= 60
+        ? 'Mostly Bullish'
+        : sentiment <= 40
+          ? 'Mostly Bearish'
+          : 'Mixed',
+    bullCount,
+    bearCount,
+    neutralCount,
+    activeCount: indicators.length,
+    indicators,
+    technicalIndicators: indicators,
+    technicalMeter: indicators,
+    factors: indicators,
+  }
+}
+
+function calculateTimeframeAgreementRisk(data: TechnicalSentiment | null | undefined) {
+  const breakdown = data?.timeframeBreakdown
+
+  if (!breakdown || typeof breakdown !== 'object') return 0
+
+  const sentiments = Object.values(breakdown)
+    .map((item) => {
+      if (!item) return null
+      const indicators = extractTechnicalIndicators(item)
+      const activeCount = item.activeCount ?? indicators.length
+      const bullCount =
+        item.bullCount ??
+        indicators.filter((indicator) => normalizeIndicatorSignal(indicator.signal, indicator.value) === 'BULLISH').length
+      const bearCount =
+        item.bearCount ??
+        indicators.filter((indicator) => normalizeIndicatorSignal(indicator.signal, indicator.value) === 'BEARISH').length
+
+      if (activeCount <= 0) return null
+      if (bullCount > bearCount) return 'BULLISH'
+      if (bearCount > bullCount) return 'BEARISH'
+      return 'NEUTRAL'
+    })
+    .filter((item): item is 'BULLISH' | 'BEARISH' | 'NEUTRAL' => Boolean(item))
+
+  if (sentiments.length < 2) return 0
+
+  const unique = new Set(sentiments)
+
+  if (unique.size >= 3) return 70
+  if (unique.has('BULLISH') && unique.has('BEARISH')) return 60
+  if (unique.has('NEUTRAL') && unique.size > 1) return 35
+
+  return 0
+}
+
+function technicalSummary(data: TechnicalSentiment | null | undefined): TechnicalSummary {
   const indicators = extractTechnicalIndicators(data)
   const activeCount = data?.activeCount ?? indicators.length
   const bullCount =
     data?.bullCount ??
-    indicators.filter((indicator) => String(indicator.signal).toUpperCase() === 'BULLISH')
+    indicators.filter((indicator) => normalizeIndicatorSignal(indicator.signal, indicator.value) === 'BULLISH')
       .length
   const bearCount =
     data?.bearCount ??
-    indicators.filter((indicator) => String(indicator.signal).toUpperCase() === 'BEARISH')
+    indicators.filter((indicator) => normalizeIndicatorSignal(indicator.signal, indicator.value) === 'BEARISH')
       .length
   const neutralCount =
     data?.neutralCount ??
-    indicators.filter((indicator) => String(indicator.signal).toUpperCase() === 'NEUTRAL')
+    indicators.filter((indicator) => normalizeIndicatorSignal(indicator.signal, indicator.value) === 'NEUTRAL')
       .length
 
   const sentiment = clamp(Number(data?.sentiment ?? 50))
   const bullishShare = activeCount > 0 ? (bullCount / activeCount) * 100 : 0
   const bearishShare = activeCount > 0 ? (bearCount / activeCount) * 100 : 0
   const neutralShare = activeCount > 0 ? (neutralCount / activeCount) * 100 : 0
+  const timeframeCount = Array.isArray(data?.sourceTimeframes) ? data.sourceTimeframes.length : 1
+  const timeframeAgreementRisk = calculateTimeframeAgreementRisk(data)
 
   return {
     indicators,
@@ -175,17 +334,81 @@ function technicalSummary(data: TechnicalSentiment | null) {
     bullishShare,
     bearishShare,
     neutralShare,
+    timeframeCount,
+    timeframeAgreementRisk,
   }
 }
 
+function calculateChopRisk(
+  suppliedChopRisk: unknown,
+  summary: TechnicalSummary,
+  netBias: number,
+  bullPressure: number,
+  bearPressure: number,
+  conflictRisk: number
+) {
+  const explicitRisk = riskFromOptionalNumber(suppliedChopRisk)
+  if (explicitRisk !== null) return explicitRisk
+
+  const weakNetBiasRisk = clamp(55 - Math.abs(netBias) * 1.1)
+  const pressureBalanceRisk = clamp(60 - Math.abs(bullPressure - bearPressure))
+  const neutralRisk = clamp(summary.neutralShare)
+  const sentimentMiddleRisk = clamp(100 - Math.abs(summary.sentiment - 50) * 2)
+  const timeframeConflictRisk = summary.timeframeAgreementRisk
+
+  return clamp(
+    Math.max(
+      neutralRisk,
+      weakNetBiasRisk,
+      pressureBalanceRisk,
+      sentimentMiddleRisk,
+      timeframeConflictRisk,
+      conflictRisk >= 45 ? conflictRisk - 15 : 0
+    )
+  )
+}
+
+function calculateMacroRisk(signal?: TradingSignal) {
+  const explicitRisk = riskFromOptionalNumber(signal?.macroRisk)
+  if (explicitRisk !== null) return explicitRisk
+
+  const macroTexts = [
+    signal?.fredMacro,
+    signal?.session,
+    signal?.openInterest,
+    signal?.footprint,
+    signal?.finraShortVolume,
+    signal?.cot,
+  ]
+
+  const hasAnyExternalConfirmation = macroTexts.some((value) => !isNeutralText(value))
+  const hasMacroWarning = macroTexts.some((value) => isBearishOrRiskText(value))
+
+  if (hasMacroWarning) return 65
+
+  // If macro is missing/inactive, it should not be 0. It is an unknown-risk condition.
+  if (!hasAnyExternalConfirmation) return 35
+
+  return 15
+}
+
 export default function PressureGauges({ signal }: PressureGaugesProps) {
-  const [technicalSentiment, setTechnicalSentiment] =
+  const [fetchedTechnicalSentiment, setFetchedTechnicalSentiment] =
     useState<TechnicalSentiment | null>(null)
 
   const symbol = normalizeSymbol(signal?.symbol)
-  const timeframe = normalizeTimeframe(signal?.timeframe)
+  const timeframe = normalizeTimeframe(signal?.primaryTimeframe ?? signal?.timeframe)
+  const signalTechnicalSentiment = useMemo(
+    () => buildSignalTechnicalSentiment(signal),
+    [signal]
+  )
 
   useEffect(() => {
+    if (signalTechnicalSentiment) {
+      setFetchedTechnicalSentiment(null)
+      return
+    }
+
     let cancelled = false
     let intervalId: ReturnType<typeof setInterval> | null = null
 
@@ -206,7 +429,7 @@ export default function PressureGauges({ signal }: PressureGaugesProps) {
         const json = await response.json()
 
         if (!cancelled) {
-          setTechnicalSentiment(json && typeof json === 'object' ? json : null)
+          setFetchedTechnicalSentiment(json && typeof json === 'object' ? json : null)
         }
       } catch (error) {
         console.error('Pressure gauges technical sentiment fetch error:', error)
@@ -220,7 +443,9 @@ export default function PressureGauges({ signal }: PressureGaugesProps) {
       cancelled = true
       if (intervalId) clearInterval(intervalId)
     }
-  }, [symbol, timeframe])
+  }, [signalTechnicalSentiment, symbol, timeframe])
+
+  const technicalSentiment = signalTechnicalSentiment ?? fetchedTechnicalSentiment
 
   const summary = useMemo(
     () => technicalSummary(technicalSentiment),
@@ -249,25 +474,22 @@ export default function PressureGauges({ signal }: PressureGaugesProps) {
       ? Math.abs(Number(signal?.bearScore ?? 50) - summary.bullishShare) >= 25 ||
         Math.abs(Number(signal?.bullScore ?? 50) - summary.bearishShare) >= 25
         ? 75
-        : Math.abs(bullPressure - bearPressure) < 12
+        : Math.abs(bullPressure - bearPressure) < 12 || summary.timeframeAgreementRisk >= 60
           ? 45
           : 15
       : 0
   )
 
-  const chopRisk = clamp(
-    Number.isFinite(Number(signal?.chopRisk))
-      ? Number(signal?.chopRisk)
-      : Math.max(summary.neutralShare, 50 - Math.abs(netBias))
+  const chopRisk = calculateChopRisk(
+    signal?.chopRisk,
+    summary,
+    netBias,
+    bullPressure,
+    bearPressure,
+    conflictRisk
   )
 
-  const macroRisk = clamp(
-    Number.isFinite(Number(signal?.macroRisk))
-      ? Number(signal?.macroRisk)
-      : isNeutralText(signal?.fredMacro)
-        ? 35
-        : 15
-  )
+  const macroRisk = calculateMacroRisk(signal)
 
   const gauges: GaugeItem[] = [
     {
@@ -292,19 +514,29 @@ export default function PressureGauges({ signal }: PressureGaugesProps) {
       label: 'Technical Conflict Risk',
       value: conflictRisk,
       barClass: conflictRisk >= 60 ? 'bg-red-400' : conflictRisk >= 35 ? 'bg-yellow-400' : 'bg-emerald-400',
-      note: 'Mismatch between dashboard pressure and technical meter',
+      note:
+        summary.timeframeCount > 1
+          ? 'Mismatch between pressure, technical meter, and mini-chart timeframes'
+          : 'Mismatch between dashboard pressure and technical meter',
     },
     {
       label: 'Chop Risk',
       value: chopRisk,
-      barClass: chopRisk >= 60 ? 'bg-yellow-400' : 'bg-blue-400',
-      note: `${summary.neutralCount} neutral technicals + weak net bias check`,
+      barClass: chopRisk >= 60 ? 'bg-yellow-400' : chopRisk >= 35 ? 'bg-blue-400' : 'bg-emerald-400',
+      note:
+        summary.timeframeCount > 1
+          ? `${summary.neutralCount} neutral technicals + multi-timeframe conflict check`
+          : `${summary.neutralCount} neutral technicals + weak net bias check`,
     },
     {
       label: 'Macro Risk',
       value: macroRisk,
-      barClass: macroRisk >= 60 ? 'bg-orange-500' : 'bg-orange-400',
-      note: isNeutralText(signal?.fredMacro) ? 'Macro is neutral or missing' : 'Macro confirmation available',
+      barClass: macroRisk >= 60 ? 'bg-orange-500' : macroRisk >= 35 ? 'bg-yellow-400' : 'bg-orange-400',
+      note: calculateMacroRisk(signal) >= 60
+        ? 'External or macro warning detected'
+        : isNeutralText(signal?.fredMacro)
+          ? 'Macro is neutral or missing'
+          : 'Macro confirmation available',
     },
   ]
 
