@@ -132,6 +132,7 @@ type CandleMode = 'Regular' | 'Heikin Ashi'
 type SmmaOverlayLength = 'Off' | '20' | '50'
 type NrtrOverlayMode = 'Off' | 'ATR-Based' | 'Percentage'
 type NrtrExitMode = 'Off' | 'Pivot Pullback' | 'Internal SuperTrend End'
+type NrtrPresetMode = 'Scalping' | 'Swing' | 'Long'
 
 type OverlayToggleKey = 'smc' | 'ghost' | 'liquidityProfile' | 'orderBlocks'
 
@@ -560,7 +561,7 @@ function getChartSettingsKey(compact: boolean, chartTitle?: string, fallbackTime
   return `${CHART_SETTINGS_PREFIX}${identity}`
 }
 
-function readChartSettings(key: string): Partial<{ symbol: string; timeframe: string; candleMode: CandleMode; overlayToggles: OverlayToggles; smmaOverlayLength: SmmaOverlayLength; nrtrOverlayMode: NrtrOverlayMode; nrtrExitMode: NrtrExitMode }> {
+function readChartSettings(key: string): Partial<{ symbol: string; timeframe: string; candleMode: CandleMode; overlayToggles: OverlayToggles; smmaOverlayLength: SmmaOverlayLength; nrtrOverlayMode: NrtrOverlayMode; nrtrExitMode: NrtrExitMode; nrtrPresetMode: NrtrPresetMode }> {
   if (typeof window === 'undefined') return {}
 
   try {
@@ -578,7 +579,7 @@ function readChartSettings(key: string): Partial<{ symbol: string; timeframe: st
 
 function saveChartSettings(
   key: string,
-  settings: Partial<{ symbol: string; timeframe: string; candleMode: CandleMode; overlayToggles: OverlayToggles; smmaOverlayLength: SmmaOverlayLength; nrtrOverlayMode: NrtrOverlayMode; nrtrExitMode: NrtrExitMode }>
+  settings: Partial<{ symbol: string; timeframe: string; candleMode: CandleMode; overlayToggles: OverlayToggles; smmaOverlayLength: SmmaOverlayLength; nrtrOverlayMode: NrtrOverlayMode; nrtrExitMode: NrtrExitMode; nrtrPresetMode: NrtrPresetMode }>
 ) {
   if (typeof window === 'undefined') return
 
@@ -1723,6 +1724,37 @@ function normalizeNrtrExitMode(value: unknown): NrtrExitMode {
   return 'Off'
 }
 
+function normalizeNrtrPresetMode(value: unknown): NrtrPresetMode {
+  const text = String(value ?? 'Scalping')
+  if (text === 'Swing') return 'Swing'
+  if (text === 'Long') return 'Long'
+  return 'Scalping'
+}
+
+function getNrtrPresetValues(preset: NrtrPresetMode) {
+  if (preset === 'Long') {
+    return {
+      atrMultiplier: 5.0,
+      percent: 0.5,
+      label: 'Long',
+    }
+  }
+
+  if (preset === 'Swing') {
+    return {
+      atrMultiplier: 3.0,
+      percent: 0.25,
+      label: 'Swing',
+    }
+  }
+
+  return {
+    atrMultiplier: 1.5,
+    percent: 0.15,
+    label: 'Scalping',
+  }
+}
+
 type NrtrExitPoint = {
   time: string
   value: number
@@ -1914,15 +1946,15 @@ function calculateNrtrAtrSuperTrend(candles: Candle[], atrLength = 14, atrMultip
   return result
 }
 
-function calculateNrtrOverlay(candles: Candle[], mode: NrtrOverlayMode) {
+function calculateNrtrOverlay(candles: Candle[], mode: NrtrOverlayMode, preset: NrtrPresetMode) {
+  const presetValues = getNrtrPresetValues(preset)
+
   if (mode === 'ATR-Based') {
-    return calculateNrtrAtrSuperTrend(candles, 14, 3)
+    return calculateNrtrAtrSuperTrend(candles, 14, presetValues.atrMultiplier)
   }
 
   if (mode === 'Percentage') {
-    // Dashboard visual default: 0.25%.
-    // Pine default 2% is too wide for intraday BTC/MES and compresses the chart.
-    return calculateNrtrPercentage(candles, 0.25)
+    return calculateNrtrPercentage(candles, presetValues.percent)
   }
 
   return []
@@ -2227,6 +2259,7 @@ function buildChartOption({
   smmaOverlayLength = 'Off',
   nrtrOverlayMode = 'Off',
   nrtrExitMode = 'Off',
+  nrtrPresetMode = 'Scalping',
 }: {
   symbol: string
   timeframe: string
@@ -2239,6 +2272,7 @@ function buildChartOption({
   smmaOverlayLength?: SmmaOverlayLength
   nrtrOverlayMode?: NrtrOverlayMode
   nrtrExitMode?: NrtrExitMode
+  nrtrPresetMode?: NrtrPresetMode
 }): any {
   const activeCandles = candleMode === 'Heikin Ashi' ? convertToHeikinAshi(candles) : candles
   const latestRealClose = candles.length > 0 ? Number(candles[candles.length - 1].close) : NaN
@@ -2291,8 +2325,9 @@ function buildChartOption({
         ])
       : []
 
+  const nrtrPresetValues = getNrtrPresetValues(nrtrPresetMode)
   const nrtrPoints = !compact && nrtrOverlayMode !== 'Off'
-    ? calculateNrtrOverlay(activeCandles, nrtrOverlayMode)
+    ? calculateNrtrOverlay(activeCandles, nrtrOverlayMode, nrtrPresetMode)
     : []
 
   const nrtrBullData = nrtrPoints.map((point) => [
@@ -2647,11 +2682,11 @@ function buildChartOption({
               silent: true,
               style: {
                 text: [
-                  `NRTR+ ${nrtrOverlayMode} · ${nrtrTradeStats.directionText}`,
+                  `NRTR+ ${nrtrOverlayMode} · ${nrtrPresetValues.label} · ${nrtrTradeStats.directionText}`,
                   `Entry: ${compactPrice(Number(nrtrTradeStats.entryPrice ?? NaN))}    Trail: ${compactPrice(Number(nrtrTradeStats.trailingStop ?? NaN))}`,
                   `P&L: ${formatSignedNumber(nrtrTradeStats.pnlPoints, 2)}  (${formatSignedNumber(nrtrTradeStats.pnlPercent, 3)}%)`,
                   `Locked: ${formatSignedNumber(nrtrTradeStats.lockedProfit, 2)}  (${formatSignedNumber(nrtrTradeStats.lockedPercent, 1)}%)`,
-                  `Bars: ${nrtrTradeStats.barsInTrade}    Last: ${nrtrTradeStats.lastSignalText}    Exit: ${nrtrExitMode}`,
+                  `Bars: ${nrtrTradeStats.barsInTrade}    Last: ${nrtrTradeStats.lastSignalText}    ${nrtrOverlayMode === 'ATR-Based' ? `ATRx${nrtrPresetValues.atrMultiplier}` : `${nrtrPresetValues.percent}%`}`,
                 ].join('\n'),
                 fill: '#e5e7eb',
                 fontSize: 11,
@@ -3121,6 +3156,8 @@ export default function EChartsCandlestickChart({
 
   const initialNrtrExitMode = normalizeNrtrExitMode(savedChartSettings.nrtrExitMode)
 
+  const initialNrtrPresetMode = normalizeNrtrPresetMode(savedChartSettings.nrtrPresetMode)
+
   const [symbol, setSymbol] = useState(() => initialSymbol)
   const [timeframe, setTimeframe] = useState(() => initialTimeframe)
   const [candleMode, setCandleMode] = useState<CandleMode>(() => initialCandleMode)
@@ -3128,6 +3165,7 @@ export default function EChartsCandlestickChart({
   const [smmaOverlayLength, setSmmaOverlayLength] = useState<SmmaOverlayLength>(() => initialSmmaOverlayLength)
   const [nrtrOverlayMode, setNrtrOverlayMode] = useState<NrtrOverlayMode>(() => initialNrtrOverlayMode)
   const [nrtrExitMode, setNrtrExitMode] = useState<NrtrExitMode>(() => initialNrtrExitMode)
+  const [nrtrPresetMode, setNrtrPresetMode] = useState<NrtrPresetMode>(() => initialNrtrPresetMode)
   const [historicalCandles, setHistoricalCandles] = useState<Candle[]>([])
   const [status, setStatus] = useState<'idle' | 'loading' | 'cached' | 'loaded' | 'empty' | 'error'>('idle')
   const [liveProvider, setLiveProvider] = useState<string>('')
@@ -3168,6 +3206,10 @@ export default function EChartsCandlestickChart({
     setNrtrExitMode(normalizeNrtrExitMode(value))
   }
 
+  const handleNrtrPresetModeChange = (value: string) => {
+    setNrtrPresetMode(normalizeNrtrPresetMode(value))
+  }
+
   useEffect(() => {
     if (!followDefaultSymbol) return
 
@@ -3186,8 +3228,9 @@ export default function EChartsCandlestickChart({
       smmaOverlayLength,
       nrtrOverlayMode,
       nrtrExitMode,
+      nrtrPresetMode,
     })
-  }, [chartSettingsKey, symbol, timeframe, candleMode, overlayToggles, smmaOverlayLength, nrtrOverlayMode, nrtrExitMode])
+  }, [chartSettingsKey, symbol, timeframe, candleMode, overlayToggles, smmaOverlayLength, nrtrOverlayMode, nrtrExitMode, nrtrPresetMode])
 
   useEffect(() => {
     if (compact) return
@@ -3567,6 +3610,7 @@ export default function EChartsCandlestickChart({
       smmaOverlayLength,
       nrtrOverlayMode,
       nrtrExitMode,
+      nrtrPresetMode,
     })
 
     const chartIdentity = `${symbol}::${timeframe}::${candleMode}::${compact}`
@@ -3613,7 +3657,7 @@ export default function EChartsCandlestickChart({
     return () => {
       window.removeEventListener('resize', resize)
     }
-  }, [symbol, timeframe, candleMode, candles, compact, status, chartOverlays, overlayToggles, smmaOverlayLength, nrtrOverlayMode, nrtrExitMode])
+  }, [symbol, timeframe, candleMode, candles, compact, status, chartOverlays, overlayToggles, smmaOverlayLength, nrtrOverlayMode, nrtrExitMode, nrtrPresetMode])
 
   useEffect(() => {
     return () => {
@@ -3758,6 +3802,22 @@ export default function EChartsCandlestickChart({
                   <option value="Off">NRTR Off</option>
                   <option value="ATR-Based">NRTR ATR</option>
                   <option value="Percentage">NRTR %</option>
+                </select>
+
+                <select
+                  value={nrtrPresetMode}
+                  onChange={(event) => handleNrtrPresetModeChange(event.target.value)}
+                  disabled={nrtrOverlayMode === 'Off'}
+                  className={`rounded-full border px-2 py-1 text-[10px] font-bold outline-none transition ${
+                    nrtrOverlayMode !== 'Off'
+                      ? 'border-violet-400/60 bg-violet-400/10 text-violet-300'
+                      : 'border-dark-600 bg-dark-900/60 text-gray-500 hover:border-gray-500 hover:text-gray-300 disabled:opacity-50'
+                  }`}
+                  title="NRTR+ preset: Scalping, Swing, or Long"
+                >
+                  <option value="Scalping">NRTR Scalping</option>
+                  <option value="Swing">NRTR Swing</option>
+                  <option value="Long">NRTR Long</option>
                 </select>
 
                 <select
