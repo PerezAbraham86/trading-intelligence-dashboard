@@ -3967,8 +3967,46 @@ def build_options_pressure_context(symbol: str, underlying_override: str = "") -
 # - cached/stale overlay response prevents chart from waiting on heavy calculations
 # ─────────────────────────────────────────────────────────────────────────────
 
-def chart_overlay_cache_key(symbol: str, timeframe: str, limit: int) -> str:
-    return f"{normalize_symbol(symbol)}::{normalize_timeframe(timeframe)}::{int(limit or 500)}"
+def chart_overlay_cache_key(
+    symbol: str,
+    timeframe: str,
+    limit: int,
+    smc: bool = False,
+    ghost: bool = False,
+    profile: bool = False,
+    order_blocks: bool = False,
+) -> str:
+    flags = f"smc={int(bool(smc))}:ghost={int(bool(ghost))}:profile={int(bool(profile))}:ob={int(bool(order_blocks))}"
+    return f"{normalize_symbol(symbol)}::{normalize_timeframe(timeframe)}::{int(limit or 500)}::{flags}"
+
+
+def empty_fast_overlay_response(
+    symbol: str,
+    timeframe: str,
+    limit: int,
+    cache: str = "disabled_no_fetch",
+) -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    return {
+        "eventType": "CHART_OVERLAYS",
+        "status": "Disabled",
+        "symbol": normalized_symbol,
+        "timeframe": normalized_timeframe,
+        "candlesCount": 0,
+        "chartOverlays": empty_overlay_payload(),
+        "ghostCandles": [],
+        "alphaProfileMeta": {},
+        "cache": cache,
+        "source": "python_fast_chart_overlay_flags",
+        "overlayFlags": {
+            "smc": False,
+            "ghost": False,
+            "profile": False,
+            "orderBlocks": False,
+        },
+        "createdAt": now_iso(),
+    }
 
 
 def chart_overlay_cache_is_fresh(key: str, max_age_seconds: int = 12) -> bool:
@@ -3983,49 +4021,99 @@ def chart_overlay_cache_is_fresh(key: str, max_age_seconds: int = 12) -> bool:
         return False
 
 
-def trim_chart_overlays_for_dashboard(overlays: Dict[str, Any]) -> Dict[str, Any]:
+def trim_chart_overlays_for_dashboard(
+    overlays: Dict[str, Any],
+    smc: bool = False,
+    ghost: bool = False,
+    profile: bool = False,
+    order_blocks: bool = False,
+) -> Dict[str, Any]:
     if not isinstance(overlays, dict):
         return empty_overlay_payload()
 
-    trimmed = dict(overlays)
+    trimmed = empty_overlay_payload()
 
-    # Keep the visual payload light. Frontend still limits labels, but trimming here
-    # reduces JSON size and improves ECharts setOption speed.
-    if isinstance(trimmed.get("smcEvents"), list):
-        trimmed["smcEvents"] = trimmed["smcEvents"][-12:]
+    # Keep payloads minimal and only return overlays requested by the chart UI.
+    # This prevents SMC / AlphaX / Ghost calculations from bloating first load.
+    if smc:
+        if isinstance(overlays.get("smcEvents"), list):
+            trimmed["smcEvents"] = overlays["smcEvents"][-12:]
 
-    if isinstance(trimmed.get("liquidityEvents"), list):
-        trimmed["liquidityEvents"] = trimmed["liquidityEvents"][-10:]
+        if isinstance(overlays.get("liquidityEvents"), list):
+            trimmed["liquidityEvents"] = overlays["liquidityEvents"][-10:]
 
-    if isinstance(trimmed.get("zones"), list):
-        trimmed["zones"] = trimmed["zones"][-8:]
+        if isinstance(overlays.get("dlmConfluenceMarkers"), list):
+            trimmed["dlmConfluenceMarkers"] = overlays["dlmConfluenceMarkers"][-6:]
 
-    if isinstance(trimmed.get("dlmConfluenceMarkers"), list):
-        trimmed["dlmConfluenceMarkers"] = trimmed["dlmConfluenceMarkers"][-6:]
+        if isinstance(overlays.get("scoreMarkers"), list):
+            trimmed["scoreMarkers"] = overlays["scoreMarkers"][-1:]
 
-    if isinstance(trimmed.get("scoreMarkers"), list):
-        trimmed["scoreMarkers"] = trimmed["scoreMarkers"][-1:]
+    if order_blocks:
+        if isinstance(overlays.get("zones"), list):
+            trimmed["zones"] = overlays["zones"][-8:]
 
-    if isinstance(trimmed.get("alphaProfileBins"), list):
-        # Remove empty profile rows and cap to a clean profile size.
-        bins = [
-            item for item in trimmed["alphaProfileBins"]
-            if isinstance(item, dict) and to_float(item.get("volumePct"), 0) > 1
-        ]
-        trimmed["alphaProfileBins"] = bins[-28:]
+    if profile:
+        if isinstance(overlays.get("dlmLevels"), list):
+            trimmed["dlmLevels"] = overlays["dlmLevels"][-12:]
 
-    if isinstance(trimmed.get("ghostCandles"), list):
-        trimmed["ghostCandles"] = trimmed["ghostCandles"][:5]
+        if isinstance(overlays.get("alphaProfileBins"), list):
+            bins = [
+                item for item in overlays["alphaProfileBins"]
+                if isinstance(item, dict) and to_float(item.get("volumePct"), 0) > 1
+            ]
+            trimmed["alphaProfileBins"] = bins[-28:]
 
-    trimmed["payloadMode"] = "trimmed_fast_chart_overlay"
+        if isinstance(overlays.get("alphaProfileMeta"), dict):
+            trimmed["alphaProfileMeta"] = overlays.get("alphaProfileMeta", {})
+
+    if ghost:
+        if isinstance(overlays.get("ghostCandles"), list):
+            trimmed["ghostCandles"] = overlays["ghostCandles"][:5]
+
+    trimmed["payloadMode"] = "flag_filtered_fast_chart_overlay"
+    trimmed["source"] = "python_fast_chart_overlay_flags"
+    trimmed["overlayFlags"] = {
+        "smc": bool(smc),
+        "ghost": bool(ghost),
+        "profile": bool(profile),
+        "orderBlocks": bool(order_blocks),
+    }
     return trimmed
 
 
-def build_fast_chart_overlay_payload(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500, force_refresh: bool = False) -> Dict[str, Any]:
+def build_fast_chart_overlay_payload(
+    symbol: str = "BTCUSD",
+    timeframe: str = "1m",
+    limit: int = 500,
+    force_refresh: bool = False,
+    smc: bool = False,
+    ghost: bool = False,
+    profile: bool = False,
+    order_blocks: bool = False,
+) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = max(120, min(int(limit or 500), 700))
-    cache_key = chart_overlay_cache_key(normalized_symbol, normalized_timeframe, safe_limit)
+
+    # Fastest possible path: if the chart has all overlay toggles off,
+    # do not fetch candles and do not run SMC/AlphaX/Ghost calculations.
+    if not any([smc, ghost, profile, order_blocks]):
+        return empty_fast_overlay_response(
+            normalized_symbol,
+            normalized_timeframe,
+            safe_limit,
+            cache="disabled_no_fetch",
+        )
+
+    cache_key = chart_overlay_cache_key(
+        normalized_symbol,
+        normalized_timeframe,
+        safe_limit,
+        smc=smc,
+        ghost=ghost,
+        profile=profile,
+        order_blocks=order_blocks,
+    )
 
     if not force_refresh and chart_overlay_cache_is_fresh(cache_key):
         cached = CHART_OVERLAY_CACHE.get(cache_key)
@@ -4037,12 +4125,20 @@ def build_fast_chart_overlay_payload(symbol: str = "BTCUSD", timeframe: str = "1
     cached_payload = CHART_OVERLAY_CACHE.get(cache_key)
 
     try:
-        # Use the same dashboard candle router as the chart, but keep this route separate
-        # so candles can render before overlays finish.
         candles = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit)
-        ghosts = build_python_ghost_candles(candles, 3)
+
+        # Ghost candles are only built if the Ghost toggle is on.
+        # SMC/Profile/OB do not need ghost generation for chart drawing.
+        ghosts = build_python_ghost_candles(candles, 3) if ghost else []
+
         raw_overlays = build_python_chart_overlays(candles, ghosts)
-        overlays = trim_chart_overlays_for_dashboard(raw_overlays)
+        overlays = trim_chart_overlays_for_dashboard(
+            raw_overlays,
+            smc=smc,
+            ghost=ghost,
+            profile=profile,
+            order_blocks=order_blocks,
+        )
 
         payload = {
             "eventType": "CHART_OVERLAYS",
@@ -4054,7 +4150,13 @@ def build_fast_chart_overlay_payload(symbol: str = "BTCUSD", timeframe: str = "1
             "ghostCandles": overlays.get("ghostCandles", []),
             "alphaProfileMeta": overlays.get("alphaProfileMeta", {}),
             "cache": "refreshed",
-            "source": "python_fast_chart_overlay_cache",
+            "source": "python_fast_chart_overlay_flags",
+            "overlayFlags": {
+                "smc": bool(smc),
+                "ghost": bool(ghost),
+                "profile": bool(profile),
+                "orderBlocks": bool(order_blocks),
+            },
             "createdAt": now_iso(),
         }
 
@@ -4078,7 +4180,13 @@ def build_fast_chart_overlay_payload(symbol: str = "BTCUSD", timeframe: str = "1
             "ghostCandles": [],
             "alphaProfileMeta": {},
             "cache": "empty_error",
-            "source": "python_fast_chart_overlay_cache",
+            "source": "python_fast_chart_overlay_flags",
+            "overlayFlags": {
+                "smc": bool(smc),
+                "ghost": bool(ghost),
+                "profile": bool(profile),
+                "orderBlocks": bool(order_blocks),
+            },
             "error": str(error),
             "createdAt": now_iso(),
         }
@@ -4099,8 +4207,26 @@ def build_fast_chart_overlay_payload(symbol: str = "BTCUSD", timeframe: str = "1
 
 
 @app.get("/api/chart-overlays")
-def chart_overlays(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500, force: bool = False) -> Dict[str, Any]:
-    return build_fast_chart_overlay_payload(symbol, timeframe, limit, force_refresh=force)
+def chart_overlays(
+    symbol: str = "BTCUSD",
+    timeframe: str = "1m",
+    limit: int = 500,
+    force: bool = False,
+    smc: bool = False,
+    ghost: bool = False,
+    profile: bool = False,
+    orderBlocks: bool = False,
+) -> Dict[str, Any]:
+    return build_fast_chart_overlay_payload(
+        symbol,
+        timeframe,
+        limit,
+        force_refresh=force,
+        smc=smc,
+        ghost=ghost,
+        profile=profile,
+        order_blocks=orderBlocks,
+    )
 
 @app.get("/api/options-pressure")
 def options_pressure(symbol: str = "SPY", underlying: str = "") -> Dict[str, Any]:
@@ -4123,7 +4249,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v24_phase3_news_options_macro_cache",
+        "engine": "main_v25_fast_overlay_flags_default_off",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
@@ -4135,6 +4261,7 @@ def root() -> Dict[str, Any]:
             "/api/live-price",
             "/api/provider-debug",
             "/api/engine-state",
+            "/api/chart-overlays",
             "/api/latest-sentiment",
             "/webhook/tradingview",
         ],
