@@ -1819,11 +1819,17 @@ function calculateNrtrAtrSuperTrend(candles: Candle[], atrLength = 14, atrMultip
   const result: NrtrPoint[] = []
   if (candles.length === 0) return result
 
+  // TradingView ta.supertrend-compatible logic:
+  // Pine cpDir is -1 in bullish mode and +1 in bearish mode.
+  // This dashboard uses +1 bullish and -1 bearish, so we invert that behavior.
   const atrValues = calculateAtr(candles, atrLength)
-  let finalUpper = 0
-  let finalLower = 0
-  let direction: 1 | -1 = 1
-  let superTrend: number | null = null
+
+  let finalUpper: number | null = null
+  let finalLower: number | null = null
+  let previousSuperTrend: number | null = null
+  let previousFinalUpper: number | null = null
+  let previousFinalLower: number | null = null
+  let direction: 1 | -1 | 0 = 0
 
   for (let index = 0; index < candles.length; index += 1) {
     const candle = candles[index]
@@ -1849,38 +1855,45 @@ function calculateNrtrAtrSuperTrend(candles: Candle[], atrLength = 14, atrMultip
     const basicUpper = hl2 + atrMultiplier * atr
     const basicLower = hl2 - atrMultiplier * atr
 
-    if (index === 0 || !Number.isFinite(finalUpper) || !Number.isFinite(finalLower)) {
+    if (previousFinalUpper === null || previousFinalLower === null) {
       finalUpper = basicUpper
       finalLower = basicLower
     } else {
       finalUpper =
-        basicUpper < finalUpper || previousClose > finalUpper
+        basicUpper < previousFinalUpper || previousClose > previousFinalUpper
           ? basicUpper
-          : finalUpper
+          : previousFinalUpper
 
       finalLower =
-        basicLower > finalLower || previousClose < finalLower
+        basicLower > previousFinalLower || previousClose < previousFinalLower
           ? basicLower
-          : finalLower
+          : previousFinalLower
     }
 
-    if (superTrend === finalUpper) {
-      direction = close > finalUpper ? 1 : -1
-    } else if (superTrend === finalLower) {
-      direction = close < finalLower ? -1 : 1
-    } else {
+    // Match the standard SuperTrend state transition:
+    // if previous ST was the upper band, price must close above upper band to flip bullish;
+    // if previous ST was the lower band, price must close below lower band to flip bearish.
+    if (previousSuperTrend === null) {
       direction = close >= hl2 ? 1 : -1
+    } else if (previousFinalUpper !== null && Math.abs(previousSuperTrend - previousFinalUpper) <= 1e-10) {
+      direction = close > finalUpper ? 1 : -1
+    } else {
+      direction = close < finalLower ? -1 : 1
     }
 
-    superTrend = direction === 1 ? finalLower : finalUpper
+    const superTrend = direction === 1 ? finalLower : finalUpper
 
     result.push({
       time: candle.time,
-      value: superTrend,
+      value: Number.isFinite(superTrend ?? NaN) ? Number(superTrend) : null,
       direction,
-      buy: index > 0 && direction === 1 && previousDirection === -1,
-      sell: index > 0 && direction === -1 && previousDirection === 1,
+      buy: index > 0 && previousDirection === -1 && direction === 1,
+      sell: index > 0 && previousDirection === 1 && direction === -1,
     })
+
+    previousSuperTrend = superTrend
+    previousFinalUpper = finalUpper
+    previousFinalLower = finalLower
   }
 
   return result
