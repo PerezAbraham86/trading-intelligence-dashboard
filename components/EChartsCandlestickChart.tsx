@@ -1837,6 +1837,13 @@ export default function EChartsCandlestickChart({
     setCandleMode(value as CandleMode)
   }
 
+  const handleOverlayToggle = (key: OverlayToggleKey) => {
+    setOverlayToggles((current) => ({
+      ...current,
+      [key]: !current[key],
+    }))
+  }
+
   useEffect(() => {
     if (!followDefaultSymbol) return
 
