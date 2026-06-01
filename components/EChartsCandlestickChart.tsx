@@ -129,6 +129,7 @@ function getOverlayRenderStatusClass(status: OverlayRenderStatus) {
 }
 
 type CandleMode = 'Regular' | 'Heikin Ashi'
+type SmmaOverlayLength = 'Off' | '20' | '50'
 
 type OverlayToggleKey = 'smc' | 'ghost' | 'liquidityProfile' | 'orderBlocks'
 
@@ -557,7 +558,7 @@ function getChartSettingsKey(compact: boolean, chartTitle?: string, fallbackTime
   return `${CHART_SETTINGS_PREFIX}${identity}`
 }
 
-function readChartSettings(key: string): Partial<{ symbol: string; timeframe: string; candleMode: CandleMode; overlayToggles: OverlayToggles }> {
+function readChartSettings(key: string): Partial<{ symbol: string; timeframe: string; candleMode: CandleMode; overlayToggles: OverlayToggles; smmaOverlayLength: SmmaOverlayLength }> {
   if (typeof window === 'undefined') return {}
 
   try {
@@ -575,7 +576,7 @@ function readChartSettings(key: string): Partial<{ symbol: string; timeframe: st
 
 function saveChartSettings(
   key: string,
-  settings: Partial<{ symbol: string; timeframe: string; candleMode: CandleMode; overlayToggles: OverlayToggles }>
+  settings: Partial<{ symbol: string; timeframe: string; candleMode: CandleMode; overlayToggles: OverlayToggles; smmaOverlayLength: SmmaOverlayLength }>
 ) {
   if (typeof window === 'undefined') return
 
@@ -1662,6 +1663,51 @@ async function warmChartOverlayRawCache(
 }
 
 
+function normalizeSmmaOverlayLength(value: unknown): SmmaOverlayLength {
+  const text = String(value ?? 'Off')
+  if (text === '20') return '20'
+  if (text === '50') return '50'
+  return 'Off'
+}
+
+function calculateSmma(values: number[], length: number) {
+  const result: Array<number | null> = Array(values.length).fill(null)
+
+  if (!Number.isFinite(length) || length <= 0 || values.length < length) {
+    return result
+  }
+
+  let seedSum = 0
+
+  for (let index = 0; index < values.length; index += 1) {
+    const value = Number(values[index])
+
+    if (!Number.isFinite(value)) {
+      result[index] = null
+      continue
+    }
+
+    if (index < length) {
+      seedSum += value
+
+      if (index === length - 1) {
+        result[index] = seedSum / length
+      }
+
+      continue
+    }
+
+    const previous = result[index - 1]
+    result[index] =
+      previous === null || !Number.isFinite(previous)
+        ? null
+        : (previous * (length - 1) + value) / length
+  }
+
+  return result
+}
+
+
 // Returns any because this chart builds dynamic ECharts series conditionally.
 // EChartsOption's strict union type rejects valid runtime markArea/markLine series.
 function buildChartOption({
@@ -1673,6 +1719,7 @@ function buildChartOption({
   loading,
   chartOverlays,
   overlayToggles = DEFAULT_OVERLAY_TOGGLES,
+  smmaOverlayLength = 'Off',
 }: {
   symbol: string
   timeframe: string
@@ -1682,6 +1729,7 @@ function buildChartOption({
   loading: boolean
   chartOverlays?: ChartOverlays | null
   overlayToggles?: OverlayToggles
+  smmaOverlayLength?: SmmaOverlayLength
 }): any {
   const activeCandles = candleMode === 'Heikin Ashi' ? convertToHeikinAshi(candles) : candles
   const latestRealClose = candles.length > 0 ? Number(candles[candles.length - 1].close) : NaN
@@ -1720,6 +1768,20 @@ function buildChartOption({
     candle.low,
     candle.high,
   ])
+
+  const smmaLength = smmaOverlayLength === '20' ? 20 : smmaOverlayLength === '50' ? 50 : 0
+  const smmaValues =
+    !compact && smmaLength > 0
+      ? calculateSmma(activeCandles.map((candle) => Number(candle.close)), smmaLength)
+      : []
+  const smmaData =
+    !compact && smmaLength > 0
+      ? activeCandles.map((candle, index) => [
+          candle.time,
+          smmaValues[index] === null ? null : Number(smmaValues[index]),
+        ])
+      : []
+
   const volumeData = activeCandles.map((candle, index) => ({
     value: candle.volume ?? 0,
     itemStyle: {
@@ -2005,6 +2067,27 @@ function buildChartOption({
                 }
               : undefined,
           },
+          ...(smmaLength > 0
+            ? [
+                {
+                  name: `SMMA ${smmaLength}`,
+                  type: 'line',
+                  data: smmaData,
+                  symbol: 'none',
+                  smooth: true,
+                  connectNulls: true,
+                  lineStyle: {
+                    color: smmaLength === 20 ? '#60a5fa' : '#fbbf24',
+                    width: 2,
+                    opacity: 0.95,
+                  },
+                  emphasis: {
+                    disabled: true,
+                  },
+                  z: 9,
+                },
+              ]
+            : []),
           ...(zoneMarkAreas.length > 0
             ? [
                 {
@@ -2217,10 +2300,13 @@ export default function EChartsCandlestickChart({
       : {}),
   }
 
+  const initialSmmaOverlayLength = normalizeSmmaOverlayLength(savedChartSettings.smmaOverlayLength)
+
   const [symbol, setSymbol] = useState(() => initialSymbol)
   const [timeframe, setTimeframe] = useState(() => initialTimeframe)
   const [candleMode, setCandleMode] = useState<CandleMode>(() => initialCandleMode)
   const [overlayToggles, setOverlayToggles] = useState<OverlayToggles>(() => initialOverlayToggles)
+  const [smmaOverlayLength, setSmmaOverlayLength] = useState<SmmaOverlayLength>(() => initialSmmaOverlayLength)
   const [historicalCandles, setHistoricalCandles] = useState<Candle[]>([])
   const [status, setStatus] = useState<'idle' | 'loading' | 'cached' | 'loaded' | 'empty' | 'error'>('idle')
   const [liveProvider, setLiveProvider] = useState<string>('')
@@ -2249,6 +2335,10 @@ export default function EChartsCandlestickChart({
     }))
   }
 
+  const handleSmmaOverlayChange = (value: string) => {
+    setSmmaOverlayLength(normalizeSmmaOverlayLength(value))
+  }
+
   useEffect(() => {
     if (!followDefaultSymbol) return
 
@@ -2264,8 +2354,9 @@ export default function EChartsCandlestickChart({
       timeframe,
       candleMode,
       overlayToggles,
+      smmaOverlayLength,
     })
-  }, [chartSettingsKey, symbol, timeframe, candleMode, overlayToggles])
+  }, [chartSettingsKey, symbol, timeframe, candleMode, overlayToggles, smmaOverlayLength])
 
   useEffect(() => {
     if (compact) return
@@ -2642,6 +2733,7 @@ export default function EChartsCandlestickChart({
       loading: status === 'loading' && candles.length === 0,
       chartOverlays: effectiveChartOverlays,
       overlayToggles,
+      smmaOverlayLength,
     })
 
     const chartIdentity = `${symbol}::${timeframe}::${candleMode}::${compact}`
@@ -2688,7 +2780,7 @@ export default function EChartsCandlestickChart({
     return () => {
       window.removeEventListener('resize', resize)
     }
-  }, [symbol, timeframe, candleMode, candles, compact, status, chartOverlays, overlayToggles])
+  }, [symbol, timeframe, candleMode, candles, compact, status, chartOverlays, overlayToggles, smmaOverlayLength])
 
   useEffect(() => {
     return () => {
@@ -2804,6 +2896,21 @@ export default function EChartsCandlestickChart({
                     {label}
                   </button>
                 ))}
+
+                <select
+                  value={smmaOverlayLength}
+                  onChange={(event) => handleSmmaOverlayChange(event.target.value)}
+                  className={`rounded-full border px-2 py-1 text-[10px] font-bold outline-none transition ${
+                    smmaOverlayLength !== 'Off'
+                      ? 'border-blue-400/60 bg-blue-400/10 text-blue-300'
+                      : 'border-dark-600 bg-dark-900/60 text-gray-500 hover:border-gray-500 hover:text-gray-300'
+                  }`}
+                  title="Optional SMMA overlay"
+                >
+                  <option value="Off">SMMA Off</option>
+                  <option value="20">SMMA 20</option>
+                  <option value="50">SMMA 50</option>
+                </select>
 
                 <div
                   className={`rounded-full border px-2 py-1 text-[10px] font-bold ${getOverlayRenderStatusClass(overlayRenderStatus)}`}
