@@ -2085,10 +2085,14 @@ type NrtrTradeStats = {
   direction: 1 | -1 | 0
   directionText: string
   entryPrice: number | null
+  entryTime: string | null
   currentPrice: number | null
   trailingStop: number | null
   pnlPoints: number | null
   pnlPercent: number | null
+  lockedProfit: number | null
+  lockedPercent: number | null
+  moveDistance: number | null
   barsInTrade: number
   lastSignalText: string
 }
@@ -2105,10 +2109,14 @@ function calculateNrtrTradeStats(candles: Candle[], points: NrtrPoint[]): NrtrTr
     direction: 0,
     directionText: 'Flat',
     entryPrice: null,
+    entryTime: null,
     currentPrice: candles.length > 0 ? Number(candles[candles.length - 1].close) : null,
     trailingStop: null,
     pnlPoints: null,
     pnlPercent: null,
+    lockedProfit: null,
+    lockedPercent: null,
+    moveDistance: null,
     barsInTrade: 0,
     lastSignalText: 'No Signal',
   }
@@ -2117,6 +2125,7 @@ function calculateNrtrTradeStats(candles: Candle[], points: NrtrPoint[]): NrtrTr
 
   let direction: 1 | -1 | 0 = 0
   let entryPrice: number | null = null
+  let entryTime: string | null = null
   let entryIndex = -1
   let lastSignalText = 'No Signal'
 
@@ -2124,6 +2133,7 @@ function calculateNrtrTradeStats(candles: Candle[], points: NrtrPoint[]): NrtrTr
     if (point.buy) {
       direction = 1
       entryPrice = Number(candles[index]?.close)
+      entryTime = candles[index]?.time ?? null
       entryIndex = index
       lastSignalText = 'BUY'
     }
@@ -2131,6 +2141,7 @@ function calculateNrtrTradeStats(candles: Candle[], points: NrtrPoint[]): NrtrTr
     if (point.sell) {
       direction = -1
       entryPrice = Number(candles[index]?.close)
+      entryTime = candles[index]?.time ?? null
       entryIndex = index
       lastSignalText = 'SELL'
     }
@@ -2152,15 +2163,50 @@ function calculateNrtrTradeStats(candles: Candle[], points: NrtrPoint[]): NrtrTr
 
   const pnlPoints = direction === 1 ? currentPrice - entryPrice : entryPrice - currentPrice
   const pnlPercent = entryPrice !== 0 ? (pnlPoints / entryPrice) * 100 : null
+  const trailingStopNumber = Number(trailingStop ?? NaN)
+  const lockedProfit =
+    Number.isFinite(trailingStopNumber)
+      ? direction === 1
+        ? trailingStopNumber - entryPrice
+        : entryPrice - trailingStopNumber
+      : null
+
+  const tradeCandles = entryIndex >= 0 ? candles.slice(entryIndex) : []
+  const profitExtreme =
+    tradeCandles.length > 0
+      ? direction === 1
+        ? Math.max(...tradeCandles.map((candle) => Number(candle.high)))
+        : Math.min(...tradeCandles.map((candle) => Number(candle.low)))
+      : null
+
+  const moveDistance =
+    profitExtreme !== null && Number.isFinite(profitExtreme)
+      ? direction === 1
+        ? profitExtreme - entryPrice
+        : entryPrice - profitExtreme
+      : null
+
+  const lockedPercent =
+    lockedProfit !== null &&
+    moveDistance !== null &&
+    Number.isFinite(lockedProfit) &&
+    Number.isFinite(moveDistance) &&
+    moveDistance > 0
+      ? (lockedProfit / moveDistance) * 100
+      : null
 
   return {
     direction,
     directionText: direction === 1 ? 'Long' : 'Short',
     entryPrice,
+    entryTime,
     currentPrice,
     trailingStop,
     pnlPoints,
     pnlPercent,
+    lockedProfit,
+    lockedPercent,
+    moveDistance,
     barsInTrade: entryIndex >= 0 ? candles.length - 1 - entryIndex : 0,
     lastSignalText,
   }
@@ -2326,7 +2372,45 @@ function buildChartOption({
 
   const nrtrPnlPositive = Number(nrtrTradeStats?.pnlPoints ?? 0) >= 0
   const nrtrEntryPrice = Number(nrtrTradeStats?.entryPrice ?? NaN)
+  const nrtrTrailPrice = Number(nrtrTradeStats?.trailingStop ?? NaN)
+  const nrtrLockedProfit = Number(nrtrTradeStats?.lockedProfit ?? NaN)
+  const nrtrEntryTime = nrtrTradeStats?.entryTime ?? null
+  const latestCandleTime = activeCandles[activeCandles.length - 1]?.time ?? null
   const hasNrtrEntryPrice = Number.isFinite(nrtrEntryPrice)
+  const hasNrtrLockedProfit =
+    hasNrtrEntryPrice &&
+    Number.isFinite(nrtrTrailPrice) &&
+    Number.isFinite(nrtrLockedProfit) &&
+    nrtrLockedProfit > 0 &&
+    Boolean(nrtrEntryTime) &&
+    Boolean(latestCandleTime)
+
+  const nrtrProfitAreaData =
+    hasNrtrLockedProfit
+      ? [[
+          {
+            xAxis: nrtrEntryTime,
+            yAxis: nrtrTradeStats?.direction === 1
+              ? Math.max(nrtrEntryPrice, nrtrTrailPrice)
+              : Math.max(nrtrEntryPrice, nrtrTrailPrice),
+            itemStyle: {
+              color: nrtrTradeStats?.direction === 1
+                ? 'rgba(34, 197, 94, 0.16)'
+                : 'rgba(239, 68, 68, 0.16)',
+              borderColor: nrtrTradeStats?.direction === 1
+                ? 'rgba(34, 197, 94, 0.42)'
+                : 'rgba(239, 68, 68, 0.42)',
+              borderWidth: 1,
+            },
+          },
+          {
+            xAxis: latestCandleTime,
+            yAxis: nrtrTradeStats?.direction === 1
+              ? Math.min(nrtrEntryPrice, nrtrTrailPrice)
+              : Math.min(nrtrEntryPrice, nrtrTrailPrice),
+          },
+        ]]
+      : []
 
   const volumeData = activeCandles.map((candle, index) => ({
     value: candle.volume ?? 0,
@@ -2541,7 +2625,7 @@ function buildChartOption({
               silent: true,
               shape: {
                 width: 228,
-                height: 88,
+                height: 106,
                 r: 8,
               },
               style: {
@@ -2566,6 +2650,7 @@ function buildChartOption({
                   `NRTR+ ${nrtrOverlayMode} · ${nrtrTradeStats.directionText}`,
                   `Entry: ${compactPrice(Number(nrtrTradeStats.entryPrice ?? NaN))}    Trail: ${compactPrice(Number(nrtrTradeStats.trailingStop ?? NaN))}`,
                   `P&L: ${formatSignedNumber(nrtrTradeStats.pnlPoints, 2)}  (${formatSignedNumber(nrtrTradeStats.pnlPercent, 3)}%)`,
+                  `Locked: ${formatSignedNumber(nrtrTradeStats.lockedProfit, 2)}  (${formatSignedNumber(nrtrTradeStats.lockedPercent, 1)}%)`,
                   `Bars: ${nrtrTradeStats.barsInTrade}    Last: ${nrtrTradeStats.lastSignalText}    Exit: ${nrtrExitMode}`,
                 ].join('\n'),
                 fill: '#e5e7eb',
@@ -2768,6 +2853,21 @@ function buildChartOption({
                     width: 3,
                   },
                   z: 25,
+                },
+              ]
+            : []),
+          ...(nrtrProfitAreaData.length > 0
+            ? [
+                {
+                  name: 'NRTR+ Locked Profit Area',
+                  type: 'line',
+                  data: [],
+                  silent: true,
+                  markArea: {
+                    silent: true,
+                    data: nrtrProfitAreaData,
+                  },
+                  z: 7,
                 },
               ]
             : []),
