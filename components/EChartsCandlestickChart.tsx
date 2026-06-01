@@ -130,6 +130,7 @@ function getOverlayRenderStatusClass(status: OverlayRenderStatus) {
 
 type CandleMode = 'Regular' | 'Heikin Ashi'
 type SmmaOverlayLength = 'Off' | '20' | '50'
+type NrtrOverlayMode = 'Off' | 'ATR-Based' | 'Percentage'
 
 type OverlayToggleKey = 'smc' | 'ghost' | 'liquidityProfile' | 'orderBlocks'
 
@@ -558,7 +559,7 @@ function getChartSettingsKey(compact: boolean, chartTitle?: string, fallbackTime
   return `${CHART_SETTINGS_PREFIX}${identity}`
 }
 
-function readChartSettings(key: string): Partial<{ symbol: string; timeframe: string; candleMode: CandleMode; overlayToggles: OverlayToggles; smmaOverlayLength: SmmaOverlayLength }> {
+function readChartSettings(key: string): Partial<{ symbol: string; timeframe: string; candleMode: CandleMode; overlayToggles: OverlayToggles; smmaOverlayLength: SmmaOverlayLength; nrtrOverlayMode: NrtrOverlayMode }> {
   if (typeof window === 'undefined') return {}
 
   try {
@@ -576,7 +577,7 @@ function readChartSettings(key: string): Partial<{ symbol: string; timeframe: st
 
 function saveChartSettings(
   key: string,
-  settings: Partial<{ symbol: string; timeframe: string; candleMode: CandleMode; overlayToggles: OverlayToggles; smmaOverlayLength: SmmaOverlayLength }>
+  settings: Partial<{ symbol: string; timeframe: string; candleMode: CandleMode; overlayToggles: OverlayToggles; smmaOverlayLength: SmmaOverlayLength; nrtrOverlayMode: NrtrOverlayMode }>
 ) {
   if (typeof window === 'undefined') return
 
@@ -1707,6 +1708,196 @@ function calculateSmma(values: number[], length: number) {
   return result
 }
 
+function normalizeNrtrOverlayMode(value: unknown): NrtrOverlayMode {
+  const text = String(value ?? 'Off')
+  if (text === 'ATR-Based') return 'ATR-Based'
+  if (text === 'Percentage') return 'Percentage'
+  return 'Off'
+}
+
+type NrtrPoint = {
+  time: string
+  value: number | null
+  direction: 1 | -1 | 0
+  buy: boolean
+  sell: boolean
+}
+
+function calculateAtr(candles: Candle[], length: number) {
+  const atrValues: Array<number | null> = Array(candles.length).fill(null)
+
+  if (candles.length === 0 || length <= 0) return atrValues
+
+  const trueRanges = candles.map((candle, index) => {
+    const high = Number(candle.high)
+    const low = Number(candle.low)
+    const previousClose = index > 0 ? Number(candles[index - 1].close) : Number(candle.close)
+
+    return Math.max(
+      high - low,
+      Math.abs(high - previousClose),
+      Math.abs(low - previousClose)
+    )
+  })
+
+  let seedSum = 0
+
+  for (let index = 0; index < trueRanges.length; index += 1) {
+    const value = trueRanges[index]
+
+    if (index < length) {
+      seedSum += value
+
+      if (index === length - 1) {
+        atrValues[index] = seedSum / length
+      }
+
+      continue
+    }
+
+    const previousAtr = atrValues[index - 1]
+
+    atrValues[index] =
+      previousAtr === null || !Number.isFinite(previousAtr)
+        ? null
+        : (previousAtr * (length - 1) + value) / length
+  }
+
+  return atrValues
+}
+
+function calculateNrtrPercentage(candles: Candle[], percent = 2): NrtrPoint[] {
+  const result: NrtrPoint[] = []
+  const coefficient = Math.max(0, Math.min(100, percent)) / 100
+
+  if (candles.length === 0) return result
+
+  let trend: 1 | -1 = 1
+  let highestPoint = Number(candles[0].high)
+  let lowestPoint = Number(candles[0].low)
+  let nrtr = highestPoint * (1 - coefficient)
+
+  for (let index = 0; index < candles.length; index += 1) {
+    const candle = candles[index]
+    const high = Number(candle.high)
+    const low = Number(candle.low)
+    const previousTrend = trend
+
+    if (trend === 1) {
+      if (high > highestPoint) highestPoint = high
+      nrtr = highestPoint * (1 - coefficient)
+
+      if (low <= nrtr) {
+        trend = -1
+        lowestPoint = low
+        nrtr = lowestPoint * (1 + coefficient)
+      }
+    } else {
+      if (low < lowestPoint) lowestPoint = low
+      nrtr = lowestPoint * (1 + coefficient)
+
+      if (high >= nrtr) {
+        trend = 1
+        highestPoint = high
+        nrtr = highestPoint * (1 - coefficient)
+      }
+    }
+
+    result.push({
+      time: candle.time,
+      value: Number.isFinite(nrtr) ? nrtr : null,
+      direction: trend,
+      buy: index > 0 && trend === 1 && previousTrend === -1,
+      sell: index > 0 && trend === -1 && previousTrend === 1,
+    })
+  }
+
+  return result
+}
+
+function calculateNrtrAtrSuperTrend(candles: Candle[], atrLength = 14, atrMultiplier = 3): NrtrPoint[] {
+  const result: NrtrPoint[] = []
+  if (candles.length === 0) return result
+
+  const atrValues = calculateAtr(candles, atrLength)
+  let finalUpper = 0
+  let finalLower = 0
+  let direction: 1 | -1 = 1
+  let superTrend: number | null = null
+
+  for (let index = 0; index < candles.length; index += 1) {
+    const candle = candles[index]
+    const high = Number(candle.high)
+    const low = Number(candle.low)
+    const close = Number(candle.close)
+    const previousClose = index > 0 ? Number(candles[index - 1].close) : close
+    const atr = atrValues[index]
+    const previousDirection = direction
+
+    if (atr === null || !Number.isFinite(atr)) {
+      result.push({
+        time: candle.time,
+        value: null,
+        direction: 0,
+        buy: false,
+        sell: false,
+      })
+      continue
+    }
+
+    const hl2 = (high + low) / 2
+    const basicUpper = hl2 + atrMultiplier * atr
+    const basicLower = hl2 - atrMultiplier * atr
+
+    if (index === 0 || !Number.isFinite(finalUpper) || !Number.isFinite(finalLower)) {
+      finalUpper = basicUpper
+      finalLower = basicLower
+    } else {
+      finalUpper =
+        basicUpper < finalUpper || previousClose > finalUpper
+          ? basicUpper
+          : finalUpper
+
+      finalLower =
+        basicLower > finalLower || previousClose < finalLower
+          ? basicLower
+          : finalLower
+    }
+
+    if (superTrend === finalUpper) {
+      direction = close > finalUpper ? 1 : -1
+    } else if (superTrend === finalLower) {
+      direction = close < finalLower ? -1 : 1
+    } else {
+      direction = close >= hl2 ? 1 : -1
+    }
+
+    superTrend = direction === 1 ? finalLower : finalUpper
+
+    result.push({
+      time: candle.time,
+      value: superTrend,
+      direction,
+      buy: index > 0 && direction === 1 && previousDirection === -1,
+      sell: index > 0 && direction === -1 && previousDirection === 1,
+    })
+  }
+
+  return result
+}
+
+function calculateNrtrOverlay(candles: Candle[], mode: NrtrOverlayMode) {
+  if (mode === 'ATR-Based') {
+    return calculateNrtrAtrSuperTrend(candles, 14, 3)
+  }
+
+  if (mode === 'Percentage') {
+    return calculateNrtrPercentage(candles, 2)
+  }
+
+  return []
+}
+
 
 // Returns any because this chart builds dynamic ECharts series conditionally.
 // EChartsOption's strict union type rejects valid runtime markArea/markLine series.
@@ -1720,6 +1911,7 @@ function buildChartOption({
   chartOverlays,
   overlayToggles = DEFAULT_OVERLAY_TOGGLES,
   smmaOverlayLength = 'Off',
+  nrtrOverlayMode = 'Off',
 }: {
   symbol: string
   timeframe: string
@@ -1730,6 +1922,7 @@ function buildChartOption({
   chartOverlays?: ChartOverlays | null
   overlayToggles?: OverlayToggles
   smmaOverlayLength?: SmmaOverlayLength
+  nrtrOverlayMode?: NrtrOverlayMode
 }): any {
   const activeCandles = candleMode === 'Heikin Ashi' ? convertToHeikinAshi(candles) : candles
   const latestRealClose = candles.length > 0 ? Number(candles[candles.length - 1].close) : NaN
@@ -1781,6 +1974,58 @@ function buildChartOption({
           smmaValues[index] === null ? null : Number(smmaValues[index]),
         ])
       : []
+
+  const nrtrPoints = !compact && nrtrOverlayMode !== 'Off'
+    ? calculateNrtrOverlay(activeCandles, nrtrOverlayMode)
+    : []
+
+  const nrtrBullData = nrtrPoints.map((point) => [
+    point.time,
+    point.direction === 1 ? point.value : null,
+  ])
+
+  const nrtrBearData = nrtrPoints.map((point) => [
+    point.time,
+    point.direction === -1 ? point.value : null,
+  ])
+
+  const nrtrBuyMarkers = nrtrPoints
+    .filter((point) => point.buy && point.value !== null)
+    .map((point) => ({
+      value: [point.time, point.value],
+      itemStyle: {
+        color: '#22c55e',
+      },
+      label: {
+        show: true,
+        formatter: 'BUY',
+        color: '#ffffff',
+        fontSize: 9,
+        fontWeight: 900,
+        backgroundColor: '#16a34a',
+        borderRadius: 4,
+        padding: [3, 5],
+      },
+    }))
+
+  const nrtrSellMarkers = nrtrPoints
+    .filter((point) => point.sell && point.value !== null)
+    .map((point) => ({
+      value: [point.time, point.value],
+      itemStyle: {
+        color: '#ef4444',
+      },
+      label: {
+        show: true,
+        formatter: 'SELL',
+        color: '#ffffff',
+        fontSize: 9,
+        fontWeight: 900,
+        backgroundColor: '#dc2626',
+        borderRadius: 4,
+        padding: [3, 5],
+      },
+    }))
 
   const volumeData = activeCandles.map((candle, index) => ({
     value: candle.volume ?? 0,
@@ -2088,6 +2333,67 @@ function buildChartOption({
                 },
               ]
             : []),
+          ...(nrtrOverlayMode !== 'Off'
+            ? [
+                {
+                  name: `${nrtrOverlayMode} NRTR+ Long`,
+                  type: 'line',
+                  data: nrtrBullData,
+                  symbol: 'none',
+                  connectNulls: false,
+                  lineStyle: {
+                    color: '#22c55e',
+                    width: 2,
+                    opacity: 0.95,
+                  },
+                  emphasis: {
+                    disabled: true,
+                  },
+                  z: 10,
+                },
+                {
+                  name: `${nrtrOverlayMode} NRTR+ Short`,
+                  type: 'line',
+                  data: nrtrBearData,
+                  symbol: 'none',
+                  connectNulls: false,
+                  lineStyle: {
+                    color: '#ef4444',
+                    width: 2,
+                    opacity: 0.95,
+                  },
+                  emphasis: {
+                    disabled: true,
+                  },
+                  z: 10,
+                },
+              ]
+            : []),
+          ...(nrtrBuyMarkers.length > 0
+            ? [
+                {
+                  name: 'NRTR+ Buy',
+                  type: 'scatter',
+                  data: nrtrBuyMarkers,
+                  symbol: 'triangle',
+                  symbolSize: 14,
+                  z: 24,
+                },
+              ]
+            : []),
+          ...(nrtrSellMarkers.length > 0
+            ? [
+                {
+                  name: 'NRTR+ Sell',
+                  type: 'scatter',
+                  data: nrtrSellMarkers,
+                  symbol: 'triangle',
+                  symbolRotate: 180,
+                  symbolSize: 14,
+                  z: 24,
+                },
+              ]
+            : []),
           ...(zoneMarkAreas.length > 0
             ? [
                 {
@@ -2302,11 +2608,14 @@ export default function EChartsCandlestickChart({
 
   const initialSmmaOverlayLength = normalizeSmmaOverlayLength(savedChartSettings.smmaOverlayLength)
 
+  const initialNrtrOverlayMode = normalizeNrtrOverlayMode(savedChartSettings.nrtrOverlayMode)
+
   const [symbol, setSymbol] = useState(() => initialSymbol)
   const [timeframe, setTimeframe] = useState(() => initialTimeframe)
   const [candleMode, setCandleMode] = useState<CandleMode>(() => initialCandleMode)
   const [overlayToggles, setOverlayToggles] = useState<OverlayToggles>(() => initialOverlayToggles)
   const [smmaOverlayLength, setSmmaOverlayLength] = useState<SmmaOverlayLength>(() => initialSmmaOverlayLength)
+  const [nrtrOverlayMode, setNrtrOverlayMode] = useState<NrtrOverlayMode>(() => initialNrtrOverlayMode)
   const [historicalCandles, setHistoricalCandles] = useState<Candle[]>([])
   const [status, setStatus] = useState<'idle' | 'loading' | 'cached' | 'loaded' | 'empty' | 'error'>('idle')
   const [liveProvider, setLiveProvider] = useState<string>('')
@@ -2339,6 +2648,10 @@ export default function EChartsCandlestickChart({
     setSmmaOverlayLength(normalizeSmmaOverlayLength(value))
   }
 
+  const handleNrtrOverlayChange = (value: string) => {
+    setNrtrOverlayMode(normalizeNrtrOverlayMode(value))
+  }
+
   useEffect(() => {
     if (!followDefaultSymbol) return
 
@@ -2355,8 +2668,9 @@ export default function EChartsCandlestickChart({
       candleMode,
       overlayToggles,
       smmaOverlayLength,
+      nrtrOverlayMode,
     })
-  }, [chartSettingsKey, symbol, timeframe, candleMode, overlayToggles, smmaOverlayLength])
+  }, [chartSettingsKey, symbol, timeframe, candleMode, overlayToggles, smmaOverlayLength, nrtrOverlayMode])
 
   useEffect(() => {
     if (compact) return
@@ -2734,6 +3048,7 @@ export default function EChartsCandlestickChart({
       chartOverlays: effectiveChartOverlays,
       overlayToggles,
       smmaOverlayLength,
+      nrtrOverlayMode,
     })
 
     const chartIdentity = `${symbol}::${timeframe}::${candleMode}::${compact}`
@@ -2780,7 +3095,7 @@ export default function EChartsCandlestickChart({
     return () => {
       window.removeEventListener('resize', resize)
     }
-  }, [symbol, timeframe, candleMode, candles, compact, status, chartOverlays, overlayToggles, smmaOverlayLength])
+  }, [symbol, timeframe, candleMode, candles, compact, status, chartOverlays, overlayToggles, smmaOverlayLength, nrtrOverlayMode])
 
   useEffect(() => {
     return () => {
@@ -2910,6 +3225,21 @@ export default function EChartsCandlestickChart({
                   <option value="Off">SMMA Off</option>
                   <option value="20">SMMA 20</option>
                   <option value="50">SMMA 50</option>
+                </select>
+
+                <select
+                  value={nrtrOverlayMode}
+                  onChange={(event) => handleNrtrOverlayChange(event.target.value)}
+                  className={`rounded-full border px-2 py-1 text-[10px] font-bold outline-none transition ${
+                    nrtrOverlayMode !== 'Off'
+                      ? 'border-purple-400/60 bg-purple-400/10 text-purple-300'
+                      : 'border-dark-600 bg-dark-900/60 text-gray-500 hover:border-gray-500 hover:text-gray-300'
+                  }`}
+                  title="Optional NRTR+ trailing stop overlay"
+                >
+                  <option value="Off">NRTR Off</option>
+                  <option value="ATR-Based">NRTR ATR</option>
+                  <option value="Percentage">NRTR %</option>
                 </select>
 
                 <div
