@@ -6,7 +6,7 @@ import * as echarts from 'echarts'
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
 const DEFAULT_VISIBLE_CANDLES = 78
 const CACHE_TTL_MS = 1000 * 60 * 5
-const LOCAL_STORAGE_PREFIX = 'marketbos:v10:mes1-confirmed-symbol-only:'
+const LOCAL_STORAGE_PREFIX = 'marketbos:v11:fast-timeframe-switch:'
 const CHART_SETTINGS_PREFIX = 'marketbos:chart-settings:v1:'
 const MAIN_CANDLES_READY_KEY = 'marketbos:main-candles-ready:v1'
 const PRIMARY_CANDLE_TIMEFRAMES = ['1m', '5m', '10m', '15m']
@@ -742,42 +742,15 @@ async function preloadPrimaryCandles(
   prioritySymbol = 'BTCUSD',
   priorityTimeframe = '1m'
 ) {
-  if (typeof window === 'undefined') return
-
-  const normalizedPrioritySymbol = normalizeDefaultSymbol(prioritySymbol)
-  const normalizedPriorityTimeframe = normalizeDefaultTimeframe(priorityTimeframe)
-  const preloadKey = `${normalizedPrioritySymbol}::${normalizedPriorityTimeframe}`
-
-  // One priority preload per selected symbol/timeframe session.
-  // Important: do NOT preload other symbols here. The selected chart symbol owns
-  // priority after deployment/load, and other symbols should wait until the user
-  // actually switches to them.
-  if (primaryCandlePreloadStarted === preloadKey) return
-
-  primaryCandlePreloadStarted = preloadKey
-
-  const timeframes = Array.from(
-    new Set([
-      normalizedPriorityTimeframe,
-      ...PRIMARY_CANDLE_TIMEFRAMES,
-    ])
-  )
-
-  const params = new URLSearchParams({
-    symbols: normalizedPrioritySymbol,
-    timeframes: timeframes.join(','),
-    limit: '500',
-  })
-
-  try {
-    await fetch(`${API_BASE_URL}/api/preload-candles?${params.toString()}`, {
-      cache: 'no-store',
-      signal,
-    })
-  } catch (error: any) {
-    if (error?.name === 'AbortError') throw error
-    console.warn('Current-symbol candle preload failed:', error)
-  }
+  // Speed fix:
+  // Do not auto-preload multiple timeframes while the user is switching charts.
+  // The previous preloader could make BTCUSD and MES1! feel delayed because it
+  // requested 1m/5m/10m/15m in the background and competed with the selected chart.
+  // Keep this as a safe no-op for now. The selected symbol/timeframe fetch is the priority.
+  void signal
+  void prioritySymbol
+  void priorityTimeframe
+  return
 }
 
 
@@ -795,38 +768,27 @@ async function fetchCandlesFromNetwork(
     limit,
   })
 
-  const routes = [
-    '/api/candles',
-    '/api/merged-candles',
-    '/api/historical-candles',
-  ]
+  const route = '/api/candles'
 
-  for (const route of routes) {
-    try {
-      const response = await fetch(`${API_BASE_URL}${route}?${params.toString()}`, {
-        cache: 'no-store',
-        signal,
-      })
+  try {
+    const response = await fetch(`${API_BASE_URL}${route}?${params.toString()}`, {
+      cache: 'no-store',
+      signal,
+    })
 
-      if (!response.ok) continue
+    if (!response.ok) return []
 
-      const json = await response.json()
-      const candles = extractCandleArray(json)
-        .map(candleFromAny)
-        .filter((candle): candle is Candle => candle !== null)
+    const json = await response.json()
+    const candles = extractCandleArray(json)
+      .map(candleFromAny)
+      .filter((candle): candle is Candle => candle !== null)
 
-      const merged = mergeCandlesByTime(candles)
-
-      if (merged.length > 0) {
-        return merged
-      }
-    } catch (error: any) {
-      if (error?.name === 'AbortError') throw error
-      console.error(`Candle fetch error: ${route} ${symbol} ${timeframe}`, error)
-    }
+    return mergeCandlesByTime(candles)
+  } catch (error: any) {
+    if (error?.name === 'AbortError') throw error
+    console.error(`Candle fetch error: ${route} ${symbol} ${timeframe}`, error)
+    return []
   }
-
-  return []
 }
 
 
@@ -837,16 +799,15 @@ async function fetchCandles(
   signal?: AbortSignal
 ): Promise<Candle[]> {
   const cacheKey = getCandleCacheKey(symbol, timeframe)
-  const requestedLimit = requestedLimitNumber(limit)
 
   const cached = readMemoryCache(cacheKey) ?? readLocalStorageCache(cacheKey)
 
-  // Important:
-  // Old BTCUSD caches could contain short pages like 332 / 69 / 23 candles.
-  // Do not treat those as complete when the chart is requesting 500.
-  // Show short cached candles only through the load effect while a fresh
-  // network request replaces them with the full 500 from the backend.
-  if (cached && cached.length >= requestedLimit) return cached
+  // Speed fix:
+  // Any valid cached candle set should display immediately when switching
+  // symbols/timeframes. Do not block the chart waiting for a full 500 refresh.
+  // A later WebSocket/background refresh can update live data, but chart switching
+  // must stay instant.
+  if (cached && cached.length > 0) return cached
 
   const existingRequest = inflightCandleRequests.get(cacheKey)
   if (existingRequest) return existingRequest
@@ -3287,13 +3248,11 @@ export default function EChartsCandlestickChart({
         })
       }
 
-      const requestedLimit = requestedLimitNumber(candleFetchLimit)
-      const cachedIsComplete = Boolean(cached && cached.length >= requestedLimit)
-
       if (cached && cached.length > 0) {
-        // Show cache instantly if available, but still refresh below if it is short.
+        // Show cache instantly if available. Never make visible cached candles look like
+        // they are still loading during a timeframe/symbol switch.
         setHistoricalCandles(cached)
-        setStatus(cachedIsComplete ? 'cached' : 'loading')
+        setStatus('cached')
 
         if (!compact) {
           setMainCandlesReady({
@@ -3301,7 +3260,7 @@ export default function EChartsCandlestickChart({
             timeframe,
             candleMode,
             count: cached.length,
-            status: cachedIsComplete ? 'cached' : 'cached-refreshing',
+            status: 'cached',
           })
 
           window.setTimeout(() => {
@@ -3342,8 +3301,8 @@ export default function EChartsCandlestickChart({
               status: 'loaded',
             })
 
-            // Only after the selected main chart candles are ready do we warm up
-            // other symbols/timeframes in the background.
+            // Preload is intentionally disabled in fast-switch mode.
+            // The selected symbol/timeframe fetch always stays priority.
             preloadPrimaryCandles(controller.signal, symbol, timeframe).catch((error: any) => {
               if (error?.name !== 'AbortError') {
                 console.warn('Primary candle preload after main ready failed:', error)
