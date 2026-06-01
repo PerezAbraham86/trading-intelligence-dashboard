@@ -131,6 +131,7 @@ function getOverlayRenderStatusClass(status: OverlayRenderStatus) {
 type CandleMode = 'Regular' | 'Heikin Ashi'
 type SmmaOverlayLength = 'Off' | '20' | '50'
 type NrtrOverlayMode = 'Off' | 'ATR-Based' | 'Percentage'
+type NrtrExitMode = 'Off' | 'Pivot Pullback' | 'Internal SuperTrend End'
 
 type OverlayToggleKey = 'smc' | 'ghost' | 'liquidityProfile' | 'orderBlocks'
 
@@ -559,7 +560,7 @@ function getChartSettingsKey(compact: boolean, chartTitle?: string, fallbackTime
   return `${CHART_SETTINGS_PREFIX}${identity}`
 }
 
-function readChartSettings(key: string): Partial<{ symbol: string; timeframe: string; candleMode: CandleMode; overlayToggles: OverlayToggles; smmaOverlayLength: SmmaOverlayLength; nrtrOverlayMode: NrtrOverlayMode }> {
+function readChartSettings(key: string): Partial<{ symbol: string; timeframe: string; candleMode: CandleMode; overlayToggles: OverlayToggles; smmaOverlayLength: SmmaOverlayLength; nrtrOverlayMode: NrtrOverlayMode; nrtrExitMode: NrtrExitMode }> {
   if (typeof window === 'undefined') return {}
 
   try {
@@ -577,7 +578,7 @@ function readChartSettings(key: string): Partial<{ symbol: string; timeframe: st
 
 function saveChartSettings(
   key: string,
-  settings: Partial<{ symbol: string; timeframe: string; candleMode: CandleMode; overlayToggles: OverlayToggles; smmaOverlayLength: SmmaOverlayLength; nrtrOverlayMode: NrtrOverlayMode }>
+  settings: Partial<{ symbol: string; timeframe: string; candleMode: CandleMode; overlayToggles: OverlayToggles; smmaOverlayLength: SmmaOverlayLength; nrtrOverlayMode: NrtrOverlayMode; nrtrExitMode: NrtrExitMode }>
 ) {
   if (typeof window === 'undefined') return
 
@@ -1715,6 +1716,20 @@ function normalizeNrtrOverlayMode(value: unknown): NrtrOverlayMode {
   return 'Off'
 }
 
+function normalizeNrtrExitMode(value: unknown): NrtrExitMode {
+  const text = String(value ?? 'Off')
+  if (text === 'Pivot Pullback') return 'Pivot Pullback'
+  if (text === 'Internal SuperTrend End') return 'Internal SuperTrend End'
+  return 'Off'
+}
+
+type NrtrExitPoint = {
+  time: string
+  value: number
+  direction: 1 | -1
+  label: string
+}
+
 type NrtrPoint = {
   time: string
   value: number | null
@@ -1913,6 +1928,159 @@ function calculateNrtrOverlay(candles: Candle[], mode: NrtrOverlayMode) {
   return []
 }
 
+function calculateNrtrExitPoints(
+  candles: Candle[],
+  nrtrPoints: NrtrPoint[],
+  exitMode: NrtrExitMode,
+  pivotLength = 5
+): NrtrExitPoint[] {
+  if (exitMode === 'Off' || candles.length === 0 || nrtrPoints.length === 0) return []
+
+  const exits: NrtrExitPoint[] = []
+  let exitLocked = false
+
+  const internalPoints =
+    exitMode === 'Internal SuperTrend End'
+      ? calculateNrtrAtrSuperTrend(candles, 10, 1.5)
+      : []
+
+  for (let index = 1; index < candles.length; index += 1) {
+    const point = nrtrPoints[index]
+    const previousPoint = nrtrPoints[index - 1]
+    const direction = point?.direction ?? 0
+    const previousDirection = previousPoint?.direction ?? 0
+
+    if (direction !== previousDirection) {
+      exitLocked = false
+    }
+
+    if (direction === 0) continue
+
+    if (exitMode === 'Pivot Pullback') {
+      const lookbackStart = Math.max(0, index - pivotLength)
+      const previousLookbackStart = Math.max(0, index - 1 - pivotLength)
+      const previousWindow = candles.slice(previousLookbackStart, index)
+      const currentWindow = candles.slice(lookbackStart, index + 1)
+
+      const previousHighest = Math.max(...previousWindow.map((candle) => Number(candle.high)))
+      const previousLowest = Math.min(...previousWindow.map((candle) => Number(candle.low)))
+      const currentHighest = Math.max(...currentWindow.map((candle) => Number(candle.high)))
+      const currentLowest = Math.min(...currentWindow.map((candle) => Number(candle.low)))
+
+      const candle = candles[index]
+      const previousCandle = candles[index - 1]
+      const trendValue = Number(point.value ?? NaN)
+      const previousTrendValue = Number(previousPoint?.value ?? NaN)
+
+      const newExtremeLong =
+        direction === 1 &&
+        Number(candle.high) > previousHighest
+
+      const newExtremeShort =
+        direction === -1 &&
+        Number(candle.low) < previousLowest
+
+      if (newExtremeLong || newExtremeShort) {
+        exitLocked = false
+      }
+
+      const exitLong =
+        direction === 1 &&
+        Number(previousCandle.high) >= previousHighest &&
+        Number(candle.close) < Number(previousCandle.close) &&
+        Number.isFinite(trendValue) &&
+        Number.isFinite(previousTrendValue) &&
+        trendValue <= previousTrendValue
+
+      const exitShort =
+        direction === -1 &&
+        Number(previousCandle.low) <= previousLowest &&
+        Number(candle.close) > Number(previousCandle.close) &&
+        Number.isFinite(trendValue) &&
+        Number.isFinite(previousTrendValue) &&
+        trendValue >= previousTrendValue
+
+      if (!exitLocked && exitLong) {
+        exits.push({
+          time: candle.time,
+          value: Number(candle.high),
+          direction: 1,
+          label: 'Exit Long',
+        })
+        exitLocked = true
+      }
+
+      if (!exitLocked && exitShort) {
+        exits.push({
+          time: candle.time,
+          value: Number(candle.low),
+          direction: -1,
+          label: 'Exit Short',
+        })
+        exitLocked = true
+      }
+
+      void currentHighest
+      void currentLowest
+    }
+
+    if (exitMode === 'Internal SuperTrend End') {
+      const internalPoint = internalPoints[index]
+      const previousInternalPoint = internalPoints[index - 1]
+
+      if (!internalPoint || !previousInternalPoint) continue
+
+      const internalResetLong =
+        direction === 1 &&
+        internalPoint.direction === 1 &&
+        previousInternalPoint.direction === -1
+
+      const internalResetShort =
+        direction === -1 &&
+        internalPoint.direction === -1 &&
+        previousInternalPoint.direction === 1
+
+      if (internalResetLong || internalResetShort) {
+        exitLocked = false
+      }
+
+      const exitLong =
+        direction === 1 &&
+        internalPoint.direction === -1 &&
+        previousInternalPoint.direction === 1
+
+      const exitShort =
+        direction === -1 &&
+        internalPoint.direction === 1 &&
+        previousInternalPoint.direction === -1
+
+      const candle = candles[index]
+
+      if (!exitLocked && exitLong) {
+        exits.push({
+          time: candle.time,
+          value: Number(candle.high),
+          direction: 1,
+          label: 'Exit Long',
+        })
+        exitLocked = true
+      }
+
+      if (!exitLocked && exitShort) {
+        exits.push({
+          time: candle.time,
+          value: Number(candle.low),
+          direction: -1,
+          label: 'Exit Short',
+        })
+        exitLocked = true
+      }
+    }
+  }
+
+  return exits
+}
+
 type NrtrTradeStats = {
   direction: 1 | -1 | 0
   directionText: string
@@ -2012,6 +2180,7 @@ function buildChartOption({
   overlayToggles = DEFAULT_OVERLAY_TOGGLES,
   smmaOverlayLength = 'Off',
   nrtrOverlayMode = 'Off',
+  nrtrExitMode = 'Off',
 }: {
   symbol: string
   timeframe: string
@@ -2023,6 +2192,7 @@ function buildChartOption({
   overlayToggles?: OverlayToggles
   smmaOverlayLength?: SmmaOverlayLength
   nrtrOverlayMode?: NrtrOverlayMode
+  nrtrExitMode?: NrtrExitMode
 }): any {
   const activeCandles = candleMode === 'Heikin Ashi' ? convertToHeikinAshi(candles) : candles
   const latestRealClose = candles.length > 0 ? Number(candles[candles.length - 1].close) : NaN
@@ -2126,6 +2296,28 @@ function buildChartOption({
         padding: [3, 5],
       },
     }))
+
+  const nrtrExitPoints =
+    !compact && nrtrOverlayMode !== 'Off' && nrtrExitMode !== 'Off'
+      ? calculateNrtrExitPoints(activeCandles, nrtrPoints, nrtrExitMode, 5)
+      : []
+
+  const nrtrExitMarkers = nrtrExitPoints.map((point) => ({
+    value: [point.time, point.value],
+    itemStyle: {
+      color: point.direction === 1 ? '#22c55e' : '#ef4444',
+    },
+    label: {
+      show: true,
+      formatter: 'X',
+      color: point.direction === 1 ? '#22c55e' : '#ef4444',
+      fontSize: 16,
+      fontWeight: 900,
+      backgroundColor: 'rgba(15, 23, 42, 0.72)',
+      borderRadius: 4,
+      padding: [1, 4],
+    },
+  }))
 
   const nrtrTradeStats =
     !compact && nrtrOverlayMode !== 'Off'
@@ -2374,7 +2566,7 @@ function buildChartOption({
                   `NRTR+ ${nrtrOverlayMode} · ${nrtrTradeStats.directionText}`,
                   `Entry: ${compactPrice(Number(nrtrTradeStats.entryPrice ?? NaN))}    Trail: ${compactPrice(Number(nrtrTradeStats.trailingStop ?? NaN))}`,
                   `P&L: ${formatSignedNumber(nrtrTradeStats.pnlPoints, 2)}  (${formatSignedNumber(nrtrTradeStats.pnlPercent, 3)}%)`,
-                  `Bars: ${nrtrTradeStats.barsInTrade}    Last: ${nrtrTradeStats.lastSignalText}`,
+                  `Bars: ${nrtrTradeStats.barsInTrade}    Last: ${nrtrTradeStats.lastSignalText}    Exit: ${nrtrExitMode}`,
                 ].join('\n'),
                 fill: '#e5e7eb',
                 fontSize: 11,
@@ -2561,6 +2753,21 @@ function buildChartOption({
                   symbolRotate: 180,
                   symbolSize: 14,
                   z: 24,
+                },
+              ]
+            : []),
+          ...(nrtrExitMarkers.length > 0
+            ? [
+                {
+                  name: 'NRTR+ Exit X',
+                  type: 'scatter',
+                  data: nrtrExitMarkers,
+                  symbol: 'path://M -6 -6 L 6 6 M 6 -6 L -6 6',
+                  symbolSize: 18,
+                  lineStyle: {
+                    width: 3,
+                  },
+                  z: 25,
                 },
               ]
             : []),
@@ -2812,12 +3019,15 @@ export default function EChartsCandlestickChart({
 
   const initialNrtrOverlayMode = normalizeNrtrOverlayMode(savedChartSettings.nrtrOverlayMode)
 
+  const initialNrtrExitMode = normalizeNrtrExitMode(savedChartSettings.nrtrExitMode)
+
   const [symbol, setSymbol] = useState(() => initialSymbol)
   const [timeframe, setTimeframe] = useState(() => initialTimeframe)
   const [candleMode, setCandleMode] = useState<CandleMode>(() => initialCandleMode)
   const [overlayToggles, setOverlayToggles] = useState<OverlayToggles>(() => initialOverlayToggles)
   const [smmaOverlayLength, setSmmaOverlayLength] = useState<SmmaOverlayLength>(() => initialSmmaOverlayLength)
   const [nrtrOverlayMode, setNrtrOverlayMode] = useState<NrtrOverlayMode>(() => initialNrtrOverlayMode)
+  const [nrtrExitMode, setNrtrExitMode] = useState<NrtrExitMode>(() => initialNrtrExitMode)
   const [historicalCandles, setHistoricalCandles] = useState<Candle[]>([])
   const [status, setStatus] = useState<'idle' | 'loading' | 'cached' | 'loaded' | 'empty' | 'error'>('idle')
   const [liveProvider, setLiveProvider] = useState<string>('')
@@ -2854,6 +3064,10 @@ export default function EChartsCandlestickChart({
     setNrtrOverlayMode(normalizeNrtrOverlayMode(value))
   }
 
+  const handleNrtrExitModeChange = (value: string) => {
+    setNrtrExitMode(normalizeNrtrExitMode(value))
+  }
+
   useEffect(() => {
     if (!followDefaultSymbol) return
 
@@ -2871,8 +3085,9 @@ export default function EChartsCandlestickChart({
       overlayToggles,
       smmaOverlayLength,
       nrtrOverlayMode,
+      nrtrExitMode,
     })
-  }, [chartSettingsKey, symbol, timeframe, candleMode, overlayToggles, smmaOverlayLength, nrtrOverlayMode])
+  }, [chartSettingsKey, symbol, timeframe, candleMode, overlayToggles, smmaOverlayLength, nrtrOverlayMode, nrtrExitMode])
 
   useEffect(() => {
     if (compact) return
@@ -3251,6 +3466,7 @@ export default function EChartsCandlestickChart({
       overlayToggles,
       smmaOverlayLength,
       nrtrOverlayMode,
+      nrtrExitMode,
     })
 
     const chartIdentity = `${symbol}::${timeframe}::${candleMode}::${compact}`
@@ -3297,7 +3513,7 @@ export default function EChartsCandlestickChart({
     return () => {
       window.removeEventListener('resize', resize)
     }
-  }, [symbol, timeframe, candleMode, candles, compact, status, chartOverlays, overlayToggles, smmaOverlayLength, nrtrOverlayMode])
+  }, [symbol, timeframe, candleMode, candles, compact, status, chartOverlays, overlayToggles, smmaOverlayLength, nrtrOverlayMode, nrtrExitMode])
 
   useEffect(() => {
     return () => {
@@ -3442,6 +3658,22 @@ export default function EChartsCandlestickChart({
                   <option value="Off">NRTR Off</option>
                   <option value="ATR-Based">NRTR ATR</option>
                   <option value="Percentage">NRTR %</option>
+                </select>
+
+                <select
+                  value={nrtrExitMode}
+                  onChange={(event) => handleNrtrExitModeChange(event.target.value)}
+                  disabled={nrtrOverlayMode === 'Off'}
+                  className={`rounded-full border px-2 py-1 text-[10px] font-bold outline-none transition ${
+                    nrtrOverlayMode !== 'Off' && nrtrExitMode !== 'Off'
+                      ? 'border-rose-400/60 bg-rose-400/10 text-rose-300'
+                      : 'border-dark-600 bg-dark-900/60 text-gray-500 hover:border-gray-500 hover:text-gray-300 disabled:opacity-50'
+                  }`}
+                  title="Optional NRTR+ exit X mode"
+                >
+                  <option value="Off">Exit Off</option>
+                  <option value="Pivot Pullback">Exit Pivot</option>
+                  <option value="Internal SuperTrend End">Exit Internal ST</option>
                 </select>
 
                 <div
