@@ -1913,6 +1913,91 @@ function calculateNrtrOverlay(candles: Candle[], mode: NrtrOverlayMode) {
   return []
 }
 
+type NrtrTradeStats = {
+  direction: 1 | -1 | 0
+  directionText: string
+  entryPrice: number | null
+  currentPrice: number | null
+  trailingStop: number | null
+  pnlPoints: number | null
+  pnlPercent: number | null
+  barsInTrade: number
+  lastSignalText: string
+}
+
+function formatSignedNumber(value: number | null | undefined, decimals = 2) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '—'
+  const number = Number(value)
+  const sign = number > 0 ? '+' : ''
+  return `${sign}${number.toFixed(decimals)}`
+}
+
+function calculateNrtrTradeStats(candles: Candle[], points: NrtrPoint[]): NrtrTradeStats {
+  const empty: NrtrTradeStats = {
+    direction: 0,
+    directionText: 'Flat',
+    entryPrice: null,
+    currentPrice: candles.length > 0 ? Number(candles[candles.length - 1].close) : null,
+    trailingStop: null,
+    pnlPoints: null,
+    pnlPercent: null,
+    barsInTrade: 0,
+    lastSignalText: 'No Signal',
+  }
+
+  if (candles.length === 0 || points.length === 0) return empty
+
+  let direction: 1 | -1 | 0 = 0
+  let entryPrice: number | null = null
+  let entryIndex = -1
+  let lastSignalText = 'No Signal'
+
+  points.forEach((point, index) => {
+    if (point.buy) {
+      direction = 1
+      entryPrice = Number(candles[index]?.close)
+      entryIndex = index
+      lastSignalText = 'BUY'
+    }
+
+    if (point.sell) {
+      direction = -1
+      entryPrice = Number(candles[index]?.close)
+      entryIndex = index
+      lastSignalText = 'SELL'
+    }
+  })
+
+  const latestPoint = points[points.length - 1]
+  const currentPrice = Number(candles[candles.length - 1].close)
+  const trailingStop = latestPoint?.value ?? null
+
+  if (direction === 0 || entryPrice === null || !Number.isFinite(entryPrice)) {
+    return {
+      ...empty,
+      direction: latestPoint?.direction ?? 0,
+      directionText: latestPoint?.direction === 1 ? 'Bullish' : latestPoint?.direction === -1 ? 'Bearish' : 'Flat',
+      trailingStop,
+      lastSignalText,
+    }
+  }
+
+  const pnlPoints = direction === 1 ? currentPrice - entryPrice : entryPrice - currentPrice
+  const pnlPercent = entryPrice !== 0 ? (pnlPoints / entryPrice) * 100 : null
+
+  return {
+    direction,
+    directionText: direction === 1 ? 'Long' : 'Short',
+    entryPrice,
+    currentPrice,
+    trailingStop,
+    pnlPoints,
+    pnlPercent,
+    barsInTrade: entryIndex >= 0 ? candles.length - 1 - entryIndex : 0,
+    lastSignalText,
+  }
+}
+
 
 // Returns any because this chart builds dynamic ECharts series conditionally.
 // EChartsOption's strict union type rejects valid runtime markArea/markLine series.
@@ -2041,6 +2126,13 @@ function buildChartOption({
         padding: [3, 5],
       },
     }))
+
+  const nrtrTradeStats =
+    !compact && nrtrOverlayMode !== 'Off'
+      ? calculateNrtrTradeStats(activeCandles, nrtrPoints)
+      : null
+
+  const nrtrPnlPositive = Number(nrtrTradeStats?.pnlPoints ?? 0) >= 0
 
   const volumeData = activeCandles.map((candle, index) => ({
     value: candle.volume ?? 0,
@@ -2244,6 +2336,67 @@ function buildChartOption({
           fontWeight: 700,
         },
       },
+      ...(!compact && nrtrOverlayMode !== 'Off' && nrtrTradeStats
+        ? [
+            {
+              id: 'nrtr-trade-panel-bg',
+              type: 'rect',
+              right: 148,
+              top: 44,
+              z: 80,
+              silent: true,
+              shape: {
+                width: 228,
+                height: 88,
+                r: 8,
+              },
+              style: {
+                fill: 'rgba(15, 23, 42, 0.78)',
+                stroke: nrtrTradeStats.direction === 1
+                  ? 'rgba(34, 197, 94, 0.45)'
+                  : nrtrTradeStats.direction === -1
+                    ? 'rgba(239, 68, 68, 0.45)'
+                    : 'rgba(148, 163, 184, 0.28)',
+                lineWidth: 1,
+              },
+            },
+            {
+              id: 'nrtr-trade-panel-text',
+              type: 'text',
+              right: 160,
+              top: 54,
+              z: 81,
+              silent: true,
+              style: {
+                text: [
+                  `NRTR+ ${nrtrOverlayMode} · ${nrtrTradeStats.directionText}`,
+                  `Entry: ${compactPrice(Number(nrtrTradeStats.entryPrice ?? NaN))}    Trail: ${compactPrice(Number(nrtrTradeStats.trailingStop ?? NaN))}`,
+                  `P&L: ${formatSignedNumber(nrtrTradeStats.pnlPoints, 2)}  (${formatSignedNumber(nrtrTradeStats.pnlPercent, 3)}%)`,
+                  `Bars: ${nrtrTradeStats.barsInTrade}    Last: ${nrtrTradeStats.lastSignalText}`,
+                ].join('\n'),
+                fill: '#e5e7eb',
+                fontSize: 11,
+                fontWeight: 700,
+                lineHeight: 18,
+                rich: {},
+              },
+            },
+            {
+              id: 'nrtr-trade-panel-pnl-dot',
+              type: 'circle',
+              right: 356,
+              top: 69,
+              z: 82,
+              silent: true,
+              shape: {
+                r: 4,
+              },
+              style: {
+                fill: nrtrPnlPositive ? '#22c55e' : '#ef4444',
+              },
+            },
+          ]
+        : []),
     ],
     series: compact
       ? [
@@ -2406,6 +2559,38 @@ function buildChartOption({
                   symbolRotate: 180,
                   symbolSize: 14,
                   z: 24,
+                },
+              ]
+            : []),
+          ...(!compact && nrtrOverlayMode !== 'Off' && nrtrTradeStats?.entryPrice !== null && Number.isFinite(Number(nrtrTradeStats?.entryPrice))
+            ? [
+                {
+                  name: 'NRTR+ Entry',
+                  type: 'line',
+                  data: [],
+                  silent: true,
+                  markLine: {
+                    silent: true,
+                    symbol: ['none', 'none'],
+                    label: {
+                      show: true,
+                      position: 'end',
+                      formatter: () => 'NRTR Entry',
+                      color: '#e5e7eb',
+                      backgroundColor: 'rgba(99, 102, 241, 0.72)',
+                      borderRadius: 4,
+                      padding: [3, 5],
+                      fontSize: 10,
+                      fontWeight: 800,
+                    },
+                    lineStyle: {
+                      color: 'rgba(129, 140, 248, 0.78)',
+                      width: 1,
+                      type: 'dashed',
+                    },
+                    data: [{ yAxis: Number(nrtrTradeStats.entryPrice) }],
+                  },
+                  z: 8,
                 },
               ]
             : []),
