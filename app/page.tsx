@@ -21,6 +21,20 @@ type ChartSelection = {
   candleMode: CandleMode
 }
 
+type OverlayToggles = {
+  smc: boolean
+  ghost: boolean
+  liquidityProfile: boolean
+  orderBlocks: boolean
+}
+
+const DEFAULT_OVERLAY_TOGGLES: OverlayToggles = {
+  smc: false,
+  ghost: false,
+  liquidityProfile: false,
+  orderBlocks: false,
+}
+
 type TechnicalIndicator = {
   name: string
   value: number
@@ -90,6 +104,7 @@ type DashboardSettings = {
 
 const DASHBOARD_SETTINGS_KEY = 'marketbos:dashboard-settings:v3:candle-first-same-timeframes'
 const MAIN_CANDLES_READY_KEY = 'marketbos:main-candles-ready:v1'
+const MAIN_CHART_OVERLAY_TOGGLES_KEY = 'marketbos:main-chart-overlay-toggles:v1'
 
 function normalizeSymbol(value: unknown) {
   const raw = String(value ?? 'BTCUSD')
@@ -219,6 +234,39 @@ function readMainCandleGate(symbol?: string, timeframe?: string) {
       timeframe: '',
       status: 'parse-error',
     }
+  }
+}
+
+
+function readMainChartOverlayToggles(symbol?: string, timeframe?: string) {
+  if (typeof window === 'undefined') return DEFAULT_OVERLAY_TOGGLES
+
+  try {
+    const raw = window.localStorage.getItem(MAIN_CHART_OVERLAY_TOGGLES_KEY)
+    if (!raw) return DEFAULT_OVERLAY_TOGGLES
+
+    const parsed = JSON.parse(raw)
+    const storedSymbol = normalizeSymbol(parsed?.symbol ?? '')
+    const storedTimeframe = normalizeTimeframe(parsed?.timeframe ?? '')
+    const requestedSymbol = normalizeSymbol(symbol ?? storedSymbol)
+    const requestedTimeframe = normalizeTimeframe(timeframe ?? storedTimeframe)
+
+    if (storedSymbol !== requestedSymbol || storedTimeframe !== requestedTimeframe) {
+      return DEFAULT_OVERLAY_TOGGLES
+    }
+
+    const toggles = parsed?.toggles && typeof parsed.toggles === 'object'
+      ? parsed.toggles
+      : {}
+
+    return {
+      smc: Boolean(toggles.smc),
+      ghost: Boolean(toggles.ghost),
+      liquidityProfile: Boolean(toggles.liquidityProfile),
+      orderBlocks: Boolean(toggles.orderBlocks),
+    }
+  } catch {
+    return DEFAULT_OVERLAY_TOGGLES
   }
 }
 
@@ -551,6 +599,9 @@ export default function Dashboard() {
   const [mainCandleGate, setMainCandleGate] = useState(() =>
     readMainCandleGate(selectedSymbol, selectedTimeframe)
   )
+  const [mainChartOverlayToggles, setMainChartOverlayToggles] = useState<OverlayToggles>(() =>
+    readMainChartOverlayToggles(selectedSymbol, selectedTimeframe)
+  )
 
   const dashboardTimeframes = useMemo(
     () => Array.from(new Set([selectedTimeframe, miniOneTimeframe, miniTwoTimeframe])),
@@ -611,6 +662,21 @@ export default function Dashboard() {
     return () => {
       window.removeEventListener('marketbos:candle-gate', updateGate)
       window.removeEventListener('storage', updateGate)
+    }
+  }, [selectedSymbol, selectedTimeframe])
+
+  useEffect(() => {
+    const updateOverlayToggles = () => {
+      setMainChartOverlayToggles(readMainChartOverlayToggles(selectedSymbol, selectedTimeframe))
+    }
+
+    updateOverlayToggles()
+    window.addEventListener('marketbos:overlay-toggles', updateOverlayToggles)
+    window.addEventListener('storage', updateOverlayToggles)
+
+    return () => {
+      window.removeEventListener('marketbos:overlay-toggles', updateOverlayToggles)
+      window.removeEventListener('storage', updateOverlayToggles)
     }
   }, [selectedSymbol, selectedTimeframe])
 
@@ -798,6 +864,7 @@ export default function Dashboard() {
       chartCandleMode: mainChartSelection.candleMode,
       candleGateReady: mainCandleGate.ready,
       candleGateStatus: mainCandleGate.status,
+      chartOverlayToggles: mainChartOverlayToggles,
     }
   }, [
     latestSignal,
@@ -814,6 +881,7 @@ export default function Dashboard() {
     mainChartSelection.candleMode,
     mainCandleGate.ready,
     mainCandleGate.status,
+    mainChartOverlayToggles,
   ])
 
   if (!isClient) {
