@@ -1766,7 +1766,7 @@ function calculateAtr(candles: Candle[], length: number) {
   return atrValues
 }
 
-function calculateNrtrPercentage(candles: Candle[], percent = 2): NrtrPoint[] {
+function calculateNrtrPercentage(candles: Candle[], percent = 0.25): NrtrPoint[] {
   const result: NrtrPoint[] = []
   const coefficient = Math.max(0, Math.min(100, percent)) / 100
 
@@ -1905,7 +1905,9 @@ function calculateNrtrOverlay(candles: Candle[], mode: NrtrOverlayMode) {
   }
 
   if (mode === 'Percentage') {
-    return calculateNrtrPercentage(candles, 2)
+    // Dashboard visual default: 0.25%.
+    // Pine default 2% is too wide for intraday BTC/MES and compresses the chart.
+    return calculateNrtrPercentage(candles, 0.25)
   }
 
   return []
