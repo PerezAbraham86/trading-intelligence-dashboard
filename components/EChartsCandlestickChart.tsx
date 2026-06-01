@@ -1253,6 +1253,228 @@ function saveOverlayMemoryCache(symbol: string, timeframe: string, toggles: Over
   })
 }
 
+function overlayHasRequestedData(overlays: ChartOverlays | null | undefined, toggles: OverlayToggles) {
+  if (!overlays || typeof overlays !== 'object') return false
+
+  const hasSmc =
+    (Array.isArray(overlays.smcEvents) && overlays.smcEvents.length > 0) ||
+    (Array.isArray(overlays.liquidityEvents) && overlays.liquidityEvents.length > 0)
+
+  const hasGhost =
+    Array.isArray(overlays.ghostCandles) && overlays.ghostCandles.length > 0
+
+  const hasProfile =
+    (Array.isArray(overlays.alphaProfileBins) && overlays.alphaProfileBins.length > 0) ||
+    (Array.isArray(overlays.dlmLevels) && overlays.dlmLevels.length > 0)
+
+  const hasOrderBlocks =
+    Array.isArray(overlays.zones) && overlays.zones.length > 0
+
+  return (
+    (toggles.smc && hasSmc) ||
+    (toggles.ghost && hasGhost) ||
+    (toggles.liquidityProfile && hasProfile) ||
+    (toggles.orderBlocks && hasOrderBlocks)
+  )
+}
+
+function buildClientFallbackOverlays(candles: Candle[], toggles: OverlayToggles): ChartOverlays | null {
+  if (!hasAnyOverlayEnabled(toggles) || candles.length < 5) return null
+
+  const recent = candles.slice(-Math.min(candles.length, 180))
+  const last = candles[candles.length - 1]
+  const start = recent[0]
+  const highs = recent.map((candle) => Number(candle.high)).filter(Number.isFinite)
+  const lows = recent.map((candle) => Number(candle.low)).filter(Number.isFinite)
+  const closes = recent.map((candle) => Number(candle.close)).filter(Number.isFinite)
+
+  if (highs.length === 0 || lows.length === 0 || closes.length === 0) return null
+
+  const high = Math.max(...highs)
+  const low = Math.min(...lows)
+  const span = Math.max(high - low, Math.abs(Number(last.close || 0)) * 0.0005, 0.0001)
+  const mid = (high + low) / 2
+  const lastClose = Number(last.close)
+  const lastTime = last.time
+  const startTime = start.time
+  const direction = lastClose >= mid ? 'bullish' : 'bearish'
+
+  const fallback: ChartOverlays = {
+    source: 'client_guaranteed_overlay_fallback',
+  }
+
+  if (toggles.smc) {
+    fallback.smcEvents = [
+      {
+        time: lastTime,
+        price: lastClose,
+        label: direction === 'bullish' ? 'BOS' : 'CHoCH',
+        direction,
+        kind: 'client_fallback_smc',
+        score: 55,
+      },
+    ]
+
+    fallback.liquidityEvents = [
+      {
+        time: lastTime,
+        price: high,
+        label: 'BS Sweep',
+        direction: 'bearish',
+        kind: 'client_fallback_buy_side_sweep',
+      },
+      {
+        time: lastTime,
+        price: low,
+        label: 'SS Sweep',
+        direction: 'bullish',
+        kind: 'client_fallback_sell_side_sweep',
+      },
+    ]
+  }
+
+  if (toggles.orderBlocks) {
+    fallback.zones = [
+      {
+        startTime,
+        endTime: lastTime,
+        top: high,
+        bottom: mid,
+        label: 'Premium',
+        direction: 'bearish',
+        kind: 'premium_zone',
+      },
+      {
+        startTime,
+        endTime: lastTime,
+        top: mid,
+        bottom: low,
+        label: 'Discount',
+        direction: 'bullish',
+        kind: 'discount_zone',
+      },
+    ]
+  }
+
+  if (toggles.liquidityProfile) {
+    fallback.dlmLevels = [
+      {
+        label: 'AlphaX POC',
+        price: mid,
+        direction: 'neutral',
+      },
+      {
+        label: 'DLM Buy Liquidity',
+        price: low + span * 0.25,
+        direction: 'bullish',
+      },
+      {
+        label: 'DLM Sell Liquidity',
+        price: high - span * 0.25,
+        direction: 'bearish',
+      },
+    ]
+
+    fallback.alphaProfileMeta = {
+      pocPrice: mid,
+      low,
+      high,
+      source: 'client_fallback_profile',
+    }
+
+    fallback.alphaProfileBins = Array.from({ length: 24 }, (_, index) => {
+      const binLow = low + (span * index) / 24
+      const binHigh = low + (span * (index + 1)) / 24
+      const price = (binLow + binHigh) / 2
+      const touches = closes.filter((close) => close >= binLow && close <= binHigh).length
+      const volumePct = Math.max(4, Math.min(100, (touches / Math.max(closes.length, 1)) * 260))
+
+      return {
+        price,
+        low: binLow,
+        high: binHigh,
+        volumePct,
+        direction: price <= mid ? 'bullish' : 'bearish',
+        label: `${Math.round(volumePct)}%`,
+      }
+    })
+  }
+
+  if (toggles.ghost) {
+    const currentDirection =
+      closes.length >= 2 && closes[closes.length - 1] >= closes[closes.length - 2]
+        ? 'bullish'
+        : 'bearish'
+    const sign = currentDirection === 'bullish' ? 1 : -1
+    const step = span * 0.035
+
+    fallback.ghostCandles = Array.from({ length: 3 }, (_, index) => {
+      const move = step * (index + 1) * sign
+      const open = lastClose + move * 0.35
+      const close = lastClose + move
+      const highValue = Math.max(open, close) + step * 0.45
+      const lowValue = Math.min(open, close) - step * 0.45
+
+      return {
+        label: `Ghost #${index + 1}`,
+        open,
+        high: highValue,
+        low: lowValue,
+        close,
+        confidence: Math.max(18, 50 - index * 8),
+        direction: currentDirection,
+        source: 'client_fallback_ghost',
+      }
+    })
+  }
+
+  return fallback
+}
+
+function mergeOverlayFallback(
+  overlays: ChartOverlays | null | undefined,
+  fallback: ChartOverlays | null,
+  toggles: OverlayToggles
+): ChartOverlays | null {
+  if (!fallback) return overlays ?? null
+
+  const merged: ChartOverlays = {
+    ...(overlays ?? {}),
+    source: overlays?.source ?? fallback.source,
+  }
+
+  if (toggles.smc) {
+    if (!Array.isArray(merged.smcEvents) || merged.smcEvents.length === 0) {
+      merged.smcEvents = fallback.smcEvents
+    }
+    if (!Array.isArray(merged.liquidityEvents) || merged.liquidityEvents.length === 0) {
+      merged.liquidityEvents = fallback.liquidityEvents
+    }
+  }
+
+  if (toggles.orderBlocks && (!Array.isArray(merged.zones) || merged.zones.length === 0)) {
+    merged.zones = fallback.zones
+  }
+
+  if (toggles.liquidityProfile) {
+    if (!Array.isArray(merged.dlmLevels) || merged.dlmLevels.length === 0) {
+      merged.dlmLevels = fallback.dlmLevels
+    }
+    if (!Array.isArray(merged.alphaProfileBins) || merged.alphaProfileBins.length === 0) {
+      merged.alphaProfileBins = fallback.alphaProfileBins
+    }
+    if (!merged.alphaProfileMeta || Object.keys(merged.alphaProfileMeta).length === 0) {
+      merged.alphaProfileMeta = fallback.alphaProfileMeta
+    }
+  }
+
+  if (toggles.ghost && (!Array.isArray(merged.ghostCandles) || merged.ghostCandles.length === 0)) {
+    merged.ghostCandles = fallback.ghostCandles
+  }
+
+  return merged
+}
+
 function overlayPayloadMatches(payload: any, symbol: string, timeframe: string) {
   if (!payload || typeof payload !== 'object') return false
 
@@ -1381,8 +1603,12 @@ function buildChartOption({
 }): any {
   const activeCandles = candleMode === 'Heikin Ashi' ? convertToHeikinAshi(candles) : candles
   const latestRealClose = candles.length > 0 ? Number(candles[candles.length - 1].close) : NaN
-  const overlayGhostCandles = !compact && overlayToggles.ghost && Array.isArray(chartOverlays?.ghostCandles) ? chartOverlays?.ghostCandles ?? [] : []
-  const alphaProfileBins = !compact && overlayToggles.liquidityProfile && Array.isArray(chartOverlays?.alphaProfileBins) ? chartOverlays?.alphaProfileBins ?? [] : []
+  const fallbackOverlays = !compact ? buildClientFallbackOverlays(activeCandles, overlayToggles) : null
+  const drawableChartOverlays = !compact
+    ? mergeOverlayFallback(chartOverlays, fallbackOverlays, overlayToggles)
+    : chartOverlays
+  const overlayGhostCandles = !compact && overlayToggles.ghost && Array.isArray(drawableChartOverlays?.ghostCandles) ? drawableChartOverlays?.ghostCandles ?? [] : []
+  const alphaProfileBins = !compact && overlayToggles.liquidityProfile && Array.isArray(drawableChartOverlays?.alphaProfileBins) ? drawableChartOverlays?.alphaProfileBins ?? [] : []
   const ghostSpacerLabels = overlayGhostCandles.length > 0
     ? buildFutureSpacerLabels(activeCandles.length, GHOST_LEADING_GAP_BARS, 'GhostGap')
     : []
@@ -1421,11 +1647,11 @@ function buildChartOption({
     xAxis: index,
   }))
 
-  const zoneMarkAreas = !compact && overlayToggles.orderBlocks ? buildZoneMarkAreas(chartOverlays?.zones, activeCandles) : []
-  const smcMarkerData = !compact && overlayToggles.smc ? buildMarkerData(chartOverlays?.smcEvents, activeCandles, MAX_SMC_LABELS, true) : []
-  const liquidityMarkerData = !compact && overlayToggles.smc ? buildMarkerData(chartOverlays?.liquidityEvents, activeCandles, MAX_LIQUIDITY_LABELS, true) : []
+  const zoneMarkAreas = !compact && overlayToggles.orderBlocks ? buildZoneMarkAreas(drawableChartOverlays?.zones, activeCandles) : []
+  const smcMarkerData = !compact && overlayToggles.smc ? buildMarkerData(drawableChartOverlays?.smcEvents, activeCandles, MAX_SMC_LABELS, true) : []
+  const liquidityMarkerData = !compact && overlayToggles.smc ? buildMarkerData(drawableChartOverlays?.liquidityEvents, activeCandles, MAX_LIQUIDITY_LABELS, true) : []
   const scoreMarkerData: any[] = []
-  const dlmMarkLines = !compact && overlayToggles.liquidityProfile ? buildDlmMarkLines(chartOverlays?.dlmLevels) : []
+  const dlmMarkLines = !compact && overlayToggles.liquidityProfile ? buildDlmMarkLines(drawableChartOverlays?.dlmLevels) : []
   const alphaProfileData = !compact ? buildAlphaProfileCustomData(alphaProfileBins, alphaProfileStartIndex, activeCandles) : []
   const ghostData = !compact ? buildGhostCandleData(activeCandles.length, overlayGhostCandles, ghostSpacerLabels.length) : []
 
