@@ -1785,6 +1785,156 @@ def build_python_chart_overlays(candles: List[Dict[str, Any]], ghosts: Optional[
     }
 
 
+def ensure_requested_chart_overlays(
+    candles: List[Dict[str, Any]],
+    overlays: Dict[str, Any],
+    smc: bool = False,
+    ghost: bool = False,
+    profile: bool = False,
+    order_blocks: bool = False,
+) -> Dict[str, Any]:
+    """Guarantee lightweight drawable overlays for requested toggles.
+
+    Some symbols/timeframes can briefly return empty SMC/AlphaX/Ghost structures.
+    The chart should still draw useful lightweight visual levels instead of nothing.
+    """
+    if not isinstance(overlays, dict):
+        overlays = empty_overlay_payload()
+
+    result = dict(overlays)
+    if len(candles) < 5:
+        return result
+
+    recent = candles[-min(len(candles), 180):]
+    last = candles[-1]
+    last_close = to_float(last.get("close"))
+    highs = [to_float(item.get("high")) for item in recent]
+    lows = [to_float(item.get("low")) for item in recent]
+    closes = [to_float(item.get("close")) for item in recent]
+    high = max(highs) if highs else last_close
+    low = min(lows) if lows else last_close
+    span = max(high - low, 0.0001)
+    mid = (high + low) / 2
+    last_time = _overlay_time(last)
+    start_time = _overlay_time(recent[0])
+    end_time = _overlay_time(last)
+
+    if order_blocks and not result.get("zones"):
+        result["zones"] = [
+            {
+                "startTime": start_time,
+                "endTime": end_time,
+                "top": round(high, 5),
+                "bottom": round(mid, 5),
+                "label": "Premium",
+                "direction": "bearish",
+                "kind": "premium_zone",
+            },
+            {
+                "startTime": start_time,
+                "endTime": end_time,
+                "top": round(mid, 5),
+                "bottom": round(low, 5),
+                "label": "Discount",
+                "direction": "bullish",
+                "kind": "discount_zone",
+            },
+        ]
+
+    if smc and not result.get("smcEvents"):
+        result["smcEvents"] = [
+            {
+                "time": last_time,
+                "price": round(last_close, 5),
+                "label": "SMC",
+                "direction": "bullish" if last_close >= mid else "bearish",
+                "kind": "fallback_smc",
+                "score": 55,
+            }
+        ]
+
+    if smc and not result.get("liquidityEvents"):
+        sweep_high = max(highs[-30:]) if len(highs) >= 30 else high
+        sweep_low = min(lows[-30:]) if len(lows) >= 30 else low
+        result["liquidityEvents"] = [
+            {
+                "time": last_time,
+                "price": round(sweep_high, 5),
+                "label": "BS Sweep",
+                "direction": "bearish",
+                "kind": "fallback_buy_side_sweep",
+            },
+            {
+                "time": last_time,
+                "price": round(sweep_low, 5),
+                "label": "SS Sweep",
+                "direction": "bullish",
+                "kind": "fallback_sell_side_sweep",
+            },
+        ]
+
+    if profile and not result.get("dlmLevels"):
+        result["dlmLevels"] = [
+            {"label": "AlphaX POC", "price": round(mid, 5), "direction": "neutral"},
+            {"label": "DLM Buy Liquidity", "price": round(low + span * 0.25, 5), "direction": "bullish"},
+            {"label": "DLM Sell Liquidity", "price": round(high - span * 0.25, 5), "direction": "bearish"},
+        ]
+
+    if profile and not result.get("alphaProfileBins"):
+        bin_count = 24
+        profile_bins = []
+        for index in range(bin_count):
+            level_low = low + span * index / bin_count
+            level_high = low + span * (index + 1) / bin_count
+            level_mid = (level_low + level_high) / 2
+            touches = sum(1 for close in closes if level_low <= close <= level_high)
+            volume_pct = max(3.0, min(100.0, (touches / max(len(closes), 1)) * 260))
+            direction = "bullish" if level_mid <= mid else "bearish"
+            profile_bins.append({
+                "price": round(level_mid, 5),
+                "low": round(level_low, 5),
+                "high": round(level_high, 5),
+                "volumePct": round(volume_pct, 2),
+                "direction": direction,
+                "label": f"{round(volume_pct)}%",
+            })
+
+        result["alphaProfileBins"] = profile_bins
+        result["alphaProfileMeta"] = {
+            "pocPrice": round(mid, 5),
+            "low": round(low, 5),
+            "high": round(high, 5),
+            "source": "fallback_profile",
+        }
+
+    if ghost and not result.get("ghostCandles"):
+        direction = "bullish" if len(closes) >= 2 and closes[-1] >= closes[-2] else "bearish"
+        step = span * 0.035
+        ghost_candles = []
+        base = last_close
+        for idx in range(3):
+            move = step * (idx + 1) * (1 if direction == "bullish" else -1)
+            open_price = base + move * 0.35
+            close_price = base + move
+            high_price = max(open_price, close_price) + step * 0.45
+            low_price = min(open_price, close_price) - step * 0.45
+            ghost_candles.append({
+                "label": f"Ghost #{idx + 1}",
+                "open": round(open_price, 5),
+                "high": round(high_price, 5),
+                "low": round(low_price, 5),
+                "close": round(close_price, 5),
+                "confidence": max(18, 50 - idx * 8),
+                "direction": direction,
+                "source": "fallback_ghost",
+            })
+
+        result["ghostCandles"] = ghost_candles
+
+    result["fallbackVisualsApplied"] = True
+    return result
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PYTHON-ONLY 12 INDICATOR TECHNICAL SENTIMENT ENGINE
 # Matches the TradingView meter concept without requiring a webhook.
@@ -4216,6 +4366,15 @@ def build_fast_chart_overlay_payload(
         if not isinstance(raw_overlays, dict):
             raw_overlays = empty_overlay_payload()
 
+        raw_overlays = ensure_requested_chart_overlays(
+            candles=get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit),
+            overlays=raw_overlays,
+            smc=smc,
+            ghost=ghost,
+            profile=profile,
+            order_blocks=order_blocks,
+        )
+
         overlays = trim_chart_overlays_for_dashboard(
             raw_overlays,
             smc=smc,
@@ -4334,7 +4493,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v27_fast_overlay_warm_cache_350",
+        "engine": "main_v28_fast_overlay_guaranteed_draw",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
