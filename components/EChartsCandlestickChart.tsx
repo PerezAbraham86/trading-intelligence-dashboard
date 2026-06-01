@@ -121,6 +121,15 @@ const DEFAULT_OVERLAY_TOGGLES: OverlayToggles = {
   orderBlocks: false,
 }
 
+const WARM_ALL_OVERLAY_TOGGLES: OverlayToggles = {
+  smc: true,
+  ghost: true,
+  liquidityProfile: true,
+  orderBlocks: true,
+}
+
+const warmedOverlayRawCacheKeys = new Set<string>()
+
 function hasAnyOverlayEnabled(toggles: OverlayToggles) {
   return toggles.smc || toggles.ghost || toggles.liquidityProfile || toggles.orderBlocks
 }
@@ -1325,6 +1334,30 @@ async function fetchChartOverlays(
   }
 }
 
+async function warmChartOverlayRawCache(
+  symbol: string,
+  timeframe: string,
+  signal?: AbortSignal
+) {
+  const normalizedSymbol = normalizeDefaultSymbol(symbol)
+  const normalizedTimeframe = normalizeTimeframe(timeframe)
+  const warmKey = `${normalizedSymbol}::${normalizedTimeframe}`
+
+  if (warmedOverlayRawCacheKeys.has(warmKey)) return
+  warmedOverlayRawCacheKeys.add(warmKey)
+
+  try {
+    // This silently warms the backend raw overlay cache.
+    // It does not draw anything. Toggle requests after this should filter cached raw overlays quickly.
+    await fetchChartOverlays(normalizedSymbol, normalizedTimeframe, WARM_ALL_OVERLAY_TOGGLES, signal)
+  } catch (error: any) {
+    if (error?.name === 'AbortError') throw error
+    warmedOverlayRawCacheKeys.delete(warmKey)
+    console.warn('Overlay warm cache failed:', error)
+  }
+}
+
+
 // Returns any because this chart builds dynamic ECharts series conditionally.
 // EChartsOption's strict union type rejects valid runtime markArea/markLine series.
 function buildChartOption({
@@ -2094,6 +2127,25 @@ export default function EChartsCandlestickChart({
       controller.abort()
     }
   }, [symbol, timeframe, compact, allowCompactHistory, candleFetchLimit])
+
+  useEffect(() => {
+    if (compact) return
+    if (historicalCandles.length === 0) return
+
+    const controller = new AbortController()
+    const warmId = window.setTimeout(() => {
+      warmChartOverlayRawCache(symbol, timeframe, controller.signal).catch((error: any) => {
+        if (error?.name !== 'AbortError') {
+          console.warn('Overlay background warm failed:', error)
+        }
+      })
+    }, 350)
+
+    return () => {
+      controller.abort()
+      window.clearTimeout(warmId)
+    }
+  }, [symbol, timeframe, compact, historicalCandles.length])
 
   useEffect(() => {
     if (historicalCandles.length === 0) return
