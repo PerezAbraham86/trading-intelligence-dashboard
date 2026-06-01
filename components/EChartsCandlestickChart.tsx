@@ -1776,6 +1776,7 @@ export default function EChartsCandlestickChart({
   showControls = true,
   lockSymbolToDefault = false,
   followDefaultSymbol = false,
+  enableAdvancedOverlays = false,
   onChartSelectionChange,
   latestSignal,
 }: EChartsCandlestickChartProps) {
