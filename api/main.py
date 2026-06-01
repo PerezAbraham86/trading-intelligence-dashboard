@@ -457,7 +457,7 @@ def insightsentry_headers() -> Dict[str, str]:
 def http_get_json(url: str, headers: Optional[Dict[str, str]] = None, provider: str = "Data provider") -> Any:
     request = Request(url, headers=headers or {})
     try:
-        with urlopen(request, timeout=25) as response:
+        with urlopen(request, timeout=12) as response:
             body = response.read().decode("utf-8")
             return json.loads(body)
     except HTTPError as error:
@@ -521,6 +521,36 @@ INSIGHTSENTRY_SYMBOL_MAP = {
 def to_insightsentry_symbol(symbol: str) -> str:
     normalized = normalize_symbol(symbol)
     return INSIGHTSENTRY_SYMBOL_MAP.get(normalized, normalized)
+
+
+def insightsentry_symbol_candidates(symbol: str) -> List[str]:
+    normalized = normalize_symbol(symbol)
+    primary = to_insightsentry_symbol(normalized)
+
+    if normalized == "MES1!":
+        candidates = [
+            primary,
+            "CME_MINI:MES1!",
+            "MES1!",
+            "/MES",
+            "MES",
+        ]
+    elif normalized == "ES1!":
+        candidates = [
+            primary,
+            "CME_MINI:ES1!",
+            "ES1!",
+            "/ES",
+            "ES",
+        ]
+    else:
+        candidates = [primary, normalized]
+
+    deduped: List[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
 
 
 def insightsentry_interval_candidates(timeframe: str) -> List[str]:
@@ -709,44 +739,48 @@ def build_insightsentry_urls(api_symbol: str, api_interval: str, limit: int) -> 
 def fetch_insightsentry_direct_candles(symbol: str, timeframe: str = "1m", limit: int = 500) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    api_symbol = to_insightsentry_symbol(normalized_symbol)
     safe_limit = max(1, min(int(limit or 500), 5000))
     headers = insightsentry_headers()
 
     last_error: Optional[str] = None
 
-    for api_interval in insightsentry_interval_candidates(normalized_timeframe):
-        for url in build_insightsentry_urls(api_symbol, api_interval, safe_limit):
-            data = http_get_json_or_none(url, headers=headers, provider="InsightSentry")
-            if data is None:
-                continue
-
-            bars = extract_insightsentry_bars(data)
-            candles = [
-                candle
-                for candle in (normalize_insightsentry_bar(bar, normalized_symbol, normalized_timeframe) for bar in bars)
-                if candle is not None
-            ]
-
-            candles = filter_valid_candles_for_symbol(merge_candles_by_time(candles), normalized_symbol)
-
-            if candles:
-                if not candles_match_requested_timeframe(candles, normalized_timeframe):
-                    last_error = (
-                        f"Rejected wrong spacing from {url}; "
-                        f"requested={normalized_timeframe}; count={len(candles)}"
-                    )
-                    print(f"[InsightSentry] {last_error}")
+    # Important reliability fix:
+    # Try multiple futures symbol formats. InsightSentry/RapidAPI can accept different
+    # futures symbols depending on the route/vendor cache. This prevents MES from
+    # going blank when only one symbol alias temporarily fails.
+    for api_symbol in insightsentry_symbol_candidates(normalized_symbol):
+        for api_interval in insightsentry_interval_candidates(normalized_timeframe):
+            for url in build_insightsentry_urls(api_symbol, api_interval, safe_limit):
+                data = http_get_json_or_none(url, headers=headers, provider="InsightSentry")
+                if data is None:
                     continue
 
-                print(
-                    f"[InsightSentry] frontend_symbol={symbol} normalized={normalized_symbol} "
-                    f"api_symbol={api_symbol} timeframe={normalized_timeframe} api_interval={api_interval} "
-                    f"count={len(candles)}"
-                )
-                return candles[-safe_limit:]
+                bars = extract_insightsentry_bars(data)
+                candles = [
+                    candle
+                    for candle in (normalize_insightsentry_bar(bar, normalized_symbol, normalized_timeframe) for bar in bars)
+                    if candle is not None
+                ]
 
-            last_error = f"No bars parsed from {url}"
+                candles = filter_valid_candles_for_symbol(merge_candles_by_time(candles), normalized_symbol)
+
+                if candles:
+                    if not candles_match_requested_timeframe(candles, normalized_timeframe):
+                        last_error = (
+                            f"Rejected wrong spacing from {url}; "
+                            f"requested={normalized_timeframe}; count={len(candles)}"
+                        )
+                        print(f"[InsightSentry] {last_error}")
+                        continue
+
+                    print(
+                        f"[InsightSentry] frontend_symbol={symbol} normalized={normalized_symbol} "
+                        f"api_symbol={api_symbol} timeframe={normalized_timeframe} api_interval={api_interval} "
+                        f"count={len(candles)}"
+                    )
+                    return candles[-safe_limit:]
+
+                last_error = f"No bars parsed from {url}"
 
     if last_error:
         print(f"[InsightSentry] {last_error}")
@@ -4522,7 +4556,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v30_ghost_ml_refactored",
+        "engine": "main_v31_mes_symbol_candidate_fix",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
