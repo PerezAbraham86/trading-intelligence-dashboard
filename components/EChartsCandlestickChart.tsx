@@ -125,6 +125,33 @@ function hasAnyOverlayEnabled(toggles: OverlayToggles) {
   return toggles.smc || toggles.ghost || toggles.liquidityProfile || toggles.orderBlocks
 }
 
+const MAIN_CHART_OVERLAY_TOGGLES_KEY = 'marketbos:main-chart-overlay-toggles:v1'
+
+function emitMainChartOverlayToggles(detail: {
+  symbol: string
+  timeframe: string
+  toggles: OverlayToggles
+}) {
+  if (typeof window === 'undefined') return
+
+  const payload = {
+    ...detail,
+    savedAt: Date.now(),
+  }
+
+  try {
+    window.localStorage.setItem(MAIN_CHART_OVERLAY_TOGGLES_KEY, JSON.stringify(payload))
+  } catch {
+    // Ignore localStorage quota/private-mode failures.
+  }
+
+  window.dispatchEvent(
+    new CustomEvent('marketbos:overlay-toggles', {
+      detail: payload,
+    })
+  )
+}
+
 type EChartsCandlestickChartProps = {
   heightClass?: string
   compact?: boolean
@@ -1871,6 +1898,16 @@ export default function EChartsCandlestickChart({
       overlayToggles,
     })
   }, [chartSettingsKey, symbol, timeframe, candleMode, overlayToggles])
+
+  useEffect(() => {
+    if (compact) return
+
+    emitMainChartOverlayToggles({
+      symbol,
+      timeframe,
+      toggles: overlayToggles,
+    })
+  }, [compact, symbol, timeframe, overlayToggles])
 
   useEffect(() => {
     onChartSelectionChange?.({
