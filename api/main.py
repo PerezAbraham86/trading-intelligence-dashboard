@@ -167,9 +167,7 @@ def normalize_symbol(symbol: str) -> str:
         return "ETHUSD"
     if raw in {"SPY", "SPY.US"}:
         return "SPY"
-    if raw in {"ES", "ES1", "ES1!", "/ES", "ES=F"}:
-        return "ES1!"
-    if raw in {"MES", "MES1", "MES1!", "/MES", "MES=F"}:
+    if raw in {"MES", "MES1", "MES1!", "/MES", "MES=F", "CME_MINI:MES1!"}:
         return "MES1!"
 
     return raw
@@ -235,7 +233,7 @@ def is_crypto_symbol(symbol: str) -> bool:
 
 
 def is_futures_symbol(symbol: str) -> bool:
-    return normalize_symbol(symbol) in {"ES1!", "MES1!"}
+    return normalize_symbol(symbol) == "MES1!"
 
 
 def is_stock_symbol(symbol: str) -> bool:
@@ -507,11 +505,6 @@ INSIGHTSENTRY_SYMBOL_MAP = {
     "MES": "CME_MINI:MES1!",
     "MES1": "CME_MINI:MES1!",
     "MES1!": "CME_MINI:MES1!",
-    "/MES": "CME_MINI:MES1!",
-    "ES": "CME_MINI:ES1!",
-    "ES1": "CME_MINI:ES1!",
-    "ES1!": "CME_MINI:ES1!",
-    "/ES": "CME_MINI:ES1!",
     "SPY": "SPY",
     "BTCUSD": "BTCUSD",
     "ETHUSD": "ETHUSD",
@@ -525,32 +518,14 @@ def to_insightsentry_symbol(symbol: str) -> str:
 
 def insightsentry_symbol_candidates(symbol: str) -> List[str]:
     normalized = normalize_symbol(symbol)
-    primary = to_insightsentry_symbol(normalized)
 
+    # Confirmed by InsightSentry Search:
+    # name=MES1!, code=CME_MINI:MES1!, type=FUTURES, exchange=CME.
+    # Keep this strict. No ES and no fallback aliases.
     if normalized == "MES1!":
-        candidates = [
-            primary,
-            "CME_MINI:MES1!",
-            "MES1!",
-            "/MES",
-            "MES",
-        ]
-    elif normalized == "ES1!":
-        candidates = [
-            primary,
-            "CME_MINI:ES1!",
-            "ES1!",
-            "/ES",
-            "ES",
-        ]
-    else:
-        candidates = [primary, normalized]
+        return ["CME_MINI:MES1!"]
 
-    deduped: List[str] = []
-    for candidate in candidates:
-        if candidate and candidate not in deduped:
-            deduped.append(candidate)
-    return deduped
+    return [to_insightsentry_symbol(normalized)]
 
 
 def insightsentry_interval_candidates(timeframe: str) -> List[str]:
@@ -4556,7 +4531,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v31_mes_symbol_candidate_fix",
+        "engine": "main_v32_mes1_confirmed_symbol_only",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
