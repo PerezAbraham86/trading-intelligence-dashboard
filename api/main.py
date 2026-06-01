@@ -4005,7 +4005,7 @@ def get_or_build_raw_chart_overlays(
 ) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(120, min(int(limit or 500), 700))
+    safe_limit = max(120, min(int(limit or 500), 350))
     raw_key = chart_overlay_raw_cache_key(normalized_symbol, normalized_timeframe, safe_limit)
 
     if not force_refresh and chart_overlay_raw_cache_is_fresh(raw_key):
@@ -4171,7 +4171,7 @@ def build_fast_chart_overlay_payload(
 ) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(120, min(int(limit or 500), 700))
+    safe_limit = max(120, min(int(limit or 500), 350))
 
     # Fastest possible path: if the chart has all overlay toggles off,
     # return immediately. No candle fetch and no overlay calculation.
@@ -4334,7 +4334,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v26_fast_raw_overlay_cache",
+        "engine": "main_v27_fast_overlay_warm_cache_350",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
