@@ -2133,6 +2133,8 @@ function buildChartOption({
       : null
 
   const nrtrPnlPositive = Number(nrtrTradeStats?.pnlPoints ?? 0) >= 0
+  const nrtrEntryPrice = Number(nrtrTradeStats?.entryPrice ?? NaN)
+  const hasNrtrEntryPrice = Number.isFinite(nrtrEntryPrice)
 
   const volumeData = activeCandles.map((candle, index) => ({
     value: candle.volume ?? 0,
@@ -2562,7 +2564,7 @@ function buildChartOption({
                 },
               ]
             : []),
-          ...(!compact && nrtrOverlayMode !== 'Off' && nrtrTradeStats?.entryPrice !== null && Number.isFinite(Number(nrtrTradeStats?.entryPrice))
+          ...(!compact && nrtrOverlayMode !== 'Off' && hasNrtrEntryPrice
             ? [
                 {
                   name: 'NRTR+ Entry',
@@ -2588,7 +2590,7 @@ function buildChartOption({
                       width: 1,
                       type: 'dashed',
                     },
-                    data: [{ yAxis: Number(nrtrTradeStats.entryPrice) }],
+                    data: [{ yAxis: nrtrEntryPrice }],
                   },
                   z: 8,
                 },
