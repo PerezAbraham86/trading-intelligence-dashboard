@@ -6,7 +6,7 @@ import * as echarts from 'echarts'
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
 const DEFAULT_VISIBLE_CANDLES = 78
 const CACHE_TTL_MS = 1000 * 60 * 5
-const LOCAL_STORAGE_PREFIX = 'marketbos:v11:fast-timeframe-switch:'
+const LOCAL_STORAGE_PREFIX = 'marketbos:v12:smart-fallback-fast-switch:'
 const CHART_SETTINGS_PREFIX = 'marketbos:chart-settings:v1:'
 const MAIN_CANDLES_READY_KEY = 'marketbos:main-candles-ready:v1'
 const PRIMARY_CANDLE_TIMEFRAMES = ['1m', '5m', '10m', '15m']
@@ -768,27 +768,40 @@ async function fetchCandlesFromNetwork(
     limit,
   })
 
-  const route = '/api/candles'
+  // Fast path first, safety fallback only if empty.
+  // This keeps BTCUSD protected while keeping MES1! fast.
+  const routes = [
+    '/api/candles',
+    '/api/merged-candles',
+    '/api/historical-candles',
+  ]
 
-  try {
-    const response = await fetch(`${API_BASE_URL}${route}?${params.toString()}`, {
-      cache: 'no-store',
-      signal,
-    })
+  for (const route of routes) {
+    try {
+      const response = await fetch(`${API_BASE_URL}${route}?${params.toString()}`, {
+        cache: 'no-store',
+        signal,
+      })
 
-    if (!response.ok) return []
+      if (!response.ok) continue
 
-    const json = await response.json()
-    const candles = extractCandleArray(json)
-      .map(candleFromAny)
-      .filter((candle): candle is Candle => candle !== null)
+      const json = await response.json()
+      const candles = extractCandleArray(json)
+        .map(candleFromAny)
+        .filter((candle): candle is Candle => candle !== null)
 
-    return mergeCandlesByTime(candles)
-  } catch (error: any) {
-    if (error?.name === 'AbortError') throw error
-    console.error(`Candle fetch error: ${route} ${symbol} ${timeframe}`, error)
-    return []
+      const merged = mergeCandlesByTime(candles)
+
+      if (merged.length > 0) {
+        return merged
+      }
+    } catch (error: any) {
+      if (error?.name === 'AbortError') throw error
+      console.error(`Candle fetch error: ${route} ${symbol} ${timeframe}`, error)
+    }
   }
+
+  return []
 }
 
 
