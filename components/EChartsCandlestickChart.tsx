@@ -1256,6 +1256,31 @@ function overlayPayloadMatches(payload: any, symbol: string, timeframe: string) 
   )
 }
 
+function overlayPayloadHasRequestedData(overlays: ChartOverlays | null | undefined, toggles: OverlayToggles) {
+  if (!overlays || typeof overlays !== 'object') return false
+
+  const hasSmc =
+    Array.isArray(overlays.smcEvents) && overlays.smcEvents.length > 0 ||
+    Array.isArray(overlays.liquidityEvents) && overlays.liquidityEvents.length > 0
+
+  const hasGhost =
+    Array.isArray(overlays.ghostCandles) && overlays.ghostCandles.length > 0
+
+  const hasProfile =
+    Array.isArray(overlays.alphaProfileBins) && overlays.alphaProfileBins.length > 0 ||
+    Array.isArray(overlays.dlmLevels) && overlays.dlmLevels.length > 0
+
+  const hasOrderBlocks =
+    Array.isArray(overlays.zones) && overlays.zones.length > 0
+
+  return (
+    (toggles.smc && hasSmc) ||
+    (toggles.ghost && hasGhost) ||
+    (toggles.liquidityProfile && hasProfile) ||
+    (toggles.orderBlocks && hasOrderBlocks)
+  )
+}
+
 async function fetchChartOverlays(
   symbol: string,
   timeframe: string,
@@ -1823,6 +1848,7 @@ export default function EChartsCandlestickChart({
   const dataSignatureRef = useRef<string>('')
   const overlayLayoutSignatureRef = useRef<string>('')
   const overlayIdentityRef = useRef<string>('')
+  const lastGoodChartOverlaysRef = useRef<ChartOverlays | null>(null)
   const userZoomedRef = useRef(false)
   const [mainCandleGateTick, setMainCandleGateTick] = useState(0)
 
@@ -2126,15 +2152,16 @@ export default function EChartsCandlestickChart({
   useEffect(() => {
     const overlayIdentity = `${symbol}::${timeframe}::${compact}`
 
-    // Clear old overlays only when the chart identity changes or overlays are fully off.
-    // Do not clear on every toggle change; that caused overlays to disappear while the
-    // next filtered payload was loading.
+    // Clear only when the actual chart identity changes.
+    // Live ticks/new candles should never wipe drawings.
     if (overlayIdentityRef.current !== overlayIdentity) {
       overlayIdentityRef.current = overlayIdentity
+      lastGoodChartOverlaysRef.current = null
       setChartOverlays(null)
     }
 
     if (compact || historicalCandles.length === 0 || !hasAnyOverlayEnabled(overlayToggles)) {
+      lastGoodChartOverlaysRef.current = null
       setChartOverlays(null)
       return
     }
@@ -2143,9 +2170,13 @@ export default function EChartsCandlestickChart({
     if (
       cached?.chartOverlays &&
       typeof cached.chartOverlays === 'object' &&
-      overlayPayloadMatches(cached, symbol, timeframe)
+      overlayPayloadMatches(cached, symbol, timeframe) &&
+      overlayPayloadHasRequestedData(cached.chartOverlays as ChartOverlays, overlayToggles)
     ) {
+      lastGoodChartOverlaysRef.current = cached.chartOverlays as ChartOverlays
       setChartOverlays(cached.chartOverlays as ChartOverlays)
+    } else if (lastGoodChartOverlaysRef.current) {
+      setChartOverlays(lastGoodChartOverlaysRef.current)
     }
 
     const controller = new AbortController()
@@ -2155,8 +2186,9 @@ export default function EChartsCandlestickChart({
       try {
         const engine = await fetchChartOverlays(symbol, timeframe, overlayToggles, controller.signal)
         if (cancelled) return
+
         if (!overlayPayloadMatches(engine, symbol, timeframe)) {
-          setChartOverlays(null)
+          // Do not clear good drawings because one refresh response was mismatched.
           return
         }
 
@@ -2164,15 +2196,22 @@ export default function EChartsCandlestickChart({
           ? engine.chartOverlays as ChartOverlays
           : null
 
-        if (overlays) {
+        if (overlayPayloadHasRequestedData(overlays, overlayToggles)) {
+          lastGoodChartOverlaysRef.current = overlays
           setChartOverlays(overlays)
+        } else if (lastGoodChartOverlaysRef.current) {
+          // Backend can briefly return Waiting/empty while a live candle or new bucket is updating.
+          // Keep the previous drawings visible until the next successful overlay payload arrives.
+          setChartOverlays(lastGoodChartOverlaysRef.current)
         }
       } catch (error: any) {
         if (error?.name === 'AbortError') return
+        if (lastGoodChartOverlaysRef.current) {
+          setChartOverlays(lastGoodChartOverlaysRef.current)
+        }
       }
     }
 
-    // Delay overlays slightly so the candle chart paints first.
     const firstLoadId = window.setTimeout(pollChartOverlays, cached ? 0 : 75)
     const intervalId = window.setInterval(pollChartOverlays, 45000)
 
@@ -2199,6 +2238,10 @@ export default function EChartsCandlestickChart({
       })
     }
 
+    const effectiveChartOverlays =
+      chartOverlays ??
+      (hasAnyOverlayEnabled(overlayToggles) ? lastGoodChartOverlaysRef.current : null)
+
     const option = buildChartOption({
       symbol,
       timeframe,
@@ -2206,13 +2249,13 @@ export default function EChartsCandlestickChart({
       candles,
       compact,
       loading: status === 'loading' && candles.length === 0,
-      chartOverlays,
+      chartOverlays: effectiveChartOverlays,
       overlayToggles,
     })
 
     const chartIdentity = `${symbol}::${timeframe}::${candleMode}::${compact}`
     const dataSignature = candleDataSignature(candles)
-    const layoutSignature = overlayLayoutSignature(chartOverlays)
+    const layoutSignature = overlayLayoutSignature(effectiveChartOverlays)
     const identityChanged = chartIdentityRef.current !== chartIdentity
     const dataChanged = dataSignatureRef.current !== dataSignature
     const overlayLayoutChanged = overlayLayoutSignatureRef.current !== layoutSignature
