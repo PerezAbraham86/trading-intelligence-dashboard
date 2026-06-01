@@ -1937,7 +1937,11 @@ export default function EChartsCandlestickChart({
         // This prevents a 5m or 15m dropdown from visually showing old 1m candles.
         setHistoricalCandles([])
 
-        if (compact && !readMainCandlesReadyForSymbol(symbol)) {
+        const compactHasSharedCache =
+          compact &&
+          Boolean(readMemoryCache(cacheKey) ?? readLocalStorageCache(cacheKey))
+
+        if (compact && !compactHasSharedCache && !readMainCandlesReadyForSymbol(symbol)) {
           setStatus('idle')
           return
         }
@@ -2022,7 +2026,7 @@ export default function EChartsCandlestickChart({
       cancelled = true
       controller.abort()
     }
-  }, [symbol, timeframe, compact, allowCompactHistory, candleFetchLimit])
+  }, [symbol, timeframe, compact, allowCompactHistory, candleFetchLimit, mainCandleGateTick])
 
   useEffect(() => {
     if (historicalCandles.length === 0) return
