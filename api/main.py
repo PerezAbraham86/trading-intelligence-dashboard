@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,6 +33,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+def load_site_candle_cache_on_startup() -> None:
+    load_persistent_candle_cache()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -70,6 +76,8 @@ RECENT_CANDLES: List[Dict[str, Any]] = []
 CHART_OVERLAY_CACHE: Dict[str, Any] = {}
 CHART_OVERLAY_RAW_CACHE: Dict[str, Any] = {}
 CANDLE_RESPONSE_CACHE: Dict[str, Any] = {}
+CANDLE_CACHE_FILE = Path(os.getenv("CANDLE_CACHE_FILE", "/tmp/trading_dashboard_candle_cache.json"))
+CANDLE_SITE_CACHE_MAX_AGE_SECONDS = int(os.getenv("CANDLE_SITE_CACHE_MAX_AGE_SECONDS", "86400"))
 
 MAX_RECENT_SIGNALS = 50
 MAX_RECENT_CANDLES = 5000
@@ -901,26 +909,72 @@ def fetch_alpaca_historical_candles(symbol: str, timeframe: str = "1m", limit: i
     return []
 
 
+def load_persistent_candle_cache() -> None:
+    global CANDLE_RESPONSE_CACHE
+
+    try:
+        if not CANDLE_CACHE_FILE.exists():
+            return
+
+        with CANDLE_CACHE_FILE.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+
+        if isinstance(data, dict):
+            CANDLE_RESPONSE_CACHE.update({
+                str(key): value for key, value in data.items()
+                if isinstance(value, dict)
+            })
+            print(f"[Candle Cache] loaded {len(CANDLE_RESPONSE_CACHE)} site-level candle payloads")
+    except Exception as error:
+        print(f"[Candle Cache] load failed: {error}")
+
+
+def save_persistent_candle_cache() -> None:
+    try:
+        CANDLE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with CANDLE_CACHE_FILE.open("w", encoding="utf-8") as handle:
+            json.dump(CANDLE_RESPONSE_CACHE, handle)
+    except Exception as error:
+        print(f"[Candle Cache] save failed: {error}")
+
+
+def candle_cache_age_seconds(payload: Dict[str, Any]) -> Optional[float]:
+    try:
+        created_at = datetime.fromisoformat(str(payload.get("createdAt", "")).replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - created_at).total_seconds()
+    except Exception:
+        return None
+
+
+def candle_cache_payload(cached: Dict[str, Any], cache_label: str) -> Dict[str, Any]:
+    payload = dict(cached)
+    payload["cache"] = cache_label
+    payload["siteCache"] = True
+    payload["siteCacheAgeSeconds"] = candle_cache_age_seconds(cached)
+    return payload
+
+
 def candle_cache_key(route: str, symbol: str, timeframe: str, limit: int) -> str:
     return f"{route}::{normalize_symbol(symbol)}::{normalize_timeframe(timeframe)}::{int(limit or 500)}"
 
 
-def candle_cache_get(route: str, symbol: str, timeframe: str, limit: int, max_age_seconds: int = 60) -> Optional[Dict[str, Any]]:
+def candle_cache_get(route: str, symbol: str, timeframe: str, limit: int, max_age_seconds: int = CANDLE_SITE_CACHE_MAX_AGE_SECONDS) -> Optional[Dict[str, Any]]:
     key = candle_cache_key(route, symbol, timeframe, limit)
     cached = CANDLE_RESPONSE_CACHE.get(key)
     if not isinstance(cached, dict):
         return None
 
-    try:
-        created_at = datetime.fromisoformat(str(cached.get("createdAt", "")).replace("Z", "+00:00"))
-        if (datetime.now(timezone.utc) - created_at).total_seconds() > max_age_seconds:
-            return None
-    except Exception:
-        return None
+    # Site-level cache behavior:
+    # A loaded candle set should be reused across browser reloads and other computers.
+    # The provider should only be hit again when force=true, cache missing, or cache has no candles.
+    candles = cached.get("candles")
+    if isinstance(candles, list) and len(candles) > 0:
+        age = candle_cache_age_seconds(cached)
+        if age is None or age <= max_age_seconds:
+            return candle_cache_payload(cached, "site_cached")
+        return candle_cache_payload(cached, "site_cached_stale")
 
-    payload = dict(cached)
-    payload["cache"] = "fresh"
-    return payload
+    return None
 
 
 def candle_cache_set(route: str, symbol: str, timeframe: str, limit: int, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -928,7 +982,9 @@ def candle_cache_set(route: str, symbol: str, timeframe: str, limit: int, payloa
     stored = dict(payload)
     stored["createdAt"] = now_iso()
     stored["cache"] = "stored"
+    stored["siteCache"] = True
     CANDLE_RESPONSE_CACHE[key] = stored
+    save_persistent_candle_cache()
     return stored
 
 
@@ -938,9 +994,7 @@ def candle_cache_stale(route: str, symbol: str, timeframe: str, limit: int) -> O
     if not isinstance(cached, dict):
         return None
 
-    payload = dict(cached)
-    payload["cache"] = "stale"
-    return payload
+    return candle_cache_payload(cached, "site_cached_stale")
 
 
 def timeframe_to_1m_fetch_limit(timeframe: str, limit: int) -> int:
@@ -4531,13 +4585,15 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v32_mes1_confirmed_symbol_only",
+        "engine": "main_v33_site_level_candle_cache",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
             "/api/recent-candles",
             "/api/historical-candles",
             "/api/candles",
+            "/api/candle-cache-status",
+            "/api/warm-candle-cache",
             "/api/merged-candles",
             "/api/live-candle",
             "/api/live-price",
@@ -4618,7 +4674,7 @@ def historical_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int
     safe_limit = max(1, min(int(limit or 500), 5000))
 
     if not force:
-        cached = candle_cache_get("historical", normalized_symbol, normalized_timeframe, safe_limit, 90)
+        cached = candle_cache_get("historical", normalized_symbol, normalized_timeframe, safe_limit, CANDLE_SITE_CACHE_MAX_AGE_SECONDS)
         if cached:
             return cached
 
@@ -4650,7 +4706,7 @@ def candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500, for
     safe_limit = max(1, min(int(limit or 500), 5000))
 
     if not force:
-        cached = candle_cache_get("dashboard", normalized_symbol, normalized_timeframe, safe_limit, 90)
+        cached = candle_cache_get("dashboard", normalized_symbol, normalized_timeframe, safe_limit, CANDLE_SITE_CACHE_MAX_AGE_SECONDS)
         if cached:
             return cached
 
@@ -4706,6 +4762,72 @@ def preload_candles(
         "results": results,
         "createdAt": now_iso(),
     }
+
+@app.get("/api/candle-cache-status")
+def candle_cache_status() -> Dict[str, Any]:
+    entries: List[Dict[str, Any]] = []
+
+    for key, value in CANDLE_RESPONSE_CACHE.items():
+        if not isinstance(value, dict):
+            continue
+
+        entries.append({
+            "key": key,
+            "symbol": value.get("symbol"),
+            "timeframe": value.get("timeframe"),
+            "count": value.get("count", len(value.get("candles", []) if isinstance(value.get("candles"), list) else [])),
+            "provider": value.get("provider"),
+            "createdAt": value.get("createdAt"),
+            "ageSeconds": candle_cache_age_seconds(value),
+        })
+
+    return {
+        "eventType": "CANDLE_CACHE_STATUS",
+        "status": "Live",
+        "siteCache": True,
+        "cacheFile": str(CANDLE_CACHE_FILE),
+        "count": len(entries),
+        "entries": entries,
+        "createdAt": now_iso(),
+    }
+
+
+@app.get("/api/warm-candle-cache")
+def warm_candle_cache(
+    symbols: str = "BTCUSD,MES1!",
+    timeframes: str = "1m,5m,10m,15m,30m",
+    limit: int = 500,
+    force: bool = False,
+) -> Dict[str, Any]:
+    symbol_list = [normalize_symbol(item) for item in symbols.split(",") if item.strip()]
+    timeframe_list = [normalize_timeframe(item) for item in timeframes.split(",") if item.strip()]
+    safe_limit = max(1, min(int(limit or 500), 1000))
+
+    results: List[Dict[str, Any]] = []
+
+    for item_symbol in symbol_list:
+        for item_timeframe in timeframe_list:
+            payload = candles(symbol=item_symbol, timeframe=item_timeframe, limit=safe_limit, force=force)
+            results.append({
+                "symbol": item_symbol,
+                "timeframe": item_timeframe,
+                "count": payload.get("count", 0),
+                "cache": payload.get("cache"),
+                "siteCache": payload.get("siteCache"),
+                "provider": payload.get("provider"),
+            })
+
+    save_persistent_candle_cache()
+
+    return {
+        "eventType": "CANDLE_CACHE_WARM",
+        "status": "Complete",
+        "siteCache": True,
+        "count": len(results),
+        "results": results,
+        "createdAt": now_iso(),
+    }
+
 
 @app.get("/api/merged-candles")
 def merged_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500) -> Dict[str, Any]:
