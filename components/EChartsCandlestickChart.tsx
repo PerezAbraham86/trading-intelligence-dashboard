@@ -108,6 +108,26 @@ type ChartOverlays = {
   source?: string
 }
 
+type OverlayRenderStatus = 'off' | 'loading' | 'real' | 'cached' | 'fallback' | 'empty'
+
+function getOverlayRenderStatusLabel(status: OverlayRenderStatus) {
+  if (status === 'real') return 'Overlay Real'
+  if (status === 'cached') return 'Overlay Cached'
+  if (status === 'fallback') return 'Overlay Fallback'
+  if (status === 'loading') return 'Overlay Loading'
+  if (status === 'empty') return 'Overlay Empty'
+  return 'Overlay Off'
+}
+
+function getOverlayRenderStatusClass(status: OverlayRenderStatus) {
+  if (status === 'real') return 'border-emerald-400/60 bg-emerald-400/10 text-emerald-300'
+  if (status === 'cached') return 'border-blue-400/60 bg-blue-400/10 text-blue-300'
+  if (status === 'fallback') return 'border-yellow-400/60 bg-yellow-400/10 text-yellow-300'
+  if (status === 'loading') return 'border-cyan-400/50 bg-cyan-400/10 text-cyan-300'
+  if (status === 'empty') return 'border-red-400/50 bg-red-400/10 text-red-300'
+  return 'border-dark-600 bg-dark-900/60 text-gray-500'
+}
+
 type CandleMode = 'Regular' | 'Heikin Ashi'
 
 type OverlayToggleKey = 'smc' | 'ghost' | 'liquidityProfile' | 'orderBlocks'
@@ -1472,6 +1492,19 @@ function mergeOverlayFallback(
     merged.ghostCandles = fallback.ghostCandles
   }
 
+  ;(merged as any).__fallbackApplied = Boolean(
+    (toggles.smc && (
+      merged.smcEvents === fallback.smcEvents ||
+      merged.liquidityEvents === fallback.liquidityEvents
+    )) ||
+    (toggles.orderBlocks && merged.zones === fallback.zones) ||
+    (toggles.liquidityProfile && (
+      merged.dlmLevels === fallback.dlmLevels ||
+      merged.alphaProfileBins === fallback.alphaProfileBins
+    )) ||
+    (toggles.ghost && merged.ghostCandles === fallback.ghostCandles)
+  )
+
   return merged
 }
 
@@ -2143,6 +2176,7 @@ export default function EChartsCandlestickChart({
   const [status, setStatus] = useState<'idle' | 'loading' | 'cached' | 'loaded' | 'empty' | 'error'>('idle')
   const [liveProvider, setLiveProvider] = useState<string>('')
   const [chartOverlays, setChartOverlays] = useState<ChartOverlays | null>(null)
+  const [overlayRenderStatus, setOverlayRenderStatus] = useState<OverlayRenderStatus>('off')
 
   const candleFetchLimit = '500'
 
@@ -2453,8 +2487,10 @@ export default function EChartsCandlestickChart({
     ) {
       lastGoodChartOverlaysRef.current = cached.chartOverlays as ChartOverlays
       setChartOverlays(cached.chartOverlays as ChartOverlays)
+      setOverlayRenderStatus('cached')
     } else if (lastGoodChartOverlaysRef.current) {
       setChartOverlays(lastGoodChartOverlaysRef.current)
+      setOverlayRenderStatus('cached')
     }
 
     const controller = new AbortController()
@@ -2475,17 +2511,28 @@ export default function EChartsCandlestickChart({
           : null
 
         if (overlayPayloadHasRequestedData(overlays, overlayToggles)) {
+          ;(overlays as any).__backendCache = String(engine?.cache ?? '')
+          ;(overlays as any).__backendRawCache = String(engine?.rawCache ?? '')
+          ;(overlays as any).__backendSource = String(engine?.source ?? '')
+          ;(overlays as any).__fallbackApplied = Boolean((overlays as any)?.fallbackVisualsApplied)
           lastGoodChartOverlaysRef.current = overlays
           setChartOverlays(overlays)
+
+          const cacheText = `${String(engine?.cache ?? '')} ${String(engine?.rawCache ?? '')}`.toLowerCase()
+          setOverlayRenderStatus(cacheText.includes('fresh') || cacheText.includes('cache') ? 'cached' : 'real')
         } else if (lastGoodChartOverlaysRef.current) {
           // Backend can briefly return Waiting/empty while a live candle or new bucket is updating.
           // Keep the previous drawings visible until the next successful overlay payload arrives.
           setChartOverlays(lastGoodChartOverlaysRef.current)
+          setOverlayRenderStatus('cached')
+        } else {
+          setOverlayRenderStatus('empty')
         }
       } catch (error: any) {
         if (error?.name === 'AbortError') return
         if (lastGoodChartOverlaysRef.current) {
           setChartOverlays(lastGoodChartOverlaysRef.current)
+          setOverlayRenderStatus('cached')
         }
       }
     }
@@ -2519,6 +2566,10 @@ export default function EChartsCandlestickChart({
     const effectiveChartOverlays =
       chartOverlays ??
       (hasAnyOverlayEnabled(overlayToggles) ? lastGoodChartOverlaysRef.current : null)
+
+    if (!compact && hasAnyOverlayEnabled(overlayToggles) && candles.length > 0 && !effectiveChartOverlays) {
+      setOverlayRenderStatus((current) => current === 'loading' ? 'fallback' : current)
+    }
 
     const option = buildChartOption({
       symbol,
@@ -2691,6 +2742,13 @@ export default function EChartsCandlestickChart({
                     {label}
                   </button>
                 ))}
+
+                <div
+                  className={`rounded-full border px-2 py-1 text-[10px] font-bold ${getOverlayRenderStatusClass(overlayRenderStatus)}`}
+                  title="Shows whether chart overlays are real backend data, cached backend data, fallback, loading, empty, or off."
+                >
+                  {getOverlayRenderStatusLabel(overlayRenderStatus)}
+                </div>
               </div>
             )}
 
