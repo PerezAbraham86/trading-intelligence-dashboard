@@ -1269,7 +1269,7 @@ async function fetchChartOverlays(
   } catch (error: any) {
     if (error?.name === 'AbortError') throw error
     console.error(`Chart overlay fetch error: /api/chart-overlays ${symbol} ${timeframe}`, error)
-    return readOverlayMemoryCache(symbol, timeframe, toggles, 60000)
+    return readOverlayMemoryCache(symbol, timeframe, toggles, 120000)
   }
 }
 
@@ -1795,6 +1795,7 @@ export default function EChartsCandlestickChart({
   const chartIdentityRef = useRef<string>('')
   const dataSignatureRef = useRef<string>('')
   const overlayLayoutSignatureRef = useRef<string>('')
+  const overlayIdentityRef = useRef<string>('')
   const userZoomedRef = useRef(false)
   const [mainCandleGateTick, setMainCandleGateTick] = useState(0)
 
@@ -2086,15 +2087,22 @@ export default function EChartsCandlestickChart({
   }, [symbol, timeframe, historicalCandles.length, candleFetchLimit])
 
   useEffect(() => {
-    // Clear old overlays immediately on every symbol/timeframe/toggle change.
-    // This prevents stale SMC/AlphaX/Ghost levels from staying on the wrong chart.
-    setChartOverlays(null)
+    const overlayIdentity = `${symbol}::${timeframe}::${compact}`
+
+    // Clear old overlays only when the chart identity changes or overlays are fully off.
+    // Do not clear on every toggle change; that caused overlays to disappear while the
+    // next filtered payload was loading.
+    if (overlayIdentityRef.current !== overlayIdentity) {
+      overlayIdentityRef.current = overlayIdentity
+      setChartOverlays(null)
+    }
 
     if (compact || historicalCandles.length === 0 || !hasAnyOverlayEnabled(overlayToggles)) {
+      setChartOverlays(null)
       return
     }
 
-    const cached = readOverlayMemoryCache(symbol, timeframe, overlayToggles, 60000)
+    const cached = readOverlayMemoryCache(symbol, timeframe, overlayToggles, 120000)
     if (
       cached?.chartOverlays &&
       typeof cached.chartOverlays === 'object' &&
@@ -2128,8 +2136,8 @@ export default function EChartsCandlestickChart({
     }
 
     // Delay overlays slightly so the candle chart paints first.
-    const firstLoadId = window.setTimeout(pollChartOverlays, 250)
-    const intervalId = window.setInterval(pollChartOverlays, 15000)
+    const firstLoadId = window.setTimeout(pollChartOverlays, cached ? 0 : 75)
+    const intervalId = window.setInterval(pollChartOverlays, 45000)
 
     return () => {
       cancelled = true
