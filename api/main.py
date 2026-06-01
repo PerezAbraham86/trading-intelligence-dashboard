@@ -66,6 +66,7 @@ RECENT_SIGNALS: List[Dict[str, Any]] = []
 RECENT_CANDLES: List[Dict[str, Any]] = []
 
 CHART_OVERLAY_CACHE: Dict[str, Any] = {}
+CHART_OVERLAY_RAW_CACHE: Dict[str, Any] = {}
 CANDLE_RESPONSE_CACHE: Dict[str, Any] = {}
 
 MAX_RECENT_SIGNALS = 50
@@ -3980,6 +3981,83 @@ def chart_overlay_cache_key(
     return f"{normalize_symbol(symbol)}::{normalize_timeframe(timeframe)}::{int(limit or 500)}::{flags}"
 
 
+def chart_overlay_raw_cache_key(symbol: str, timeframe: str, limit: int) -> str:
+    return f"{normalize_symbol(symbol)}::{normalize_timeframe(timeframe)}::{int(limit or 500)}::raw_full"
+
+
+def chart_overlay_raw_cache_is_fresh(key: str, max_age_seconds: int = 45) -> bool:
+    cached = CHART_OVERLAY_RAW_CACHE.get(key)
+    if not isinstance(cached, dict):
+        return False
+
+    try:
+        created_at = datetime.fromisoformat(str(cached.get("createdAt", "")).replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - created_at).total_seconds() <= max_age_seconds
+    except Exception:
+        return False
+
+
+def get_or_build_raw_chart_overlays(
+    symbol: str,
+    timeframe: str,
+    limit: int,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    safe_limit = max(120, min(int(limit or 500), 700))
+    raw_key = chart_overlay_raw_cache_key(normalized_symbol, normalized_timeframe, safe_limit)
+
+    if not force_refresh and chart_overlay_raw_cache_is_fresh(raw_key):
+        cached = CHART_OVERLAY_RAW_CACHE.get(raw_key)
+        if isinstance(cached, dict):
+            payload = dict(cached)
+            payload["cache"] = "raw_fresh"
+            return payload
+
+    cached_payload = CHART_OVERLAY_RAW_CACHE.get(raw_key)
+
+    try:
+        candles = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit)
+        ghosts = build_python_ghost_candles(candles, 3)
+        raw_overlays = build_python_chart_overlays(candles, ghosts)
+
+        payload = {
+            "symbol": normalized_symbol,
+            "timeframe": normalized_timeframe,
+            "limit": safe_limit,
+            "candlesCount": len(candles),
+            "rawOverlays": raw_overlays if isinstance(raw_overlays, dict) else empty_overlay_payload(),
+            "ghostCandles": ghosts,
+            "cache": "raw_refreshed",
+            "source": "python_raw_chart_overlay_cache",
+            "createdAt": now_iso(),
+        }
+
+        CHART_OVERLAY_RAW_CACHE[raw_key] = payload
+        return payload
+    except Exception as error:
+        print(f"[Chart Overlay Raw Cache] build failed: {error}")
+        if isinstance(cached_payload, dict):
+            payload = dict(cached_payload)
+            payload["cache"] = "raw_stale_on_error"
+            payload["error"] = str(error)
+            return payload
+
+        return {
+            "symbol": normalized_symbol,
+            "timeframe": normalized_timeframe,
+            "limit": safe_limit,
+            "candlesCount": 0,
+            "rawOverlays": empty_overlay_payload(),
+            "ghostCandles": [],
+            "cache": "raw_empty_error",
+            "source": "python_raw_chart_overlay_cache",
+            "error": str(error),
+            "createdAt": now_iso(),
+        }
+
+
 def empty_fast_overlay_response(
     symbol: str,
     timeframe: str,
@@ -4096,7 +4174,7 @@ def build_fast_chart_overlay_payload(
     safe_limit = max(120, min(int(limit or 500), 700))
 
     # Fastest possible path: if the chart has all overlay toggles off,
-    # do not fetch candles and do not run SMC/AlphaX/Ghost calculations.
+    # return immediately. No candle fetch and no overlay calculation.
     if not any([smc, ghost, profile, order_blocks]):
         return empty_fast_overlay_response(
             normalized_symbol,
@@ -4115,7 +4193,7 @@ def build_fast_chart_overlay_payload(
         order_blocks=order_blocks,
     )
 
-    if not force_refresh and chart_overlay_cache_is_fresh(cache_key):
+    if not force_refresh and chart_overlay_cache_is_fresh(cache_key, max_age_seconds=45):
         cached = CHART_OVERLAY_CACHE.get(cache_key)
         if isinstance(cached, dict):
             payload = dict(cached)
@@ -4125,13 +4203,19 @@ def build_fast_chart_overlay_payload(
     cached_payload = CHART_OVERLAY_CACHE.get(cache_key)
 
     try:
-        candles = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit)
+        # Important speed improvement:
+        # Build the full raw SMC + AlphaX + Ghost overlay set once per symbol/timeframe.
+        # Toggle changes then only filter the cached raw payload instead of recalculating.
+        raw_payload = get_or_build_raw_chart_overlays(
+            normalized_symbol,
+            normalized_timeframe,
+            safe_limit,
+            force_refresh=force_refresh,
+        )
+        raw_overlays = raw_payload.get("rawOverlays")
+        if not isinstance(raw_overlays, dict):
+            raw_overlays = empty_overlay_payload()
 
-        # Ghost candles are only built if the Ghost toggle is on.
-        # SMC/Profile/OB do not need ghost generation for chart drawing.
-        ghosts = build_python_ghost_candles(candles, 3) if ghost else []
-
-        raw_overlays = build_python_chart_overlays(candles, ghosts)
         overlays = trim_chart_overlays_for_dashboard(
             raw_overlays,
             smc=smc,
@@ -4142,15 +4226,16 @@ def build_fast_chart_overlay_payload(
 
         payload = {
             "eventType": "CHART_OVERLAYS",
-            "status": "Live" if candles else "Waiting",
+            "status": "Live" if to_float(raw_payload.get("candlesCount"), 0) > 0 else "Waiting",
             "symbol": normalized_symbol,
             "timeframe": normalized_timeframe,
-            "candlesCount": len(candles),
+            "candlesCount": int(to_float(raw_payload.get("candlesCount"), 0)),
             "chartOverlays": overlays,
             "ghostCandles": overlays.get("ghostCandles", []),
             "alphaProfileMeta": overlays.get("alphaProfileMeta", {}),
-            "cache": "refreshed",
-            "source": "python_fast_chart_overlay_flags",
+            "cache": "filtered_from_raw_cache",
+            "rawCache": raw_payload.get("cache", "unknown"),
+            "source": "python_fast_chart_overlay_flags_raw_cache",
             "overlayFlags": {
                 "smc": bool(smc),
                 "ghost": bool(ghost),
@@ -4180,7 +4265,7 @@ def build_fast_chart_overlay_payload(
             "ghostCandles": [],
             "alphaProfileMeta": {},
             "cache": "empty_error",
-            "source": "python_fast_chart_overlay_flags",
+            "source": "python_fast_chart_overlay_flags_raw_cache",
             "overlayFlags": {
                 "smc": bool(smc),
                 "ghost": bool(ghost),
@@ -4249,7 +4334,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v25_fast_overlay_flags_default_off",
+        "engine": "main_v26_fast_raw_overlay_cache",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
