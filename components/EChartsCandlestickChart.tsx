@@ -1192,12 +1192,16 @@ function buildAlphaProfileRenderItem() {
 
 const overlayMemoryCache = new Map<string, { createdAt: number; payload: any }>()
 
-function getOverlayCacheKey(symbol: string, timeframe: string) {
-  return `${normalizeDefaultSymbol(symbol)}::${normalizeTimeframe(timeframe)}`
+function getOverlayFlagKey(toggles: OverlayToggles) {
+  return `smc=${Number(toggles.smc)}:ghost=${Number(toggles.ghost)}:profile=${Number(toggles.liquidityProfile)}:ob=${Number(toggles.orderBlocks)}`
 }
 
-function readOverlayMemoryCache(symbol: string, timeframe: string, maxAgeMs = 15000) {
-  const key = getOverlayCacheKey(symbol, timeframe)
+function getOverlayCacheKey(symbol: string, timeframe: string, toggles: OverlayToggles = DEFAULT_OVERLAY_TOGGLES) {
+  return `${normalizeDefaultSymbol(symbol)}::${normalizeTimeframe(timeframe)}::${getOverlayFlagKey(toggles)}`
+}
+
+function readOverlayMemoryCache(symbol: string, timeframe: string, toggles: OverlayToggles = DEFAULT_OVERLAY_TOGGLES, maxAgeMs = 15000) {
+  const key = getOverlayCacheKey(symbol, timeframe, toggles)
   const cached = overlayMemoryCache.get(key)
   if (!cached) return null
 
@@ -1205,8 +1209,8 @@ function readOverlayMemoryCache(symbol: string, timeframe: string, maxAgeMs = 15
   return cached.payload
 }
 
-function saveOverlayMemoryCache(symbol: string, timeframe: string, payload: any) {
-  const key = getOverlayCacheKey(symbol, timeframe)
+function saveOverlayMemoryCache(symbol: string, timeframe: string, toggles: OverlayToggles, payload: any) {
+  const key = getOverlayCacheKey(symbol, timeframe, toggles)
   overlayMemoryCache.set(key, {
     createdAt: Date.now(),
     payload,
@@ -1228,12 +1232,17 @@ function overlayPayloadMatches(payload: any, symbol: string, timeframe: string) 
 async function fetchChartOverlays(
   symbol: string,
   timeframe: string,
+  toggles: OverlayToggles,
   signal?: AbortSignal
 ): Promise<any | null> {
   const params = new URLSearchParams({
     symbol: normalizeDefaultSymbol(symbol),
     timeframe: normalizeTimeframe(timeframe),
     limit: '500',
+    smc: String(Boolean(toggles.smc)),
+    ghost: String(Boolean(toggles.ghost)),
+    profile: String(Boolean(toggles.liquidityProfile)),
+    orderBlocks: String(Boolean(toggles.orderBlocks)),
   })
 
   try {
@@ -1255,12 +1264,12 @@ async function fetchChartOverlays(
       return null
     }
 
-    saveOverlayMemoryCache(symbol, timeframe, json)
+    saveOverlayMemoryCache(symbol, timeframe, toggles, json)
     return json
   } catch (error: any) {
     if (error?.name === 'AbortError') throw error
     console.error(`Chart overlay fetch error: /api/chart-overlays ${symbol} ${timeframe}`, error)
-    return readOverlayMemoryCache(symbol, timeframe, 60000)
+    return readOverlayMemoryCache(symbol, timeframe, toggles, 60000)
   }
 }
 
@@ -2085,7 +2094,7 @@ export default function EChartsCandlestickChart({
       return
     }
 
-    const cached = readOverlayMemoryCache(symbol, timeframe, 60000)
+    const cached = readOverlayMemoryCache(symbol, timeframe, overlayToggles, 60000)
     if (
       cached?.chartOverlays &&
       typeof cached.chartOverlays === 'object' &&
@@ -2099,7 +2108,7 @@ export default function EChartsCandlestickChart({
 
     async function pollChartOverlays() {
       try {
-        const engine = await fetchChartOverlays(symbol, timeframe, controller.signal)
+        const engine = await fetchChartOverlays(symbol, timeframe, overlayToggles, controller.signal)
         if (cancelled) return
         if (!overlayPayloadMatches(engine, symbol, timeframe)) {
           setChartOverlays(null)
