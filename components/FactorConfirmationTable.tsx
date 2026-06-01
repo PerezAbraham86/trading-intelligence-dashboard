@@ -39,6 +39,12 @@ type TradingSignal = {
   unusualOptionsVolume?: number
   gammaRisk?: number
   dealerPinZone?: number | null
+  chartOverlayToggles?: {
+    smc?: boolean
+    ghost?: boolean
+    liquidityProfile?: boolean
+    orderBlocks?: boolean
+  }
 }
 
 type TechnicalIndicator = {
@@ -169,31 +175,56 @@ function buildCoreRows(signal?: TradingSignal): FactorRow[] {
   const confidence = clamp(Number(signal?.confidence ?? 0))
   const bullScore = clamp(Number(signal?.bullScore ?? 50))
   const bearScore = clamp(Number(signal?.bearScore ?? 50))
+  const toggles = signal?.chartOverlayToggles ?? {}
 
-  const smcStatus = statusFromText(signal?.smc ?? signal?.smcDirection)
-  const alphaxStatus = statusFromText(signal?.alphax ?? signal?.alphaxDirection)
-  const ghostStatus = statusFromText(signal?.ghost ?? signal?.ghostDirection)
+  const smcEnabled = Boolean(toggles.smc)
+  const ghostEnabled = Boolean(toggles.ghost)
+  const profileEnabled = Boolean(toggles.liquidityProfile)
+  const orderBlocksEnabled = Boolean(toggles.orderBlocks)
+
+  const smcStatus = smcEnabled
+    ? statusFromText(signal?.smc ?? signal?.smcDirection)
+    : 'inactive'
+
+  const alphaxStatus = profileEnabled
+    ? statusFromText(signal?.alphax ?? signal?.alphaxDirection)
+    : 'inactive'
+
+  const ghostStatus = ghostEnabled
+    ? statusFromText(signal?.ghost ?? signal?.ghostDirection)
+    : 'inactive'
+
+  const orderBlockStatus = orderBlocksEnabled
+    ? statusFromText(signal?.smc ?? signal?.smcDirection)
+    : 'inactive'
+
   const sessionStatus = statusFromText(signal?.session)
 
   const smcStrength = factorStrength(signal?.smcStrength, Math.max(confidence, bullScore, bearScore))
   const alphaxStrength = factorStrength(signal?.alphaxStrength, Math.max(signal?.alphaxBullPressure ?? 0, signal?.alphaxBearPressure ?? 0, bullScore, bearScore))
   const ghostStrength = factorStrength(signal?.ghostConfidence, confidence)
+  const orderBlockStrength = factorStrength(signal?.smcStrength, Math.max(confidence, bullScore, bearScore))
 
   return [
     {
-      factor: 'SMC Structure',
+      factor: smcEnabled ? 'SMC Structure' : 'SMC Structure Off',
       status: smcStatus,
       strength: smcStatus === 'inactive' ? 0 : smcStrength,
     },
     {
-      factor: 'AlphaX DLM',
+      factor: profileEnabled ? 'AlphaX DLM / Profile' : 'AlphaX DLM / Profile Off',
       status: alphaxStatus,
       strength: alphaxStatus === 'inactive' ? 0 : alphaxStrength,
     },
     {
-      factor: 'Python Ghost Candles',
+      factor: ghostEnabled ? 'Python Ghost Candles' : 'Python Ghost Candles Off',
       status: ghostStatus,
       strength: ghostStatus === 'inactive' ? 0 : ghostStrength,
+    },
+    {
+      factor: orderBlocksEnabled ? 'Order Blocks' : 'Order Blocks Off',
+      status: orderBlockStatus,
+      strength: orderBlockStatus === 'inactive' ? 0 : orderBlockStrength,
     },
     {
       factor: 'Session',
