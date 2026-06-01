@@ -1937,15 +1937,9 @@ export default function EChartsCandlestickChart({
         // This prevents a 5m or 15m dropdown from visually showing old 1m candles.
         setHistoricalCandles([])
 
-        const compactHasSharedCache =
-          compact &&
-          Boolean(readMemoryCache(cacheKey) ?? readLocalStorageCache(cacheKey))
-
-        if (compact && !compactHasSharedCache && !readMainCandlesReadyForSymbol(symbol)) {
-          setStatus('idle')
-          return
-        }
-
+        // Mini charts should not block on the candle gate.
+        // The shared memory/localStorage/inflight candle cache already prevents duplicate work.
+        // This keeps main + mini charts loading the same selected timeframe immediately.
         setStatus('loading')
       }
 
@@ -2026,7 +2020,7 @@ export default function EChartsCandlestickChart({
       cancelled = true
       controller.abort()
     }
-  }, [symbol, timeframe, compact, allowCompactHistory, candleFetchLimit, mainCandleGateTick])
+  }, [symbol, timeframe, compact, allowCompactHistory, candleFetchLimit])
 
   useEffect(() => {
     if (historicalCandles.length === 0) return
