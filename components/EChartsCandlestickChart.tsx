@@ -6,7 +6,7 @@ import * as echarts from 'echarts'
 const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
 const DEFAULT_VISIBLE_CANDLES = 78
 const CACHE_TTL_MS = 1000 * 60 * 5
-const LOCAL_STORAGE_PREFIX = 'marketbos:v9:python-smc-alphax-ghost:'
+const LOCAL_STORAGE_PREFIX = 'marketbos:v10:mes1-confirmed-symbol-only:'
 const CHART_SETTINGS_PREFIX = 'marketbos:chart-settings:v1:'
 const MAIN_CANDLES_READY_KEY = 'marketbos:main-candles-ready:v1'
 const PRIMARY_CANDLE_TIMEFRAMES = ['1m', '5m', '10m', '15m']
@@ -239,9 +239,7 @@ function normalizeDefaultSymbol(value: any, fallback = 'BTCUSD'): string {
   const normalized = normalizeSymbol(value || fallback)
 
   if (normalized === 'MES1' || normalized === 'MES1!') return 'MES1!'
-  if (normalized === 'ES1' || normalized === 'ES1!') return 'ES1!'
   if (normalized.includes('MES')) return 'MES1!'
-  if (normalized.includes('ES') && !normalized.includes('MES')) return 'ES1!'
   if (normalized.includes('SPY')) return 'SPY'
   if (normalized.includes('ETH')) return 'ETHUSD'
   if (normalized.includes('BTC')) return 'BTCUSD'
@@ -789,6 +787,8 @@ async function fetchCandlesFromNetwork(
   limit: string,
   signal?: AbortSignal
 ): Promise<Candle[]> {
+  // Send only the dashboard symbol.
+  // api/main.py maps MES1! to the confirmed InsightSentry code CME_MINI:MES1!.
   const params = new URLSearchParams({
     symbol: normalizeDefaultSymbol(symbol),
     timeframe: normalizeTimeframe(timeframe),
