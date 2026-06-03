@@ -702,7 +702,7 @@ export default function Dashboard() {
       timeframeEngineStates,
 
       chartCandleMode: mainChartSelection.candleMode,
-      chartOverlayToggles: latestSignal?.chartOverlayToggles ?? {
+      chartOverlayToggles: (latestSignal as any)?.chartOverlayToggles ?? {
         smc: true,
         ghost: true,
         liquidityProfile: true,
