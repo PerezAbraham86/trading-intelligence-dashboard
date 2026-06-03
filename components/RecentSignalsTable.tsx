@@ -1,10 +1,11 @@
-'use client'
+use client'
 
 import { motion } from 'framer-motion'
 
 type RecentSignal = {
   symbol?: string
   timeframe?: string
+  primaryTimeframe?: string
   signal?: string
   type?: string
   confidence?: number
@@ -20,6 +21,67 @@ type RecentSignal = {
 type RecentSignalsTableProps = {
   signals: RecentSignal[]
   latestSignal?: RecentSignal
+  activeSymbol?: string
+  activeTimeframe?: string
+  activePrice?: number
+}
+
+function normalizeSymbol(value?: string) {
+  const raw = String(value ?? 'BTCUSD')
+    .trim()
+    .toUpperCase()
+    .replace('BINANCE:', '')
+    .replace('COINBASE:', '')
+    .replace('CRYPTO:', '')
+    .replace('CME_MINI:', '')
+    .replace('CME:', '')
+
+  if (raw === 'MES1' || raw === 'MES1!' || raw.includes('MES')) return 'MES1!'
+  if (raw.includes('BTC')) return 'BTCUSD'
+  if (raw.includes('ETH')) return 'ETHUSD'
+  if (raw.includes('SPY')) return 'SPY'
+
+  return raw || 'BTCUSD'
+}
+
+function normalizeTimeframe(value?: string) {
+  const raw = String(value ?? '1m').trim().toLowerCase()
+  const tf = raw.includes('/') ? raw.split('/')[0]?.trim() ?? raw : raw
+
+  if (tf === '1') return '1m'
+  if (tf === '3') return '3m'
+  if (tf === '5') return '5m'
+  if (tf === '10') return '10m'
+  if (tf === '15') return '15m'
+  if (tf === '30') return '30m'
+  if (tf === '60') return '1h'
+  if (tf === '120') return '2h'
+  if (tf === '240') return '4h'
+  if (tf === 'd' || tf === '1d') return '1d'
+  if (tf === 'w' || tf === '1w') return '1w'
+
+  return tf || '1m'
+}
+
+function timeframeMatches(value: unknown, activeTimeframe: string) {
+  const text = String(value ?? '').trim()
+
+  if (text.includes('/')) {
+    return text
+      .split('/')
+      .map((item) => normalizeTimeframe(item.trim()))
+      .includes(normalizeTimeframe(activeTimeframe))
+  }
+
+  return normalizeTimeframe(text) === normalizeTimeframe(activeTimeframe)
+}
+
+function isPriceNearActiveScale(signal: RecentSignal, activePrice?: number) {
+  const price = Number(signal.current ?? signal.price ?? signal.entry ?? 0)
+  if (!Number.isFinite(price) || price <= 0) return false
+  if (!activePrice || !Number.isFinite(activePrice) || activePrice <= 0) return true
+
+  return Math.abs(price - activePrice) / activePrice <= 0.2
 }
 
 function normalizeSignalType(value?: string) {
@@ -86,13 +148,24 @@ function getStatusClass(status?: string) {
   return 'text-gray-300'
 }
 
-function buildLiveSnapshot(latestSignal?: RecentSignal): RecentSignal {
-  const price = Number(latestSignal?.current ?? latestSignal?.price ?? latestSignal?.entry ?? 0)
+function isSignalLinkedToActiveChart(signal: RecentSignal, activeSymbol: string, activeTimeframe: string, activePrice?: number) {
+  const symbol = normalizeSymbol(signal.symbol)
+  const timeframe = signal.primaryTimeframe ?? signal.timeframe
+
+  return (
+    symbol === normalizeSymbol(activeSymbol) &&
+    timeframeMatches(timeframe, activeTimeframe) &&
+    isPriceNearActiveScale(signal, activePrice)
+  )
+}
+
+function buildLiveSnapshot(latestSignal?: RecentSignal, activeSymbol = 'BTCUSD', activeTimeframe = '1m', activePrice?: number): RecentSignal {
+  const price = Number(activePrice ?? latestSignal?.current ?? latestSignal?.price ?? latestSignal?.entry ?? 0)
   const type = normalizeSignalType(latestSignal?.signal ?? latestSignal?.type)
 
   return {
-    symbol: latestSignal?.symbol ?? 'BTCUSD',
-    timeframe: latestSignal?.timeframe ?? '1m',
+    symbol: normalizeSymbol(activeSymbol),
+    timeframe: normalizeTimeframe(activeTimeframe),
     signal: type,
     confidence: Number(latestSignal?.confidence ?? 0),
     entry: Number(latestSignal?.entry ?? price),
@@ -107,18 +180,25 @@ function buildLiveSnapshot(latestSignal?: RecentSignal): RecentSignal {
 export default function RecentSignalsTable({
   signals,
   latestSignal,
+  activeSymbol,
+  activeTimeframe,
+  activePrice,
 }: RecentSignalsTableProps) {
+  const symbol = normalizeSymbol(activeSymbol ?? latestSignal?.symbol)
+  const timeframe = normalizeTimeframe(activeTimeframe ?? latestSignal?.primaryTimeframe ?? latestSignal?.timeframe)
+
   const cleanSignals = Array.isArray(signals)
     ? signals.filter((signal) => !isPlaceholderSignal(signal))
     : []
 
-  // The dashboard now runs mostly from Python live state instead of Pine trade alerts.
-  // If no true TRADE_SIGNAL rows exist yet, show the current Python/live snapshot
-  // instead of the old WAITING / 1d placeholder row.
+  const linkedSignals = cleanSignals.filter((signal) =>
+    isSignalLinkedToActiveChart(signal, symbol, timeframe, activePrice)
+  )
+
   const displaySignals =
-    cleanSignals.length > 0
-      ? cleanSignals
-      : [buildLiveSnapshot(latestSignal)]
+    linkedSignals.length > 0
+      ? linkedSignals
+      : [buildLiveSnapshot(latestSignal, symbol, timeframe, activePrice)]
 
   return (
     <motion.div
@@ -131,16 +211,16 @@ export default function RecentSignalsTable({
         <div>
           <h2 className="text-xl font-bold text-white">Recent Signals</h2>
           <p className="mt-1 text-xs text-gray-500">
-            True trade alerts first. Live Python snapshot shown while no trade is open.
+            Chart-linked rows only • {symbol} • {timeframe}
           </p>
         </div>
 
         <div className="rounded-lg border border-dark-600 bg-dark-900/40 px-3 py-2 text-right">
           <p className="text-xs text-gray-500">
-            {cleanSignals.length > 0 ? 'Trade Rows' : 'Mode'}
+            {linkedSignals.length > 0 ? 'Linked Rows' : 'Mode'}
           </p>
           <p className="text-sm font-bold text-white">
-            {cleanSignals.length > 0 ? cleanSignals.length : 'Live'}
+            {linkedSignals.length > 0 ? linkedSignals.length : 'Live'}
           </p>
         </div>
       </div>
@@ -180,11 +260,11 @@ export default function RecentSignalsTable({
                   <td className="py-3 pr-4">{formatTime(signal.createdAt)}</td>
 
                   <td className="py-3 pr-4 font-semibold text-white">
-                    {signal.symbol ?? latestSignal?.symbol ?? 'BTCUSD'}
+                    {normalizeSymbol(signal.symbol ?? symbol)}
                   </td>
 
                   <td className="py-3 pr-4">
-                    {signal.timeframe ?? latestSignal?.timeframe ?? '1m'}
+                    {normalizeTimeframe(signal.primaryTimeframe ?? signal.timeframe ?? timeframe)}
                   </td>
 
                   <td className="py-3 pr-4">
