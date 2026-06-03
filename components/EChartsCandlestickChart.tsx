@@ -222,7 +222,9 @@ const inflightCandleRequests = new Map<string, Promise<Candle[]>>()
 
 const timeframeOptions = ['1m', '5m', '10m', '15m', '30m']
 const candleModeOptions: CandleMode[] = ['Regular', 'Heikin Ashi']
-const symbolOptions = ['BTCUSD', 'MES1!']
+// Keep this list aligned with backend-supported symbols.
+// This prevents the UI from hiding symbols that the API can already serve.
+const symbolOptions = ['BTCUSD', 'ETHUSD', 'SPY', 'MES1!']
 
 function normalizeSymbol(value: any): string {
   return String(value ?? '')
@@ -3187,11 +3189,15 @@ export default function EChartsCandlestickChart({
   useEffect(() => {
     if (!followDefaultSymbol) return
 
-    const nextSymbol = normalizeDefaultSymbol(defaultSymbol ?? latestSignal?.symbol ?? symbol, symbol)
+    // Follow only the explicit parent/default symbol.
+    // Do not use latestSignal here because it can pull mini charts or compact charts
+    // away from their own selected symbol during API polling.
+    const nextSymbol = normalizeDefaultSymbol(defaultSymbol ?? symbol, symbol)
+
     if (nextSymbol && nextSymbol !== symbol) {
       setSymbol(nextSymbol)
     }
-  }, [defaultSymbol, latestSignal?.symbol, followDefaultSymbol, symbol])
+  }, [defaultSymbol, followDefaultSymbol, symbol])
 
   useEffect(() => {
     saveChartSettings(chartSettingsKey, {
@@ -3597,23 +3603,21 @@ export default function EChartsCandlestickChart({
 
     if (identityChanged) {
       // Full reset only when symbol/timeframe/candle type changes.
-      // Live ticks should update the current candle without wiping the chart.
+      // Live ticks and overlay refreshes should not wipe the chart.
       userZoomedRef.current = false
       chartInstance.current.clear()
       chartInstance.current.setOption(option, true)
     } else {
-      // Fast path for live tick updates and status refreshes.
-      // Preserve the user's current zoom/pan so the chart does not snap back
-      // when they scroll right to inspect ghost candles or the liquidity profile.
+      // Fast path for live tick updates, overlay refreshes, and status refreshes.
+      // Preserve the current zoom/pan so the chart does not snap back when
+      // scrolling through historical candles or inspecting ghost/liquidity zones.
       const currentOption = chartInstance.current.getOption() as any
-      const shouldPreserveUserZoom =
-        userZoomedRef.current &&
-        !overlayLayoutChanged &&
-        Array.isArray(currentOption?.dataZoom) &&
-        currentOption.dataZoom.length > 0
+      const currentDataZoom = Array.isArray(currentOption?.dataZoom)
+        ? currentOption.dataZoom
+        : []
 
-      if (shouldPreserveUserZoom) {
-        option.dataZoom = currentOption.dataZoom
+      if (currentDataZoom.length > 0) {
+        option.dataZoom = currentDataZoom
       }
 
       chartInstance.current.setOption(option, {
