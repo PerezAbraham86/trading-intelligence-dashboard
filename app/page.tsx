@@ -1,7 +1,6 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { motion } from 'framer-motion'
 import SignalCard from '@/components/SignalCard'
 import EChartsCandlestickChart from '@/components/EChartsCandlestickChart'
 import PressureGauges from '@/components/PressureGauges'
@@ -11,28 +10,36 @@ import WarningsPanel from '@/components/WarningsPanel'
 import RecentSignalsTable from '@/components/RecentSignalsTable'
 import ConnectionStatusBadge from '@/components/ConnectionStatusBadge'
 import MarketSentimentGauge from '@/components/MarketSentimentGauge'
+import { motion } from 'framer-motion'
 import { useApiPolling } from '@/hooks/useApiPolling'
 
-type CandleMode = 'Regular' | 'Heikin Ashi'
+type PythonGhostCandle = {
+  confidence?: number
+  direction?: string
+  source?: string
+}
+
+type PythonEngineState = {
+  ghostCandles?: PythonGhostCandle[]
+  ghostProjections?: PythonGhostCandle[]
+  projections?: PythonGhostCandle[]
+  ghostEngine?: {
+    phase?: string
+    source?: string
+    count?: number
+  }
+  sentiment?: TechnicalSentiment
+  technicalSentiment?: TechnicalSentiment
+  indicators?: TechnicalIndicator[]
+  technicalIndicators?: TechnicalIndicator[]
+  technicalMeter?: TechnicalIndicator[]
+  factors?: TechnicalIndicator[]
+}
 
 type ChartSelection = {
   symbol: string
   timeframe: string
-  candleMode: CandleMode
-}
-
-type OverlayToggles = {
-  smc: boolean
-  ghost: boolean
-  liquidityProfile: boolean
-  orderBlocks: boolean
-}
-
-const DEFAULT_OVERLAY_TOGGLES: OverlayToggles = {
-  smc: false,
-  ghost: false,
-  liquidityProfile: false,
-  orderBlocks: false,
+  candleMode: 'Regular' | 'Heikin Ashi'
 }
 
 type TechnicalIndicator = {
@@ -62,49 +69,58 @@ type TechnicalSentiment = {
   timeframeBreakdown?: Record<string, TechnicalSentiment | null>
 }
 
-type PythonGhostCandle = {
-  confidence?: number
-  direction?: string
-  source?: string
-}
+function countTechnicalIndicatorsPayload(value: unknown): number {
+  if (!value || typeof value !== 'object') return 0
 
-type PythonEngineState = {
-  ghostCandles?: PythonGhostCandle[]
-  ghostProjections?: PythonGhostCandle[]
-  projections?: PythonGhostCandle[]
-  ghostEngine?: {
-    phase?: string
-    source?: string
-    count?: number
+  const data = value as {
+    indicators?: unknown
+    technicalIndicators?: unknown
+    technicalMeter?: unknown
+    factors?: unknown
+    technicalSentiment?: unknown
+    sentiment?: unknown
   }
-  sentiment?: TechnicalSentiment
-  technicalSentiment?: TechnicalSentiment
-  indicators?: TechnicalIndicator[]
-  technicalIndicators?: TechnicalIndicator[]
-  technicalMeter?: TechnicalIndicator[]
-  factors?: TechnicalIndicator[]
-  scorecards?: Record<string, unknown>
-  smc?: string
-  alphax?: string
-  ghost?: string
-  smcStrength?: number
-  alphaxStrength?: number
-  ghostConfidence?: number
-  smcDirection?: string
-  alphaxDirection?: string
-  ghostDirection?: string
+
+  const directCount =
+    (Array.isArray(data.indicators) ? data.indicators.length : 0) +
+    (Array.isArray(data.technicalIndicators) ? data.technicalIndicators.length : 0) +
+    (Array.isArray(data.technicalMeter) ? data.technicalMeter.length : 0) +
+    (Array.isArray(data.factors) ? data.factors.length : 0)
+
+  const nestedTechnicalCount = countTechnicalIndicatorsPayload(data.technicalSentiment)
+  const nestedSentimentCount = countTechnicalIndicatorsPayload(data.sentiment)
+
+  return Math.max(directCount, nestedTechnicalCount, nestedSentimentCount)
 }
 
-type DashboardSettings = {
-  mainChartSelection?: ChartSelection
-  miniChartOneSelection?: ChartSelection
-  miniChartTwoSelection?: ChartSelection
-  scrollY?: number
-}
+function normalizeSharedTechnicalSentimentPayload(value: unknown): TechnicalSentiment | null {
+  if (!value || typeof value !== 'object') return null
 
-const DASHBOARD_SETTINGS_KEY = 'marketbos:dashboard-settings:v3:candle-first-same-timeframes'
-const MAIN_CANDLES_READY_KEY = 'marketbos:main-candles-ready:v1'
-const MAIN_CHART_OVERLAY_TOGGLES_KEY = 'marketbos:main-chart-overlay-toggles:v1'
+  const raw = value as Record<string, unknown>
+  const nestedTechnical =
+    raw.technicalSentiment && typeof raw.technicalSentiment === 'object'
+      ? raw.technicalSentiment as Record<string, unknown>
+      : raw.sentiment && typeof raw.sentiment === 'object'
+        ? raw.sentiment as Record<string, unknown>
+        : null
+
+  const candidate: TechnicalSentiment = {
+    ...(nestedTechnical ?? {}),
+    ...(raw as TechnicalSentiment),
+    indicators: [
+      ...(Array.isArray(raw.indicators) ? raw.indicators as TechnicalIndicator[] : []),
+      ...(Array.isArray(raw.technicalIndicators) ? raw.technicalIndicators as TechnicalIndicator[] : []),
+      ...(Array.isArray(raw.technicalMeter) ? raw.technicalMeter as TechnicalIndicator[] : []),
+      ...(Array.isArray(raw.factors) ? raw.factors as TechnicalIndicator[] : []),
+      ...(nestedTechnical && Array.isArray(nestedTechnical.indicators) ? nestedTechnical.indicators as TechnicalIndicator[] : []),
+      ...(nestedTechnical && Array.isArray(nestedTechnical.technicalIndicators) ? nestedTechnical.technicalIndicators as TechnicalIndicator[] : []),
+      ...(nestedTechnical && Array.isArray(nestedTechnical.technicalMeter) ? nestedTechnical.technicalMeter as TechnicalIndicator[] : []),
+      ...(nestedTechnical && Array.isArray(nestedTechnical.factors) ? nestedTechnical.factors as TechnicalIndicator[] : []),
+    ],
+  }
+
+  return countTechnicalIndicatorsPayload(candidate) > 0 ? candidate : null
+}
 
 function normalizeSymbol(value: unknown) {
   const raw = String(value ?? 'BTCUSD')
@@ -117,9 +133,7 @@ function normalizeSymbol(value: unknown) {
     .replace('CME:', '')
 
   if (raw === 'MES1' || raw === 'MES1!') return 'MES1!'
-  if (raw === 'ES1' || raw === 'ES1!') return 'ES1!'
   if (raw.includes('MES')) return 'MES1!'
-  if (raw.includes('ES') && !raw.includes('MES')) return 'ES1!'
   if (raw.includes('BTC')) return 'BTCUSD'
   if (raw.includes('ETH')) return 'ETHUSD'
   if (raw.includes('SPY')) return 'SPY'
@@ -145,134 +159,59 @@ function normalizeTimeframe(value: unknown) {
   return tf || '1m'
 }
 
-function normalizeCandleMode(value: unknown): CandleMode {
-  return value === 'Regular' ? 'Regular' : 'Heikin Ashi'
-}
-
-function normalizeChartSelection(value: unknown, fallback: ChartSelection): ChartSelection {
-  if (!value || typeof value !== 'object') return fallback
-
-  const raw = value as Partial<ChartSelection>
-
-  return {
-    symbol: normalizeSymbol(raw.symbol ?? fallback.symbol),
-    timeframe: normalizeTimeframe(raw.timeframe ?? fallback.timeframe),
-    candleMode: normalizeCandleMode(raw.candleMode ?? fallback.candleMode),
-  }
-}
-
-function readDashboardSettings(): DashboardSettings {
-  if (typeof window === 'undefined') return {}
-
-  try {
-    const raw = window.localStorage.getItem(DASHBOARD_SETTINGS_KEY)
-    if (!raw) return {}
-
-    const parsed = JSON.parse(raw)
-    return parsed && typeof parsed === 'object' ? parsed : {}
-  } catch {
-    return {}
-  }
-}
-
-function saveDashboardSettings(settings: DashboardSettings) {
-  if (typeof window === 'undefined') return
-
-  try {
-    window.localStorage.setItem(DASHBOARD_SETTINGS_KEY, JSON.stringify(settings))
-  } catch {
-    // Ignore storage quota/private-mode failures.
-  }
-}
-
-function readMainCandleGate(symbol?: string, timeframe?: string) {
-  if (typeof window === 'undefined') {
-    return {
-      ready: false,
-      count: 0,
-      symbol: '',
-      timeframe: '',
-      status: 'server',
-    }
-  }
-
-  try {
-    const raw = window.localStorage.getItem(MAIN_CANDLES_READY_KEY)
-    if (!raw) {
-      return {
-        ready: false,
-        count: 0,
-        symbol: '',
-        timeframe: '',
-        status: 'missing',
-      }
-    }
-
-    const parsed = JSON.parse(raw)
-    const storedSymbol = normalizeSymbol(parsed?.symbol ?? '')
-    const storedTimeframe = normalizeTimeframe(parsed?.timeframe ?? '')
-    const requestedSymbol = normalizeSymbol(symbol ?? storedSymbol)
-    const requestedTimeframe = normalizeTimeframe(timeframe ?? storedTimeframe)
-    const count = Number(parsed?.count ?? 0)
-
-    return {
-      ready:
-        Boolean(parsed?.ready) &&
-        count > 0 &&
-        storedSymbol === requestedSymbol &&
-        storedTimeframe === requestedTimeframe,
-      count,
-      symbol: storedSymbol,
-      timeframe: storedTimeframe,
-      status: String(parsed?.status ?? ''),
-    }
-  } catch {
-    return {
-      ready: false,
-      count: 0,
-      symbol: '',
-      timeframe: '',
-      status: 'parse-error',
-    }
-  }
-}
-
-
-function readMainChartOverlayToggles(symbol?: string, timeframe?: string) {
-  if (typeof window === 'undefined') return DEFAULT_OVERLAY_TOGGLES
-
-  try {
-    const raw = window.localStorage.getItem(MAIN_CHART_OVERLAY_TOGGLES_KEY)
-    if (!raw) return DEFAULT_OVERLAY_TOGGLES
-
-    const parsed = JSON.parse(raw)
-    const storedSymbol = normalizeSymbol(parsed?.symbol ?? '')
-    const storedTimeframe = normalizeTimeframe(parsed?.timeframe ?? '')
-    const requestedSymbol = normalizeSymbol(symbol ?? storedSymbol)
-    const requestedTimeframe = normalizeTimeframe(timeframe ?? storedTimeframe)
-
-    if (storedSymbol !== requestedSymbol || storedTimeframe !== requestedTimeframe) {
-      return DEFAULT_OVERLAY_TOGGLES
-    }
-
-    const toggles = parsed?.toggles && typeof parsed.toggles === 'object'
-      ? parsed.toggles
-      : {}
-
-    return {
-      smc: Boolean(toggles.smc),
-      ghost: Boolean(toggles.ghost),
-      liquidityProfile: Boolean(toggles.liquidityProfile),
-      orderBlocks: Boolean(toggles.orderBlocks),
-    }
-  } catch {
-    return DEFAULT_OVERLAY_TOGGLES
-  }
-}
-
 function clampPercent(value: number) {
   if (!Number.isFinite(value)) return 0
   return Math.max(0, Math.min(100, Math.round(value)))
+}
+
+function toFiniteNumber(value: unknown, fallback = 0) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+function extractCandleArray(payload: any): any[] {
+  if (Array.isArray(payload)) return payload
+  if (Array.isArray(payload?.candles)) return payload.candles
+  if (Array.isArray(payload?.data)) return payload.data
+  if (Array.isArray(payload?.results)) return payload.results
+  if (Array.isArray(payload?.series)) return payload.series
+  return []
+}
+
+function extractLatestCloseFromCandlePayload(payload: any): number | null {
+  const candles = extractCandleArray(payload)
+  if (candles.length === 0) return null
+
+  for (let index = candles.length - 1; index >= 0; index -= 1) {
+    const candle = candles[index]
+    const close = toFiniteNumber(candle?.close ?? candle?.c, NaN)
+    if (Number.isFinite(close) && close > 0) return close
+  }
+
+  return null
+}
+
+function isSameActiveSymbol(value: unknown, activeSymbol: string) {
+  return normalizeSymbol(value) === normalizeSymbol(activeSymbol)
+}
+
+function isSameActiveTimeframe(value: unknown, activeTimeframe: string) {
+  const text = String(value ?? '').trim()
+  if (text.includes('/')) {
+    return text
+      .split('/')
+      .map((item) => normalizeTimeframe(item.trim()))
+      .includes(normalizeTimeframe(activeTimeframe))
+  }
+
+  return normalizeTimeframe(text) === normalizeTimeframe(activeTimeframe)
+}
+
+function isPriceNearActiveScale(value: unknown, activePrice: number | null) {
+  const price = toFiniteNumber(value, NaN)
+  if (!Number.isFinite(price) || price <= 0) return false
+  if (!activePrice || !Number.isFinite(activePrice) || activePrice <= 0) return true
+  return Math.abs(price - activePrice) / activePrice <= 0.2
 }
 
 function getTechnicalIndicators(sentiment: TechnicalSentiment | null | undefined): TechnicalIndicator[] {
@@ -410,59 +349,6 @@ function buildOverallTechnicalSentiment(
   }
 }
 
-function countTechnicalIndicatorsPayload(value: unknown): number {
-  if (!value || typeof value !== 'object') return 0
-
-  const data = value as {
-    indicators?: unknown
-    technicalIndicators?: unknown
-    technicalMeter?: unknown
-    factors?: unknown
-    technicalSentiment?: unknown
-    sentiment?: unknown
-  }
-
-  const directCount =
-    (Array.isArray(data.indicators) ? data.indicators.length : 0) +
-    (Array.isArray(data.technicalIndicators) ? data.technicalIndicators.length : 0) +
-    (Array.isArray(data.technicalMeter) ? data.technicalMeter.length : 0) +
-    (Array.isArray(data.factors) ? data.factors.length : 0)
-
-  const nestedTechnicalCount = countTechnicalIndicatorsPayload(data.technicalSentiment)
-  const nestedSentimentCount = countTechnicalIndicatorsPayload(data.sentiment)
-
-  return Math.max(directCount, nestedTechnicalCount, nestedSentimentCount)
-}
-
-function normalizeSharedTechnicalSentimentPayload(value: unknown): TechnicalSentiment | null {
-  if (!value || typeof value !== 'object') return null
-
-  const raw = value as Record<string, unknown>
-  const nestedTechnical =
-    raw.technicalSentiment && typeof raw.technicalSentiment === 'object'
-      ? raw.technicalSentiment as Record<string, unknown>
-      : raw.sentiment && typeof raw.sentiment === 'object'
-        ? raw.sentiment as Record<string, unknown>
-        : null
-
-  const candidate: TechnicalSentiment = {
-    ...(nestedTechnical ?? {}),
-    ...(raw as TechnicalSentiment),
-    indicators: [
-      ...(Array.isArray(raw.indicators) ? raw.indicators as TechnicalIndicator[] : []),
-      ...(Array.isArray(raw.technicalIndicators) ? raw.technicalIndicators as TechnicalIndicator[] : []),
-      ...(Array.isArray(raw.technicalMeter) ? raw.technicalMeter as TechnicalIndicator[] : []),
-      ...(Array.isArray(raw.factors) ? raw.factors as TechnicalIndicator[] : []),
-      ...(nestedTechnical && Array.isArray(nestedTechnical.indicators) ? nestedTechnical.indicators as TechnicalIndicator[] : []),
-      ...(nestedTechnical && Array.isArray(nestedTechnical.technicalIndicators) ? nestedTechnical.technicalIndicators as TechnicalIndicator[] : []),
-      ...(nestedTechnical && Array.isArray(nestedTechnical.technicalMeter) ? nestedTechnical.technicalMeter as TechnicalIndicator[] : []),
-      ...(nestedTechnical && Array.isArray(nestedTechnical.factors) ? nestedTechnical.factors as TechnicalIndicator[] : []),
-    ],
-  }
-
-  return countTechnicalIndicatorsPayload(candidate) > 0 ? candidate : null
-}
-
 function getPythonGhostCandles(engineState: PythonEngineState | null | undefined) {
   if (!engineState) return []
 
@@ -474,10 +360,8 @@ function getPythonGhostCandles(engineState: PythonEngineState | null | undefined
 }
 
 function getAverageGhostConfidence(engineState: PythonEngineState | null | undefined) {
-  const direct = Number(engineState?.ghostConfidence ?? 0)
-  if (Number.isFinite(direct) && direct > 0) return clampPercent(direct)
-
   const ghostCandles = getPythonGhostCandles(engineState)
+
   if (ghostCandles.length === 0) return 0
 
   const values = ghostCandles
@@ -492,9 +376,8 @@ function getAverageGhostConfidence(engineState: PythonEngineState | null | undef
 }
 
 function getPythonGhostText(engineState: PythonEngineState | null | undefined) {
-  if (engineState?.ghost) return engineState.ghost
-
   const ghostCandles = getPythonGhostCandles(engineState)
+
   if (ghostCandles.length === 0) return ''
 
   const firstDirection = String(ghostCandles[0]?.direction ?? '').toLowerCase()
@@ -554,32 +437,24 @@ export default function Dashboard() {
     useState<Record<string, TechnicalSentiment | null>>({})
   const [factorTechnicalSentiment, setFactorTechnicalSentiment] =
     useState<TechnicalSentiment | null>(null)
+  const [activeChartPrice, setActiveChartPrice] = useState<number | null>(null)
 
-  const [mainChartSelection, setMainChartSelection] = useState<ChartSelection>(() => {
-    const saved = readDashboardSettings()
-    return normalizeChartSelection(saved.mainChartSelection, {
-      symbol: 'BTCUSD',
-      timeframe: '1m',
-      candleMode: 'Heikin Ashi',
-    })
+  const [mainChartSelection, setMainChartSelection] = useState<ChartSelection>({
+    symbol: 'BTCUSD',
+    timeframe: '1m',
+    candleMode: 'Heikin Ashi',
   })
 
-  const [miniChartOneSelection, setMiniChartOneSelection] = useState<ChartSelection>(() => {
-    const saved = readDashboardSettings()
-    return normalizeChartSelection(saved.miniChartOneSelection, {
-      symbol: 'BTCUSD',
-      timeframe: '1m',
-      candleMode: 'Heikin Ashi',
-    })
+  const [miniChartOneSelection, setMiniChartOneSelection] = useState<ChartSelection>({
+    symbol: 'BTCUSD',
+    timeframe: '5m',
+    candleMode: 'Heikin Ashi',
   })
 
-  const [miniChartTwoSelection, setMiniChartTwoSelection] = useState<ChartSelection>(() => {
-    const saved = readDashboardSettings()
-    return normalizeChartSelection(saved.miniChartTwoSelection, {
-      symbol: 'BTCUSD',
-      timeframe: '1m',
-      candleMode: 'Heikin Ashi',
-    })
+  const [miniChartTwoSelection, setMiniChartTwoSelection] = useState<ChartSelection>({
+    symbol: 'BTCUSD',
+    timeframe: '15m',
+    candleMode: 'Heikin Ashi',
   })
 
   const {
@@ -591,17 +466,14 @@ export default function Dashboard() {
     apiBaseUrl,
   } = useApiPolling()
 
+  useEffect(() => {
+    setIsClient(true)
+  }, [])
+
   const selectedSymbol = normalizeSymbol(mainChartSelection.symbol || latestSignal?.symbol)
   const selectedTimeframe = normalizeTimeframe(mainChartSelection.timeframe || latestSignal?.timeframe)
-  const miniOneTimeframe = normalizeTimeframe(miniChartOneSelection.timeframe || selectedTimeframe)
-  const miniTwoTimeframe = normalizeTimeframe(miniChartTwoSelection.timeframe || selectedTimeframe)
-
-  const [mainCandleGate, setMainCandleGate] = useState(() =>
-    readMainCandleGate(selectedSymbol, selectedTimeframe)
-  )
-  const [mainChartOverlayToggles, setMainChartOverlayToggles] = useState<OverlayToggles>(() =>
-    readMainChartOverlayToggles(selectedSymbol, selectedTimeframe)
-  )
+  const miniOneTimeframe = normalizeTimeframe(miniChartOneSelection.timeframe || '5m')
+  const miniTwoTimeframe = normalizeTimeframe(miniChartTwoSelection.timeframe || '15m')
 
   const dashboardTimeframes = useMemo(
     () => Array.from(new Set([selectedTimeframe, miniOneTimeframe, miniTwoTimeframe])),
@@ -612,73 +484,45 @@ export default function Dashboard() {
   const FactorConfirmationTableLoose = FactorConfirmationTable as any
 
   useEffect(() => {
-    setIsClient(true)
+    if (!isClient || !apiBaseUrl) return
 
-    const saved = readDashboardSettings()
-    if (typeof saved.scrollY === 'number' && saved.scrollY > 0) {
-      window.requestAnimationFrame(() => {
-        window.scrollTo({ top: saved.scrollY, behavior: 'auto' })
-      })
+    let cancelled = false
+    let intervalId: ReturnType<typeof setInterval> | null = null
+
+    async function fetchActiveChartPrice() {
+      try {
+        const params = new URLSearchParams({
+          symbol: selectedSymbol,
+          timeframe: selectedTimeframe,
+          limit: '5',
+        })
+
+        const response = await fetch(`${apiBaseUrl}/api/candles?${params.toString()}`, {
+          cache: 'no-store',
+        })
+
+        if (!response.ok) return
+
+        const json = await response.json()
+        const latestClose = extractLatestCloseFromCandlePayload(json)
+
+        if (!cancelled && latestClose && Number.isFinite(latestClose)) {
+          setActiveChartPrice(latestClose)
+        }
+      } catch (error) {
+        console.error('Active chart price sync error:', error)
+      }
     }
 
-    const saveScrollPosition = () => {
-      const current = readDashboardSettings()
-      saveDashboardSettings({
-        ...current,
-        scrollY: window.scrollY,
-      })
-    }
-
-    window.addEventListener('beforeunload', saveScrollPosition)
-    window.addEventListener('pagehide', saveScrollPosition)
+    setActiveChartPrice(null)
+    fetchActiveChartPrice()
+    intervalId = setInterval(fetchActiveChartPrice, 10000)
 
     return () => {
-      saveScrollPosition()
-      window.removeEventListener('beforeunload', saveScrollPosition)
-      window.removeEventListener('pagehide', saveScrollPosition)
+      cancelled = true
+      if (intervalId) clearInterval(intervalId)
     }
-  }, [])
-
-  useEffect(() => {
-    const saved = readDashboardSettings()
-    saveDashboardSettings({
-      ...saved,
-      mainChartSelection,
-      miniChartOneSelection,
-      miniChartTwoSelection,
-      scrollY: typeof window !== 'undefined' ? window.scrollY : saved.scrollY,
-    })
-  }, [mainChartSelection, miniChartOneSelection, miniChartTwoSelection])
-
-  useEffect(() => {
-    const updateGate = () => {
-      setMainCandleGate(readMainCandleGate(selectedSymbol, selectedTimeframe))
-    }
-
-    updateGate()
-    window.addEventListener('marketbos:candle-gate', updateGate)
-    window.addEventListener('storage', updateGate)
-
-    return () => {
-      window.removeEventListener('marketbos:candle-gate', updateGate)
-      window.removeEventListener('storage', updateGate)
-    }
-  }, [selectedSymbol, selectedTimeframe])
-
-  useEffect(() => {
-    const updateOverlayToggles = () => {
-      setMainChartOverlayToggles(readMainChartOverlayToggles(selectedSymbol, selectedTimeframe))
-    }
-
-    updateOverlayToggles()
-    window.addEventListener('marketbos:overlay-toggles', updateOverlayToggles)
-    window.addEventListener('storage', updateOverlayToggles)
-
-    return () => {
-      window.removeEventListener('marketbos:overlay-toggles', updateOverlayToggles)
-      window.removeEventListener('storage', updateOverlayToggles)
-    }
-  }, [selectedSymbol, selectedTimeframe])
+  }, [apiBaseUrl, isClient, selectedSymbol, selectedTimeframe])
 
   useEffect(() => {
     setFactorTechnicalSentiment(null)
@@ -688,17 +532,15 @@ export default function Dashboard() {
     setMiniChartOneSelection((current) => ({
       ...current,
       symbol: selectedSymbol,
-      timeframe: current.timeframe || selectedTimeframe,
     }))
     setMiniChartTwoSelection((current) => ({
       ...current,
       symbol: selectedSymbol,
-      timeframe: current.timeframe || selectedTimeframe,
     }))
-  }, [selectedSymbol, selectedTimeframe])
+  }, [selectedSymbol])
 
   useEffect(() => {
-    if (!isClient || !apiBaseUrl || !mainCandleGate.ready) return
+    if (!isClient || !apiBaseUrl) return
 
     let cancelled = false
     let intervalId: ReturnType<typeof setInterval> | null = null
@@ -741,10 +583,10 @@ export default function Dashboard() {
       cancelled = true
       if (intervalId) clearInterval(intervalId)
     }
-  }, [apiBaseUrl, isClient, selectedSymbol, selectedTimeframe, dashboardTimeframes, mainCandleGate.ready])
+  }, [apiBaseUrl, isClient, selectedSymbol, selectedTimeframe, dashboardTimeframes])
 
   useEffect(() => {
-    if (!isClient || !apiBaseUrl || !mainCandleGate.ready) return
+    if (!isClient || !apiBaseUrl) return
 
     let cancelled = false
     let intervalId: ReturnType<typeof setInterval> | null = null
@@ -816,10 +658,9 @@ export default function Dashboard() {
       cancelled = true
       if (intervalId) clearInterval(intervalId)
     }
-  }, [apiBaseUrl, isClient, selectedSymbol, selectedTimeframe, dashboardTimeframes, mainCandleGate.ready])
+  }, [apiBaseUrl, isClient, selectedSymbol, selectedTimeframe, dashboardTimeframes])
 
   const augmentedLatestSignal = useMemo(() => {
-    const latestSignalAny = latestSignal as any
     const mainGhostConfidence = getAverageGhostConfidence(pythonEngineState)
     const overallGhostConfidence = getOverallGhostConfidence(timeframeEngineStates, dashboardTimeframes)
     const ghostConfidence = Math.max(mainGhostConfidence, overallGhostConfidence)
@@ -827,32 +668,31 @@ export default function Dashboard() {
       getOverallGhostText(timeframeEngineStates, dashboardTimeframes) ||
       getPythonGhostText(pythonEngineState)
 
-    const scorecards = pythonEngineState?.scorecards ?? {}
-
     return {
-      ...latestSignalAny,
-      ...(pythonEngineState ?? {}),
+      ...latestSignal,
 
+      // Overall dashboard logic now uses the active chart as the master context.
       symbol: selectedSymbol,
       timeframe: overallTimeframeLabel,
       primaryTimeframe: selectedTimeframe,
+      activeSymbol: selectedSymbol,
+      activeTimeframe: selectedTimeframe,
+      price: activeChartPrice ?? latestSignal?.price ?? latestSignal?.current ?? latestSignal?.entry,
+      current: activeChartPrice ?? latestSignal?.current ?? latestSignal?.price ?? latestSignal?.entry,
+      entry: isPriceNearActiveScale(latestSignal?.entry ?? latestSignal?.price, activeChartPrice)
+        ? latestSignal?.entry ?? latestSignal?.price
+        : activeChartPrice ?? latestSignal?.entry ?? latestSignal?.price,
       miniTimeframes: [miniOneTimeframe, miniTwoTimeframe],
       analysisTimeframes: dashboardTimeframes,
       multiTimeframeMode: true,
 
+      // Python ghost score is now blended across main + mini timeframe engine states.
       confidence: Math.max(Number(latestSignal?.confidence ?? 0), ghostConfidence),
-      ghost: pythonGhostText || pythonEngineState?.ghost || latestSignalAny?.ghost || 'Multi-Timeframe Python Ghost Projection',
+      ghost: pythonGhostText || latestSignal?.ghost || 'Multi-Timeframe Python Ghost Projection',
       ghostConfidence,
       pythonGhostEngine: Boolean(ghostConfidence || pythonGhostText),
 
-      smc: pythonEngineState?.smc ?? (scorecards as any)?.smc ?? latestSignalAny?.smc,
-      alphax: pythonEngineState?.alphax ?? (scorecards as any)?.alphax ?? latestSignalAny?.alphax,
-      smcStrength: pythonEngineState?.smcStrength ?? (scorecards as any)?.smcStrength ?? latestSignalAny?.smcStrength,
-      alphaxStrength: pythonEngineState?.alphaxStrength ?? (scorecards as any)?.alphaxStrength ?? latestSignalAny?.alphaxStrength,
-      smcDirection: pythonEngineState?.smcDirection ?? (scorecards as any)?.smcDirection ?? latestSignalAny?.smcDirection,
-      alphaxDirection: pythonEngineState?.alphaxDirection ?? (scorecards as any)?.alphaxDirection ?? latestSignalAny?.alphaxDirection,
-      ghostDirection: pythonEngineState?.ghostDirection ?? (scorecards as any)?.ghostDirection ?? latestSignalAny?.ghostDirection,
-
+      // Shared technical meter now combines main chart + mini chart logic.
       technicalSentiment: sharedTechnicalSentiment ?? undefined,
       indicators: sharedTechnicalSentiment?.indicators,
       technicalIndicators: sharedTechnicalSentiment?.technicalIndicators,
@@ -862,9 +702,12 @@ export default function Dashboard() {
       timeframeEngineStates,
 
       chartCandleMode: mainChartSelection.candleMode,
-      candleGateReady: mainCandleGate.ready,
-      candleGateStatus: mainCandleGate.status,
-      chartOverlayToggles: mainChartOverlayToggles,
+      chartOverlayToggles: latestSignal?.chartOverlayToggles ?? {
+        smc: true,
+        ghost: true,
+        liquidityProfile: true,
+        orderBlocks: true,
+      },
     }
   }, [
     latestSignal,
@@ -878,10 +721,8 @@ export default function Dashboard() {
     miniOneTimeframe,
     miniTwoTimeframe,
     overallTimeframeLabel,
+    activeChartPrice,
     mainChartSelection.candleMode,
-    mainCandleGate.ready,
-    mainCandleGate.status,
-    mainChartOverlayToggles,
   ])
 
   if (!isClient) {
@@ -889,10 +730,23 @@ export default function Dashboard() {
   }
 
   const maxSignalsToShow = 25
-  const visibleRecentSignals = recentSignals.slice(0, maxSignalsToShow)
+  const visibleRecentSignals = recentSignals
+    .filter((signal: any) => {
+      const candidateSymbol = signal?.symbol ?? selectedSymbol
+      const candidateTimeframe = signal?.primaryTimeframe ?? signal?.timeframe ?? selectedTimeframe
+      const candidatePrice = signal?.current ?? signal?.price ?? signal?.entry
+
+      return (
+        isSameActiveSymbol(candidateSymbol, selectedSymbol) &&
+        isSameActiveTimeframe(candidateTimeframe, selectedTimeframe) &&
+        isPriceNearActiveScale(candidatePrice, activeChartPrice)
+      )
+    })
+    .slice(0, maxSignalsToShow)
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-dark-900 via-dark-800 to-dark-900 p-6">
+      {/* Header */}
       <motion.div
         initial={{ opacity: 0, y: -20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -955,7 +809,9 @@ export default function Dashboard() {
         </div>
       </motion.div>
 
+      {/* Main Grid */}
       <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
+        {/* Left Column */}
         <div className="space-y-6 lg:col-span-2">
           <SignalCard signal={augmentedLatestSignal} />
 
@@ -979,6 +835,7 @@ export default function Dashboard() {
             recentCandles={recentCandles}
           />
 
+          {/* Two Smaller Charts */}
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
             <EChartsCandlestickChart
               heightClass="h-[390px]"
@@ -1028,6 +885,7 @@ export default function Dashboard() {
           </div>
         </div>
 
+        {/* Right Column */}
         <div className="space-y-6">
           <MarketSentimentGauge
             signal={augmentedLatestSignal as any}
@@ -1040,18 +898,34 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Second Row */}
       <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
         <FactorConfirmationTableLoose
           signal={augmentedLatestSignal as any}
           technicalSentiment={sharedTechnicalSentiment as any}
           onTechnicalSentimentUpdate={setFactorTechnicalSentiment as any}
+          activeSymbol={selectedSymbol}
+          activeTimeframe={selectedTimeframe}
+          activePrice={activeChartPrice ?? undefined}
         />
 
-        <GhostCandleProjection signal={augmentedLatestSignal} />
+        <GhostCandleProjection
+          signal={augmentedLatestSignal}
+          activeSymbol={selectedSymbol}
+          activeTimeframe={selectedTimeframe}
+          activePrice={activeChartPrice ?? undefined}
+        />
       </div>
 
-      <RecentSignalsTable signals={visibleRecentSignals} latestSignal={augmentedLatestSignal} />
+      <RecentSignalsTable
+        signals={visibleRecentSignals}
+        latestSignal={augmentedLatestSignal}
+        activeSymbol={selectedSymbol}
+        activeTimeframe={selectedTimeframe}
+        activePrice={activeChartPrice ?? undefined}
+      />
 
+      {/* Footer */}
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
@@ -1059,7 +933,7 @@ export default function Dashboard() {
         className="mt-8 border-t border-dark-700 pt-4 text-center text-xs text-gray-500"
       >
         <p>
-          Trading Intelligence Dashboard • Candle-First Loading Mode • Connected to{' '}
+          Trading Intelligence Dashboard • Live API Polling Mode • Connected to{' '}
           {apiBaseUrl}
         </p>
       </motion.div>
