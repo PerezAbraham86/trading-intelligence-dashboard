@@ -8,6 +8,13 @@ const API_BASE_URL =
 
 export type ConnectionStatus = 'Connected' | 'Waiting' | 'Error'
 
+type ChartOverlayToggles = {
+  smc?: boolean
+  ghost?: boolean
+  liquidityProfile?: boolean
+  orderBlocks?: boolean
+}
+
 export type CandleData = {
   time: number | string
   open: number
@@ -49,6 +56,7 @@ export type TradingSignal = {
   alphax: string
   ghost: string
   chartOverlays?: string
+  chartOverlayToggles?: ChartOverlayToggles
 
   openInterest: string
   footprint: string
@@ -92,6 +100,7 @@ export type RecentSignal = {
   alphax?: string
   ghost?: string
   chartOverlays?: string
+  chartOverlayToggles?: ChartOverlayToggles
 
   entry?: number
   current?: number
@@ -128,6 +137,12 @@ const fallbackSignal: TradingSignal = {
   alphax: 'Awaiting signal',
   ghost: 'Awaiting signal',
   chartOverlays: '',
+  chartOverlayToggles: {
+    smc: false,
+    ghost: false,
+    liquidityProfile: false,
+    orderBlocks: false,
+  },
 
   openInterest: 'Awaiting signal',
   footprint: 'Awaiting signal',
@@ -157,6 +172,17 @@ function toOptionalNumber(value: unknown): number | undefined {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function normalizeChartOverlayToggles(value: unknown): ChartOverlayToggles | undefined {
+  if (!isObject(value)) return undefined
+
+  return {
+    smc: Boolean(value.smc),
+    ghost: Boolean(value.ghost),
+    liquidityProfile: Boolean(value.liquidityProfile),
+    orderBlocks: Boolean(value.orderBlocks),
+  }
 }
 
 function unwrapObjectPayload(raw: unknown, keys: string[]): unknown {
@@ -245,6 +271,9 @@ function normalizeSignal(rawInput: Partial<TradingSignal> | any): TradingSignal 
     alphax: raw.alphax ?? fallbackSignal.alphax,
     ghost: raw.ghost ?? fallbackSignal.ghost,
     chartOverlays: raw.chartOverlays ?? fallbackSignal.chartOverlays,
+    chartOverlayToggles:
+      normalizeChartOverlayToggles(raw.chartOverlayToggles) ??
+      fallbackSignal.chartOverlayToggles,
 
     openInterest: raw.openInterest ?? fallbackSignal.openInterest,
     footprint: raw.footprint ?? fallbackSignal.footprint,
@@ -312,6 +341,7 @@ function normalizeRecentSignals(rawInput: unknown): RecentSignal[] {
       alphax: item.alphax,
       ghost: item.ghost,
       chartOverlays: item.chartOverlays,
+      chartOverlayToggles: normalizeChartOverlayToggles(item.chartOverlayToggles),
 
       entry: toNumber(item.entry ?? price, price),
       current: toNumber(item.current ?? close ?? price, price),
