@@ -472,6 +472,8 @@ export default function Dashboard() {
 
   const selectedSymbol = normalizeSymbol(mainChartSelection.symbol || latestSignal?.symbol)
   const selectedTimeframe = normalizeTimeframe(mainChartSelection.timeframe || latestSignal?.timeframe)
+  const miniOneSymbol = normalizeSymbol(miniChartOneSelection.symbol || 'BTCUSD')
+  const miniTwoSymbol = normalizeSymbol(miniChartTwoSelection.symbol || 'BTCUSD')
   const miniOneTimeframe = normalizeTimeframe(miniChartOneSelection.timeframe || '5m')
   const miniTwoTimeframe = normalizeTimeframe(miniChartTwoSelection.timeframe || '15m')
 
@@ -527,17 +529,6 @@ export default function Dashboard() {
   useEffect(() => {
     setFactorTechnicalSentiment(null)
   }, [selectedSymbol, overallTimeframeLabel])
-
-  useEffect(() => {
-    setMiniChartOneSelection((current) => ({
-      ...current,
-      symbol: selectedSymbol,
-    }))
-    setMiniChartTwoSelection((current) => ({
-      ...current,
-      symbol: selectedSymbol,
-    }))
-  }, [selectedSymbol])
 
   useEffect(() => {
     if (!isClient || !apiBaseUrl) return
@@ -842,16 +833,14 @@ export default function Dashboard() {
               compact
               chartTitle="Mini Chart 1"
               enableAdvancedOverlays={false}
-              defaultSymbol={selectedSymbol}
+              defaultSymbol={miniOneSymbol}
               defaultTimeframe={miniOneTimeframe}
               defaultCandleMode={miniChartOneSelection.candleMode}
               allowCompactHistory
-              lockSymbolToDefault
-              followDefaultSymbol
               onChartSelectionChange={(selection) => {
                 setMiniChartOneSelection({
-                  symbol: normalizeSymbol(selection.symbol || selectedSymbol),
-                  timeframe: normalizeTimeframe(selection.timeframe),
+                  symbol: normalizeSymbol(selection.symbol || miniOneSymbol),
+                  timeframe: normalizeTimeframe(selection.timeframe || miniOneTimeframe),
                   candleMode: selection.candleMode,
                 })
               }}
@@ -865,16 +854,14 @@ export default function Dashboard() {
               compact
               chartTitle="Mini Chart 2"
               enableAdvancedOverlays={false}
-              defaultSymbol={selectedSymbol}
+              defaultSymbol={miniTwoSymbol}
               defaultTimeframe={miniTwoTimeframe}
               defaultCandleMode={miniChartTwoSelection.candleMode}
               allowCompactHistory
-              lockSymbolToDefault
-              followDefaultSymbol
               onChartSelectionChange={(selection) => {
                 setMiniChartTwoSelection({
-                  symbol: normalizeSymbol(selection.symbol || selectedSymbol),
-                  timeframe: normalizeTimeframe(selection.timeframe),
+                  symbol: normalizeSymbol(selection.symbol || miniTwoSymbol),
+                  timeframe: normalizeTimeframe(selection.timeframe || miniTwoTimeframe),
                   candleMode: selection.candleMode,
                 })
               }}
