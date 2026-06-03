@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useState } from 'react'
 
-const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  'https://trading-intelligence-dashboard.onrender.com'
 
 export type ConnectionStatus = 'Connected' | 'Waiting' | 'Error'
 
@@ -153,8 +155,48 @@ function toOptionalNumber(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function unwrapObjectPayload(raw: unknown, keys: string[]): unknown {
+  if (!isObject(raw)) return raw
+
+  for (const key of keys) {
+    const value = raw[key]
+
+    if (isObject(value)) {
+      return value
+    }
+  }
+
+  return raw
+}
+
+function unwrapArrayPayload(raw: unknown, keys: string[]): unknown[] {
+  if (Array.isArray(raw)) return raw
+
+  if (!isObject(raw)) return []
+
+  for (const key of keys) {
+    const value = raw[key]
+
+    if (Array.isArray(value)) {
+      return value
+    }
+  }
+
+  return []
+}
+
 function normalizeSignal(rawInput: Partial<TradingSignal> | any): TradingSignal {
-  const raw = rawInput ?? {}
+  const raw = unwrapObjectPayload(rawInput, [
+    'signal',
+    'latestSignal',
+    'latest',
+    'data',
+    'result',
+  ]) as Partial<TradingSignal> | any
 
   const bullScore = toNumber(raw.bullScore, fallbackSignal.bullScore)
   const bearScore = toNumber(raw.bearScore, fallbackSignal.bearScore)
@@ -221,8 +263,15 @@ function normalizeSignal(rawInput: Partial<TradingSignal> | any): TradingSignal 
   }
 }
 
-function normalizeRecentSignals(raw: unknown): RecentSignal[] {
-  if (!Array.isArray(raw)) return []
+function normalizeRecentSignals(rawInput: unknown): RecentSignal[] {
+  const raw = unwrapArrayPayload(rawInput, [
+    'signals',
+    'recentSignals',
+    'rows',
+    'items',
+    'data',
+    'result',
+  ])
 
   return raw.map((item: any, index: number) => {
     const signal = item.signal ?? item.type ?? 'NEUTRAL'
@@ -272,8 +321,16 @@ function normalizeRecentSignals(raw: unknown): RecentSignal[] {
   })
 }
 
-function normalizeRecentCandles(raw: unknown): CandleData[] {
-  if (!Array.isArray(raw)) return []
+function normalizeRecentCandles(rawInput: unknown): CandleData[] {
+  const raw = unwrapArrayPayload(rawInput, [
+    'candles',
+    'recentCandles',
+    'bars',
+    'rows',
+    'items',
+    'data',
+    'result',
+  ])
 
   return raw
     .map((item: any): CandleData | null => {
@@ -349,8 +406,6 @@ export function useApiPolling() {
       const nextRecentSignals = normalizeRecentSignals(recentJson)
       const nextRecentCandles = normalizeRecentCandles(candlesJson)
 
-      // Sticky history:
-      // Do not erase valid rows if Render briefly returns [] while waking/restarting.
       setRecentSignals((prev) =>
         nextRecentSignals.length > 0 ? nextRecentSignals : prev
       )
