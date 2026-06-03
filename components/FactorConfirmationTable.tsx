@@ -7,6 +7,12 @@ import { CheckCircle2, XCircle } from 'lucide-react'
 type TradingSignal = {
   symbol?: string
   timeframe?: string
+  primaryTimeframe?: string
+  activeSymbol?: string
+  activeTimeframe?: string
+  price?: number
+  current?: number
+  entry?: number
   smc?: string
   alphax?: string
   ghost?: string
@@ -76,6 +82,9 @@ type FactorConfirmationTableProps = {
   signal?: TradingSignal
   technicalSentiment?: TechnicalSentiment | null
   onTechnicalSentimentUpdate?: (sentiment: TechnicalSentiment | null) => void
+  activeSymbol?: string
+  activeTimeframe?: string
+  activePrice?: number
 }
 
 type FactorStatus = 'bullish' | 'bearish' | 'active' | 'inactive'
@@ -89,6 +98,74 @@ type FactorRow = {
 function clamp(value: number) {
   if (!Number.isFinite(value)) return 0
   return Math.max(0, Math.min(100, Math.round(value)))
+}
+
+function normalizeSymbol(value: unknown) {
+  const raw = String(value ?? 'BTCUSD')
+    .trim()
+    .toUpperCase()
+    .replace('BINANCE:', '')
+    .replace('COINBASE:', '')
+    .replace('CRYPTO:', '')
+    .replace('CME_MINI:', '')
+    .replace('CME:', '')
+
+  if (raw === 'MES1' || raw === 'MES1!' || raw.includes('MES')) return 'MES1!'
+  if (raw.includes('BTC')) return 'BTCUSD'
+  if (raw.includes('ETH')) return 'ETHUSD'
+  if (raw.includes('SPY')) return 'SPY'
+
+  return raw || 'BTCUSD'
+}
+
+function normalizeTimeframe(value: unknown) {
+  const raw = String(value ?? '1m').trim().toLowerCase()
+  const tf = raw.includes('/') ? raw.split('/')[0]?.trim() ?? raw : raw
+
+  if (tf === '1') return '1m'
+  if (tf === '3') return '3m'
+  if (tf === '5') return '5m'
+  if (tf === '10') return '10m'
+  if (tf === '15') return '15m'
+  if (tf === '30') return '30m'
+  if (tf === '60') return '1h'
+  if (tf === '120') return '2h'
+  if (tf === '240') return '4h'
+  if (tf === 'd' || tf === '1d') return '1d'
+  if (tf === 'w' || tf === '1w') return '1w'
+
+  return tf || '1m'
+}
+
+function timeframeMatches(value: unknown, activeTimeframe: string) {
+  const text = String(value ?? '').trim()
+
+  if (text.includes('/')) {
+    return text
+      .split('/')
+      .map((item) => normalizeTimeframe(item.trim()))
+      .includes(normalizeTimeframe(activeTimeframe))
+  }
+
+  return normalizeTimeframe(text) === normalizeTimeframe(activeTimeframe)
+}
+
+function isPriceNearActiveScale(signal: TradingSignal | undefined, activePrice?: number) {
+  const price = Number(signal?.current ?? signal?.price ?? signal?.entry ?? 0)
+  if (!Number.isFinite(price) || price <= 0) return true
+  if (!activePrice || !Number.isFinite(activePrice) || activePrice <= 0) return true
+
+  return Math.abs(price - activePrice) / activePrice <= 0.2
+}
+
+function isSignalLinkedToActiveChart(signal: TradingSignal | undefined, activeSymbol: string, activeTimeframe: string, activePrice?: number) {
+  if (!signal) return false
+
+  return (
+    normalizeSymbol(signal.activeSymbol ?? signal.symbol) === normalizeSymbol(activeSymbol) &&
+    timeframeMatches(signal.activeTimeframe ?? signal.primaryTimeframe ?? signal.timeframe, activeTimeframe) &&
+    isPriceNearActiveScale(signal, activePrice)
+  )
 }
 
 function factorStrength(value: unknown, fallback: number) {
@@ -171,16 +248,21 @@ function getStatusTextColor(status: FactorStatus) {
   return 'text-gray-500'
 }
 
-function buildCoreRows(signal?: TradingSignal): FactorRow[] {
+function buildCoreRows(signal?: TradingSignal, isLinked = true): FactorRow[] {
   const confidence = clamp(Number(signal?.confidence ?? 0))
   const bullScore = clamp(Number(signal?.bullScore ?? 50))
   const bearScore = clamp(Number(signal?.bearScore ?? 50))
-  const toggles = signal?.chartOverlayToggles ?? {}
+  const toggles = signal?.chartOverlayToggles ?? {
+    smc: true,
+    ghost: true,
+    liquidityProfile: true,
+    orderBlocks: true,
+  }
 
-  const smcEnabled = Boolean(toggles.smc)
-  const ghostEnabled = Boolean(toggles.ghost)
-  const profileEnabled = Boolean(toggles.liquidityProfile)
-  const orderBlocksEnabled = Boolean(toggles.orderBlocks)
+  const smcEnabled = isLinked && Boolean(toggles.smc)
+  const ghostEnabled = isLinked && Boolean(toggles.ghost)
+  const profileEnabled = isLinked && Boolean(toggles.liquidityProfile)
+  const orderBlocksEnabled = isLinked && Boolean(toggles.orderBlocks)
 
   const smcStatus = smcEnabled
     ? statusFromText(signal?.smc ?? signal?.smcDirection)
@@ -292,11 +374,19 @@ function FactorRowItem({ row }: { row: FactorRow }) {
 export default function FactorConfirmationTable({
   signal,
   onTechnicalSentimentUpdate,
+  activeSymbol,
+  activeTimeframe,
+  activePrice,
 }: FactorConfirmationTableProps) {
-  const bullScore = clamp(Number(signal?.bullScore ?? 50))
-  const bearScore = clamp(Number(signal?.bearScore ?? 50))
+  const symbol = normalizeSymbol(activeSymbol ?? signal?.activeSymbol ?? signal?.symbol)
+  const timeframe = normalizeTimeframe(activeTimeframe ?? signal?.activeTimeframe ?? signal?.primaryTimeframe ?? signal?.timeframe)
+  const linkedToActiveChart = isSignalLinkedToActiveChart(signal, symbol, timeframe, activePrice)
+  const linkedSignal = linkedToActiveChart ? signal : undefined
 
-  const coreRows = useMemo(() => buildCoreRows(signal), [signal])
+  const bullScore = clamp(Number(linkedSignal?.bullScore ?? signal?.bullScore ?? 50))
+  const bearScore = clamp(Number(linkedSignal?.bearScore ?? signal?.bearScore ?? 50))
+
+  const coreRows = useMemo(() => buildCoreRows(linkedSignal, linkedToActiveChart), [linkedSignal, linkedToActiveChart])
   const externalRows = useMemo(() => buildExternalRows(signal), [signal])
 
   const activeCoreCount = coreRows.filter((row) => row.status !== 'inactive').length
@@ -320,7 +410,7 @@ export default function FactorConfirmationTable({
         <div>
           <h2 className="text-xl font-bold text-white">Factor Confirmation</h2>
           <p className="mt-1 text-xs text-gray-500">
-            Core Python factors + external datasets
+            Chart-linked core factors • {symbol} • {timeframe}
           </p>
         </div>
 
@@ -376,7 +466,7 @@ export default function FactorConfirmationTable({
       </div>
 
       <div className="mt-4 border-t border-dark-700 pt-3 text-xs text-gray-500">
-        Bull/Bear balance: {bullScore}% / {bearScore}% • SMC + AlphaX + Ghost + Options linked from Python engine
+        Bull/Bear balance: {bullScore}% / {bearScore}% • Core factors are shown only when linked to the active chart
       </div>
     </motion.div>
   )
