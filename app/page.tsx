@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import SignalCard from '@/components/SignalCard'
-import EChartsCandlestickChart from '@/components/EChartsCandlestickChart'
+import LightweightCandlestickChart, { ChartMode, DashboardCandle } from '@/components/LightweightCandlestickChart'
 import PressureGauges from '@/components/PressureGauges'
 import FactorConfirmationTable from '@/components/FactorConfirmationTable'
 import GhostCandleProjection from '@/components/GhostCandleProjection'
@@ -425,6 +425,282 @@ function getOverallGhostText(engineStates: Record<string, PythonEngineState | nu
   return ''
 }
 
+
+type CandleModeLabel = 'Regular' | 'Heikin Ashi'
+
+const chartSymbols = ['BTCUSD', 'ETHUSD', 'SPY', 'MES1!']
+const chartTimeframes = ['1m', '3m', '5m', '10m', '15m', '30m', '1h', '2h', '4h', '1d']
+
+function candleModeToLightweightMode(mode: CandleModeLabel): ChartMode {
+  return mode === 'Heikin Ashi' ? 'heikinAshi' : 'regular'
+}
+
+function normalizeCandleTime(value: unknown): DashboardCandle['time'] {
+  if (typeof value === 'number') {
+    // Lightweight Charts expects Unix seconds, not milliseconds.
+    return value > 10_000_000_000 ? Math.floor(value / 1000) : value
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+
+    if (/^\d+$/.test(trimmed)) {
+      const parsed = Number(trimmed)
+      return parsed > 10_000_000_000 ? Math.floor(parsed / 1000) : parsed
+    }
+
+    const parsedDate = Date.parse(trimmed)
+    if (Number.isFinite(parsedDate)) {
+      return Math.floor(parsedDate / 1000)
+    }
+
+    return trimmed
+  }
+
+  return Math.floor(Date.now() / 1000)
+}
+
+function normalizeCandlePayloadItem(item: any): DashboardCandle | null {
+  if (!item || typeof item !== 'object') return null
+
+  const open = toFiniteNumber(item.open ?? item.o, NaN)
+  const high = toFiniteNumber(item.high ?? item.h, NaN)
+  const low = toFiniteNumber(item.low ?? item.l, NaN)
+  const close = toFiniteNumber(item.close ?? item.c, NaN)
+
+  if (
+    !Number.isFinite(open) ||
+    !Number.isFinite(high) ||
+    !Number.isFinite(low) ||
+    !Number.isFinite(close)
+  ) {
+    return null
+  }
+
+  return {
+    time: normalizeCandleTime(
+      item.time ??
+        item.timestamp ??
+        item.t ??
+        item.datetime ??
+        item.date
+    ),
+    open,
+    high,
+    low,
+    close,
+    volume: toFiniteNumber(item.volume ?? item.v, 0),
+  }
+}
+
+function normalizeCandlePayload(payload: any): DashboardCandle[] {
+  return extractCandleArray(payload)
+    .map(normalizeCandlePayloadItem)
+    .filter((item): item is DashboardCandle => Boolean(item))
+    .sort((a, b) => {
+      const left = typeof a.time === 'number' ? a.time : Date.parse(String(a.time))
+      const right = typeof b.time === 'number' ? b.time : Date.parse(String(b.time))
+      return left - right
+    })
+}
+
+function useChartCandles(
+  apiBaseUrl: string | undefined,
+  isClient: boolean,
+  symbol: string,
+  timeframe: string,
+  limit = 500,
+  pollMs = 5000
+) {
+  const [candles, setCandles] = useState<DashboardCandle[]>([])
+  const [isLoading, setIsLoading] = useState(false)
+  const [errorText, setErrorText] = useState('')
+
+  useEffect(() => {
+    if (!isClient || !apiBaseUrl) return
+
+    let cancelled = false
+    let intervalId: ReturnType<typeof setInterval> | null = null
+
+    async function fetchCandles() {
+      try {
+        setIsLoading(true)
+        setErrorText('')
+
+        const params = new URLSearchParams({
+          symbol,
+          timeframe,
+          limit: String(limit),
+        })
+
+        const response = await fetch(`${apiBaseUrl}/api/candles?${params.toString()}`, {
+          cache: 'no-store',
+        })
+
+        if (!response.ok) {
+          throw new Error(`Candle API error ${response.status}`)
+        }
+
+        const json = await response.json()
+        const nextCandles = normalizeCandlePayload(json)
+
+        if (!cancelled) {
+          setCandles(nextCandles)
+        }
+      } catch (error) {
+        console.error('Lightweight chart candle sync error:', error)
+
+        if (!cancelled) {
+          setErrorText(error instanceof Error ? error.message : 'Candle API error')
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false)
+        }
+      }
+    }
+
+    setCandles([])
+    fetchCandles()
+    intervalId = setInterval(fetchCandles, pollMs)
+
+    return () => {
+      cancelled = true
+      if (intervalId) clearInterval(intervalId)
+    }
+  }, [apiBaseUrl, isClient, symbol, timeframe, limit, pollMs])
+
+  return {
+    candles,
+    isLoading,
+    errorText,
+  }
+}
+
+type LightweightChartPanelProps = {
+  title: string
+  symbol: string
+  timeframe: string
+  candleMode: CandleModeLabel
+  height: number
+  compact?: boolean
+  apiBaseUrl?: string
+  isClient: boolean
+  onChange: (selection: ChartSelection) => void
+}
+
+function LightweightChartPanel({
+  title,
+  symbol,
+  timeframe,
+  candleMode,
+  height,
+  compact = false,
+  apiBaseUrl,
+  isClient,
+  onChange,
+}: LightweightChartPanelProps) {
+  const normalizedSymbol = normalizeSymbol(symbol)
+  const normalizedTimeframe = normalizeTimeframe(timeframe)
+  const { candles, isLoading, errorText } = useChartCandles(
+    apiBaseUrl,
+    isClient,
+    normalizedSymbol,
+    normalizedTimeframe,
+    compact ? 300 : 700,
+    compact ? 10000 : 5000
+  )
+
+  return (
+    <div className="rounded-xl border border-dark-700 bg-dark-800/80 p-4 shadow-xl">
+      <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-300">
+            {title}
+          </h2>
+          <p className="text-xs text-gray-500">
+            Lightweight Charts • Raw OHLC truth • HA visual toggle
+          </p>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <select
+            value={normalizedSymbol}
+            onChange={(event) =>
+              onChange({
+                symbol: normalizeSymbol(event.target.value),
+                timeframe: normalizedTimeframe,
+                candleMode,
+              })
+            }
+            className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 text-xs font-semibold text-gray-200 outline-none focus:border-amber-400"
+          >
+            {chartSymbols.map((item) => (
+              <option key={item} value={item}>
+                {item}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={normalizedTimeframe}
+            onChange={(event) =>
+              onChange({
+                symbol: normalizedSymbol,
+                timeframe: normalizeTimeframe(event.target.value),
+                candleMode,
+              })
+            }
+            className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 text-xs font-semibold text-gray-200 outline-none focus:border-amber-400"
+          >
+            {chartTimeframes.map((item) => (
+              <option key={item} value={item}>
+                {item}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={candleMode}
+            onChange={(event) =>
+              onChange({
+                symbol: normalizedSymbol,
+                timeframe: normalizedTimeframe,
+                candleMode: event.target.value as CandleModeLabel,
+              })
+            }
+            className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 text-xs font-semibold text-gray-200 outline-none focus:border-amber-400"
+          >
+            <option value="Regular">Regular</option>
+            <option value="Heikin Ashi">Heikin Ashi</option>
+          </select>
+        </div>
+      </div>
+
+      {errorText && (
+        <div className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+          {errorText}
+        </div>
+      )}
+
+      {isLoading && candles.length === 0 && (
+        <div className="mb-3 rounded-lg border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-xs text-amber-300">
+          Loading candles...
+        </div>
+      )}
+
+      <LightweightCandlestickChart
+        candles={candles}
+        mode={candleModeToLightweightMode(candleMode)}
+        height={height}
+        symbol={normalizedSymbol}
+        timeframe={normalizedTimeframe}
+      />
+    </div>
+  )
+}
+
+
 export default function Dashboard() {
   const [isClient, setIsClient] = useState(false)
   const [pythonEngineState, setPythonEngineState] =
@@ -460,7 +736,6 @@ export default function Dashboard() {
   const {
     latestSignal,
     recentSignals,
-    recentCandles,
     connectionStatus,
     lastUpdateTime,
     apiBaseUrl,
@@ -806,68 +1081,59 @@ export default function Dashboard() {
         <div className="space-y-6 lg:col-span-2">
           <SignalCard signal={augmentedLatestSignal} />
 
-          <EChartsCandlestickChart
-            heightClass="h-[760px]"
-            enableAdvancedOverlays
-            defaultSymbol={selectedSymbol}
-            defaultTimeframe={selectedTimeframe}
-            defaultCandleMode={mainChartSelection.candleMode}
-            onChartSelectionChange={(selection) => {
-              if (!selection.compact) {
-                setMainChartSelection({
-                  symbol: normalizeSymbol(selection.symbol),
-                  timeframe: normalizeTimeframe(selection.timeframe),
-                  candleMode: selection.candleMode,
-                })
-              }
+          <LightweightChartPanel
+            title="Main Chart"
+            symbol={selectedSymbol}
+            timeframe={selectedTimeframe}
+            candleMode={mainChartSelection.candleMode}
+            height={760}
+            apiBaseUrl={apiBaseUrl}
+            isClient={isClient}
+            onChange={(selection) => {
+              setMainChartSelection({
+                symbol: normalizeSymbol(selection.symbol),
+                timeframe: normalizeTimeframe(selection.timeframe),
+                candleMode: selection.candleMode,
+              })
             }}
-            latestSignal={augmentedLatestSignal}
-            recentSignals={recentSignals}
-            recentCandles={recentCandles}
           />
 
           {/* Two Smaller Charts */}
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-            <EChartsCandlestickChart
-              heightClass="h-[390px]"
+            <LightweightChartPanel
+              title="Mini Chart 1"
+              symbol={miniOneSymbol}
+              timeframe={miniOneTimeframe}
+              candleMode={miniChartOneSelection.candleMode}
+              height={390}
               compact
-              chartTitle="Mini Chart 1"
-              enableAdvancedOverlays={false}
-              defaultSymbol={miniOneSymbol}
-              defaultTimeframe={miniOneTimeframe}
-              defaultCandleMode={miniChartOneSelection.candleMode}
-              allowCompactHistory
-              onChartSelectionChange={(selection) => {
+              apiBaseUrl={apiBaseUrl}
+              isClient={isClient}
+              onChange={(selection) => {
                 setMiniChartOneSelection({
                   symbol: normalizeSymbol(selection.symbol || miniOneSymbol),
                   timeframe: normalizeTimeframe(selection.timeframe || miniOneTimeframe),
                   candleMode: selection.candleMode,
                 })
               }}
-              latestSignal={augmentedLatestSignal}
-              recentSignals={recentSignals}
-              recentCandles={recentCandles}
             />
 
-            <EChartsCandlestickChart
-              heightClass="h-[390px]"
+            <LightweightChartPanel
+              title="Mini Chart 2"
+              symbol={miniTwoSymbol}
+              timeframe={miniTwoTimeframe}
+              candleMode={miniChartTwoSelection.candleMode}
+              height={390}
               compact
-              chartTitle="Mini Chart 2"
-              enableAdvancedOverlays={false}
-              defaultSymbol={miniTwoSymbol}
-              defaultTimeframe={miniTwoTimeframe}
-              defaultCandleMode={miniChartTwoSelection.candleMode}
-              allowCompactHistory
-              onChartSelectionChange={(selection) => {
+              apiBaseUrl={apiBaseUrl}
+              isClient={isClient}
+              onChange={(selection) => {
                 setMiniChartTwoSelection({
                   symbol: normalizeSymbol(selection.symbol || miniTwoSymbol),
                   timeframe: normalizeTimeframe(selection.timeframe || miniTwoTimeframe),
                   candleMode: selection.candleMode,
                 })
               }}
-              latestSignal={augmentedLatestSignal}
-              recentSignals={recentSignals}
-              recentCandles={recentCandles}
             />
           </div>
         </div>
