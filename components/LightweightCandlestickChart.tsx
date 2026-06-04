@@ -10,22 +10,21 @@ import {
   Time,
   createChart,
 } from "lightweight-charts";
+import { calculateHeikinAshi, RawCandle } from "@/lib/heikinAshi";
 
 /**
  * LightweightCandlestickChart.tsx
  *
  * Purpose:
- * - New fast candle chart component using TradingView Lightweight Charts.
+ * - Fast main candle chart using TradingView Lightweight Charts.
  * - Keeps real OHLC candles as master truth.
- * - Calculates Heikin Ashi locally only for visual display.
+ * - Uses lib/heikinAshi.ts for Heikin Ashi visual calculation.
  * - Supports a regular / Heikin Ashi display toggle through the `mode` prop.
  *
- * Install dependency:
- * npm install lightweight-charts
- *
- * Next planned files:
- * - lib/heikinAshi.ts
- * - app/page.tsx import replacement
+ * Rule:
+ * Raw OHLC = truth
+ * Heikin Ashi = visual trend filter
+ * Ghost Candles = projected visual path
  */
 
 export type DashboardCandle = {
@@ -49,72 +48,47 @@ type LightweightCandlestickChartProps = {
   autoFit?: boolean;
 };
 
-function toChartCandles(candles: DashboardCandle[]): CandlestickData<Time>[] {
-  return candles
-    .filter((c) => {
-      return (
-        c &&
-        c.time !== undefined &&
-        Number.isFinite(c.open) &&
-        Number.isFinite(c.high) &&
-        Number.isFinite(c.low) &&
-        Number.isFinite(c.close)
-      );
-    })
-    .map((c) => ({
-      time: c.time,
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-    }));
+function isValidCandle(candle: DashboardCandle | null | undefined): candle is DashboardCandle {
+  return Boolean(
+    candle &&
+      candle.time !== undefined &&
+      Number.isFinite(candle.open) &&
+      Number.isFinite(candle.high) &&
+      Number.isFinite(candle.low) &&
+      Number.isFinite(candle.close)
+  );
 }
 
-function calculateHeikinAshi(
-  candles: DashboardCandle[]
-): CandlestickData<Time>[] {
-  if (!candles.length) return [];
+function toRawCandles(candles: DashboardCandle[]): RawCandle[] {
+  return candles.filter(isValidCandle).map((candle) => ({
+    time: candle.time as RawCandle["time"],
+    open: candle.open,
+    high: candle.high,
+    low: candle.low,
+    close: candle.close,
+    volume: candle.volume,
+  }));
+}
 
-  const haCandles: CandlestickData<Time>[] = [];
-
-  for (let i = 0; i < candles.length; i++) {
-    const c = candles[i];
-
-    if (
-      !c ||
-      c.time === undefined ||
-      !Number.isFinite(c.open) ||
-      !Number.isFinite(c.high) ||
-      !Number.isFinite(c.low) ||
-      !Number.isFinite(c.close)
-    ) {
-      continue;
-    }
-
-    const haClose = (c.open + c.high + c.low + c.close) / 4;
-
-    let haOpen: number;
-
-    if (haCandles.length === 0) {
-      haOpen = (c.open + c.close) / 2;
-    } else {
-      const prev = haCandles[haCandles.length - 1];
-      haOpen = (prev.open + prev.close) / 2;
-    }
-
-    const haHigh = Math.max(c.high, haOpen, haClose);
-    const haLow = Math.min(c.low, haOpen, haClose);
-
-    haCandles.push({
-      time: c.time,
-      open: haOpen,
-      high: haHigh,
-      low: haLow,
-      close: haClose,
-    });
-  }
-
-  return haCandles;
+function toChartCandles(candles: DashboardCandle[] | RawCandle[]): CandlestickData<Time>[] {
+  return candles
+    .filter((candle) => {
+      return (
+        candle &&
+        candle.time !== undefined &&
+        Number.isFinite(candle.open) &&
+        Number.isFinite(candle.high) &&
+        Number.isFinite(candle.low) &&
+        Number.isFinite(candle.close)
+      );
+    })
+    .map((candle) => ({
+      time: candle.time as Time,
+      open: candle.open,
+      high: candle.high,
+      low: candle.low,
+      close: candle.close,
+    }));
 }
 
 export default function LightweightCandlestickChart({
@@ -135,11 +109,12 @@ export default function LightweightCandlestickChart({
   /**
    * Cache both versions so the chart toggle is instant.
    * Raw candles remain the truth.
-   * Heikin Ashi candles are visual-only.
+   * Heikin Ashi candles are visual-only and come from lib/heikinAshi.ts.
    */
   const chartData = useMemo(() => {
-    const regular = toChartCandles(candles);
-    const heikinAshi = calculateHeikinAshi(candles);
+    const rawCandles = toRawCandles(candles);
+    const regular = toChartCandles(rawCandles);
+    const heikinAshi = toChartCandles(calculateHeikinAshi(rawCandles));
 
     return {
       regular,
