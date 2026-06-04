@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   CandlestickData,
   ColorType,
@@ -17,7 +17,12 @@ import {
   GhostCandle,
   normalizeGhostCandles,
 } from "@/components/GhostCandleOverlay";
-import { ChartOverlayLine } from "@/lib/chartOverlayPrep";
+import {
+  ChartOverlayLine,
+  ChartOverlayPayload,
+  OverlayCandle,
+} from "@/lib/chartOverlayPrep";
+import LightweightChartOverlayCanvas from "@/components/LightweightChartOverlayCanvas";
 
 /**
  * LightweightCandlestickChart.tsx
@@ -26,9 +31,10 @@ import { ChartOverlayLine } from "@/lib/chartOverlayPrep";
  * - Fast main candle chart using TradingView Lightweight Charts.
  * - Keeps real OHLC candles as master truth.
  * - Uses lib/heikinAshi.ts for Heikin Ashi visual calculation.
- * - Supports a regular / Heikin Ashi display toggle through the `mode` prop.
+ * - Supports regular / Heikin Ashi display toggle through the `mode` prop.
  * - Supports optional Ghost Candles as a second projected candle series.
- * - Supports optional SMC + AlphaX overlay price lines.
+ * - Supports optional SMC + AlphaX dashed price lines.
+ * - Mounts custom canvas overlay for zones, candle labels, and liquidity profile bars.
  *
  * Rule:
  * Raw OHLC = truth
@@ -53,6 +59,7 @@ type LightweightCandlestickChartProps = {
   candles: DashboardCandle[];
   ghostCandles?: GhostCandle[];
   overlayLines?: ChartOverlayLine[];
+  overlayPayload?: ChartOverlayPayload | null;
   mode?: ChartMode;
   height?: number;
   className?: string;
@@ -60,6 +67,10 @@ type LightweightCandlestickChartProps = {
   timeframe?: string;
   autoFit?: boolean;
   showOverlayLines?: boolean;
+  showCanvasOverlay?: boolean;
+  showOverlayZones?: boolean;
+  showOverlayLabels?: boolean;
+  showLiquidityProfile?: boolean;
 };
 
 function isValidCandle(candle: DashboardCandle | null | undefined): candle is DashboardCandle {
@@ -71,6 +82,25 @@ function isValidCandle(candle: DashboardCandle | null | undefined): candle is Da
       Number.isFinite(candle.low) &&
       Number.isFinite(candle.close)
   );
+}
+
+function timeToOverlayTime(time: Time): OverlayCandle["time"] {
+  if (typeof time === "number" || typeof time === "string") {
+    return time;
+  }
+
+  return `${time.year}-${String(time.month).padStart(2, "0")}-${String(time.day).padStart(2, "0")}`;
+}
+
+function toOverlayCandles(candles: DashboardCandle[]): OverlayCandle[] {
+  return candles.filter(isValidCandle).map((candle) => ({
+    time: timeToOverlayTime(candle.time),
+    open: candle.open,
+    high: candle.high,
+    low: candle.low,
+    close: candle.close,
+    volume: candle.volume,
+  }));
 }
 
 function toRawCandles(candles: DashboardCandle[]): RawCandle[] {
@@ -142,13 +172,14 @@ function getVisibleOverlayLines(lines: ChartOverlayLine[] | undefined): ChartOve
         line.label.length > 0
       );
     })
-    .slice(-18);
+    .slice(-8);
 }
 
 export default function LightweightCandlestickChart({
   candles,
   ghostCandles = [],
   overlayLines = [],
+  overlayPayload = null,
   mode = "regular",
   height = 520,
   className = "",
@@ -156,6 +187,10 @@ export default function LightweightCandlestickChart({
   timeframe = "",
   autoFit = true,
   showOverlayLines = true,
+  showCanvasOverlay = true,
+  showOverlayZones = true,
+  showOverlayLabels = true,
+  showLiquidityProfile = true,
 }: LightweightCandlestickChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -164,6 +199,7 @@ export default function LightweightCandlestickChart({
   const overlayPriceLinesRef = useRef<IPriceLine[]>([]);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const hasFitContentRef = useRef(false);
+  const [overlaySize, setOverlaySize] = useState({ width: 0, height });
 
   /**
    * Cache both versions so the chart toggle is instant.
@@ -181,6 +217,7 @@ export default function LightweightCandlestickChart({
     };
   }, [candles]);
 
+  const overlayCandles = useMemo(() => toOverlayCandles(candles), [candles]);
   const displayData = mode === "heikinAshi" ? chartData.heikinAshi : chartData.regular;
 
   /**
@@ -285,6 +322,11 @@ export default function LightweightCandlestickChart({
     candleSeriesRef.current = candleSeries;
     ghostCandleSeriesRef.current = ghostCandleSeries;
 
+    setOverlaySize({
+      width: container.clientWidth,
+      height,
+    });
+
     resizeObserverRef.current = new ResizeObserver((entries) => {
       const entry = entries[0];
       if (!entry || !chartRef.current) return;
@@ -293,6 +335,11 @@ export default function LightweightCandlestickChart({
 
       if (width > 0) {
         chartRef.current.applyOptions({
+          width,
+          height,
+        });
+
+        setOverlaySize({
           width,
           height,
         });
@@ -364,6 +411,11 @@ export default function LightweightCandlestickChart({
     chartRef.current.applyOptions({
       height,
     });
+
+    setOverlaySize((previous) => ({
+      ...previous,
+      height,
+    }));
   }, [height]);
 
   return (
@@ -390,6 +442,12 @@ export default function LightweightCandlestickChart({
               <span>{visibleOverlayLines.length} Levels</span>
             </>
           )}
+          {overlayPayload && showCanvasOverlay && (
+            <>
+              <span className="text-slate-500">•</span>
+              <span>Canvas Overlay</span>
+            </>
+          )}
         </div>
       )}
 
@@ -400,6 +458,21 @@ export default function LightweightCandlestickChart({
       )}
 
       <div ref={containerRef} className="h-full w-full" />
+
+      {showCanvasOverlay && overlayPayload && chartRef.current && candleSeriesRef.current && (
+        <LightweightChartOverlayCanvas
+          chart={chartRef.current}
+          mainSeries={candleSeriesRef.current}
+          overlayPayload={overlayPayload}
+          candles={overlayCandles}
+          width={overlaySize.width}
+          height={overlaySize.height}
+          showZones={showOverlayZones}
+          showLabels={showOverlayLabels}
+          showLiquidityProfile={showLiquidityProfile}
+          profileLookback={160}
+        />
+      )}
     </div>
   );
 }
