@@ -377,30 +377,31 @@ export function buildAlphaXLines(
     .reverse()
     .find((rejection) => rejection.type === "bearishRejection");
 
-  const rejectionLines: ChartOverlayLine[] = [
-    latestBullishRejection
-      ? {
-          id: `alphax-rejection-${latestBullishRejection.type}-${latestBullishRejection.index}`,
-          type: "rejection",
-          label: "Bull wick rejection",
-          price: latestBullishRejection.level,
-          time: latestBullishRejection.time,
-          direction: "bullish",
-          strength: latestBullishRejection.strength,
-        }
-      : null,
-    latestBearishRejection
-      ? {
-          id: `alphax-rejection-${latestBearishRejection.type}-${latestBearishRejection.index}`,
-          type: "rejection",
-          label: "Bear wick rejection",
-          price: latestBearishRejection.level,
-          time: latestBearishRejection.time,
-          direction: "bearish",
-          strength: latestBearishRejection.strength,
-        }
-      : null,
-  ].filter((line): line is ChartOverlayLine => Boolean(line));
+  const rejectionLines: ChartOverlayLine[] = [];
+
+  if (latestBullishRejection) {
+    rejectionLines.push({
+      id: `alphax-rejection-${latestBullishRejection.type}-${latestBullishRejection.index}`,
+      type: "rejection",
+      label: "Bull wick rejection",
+      price: latestBullishRejection.level,
+      time: latestBullishRejection.time,
+      direction: "bullish",
+      strength: latestBullishRejection.strength,
+    });
+  }
+
+  if (latestBearishRejection) {
+    rejectionLines.push({
+      id: `alphax-rejection-${latestBearishRejection.type}-${latestBearishRejection.index}`,
+      type: "rejection",
+      label: "Bear wick rejection",
+      price: latestBearishRejection.level,
+      time: latestBearishRejection.time,
+      direction: "bearish",
+      strength: latestBearishRejection.strength,
+    });
+  }
 
   return prioritizeLines(rejectionLines).slice(0, maxLines);
 }
