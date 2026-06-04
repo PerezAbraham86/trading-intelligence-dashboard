@@ -521,6 +521,28 @@ function normalizeCandlePayload(payload: any): DashboardCandle[] {
     })
 }
 
+function dashboardCandlesToOverlayCandles(candles: DashboardCandle[]) {
+  return candles.map((candle) => {
+    let overlayTime: number | string
+
+    if (typeof candle.time === 'number' || typeof candle.time === 'string') {
+      overlayTime = candle.time
+    } else {
+      overlayTime = `${candle.time.year}-${String(candle.time.month).padStart(2, '0')}-${String(candle.time.day).padStart(2, '0')}`
+    }
+
+    return {
+      time: overlayTime,
+      open: candle.open,
+      high: candle.high,
+      low: candle.low,
+      close: candle.close,
+      volume: candle.volume,
+    }
+  })
+}
+
+
 function timeToUnixSeconds(time: DashboardCandle['time'] | undefined): number | null {
   if (typeof time === 'number') return time
   if (typeof time === 'string') {
@@ -874,7 +896,7 @@ function LightweightChartPanel({
       {showOverlayStatus && (
         <div className="mt-4">
           <ChartOverlayStatusPanel
-            candles={candles}
+            candles={dashboardCandlesToOverlayCandles(candles)}
             title="SMC + AlphaX Overlay Prep"
             compact
           />
