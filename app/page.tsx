@@ -5,6 +5,7 @@ import SignalCard from '@/components/SignalCard'
 import LightweightCandlestickChart, { ChartMode, DashboardCandle } from '@/components/LightweightCandlestickChart'
 import { GhostCandle } from '@/components/GhostCandleOverlay'
 import ChartOverlayStatusPanel from '@/components/ChartOverlayStatusPanel'
+import { buildChartOverlayPayload } from '@/lib/chartOverlayPrep'
 import PressureGauges from '@/components/PressureGauges'
 import FactorConfirmationTable from '@/components/FactorConfirmationTable'
 import GhostCandleProjection from '@/components/GhostCandleProjection'
@@ -768,6 +769,7 @@ type LightweightChartPanelProps = {
   ghostCandles?: GhostCandle[]
   engineState?: PythonEngineState | null
   showOverlayStatus?: boolean
+  showOverlayLines?: boolean
   height: number
   compact?: boolean
   apiBaseUrl?: string
@@ -783,6 +785,7 @@ function LightweightChartPanel({
   ghostCandles = [],
   engineState = null,
   showOverlayStatus = false,
+  showOverlayLines = false,
   height,
   compact = false,
   apiBaseUrl,
@@ -805,6 +808,20 @@ function LightweightChartPanel({
     if (compact) return []
     return buildGhostCandlesForChart(engineState, candles, normalizedTimeframe)
   }, [candles, compact, engineState, ghostCandles, normalizedTimeframe])
+
+  const overlayPayload = useMemo(() => {
+    if (!showOverlayLines || compact || candles.length < 20) return null
+
+    return buildChartOverlayPayload(dashboardCandlesToOverlayCandles(candles), {
+      smcSwingLength: 3,
+      smcUseCloseBreak: true,
+      alphaXLookback: 20,
+      alphaXRejectionWickPercent: 45,
+      maxLines: 18,
+      maxZones: 12,
+      maxMarkers: 30,
+    })
+  }, [candles, compact, showOverlayLines])
 
   return (
     <div className="rounded-xl border border-dark-700 bg-dark-800/80 p-4 shadow-xl">
@@ -887,6 +904,8 @@ function LightweightChartPanel({
       <LightweightCandlestickChart
         candles={candles}
         ghostCandles={chartGhostCandles}
+        overlayLines={overlayPayload?.lines ?? []}
+        showOverlayLines={showOverlayLines}
         mode={candleModeToLightweightMode(candleMode)}
         height={height}
         symbol={normalizedSymbol}
@@ -1297,6 +1316,7 @@ export default function Dashboard() {
             isClient={isClient}
             engineState={pythonEngineState}
             showOverlayStatus
+            showOverlayLines
             onChange={(selection) => {
               setMainChartSelection({
                 symbol: normalizeSymbol(selection.symbol),
