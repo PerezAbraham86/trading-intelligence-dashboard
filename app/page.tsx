@@ -438,7 +438,8 @@ function candleModeToLightweightMode(mode: CandleModeLabel): ChartMode {
 function normalizeCandleTime(value: unknown): DashboardCandle['time'] {
   if (typeof value === 'number') {
     // Lightweight Charts expects Unix seconds, not milliseconds.
-    return value > 10_000_000_000 ? Math.floor(value / 1000) : value
+    const unixSeconds = value > 10_000_000_000 ? Math.floor(value / 1000) : value
+    return unixSeconds as DashboardCandle['time']
   }
 
   if (typeof value === 'string') {
@@ -446,18 +447,19 @@ function normalizeCandleTime(value: unknown): DashboardCandle['time'] {
 
     if (/^\d+$/.test(trimmed)) {
       const parsed = Number(trimmed)
-      return parsed > 10_000_000_000 ? Math.floor(parsed / 1000) : parsed
+      const unixSeconds = parsed > 10_000_000_000 ? Math.floor(parsed / 1000) : parsed
+      return unixSeconds as DashboardCandle['time']
     }
 
     const parsedDate = Date.parse(trimmed)
     if (Number.isFinite(parsedDate)) {
-      return Math.floor(parsedDate / 1000)
+      return Math.floor(parsedDate / 1000) as DashboardCandle['time']
     }
 
-    return trimmed
+    return trimmed as DashboardCandle['time']
   }
 
-  return Math.floor(Date.now() / 1000)
+  return Math.floor(Date.now() / 1000) as DashboardCandle['time']
 }
 
 function normalizeCandlePayloadItem(item: any): DashboardCandle | null {
