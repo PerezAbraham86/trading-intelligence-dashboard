@@ -129,7 +129,7 @@ const DEFAULT_OPTIONS: Required<ChartOverlayPrepOptions> = {
   smcMinBreakPercent: 0,
   alphaXLookback: 20,
   alphaXRejectionWickPercent: 45,
-  maxLines: 10,
+  maxLines: 5,
   maxZones: 20,
   maxMarkers: 40,
 };
@@ -246,7 +246,7 @@ function isNearCurrentPrice(line: ChartOverlayLine, currentPrice: number | null,
   return Math.abs(line.price - currentPrice) / currentPrice <= maxDistancePercent / 100;
 }
 
-function dedupeLinesByPrice(lines: ChartOverlayLine[], tickSizePercent = 0.035): ChartOverlayLine[] {
+function dedupeLinesByPrice(lines: ChartOverlayLine[], tickSizePercent = 0.12): ChartOverlayLine[] {
   const result: ChartOverlayLine[] = [];
 
   for (const line of lines) {
@@ -286,8 +286,37 @@ function prioritizeLines(lines: ChartOverlayLine[]): ChartOverlayLine[] {
 export function buildSMCLines(smc: SMCAnalysisResult, maxLines = DEFAULT_OPTIONS.maxLines): ChartOverlayLine[] {
   const lines: ChartOverlayLine[] = [];
 
+  const latestStructure = smc.latestEvent;
   const latestSwingHigh = smc.latestSwingHigh;
   const latestSwingLow = smc.latestSwingLow;
+  const latestSweep = smc.liquiditySweeps[smc.liquiditySweeps.length - 1];
+
+  if (latestStructure) {
+    lines.push({
+      id: `structure-${latestStructure.type}-${latestStructure.index}`,
+      type:
+        latestStructure.type === "BOS"
+          ? "bos"
+          : latestStructure.type === "CHoCH"
+            ? "choch"
+            : "mss",
+      label: latestStructure.label,
+      price: latestStructure.brokenLevel,
+      time: latestStructure.time,
+      direction: normalizeDirection(latestStructure.direction),
+    });
+  }
+
+  if (latestSweep) {
+    lines.push({
+      id: `sweep-${latestSweep.direction}-${latestSweep.index}`,
+      type: "liquiditySweep",
+      label: latestSweep.direction === "buySide" ? "Buy-side sweep" : "Sell-side sweep",
+      price: latestSweep.sweptLevel,
+      time: latestSweep.time,
+      direction: latestSweep.direction === "buySide" ? "bearish" : "bullish",
+    });
+  }
 
   if (latestSwingHigh) {
     lines.push({
@@ -308,33 +337,6 @@ export function buildSMCLines(smc: SMCAnalysisResult, maxLines = DEFAULT_OPTIONS
       price: latestSwingLow.price,
       time: latestSwingLow.time,
       direction: "neutral",
-    });
-  }
-
-  for (const event of smc.structureEvents.slice(-6)) {
-    lines.push({
-      id: `structure-${event.type}-${event.index}`,
-      type:
-        event.type === "BOS"
-          ? "bos"
-          : event.type === "CHoCH"
-            ? "choch"
-            : "mss",
-      label: event.label,
-      price: event.brokenLevel,
-      time: event.time,
-      direction: normalizeDirection(event.direction),
-    });
-  }
-
-  for (const sweep of smc.liquiditySweeps.slice(-4)) {
-    lines.push({
-      id: `sweep-${sweep.direction}-${sweep.index}`,
-      type: "liquiditySweep",
-      label: sweep.label,
-      price: sweep.sweptLevel,
-      time: sweep.time,
-      direction: sweep.direction === "buySide" ? "bearish" : "bullish",
     });
   }
 
@@ -361,25 +363,46 @@ export function buildAlphaXLines(
   /**
    * Only rejection levels are real price levels.
    * Pressure states are scores, not prices, so they are intentionally excluded here.
+   *
+   * To keep the chart clean:
+   * - show latest bullish rejection
+   * - show latest bearish rejection
+   * - do not show every rejection
    */
-  const rejectionLines: ChartOverlayLine[] = alphaX.rejectionLevels.slice(-6).map(
-    (rejection, index): ChartOverlayLine => ({
-      id: `alphax-rejection-${rejection.type}-${rejection.index}-${index}`,
-      type: "rejection",
-      label: rejection.label,
-      price: rejection.level,
-      time: rejection.time,
-      direction:
-        rejection.type === "bullishRejection"
-          ? "bullish"
-          : rejection.type === "bearishRejection"
-            ? "bearish"
-            : "neutral",
-      strength: rejection.strength,
-    })
-  );
+  const latestBullishRejection = [...alphaX.rejectionLevels]
+    .reverse()
+    .find((rejection) => rejection.type === "bullishRejection");
 
-  return rejectionLines.slice(-maxLines);
+  const latestBearishRejection = [...alphaX.rejectionLevels]
+    .reverse()
+    .find((rejection) => rejection.type === "bearishRejection");
+
+  const rejectionLines: ChartOverlayLine[] = [
+    latestBullishRejection
+      ? {
+          id: `alphax-rejection-${latestBullishRejection.type}-${latestBullishRejection.index}`,
+          type: "rejection",
+          label: "Bull wick rejection",
+          price: latestBullishRejection.level,
+          time: latestBullishRejection.time,
+          direction: "bullish",
+          strength: latestBullishRejection.strength,
+        }
+      : null,
+    latestBearishRejection
+      ? {
+          id: `alphax-rejection-${latestBearishRejection.type}-${latestBearishRejection.index}`,
+          type: "rejection",
+          label: "Bear wick rejection",
+          price: latestBearishRejection.level,
+          time: latestBearishRejection.time,
+          direction: "bearish",
+          strength: latestBearishRejection.strength,
+        }
+      : null,
+  ].filter((line): line is ChartOverlayLine => Boolean(line));
+
+  return prioritizeLines(rejectionLines).slice(0, maxLines);
 }
 
 export function buildAlphaXZones(
@@ -456,7 +479,7 @@ export function buildOverlayMarkers(
     strength: rejection.strength,
   }));
 
-  return [...structureMarkers, ...sweepMarkers, ...rejectionMarkers].slice(-maxMarkers);
+  return [...structureMarkers, ...sweepMarkers, ...rejectionMarkers].slice(-Math.min(maxMarkers, 20));
 }
 
 export function buildOverlaySummary(
@@ -518,8 +541,8 @@ export function buildChartOverlayPayload(
   ];
 
   const lines = dedupeLinesByPrice(
-    prioritizeLines(rawLines.filter((line) => isNearCurrentPrice(line, currentPrice, 8)))
-  ).slice(0, settings.maxLines);
+    prioritizeLines(rawLines.filter((line) => isNearCurrentPrice(line, currentPrice, 6)))
+  ).slice(0, Math.min(settings.maxLines, 5));
 
   const zones = [
     ...buildSMCZones(smc, settings.maxZones),
