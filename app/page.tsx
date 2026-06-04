@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import SignalCard from '@/components/SignalCard'
 import LightweightCandlestickChart, { ChartMode, DashboardCandle } from '@/components/LightweightCandlestickChart'
 import { GhostCandle } from '@/components/GhostCandleOverlay'
+import ChartOverlayStatusPanel from '@/components/ChartOverlayStatusPanel'
 import PressureGauges from '@/components/PressureGauges'
 import FactorConfirmationTable from '@/components/FactorConfirmationTable'
 import GhostCandleProjection from '@/components/GhostCandleProjection'
@@ -744,6 +745,7 @@ type LightweightChartPanelProps = {
   candleMode: CandleModeLabel
   ghostCandles?: GhostCandle[]
   engineState?: PythonEngineState | null
+  showOverlayStatus?: boolean
   height: number
   compact?: boolean
   apiBaseUrl?: string
@@ -758,6 +760,7 @@ function LightweightChartPanel({
   candleMode,
   ghostCandles = [],
   engineState = null,
+  showOverlayStatus = false,
   height,
   compact = false,
   apiBaseUrl,
@@ -867,6 +870,16 @@ function LightweightChartPanel({
         symbol={normalizedSymbol}
         timeframe={normalizedTimeframe}
       />
+
+      {showOverlayStatus && (
+        <div className="mt-4">
+          <ChartOverlayStatusPanel
+            candles={candles}
+            title="SMC + AlphaX Overlay Prep"
+            compact
+          />
+        </div>
+      )}
     </div>
   )
 }
@@ -1261,6 +1274,7 @@ export default function Dashboard() {
             apiBaseUrl={apiBaseUrl}
             isClient={isClient}
             engineState={pythonEngineState}
+            showOverlayStatus
             onChange={(selection) => {
               setMainChartSelection({
                 symbol: normalizeSymbol(selection.symbol),
