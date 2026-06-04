@@ -11,6 +11,10 @@ import {
   createChart,
 } from "lightweight-charts";
 import { calculateHeikinAshi, RawCandle } from "@/lib/heikinAshi";
+import {
+  GhostCandle,
+  normalizeGhostCandles,
+} from "@/components/GhostCandleOverlay";
 
 /**
  * LightweightCandlestickChart.tsx
@@ -20,6 +24,7 @@ import { calculateHeikinAshi, RawCandle } from "@/lib/heikinAshi";
  * - Keeps real OHLC candles as master truth.
  * - Uses lib/heikinAshi.ts for Heikin Ashi visual calculation.
  * - Supports a regular / Heikin Ashi display toggle through the `mode` prop.
+ * - Supports optional Ghost Candles as a second projected candle series.
  *
  * Rule:
  * Raw OHLC = truth
@@ -40,6 +45,7 @@ export type ChartMode = "regular" | "heikinAshi";
 
 type LightweightCandlestickChartProps = {
   candles: DashboardCandle[];
+  ghostCandles?: GhostCandle[];
   mode?: ChartMode;
   height?: number;
   className?: string;
@@ -91,8 +97,20 @@ function toChartCandles(candles: DashboardCandle[] | RawCandle[]): CandlestickDa
     }));
 }
 
+function toGhostChartCandles(ghostCandles: GhostCandle[] | undefined): CandlestickData<Time>[] {
+  return normalizeGhostCandles(ghostCandles)
+    .map((candle) => ({
+      time: candle.time as Time,
+      open: candle.open,
+      high: candle.high,
+      low: candle.low,
+      close: candle.close,
+    }));
+}
+
 export default function LightweightCandlestickChart({
   candles,
+  ghostCandles = [],
   mode = "regular",
   height = 520,
   className = "",
@@ -103,6 +121,7 @@ export default function LightweightCandlestickChart({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const ghostCandleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const hasFitContentRef = useRef(false);
 
@@ -123,6 +142,14 @@ export default function LightweightCandlestickChart({
   }, [candles]);
 
   const displayData = mode === "heikinAshi" ? chartData.heikinAshi : chartData.regular;
+
+  /**
+   * Ghost Candles are projected visuals only.
+   * They should be future candles from the backend/ML layer.
+   */
+  const ghostDisplayData = useMemo(() => {
+    return toGhostChartCandles(ghostCandles);
+  }, [ghostCandles]);
 
   useEffect(() => {
     if (!containerRef.current || chartRef.current) return;
@@ -161,7 +188,7 @@ export default function LightweightCandlestickChart({
         borderColor: "rgba(148, 163, 184, 0.18)",
         timeVisible: true,
         secondsVisible: false,
-        rightOffset: 8,
+        rightOffset: 12,
         barSpacing: 8,
       },
       crosshair: {
@@ -199,8 +226,20 @@ export default function LightweightCandlestickChart({
       lastValueVisible: true,
     });
 
+    const ghostCandleSeries = chart.addCandlestickSeries({
+      upColor: "rgba(38, 166, 154, 0.28)",
+      downColor: "rgba(239, 83, 80, 0.28)",
+      borderUpColor: "rgba(38, 166, 154, 0.72)",
+      borderDownColor: "rgba(239, 83, 80, 0.72)",
+      wickUpColor: "rgba(38, 166, 154, 0.72)",
+      wickDownColor: "rgba(239, 83, 80, 0.72)",
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
+    ghostCandleSeriesRef.current = ghostCandleSeries;
 
     resizeObserverRef.current = new ResizeObserver((entries) => {
       const entry = entries[0];
@@ -225,6 +264,7 @@ export default function LightweightCandlestickChart({
       chartRef.current?.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
+      ghostCandleSeriesRef.current = null;
       hasFitContentRef.current = false;
     };
   }, [height]);
@@ -239,6 +279,12 @@ export default function LightweightCandlestickChart({
       hasFitContentRef.current = true;
     }
   }, [displayData, autoFit]);
+
+  useEffect(() => {
+    if (!ghostCandleSeriesRef.current) return;
+
+    ghostCandleSeriesRef.current.setData(ghostDisplayData);
+  }, [ghostDisplayData]);
 
   useEffect(() => {
     if (!chartRef.current) return;
@@ -260,6 +306,12 @@ export default function LightweightCandlestickChart({
           {timeframe && <span>{timeframe}</span>}
           <span className="text-slate-500">•</span>
           <span>{mode === "heikinAshi" ? "Heikin Ashi" : "Regular"}</span>
+          {ghostDisplayData.length > 0 && (
+            <>
+              <span className="text-slate-500">•</span>
+              <span>{ghostDisplayData.length} Ghost</span>
+            </>
+          )}
         </div>
       )}
 
