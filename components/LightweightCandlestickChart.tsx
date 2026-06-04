@@ -6,7 +6,9 @@ import {
   ColorType,
   CrosshairMode,
   IChartApi,
+  IPriceLine,
   ISeriesApi,
+  LineStyle,
   Time,
   createChart,
 } from "lightweight-charts";
@@ -15,6 +17,7 @@ import {
   GhostCandle,
   normalizeGhostCandles,
 } from "@/components/GhostCandleOverlay";
+import { ChartOverlayLine } from "@/lib/chartOverlayPrep";
 
 /**
  * LightweightCandlestickChart.tsx
@@ -25,10 +28,13 @@ import {
  * - Uses lib/heikinAshi.ts for Heikin Ashi visual calculation.
  * - Supports a regular / Heikin Ashi display toggle through the `mode` prop.
  * - Supports optional Ghost Candles as a second projected candle series.
+ * - Supports optional SMC + AlphaX overlay price lines.
  *
  * Rule:
  * Raw OHLC = truth
  * Heikin Ashi = visual trend filter
+ * SMC = structure context
+ * AlphaX DLM = liquidity and pressure context
  * Ghost Candles = projected visual path
  */
 
@@ -46,12 +52,14 @@ export type ChartMode = "regular" | "heikinAshi";
 type LightweightCandlestickChartProps = {
   candles: DashboardCandle[];
   ghostCandles?: GhostCandle[];
+  overlayLines?: ChartOverlayLine[];
   mode?: ChartMode;
   height?: number;
   className?: string;
   symbol?: string;
   timeframe?: string;
   autoFit?: boolean;
+  showOverlayLines?: boolean;
 };
 
 function isValidCandle(candle: DashboardCandle | null | undefined): candle is DashboardCandle {
@@ -98,30 +106,62 @@ function toChartCandles(candles: DashboardCandle[] | RawCandle[]): CandlestickDa
 }
 
 function toGhostChartCandles(ghostCandles: GhostCandle[] | undefined): CandlestickData<Time>[] {
-  return normalizeGhostCandles(ghostCandles)
-    .map((candle) => ({
-      time: candle.time as Time,
-      open: candle.open,
-      high: candle.high,
-      low: candle.low,
-      close: candle.close,
-    }));
+  return normalizeGhostCandles(ghostCandles).map((candle) => ({
+    time: candle.time as Time,
+    open: candle.open,
+    high: candle.high,
+    low: candle.low,
+    close: candle.close,
+  }));
+}
+
+function getOverlayLineColor(line: ChartOverlayLine): string {
+  if (line.direction === "bullish") return "rgba(38, 166, 154, 0.85)";
+  if (line.direction === "bearish") return "rgba(239, 83, 80, 0.85)";
+  return "rgba(234, 179, 8, 0.80)";
+}
+
+function getOverlayLineTitle(line: ChartOverlayLine): string {
+  const strengthText = Number.isFinite(line.strength)
+    ? ` ${Math.round(Number(line.strength))}%`
+    : "";
+
+  return `${line.label}${strengthText}`;
+}
+
+function getVisibleOverlayLines(lines: ChartOverlayLine[] | undefined): ChartOverlayLine[] {
+  if (!Array.isArray(lines)) return [];
+
+  return lines
+    .filter((line) => {
+      return (
+        line &&
+        Number.isFinite(line.price) &&
+        line.price > 0 &&
+        typeof line.label === "string" &&
+        line.label.length > 0
+      );
+    })
+    .slice(-18);
 }
 
 export default function LightweightCandlestickChart({
   candles,
   ghostCandles = [],
+  overlayLines = [],
   mode = "regular",
   height = 520,
   className = "",
   symbol = "",
   timeframe = "",
   autoFit = true,
+  showOverlayLines = true,
 }: LightweightCandlestickChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const ghostCandleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const overlayPriceLinesRef = useRef<IPriceLine[]>([]);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const hasFitContentRef = useRef(false);
 
@@ -150,6 +190,10 @@ export default function LightweightCandlestickChart({
   const ghostDisplayData = useMemo(() => {
     return toGhostChartCandles(ghostCandles);
   }, [ghostCandles]);
+
+  const visibleOverlayLines = useMemo(() => {
+    return showOverlayLines ? getVisibleOverlayLines(overlayLines) : [];
+  }, [overlayLines, showOverlayLines]);
 
   useEffect(() => {
     if (!containerRef.current || chartRef.current) return;
@@ -258,6 +302,11 @@ export default function LightweightCandlestickChart({
     resizeObserverRef.current.observe(container);
 
     return () => {
+      overlayPriceLinesRef.current.forEach((priceLine) => {
+        candleSeriesRef.current?.removePriceLine(priceLine);
+      });
+      overlayPriceLinesRef.current = [];
+
       resizeObserverRef.current?.disconnect();
       resizeObserverRef.current = null;
 
@@ -287,6 +336,29 @@ export default function LightweightCandlestickChart({
   }, [ghostDisplayData]);
 
   useEffect(() => {
+    if (!candleSeriesRef.current) return;
+
+    overlayPriceLinesRef.current.forEach((priceLine) => {
+      candleSeriesRef.current?.removePriceLine(priceLine);
+    });
+
+    overlayPriceLinesRef.current = [];
+
+    for (const line of visibleOverlayLines) {
+      const priceLine = candleSeriesRef.current.createPriceLine({
+        price: line.price,
+        color: getOverlayLineColor(line),
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: getOverlayLineTitle(line),
+      });
+
+      overlayPriceLinesRef.current.push(priceLine);
+    }
+  }, [visibleOverlayLines]);
+
+  useEffect(() => {
     if (!chartRef.current) return;
 
     chartRef.current.applyOptions({
@@ -312,6 +384,12 @@ export default function LightweightCandlestickChart({
               <span>{ghostDisplayData.length} Ghost</span>
             </>
           )}
+          {visibleOverlayLines.length > 0 && (
+            <>
+              <span className="text-slate-500">•</span>
+              <span>{visibleOverlayLines.length} Levels</span>
+            </>
+          )}
         </div>
       )}
 
@@ -325,4 +403,3 @@ export default function LightweightCandlestickChart({
     </div>
   );
 }
-
