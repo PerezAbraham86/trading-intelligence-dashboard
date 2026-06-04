@@ -6,10 +6,10 @@
  * - Keeps overlay preparation separate from Lightweight Charts rendering.
  * - This file does not draw anything by itself.
  *
- * Current role:
- * - Safe calculation/prep layer only.
- * - Later, components/LightweightCandlestickChart.tsx can consume this output
- *   to render lines, zones, markers, labels, and heat/pressure overlays.
+ * Important:
+ * - Only true price-based objects should become chart lines.
+ * - Pressure scores are NOT price levels, so they belong in the status panel,
+ *   not as chart price lines.
  *
  * Rule:
  * Raw OHLC = truth
@@ -129,9 +129,9 @@ const DEFAULT_OPTIONS: Required<ChartOverlayPrepOptions> = {
   smcMinBreakPercent: 0,
   alphaXLookback: 20,
   alphaXRejectionWickPercent: 45,
-  maxLines: 60,
-  maxZones: 30,
-  maxMarkers: 60,
+  maxLines: 10,
+  maxZones: 20,
+  maxMarkers: 40,
 };
 
 function normalizeOptions(options?: ChartOverlayPrepOptions): Required<ChartOverlayPrepOptions> {
@@ -235,21 +235,83 @@ function getConfidenceHint(
   return clampPercent(score);
 }
 
+function getCurrentPrice(candles: OverlayCandle[]): number | null {
+  const last = candles[candles.length - 1];
+  if (!last || !Number.isFinite(last.close)) return null;
+  return last.close;
+}
+
+function isNearCurrentPrice(line: ChartOverlayLine, currentPrice: number | null, maxDistancePercent = 8): boolean {
+  if (!currentPrice || !Number.isFinite(currentPrice) || currentPrice <= 0) return true;
+  return Math.abs(line.price - currentPrice) / currentPrice <= maxDistancePercent / 100;
+}
+
+function dedupeLinesByPrice(lines: ChartOverlayLine[], tickSizePercent = 0.035): ChartOverlayLine[] {
+  const result: ChartOverlayLine[] = [];
+
+  for (const line of lines) {
+    const duplicate = result.some((existing) => {
+      const base = Math.max(Math.abs(existing.price), 0.0000001);
+      return Math.abs(existing.price - line.price) / base <= tickSizePercent / 100;
+    });
+
+    if (!duplicate) {
+      result.push(line);
+    }
+  }
+
+  return result;
+}
+
+function prioritizeLines(lines: ChartOverlayLine[]): ChartOverlayLine[] {
+  const priority: Record<ChartOverlayLine["type"], number> = {
+    bos: 100,
+    choch: 95,
+    mss: 90,
+    liquiditySweep: 85,
+    rejection: 80,
+    swingHigh: 55,
+    swingLow: 55,
+    imbalance: 40,
+    pressure: 0,
+  };
+
+  return [...lines].sort((a, b) => {
+    const priorityDiff = (priority[b.type] ?? 0) - (priority[a.type] ?? 0);
+    if (priorityDiff !== 0) return priorityDiff;
+    return String(b.time).localeCompare(String(a.time));
+  });
+}
+
 export function buildSMCLines(smc: SMCAnalysisResult, maxLines = DEFAULT_OPTIONS.maxLines): ChartOverlayLine[] {
   const lines: ChartOverlayLine[] = [];
 
-  for (const swing of smc.swings) {
+  const latestSwingHigh = smc.latestSwingHigh;
+  const latestSwingLow = smc.latestSwingLow;
+
+  if (latestSwingHigh) {
     lines.push({
-      id: `swing-${swing.type}-${swing.index}`,
-      type: swing.type === "high" ? "swingHigh" : "swingLow",
-      label: swing.type === "high" ? "Swing high" : "Swing low",
-      price: swing.price,
-      time: swing.time,
+      id: `swing-high-${latestSwingHigh.index}`,
+      type: "swingHigh",
+      label: "Swing high",
+      price: latestSwingHigh.price,
+      time: latestSwingHigh.time,
       direction: "neutral",
     });
   }
 
-  for (const event of smc.structureEvents) {
+  if (latestSwingLow) {
+    lines.push({
+      id: `swing-low-${latestSwingLow.index}`,
+      type: "swingLow",
+      label: "Swing low",
+      price: latestSwingLow.price,
+      time: latestSwingLow.time,
+      direction: "neutral",
+    });
+  }
+
+  for (const event of smc.structureEvents.slice(-6)) {
     lines.push({
       id: `structure-${event.type}-${event.index}`,
       type:
@@ -265,7 +327,7 @@ export function buildSMCLines(smc: SMCAnalysisResult, maxLines = DEFAULT_OPTIONS
     });
   }
 
-  for (const sweep of smc.liquiditySweeps) {
+  for (const sweep of smc.liquiditySweeps.slice(-4)) {
     lines.push({
       id: `sweep-${sweep.direction}-${sweep.index}`,
       type: "liquiditySweep",
@@ -276,7 +338,7 @@ export function buildSMCLines(smc: SMCAnalysisResult, maxLines = DEFAULT_OPTIONS
     });
   }
 
-  return lines.slice(-maxLines);
+  return prioritizeLines(lines).slice(0, maxLines);
 }
 
 export function buildSMCZones(smc: SMCAnalysisResult, maxZones = DEFAULT_OPTIONS.maxZones): ChartOverlayZone[] {
@@ -296,7 +358,11 @@ export function buildAlphaXLines(
   alphaX: AlphaXDLMAnalysisResult,
   maxLines = DEFAULT_OPTIONS.maxLines
 ): ChartOverlayLine[] {
-  const rejectionLines: ChartOverlayLine[] = alphaX.rejectionLevels.map((rejection, index) => ({
+  /**
+   * Only rejection levels are real price levels.
+   * Pressure states are scores, not prices, so they are intentionally excluded here.
+   */
+  return alphaX.rejectionLevels.slice(-6).map((rejection, index) => ({
     id: `alphax-rejection-${rejection.type}-${rejection.index}-${index}`,
     type: "rejection",
     label: rejection.label,
@@ -309,21 +375,7 @@ export function buildAlphaXLines(
           ? "bearish"
           : "neutral",
     strength: rejection.strength,
-  }));
-
-  const pressureLines: ChartOverlayLine[] = alphaX.pressureStates
-    .filter((state) => state.netPressure >= 70 || state.netPressure <= 30)
-    .map((state, index) => ({
-      id: `alphax-pressure-${state.index}-${index}`,
-      type: "pressure",
-      label: state.pressureBias === "bullish" ? "Strong bullish pressure" : "Strong bearish pressure",
-      price: state.pressureBias === "bullish" ? state.bullPressure : state.bearPressure,
-      time: state.time,
-      direction: state.pressureBias,
-      strength: state.netPressure,
-    }));
-
-  return [...rejectionLines, ...pressureLines].slice(-maxLines);
+  })).slice(-maxLines);
 }
 
 export function buildAlphaXZones(
@@ -454,10 +506,16 @@ export function buildChartOverlayPayload(
     rejectionWickPercent: settings.alphaXRejectionWickPercent,
   });
 
-  const lines = [
+  const currentPrice = getCurrentPrice(validCandles);
+
+  const rawLines = [
     ...buildSMCLines(smc, settings.maxLines),
     ...buildAlphaXLines(alphaX, settings.maxLines),
-  ].slice(-settings.maxLines);
+  ];
+
+  const lines = dedupeLinesByPrice(
+    prioritizeLines(rawLines.filter((line) => isNearCurrentPrice(line, currentPrice, 8)))
+  ).slice(0, settings.maxLines);
 
   const zones = [
     ...buildSMCZones(smc, settings.maxZones),
