@@ -905,7 +905,12 @@ function LightweightChartPanel({
         candles={candles}
         ghostCandles={chartGhostCandles}
         overlayLines={overlayPayload?.lines ?? []}
+        overlayPayload={overlayPayload}
         showOverlayLines={showOverlayLines}
+        showCanvasOverlay={showOverlayLines}
+        showOverlayZones={showOverlayLines}
+        showOverlayLabels={showOverlayLines}
+        showLiquidityProfile={showOverlayLines}
         mode={candleModeToLightweightMode(candleMode)}
         height={height}
         symbol={normalizedSymbol}
