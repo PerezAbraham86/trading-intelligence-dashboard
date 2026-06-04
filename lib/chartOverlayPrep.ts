@@ -362,20 +362,24 @@ export function buildAlphaXLines(
    * Only rejection levels are real price levels.
    * Pressure states are scores, not prices, so they are intentionally excluded here.
    */
-  return alphaX.rejectionLevels.slice(-6).map((rejection, index) => ({
-    id: `alphax-rejection-${rejection.type}-${rejection.index}-${index}`,
-    type: "rejection",
-    label: rejection.label,
-    price: rejection.level,
-    time: rejection.time,
-    direction:
-      rejection.type === "bullishRejection"
-        ? "bullish"
-        : rejection.type === "bearishRejection"
-          ? "bearish"
-          : "neutral",
-    strength: rejection.strength,
-  })).slice(-maxLines);
+  const rejectionLines: ChartOverlayLine[] = alphaX.rejectionLevels.slice(-6).map(
+    (rejection, index): ChartOverlayLine => ({
+      id: `alphax-rejection-${rejection.type}-${rejection.index}-${index}`,
+      type: "rejection",
+      label: rejection.label,
+      price: rejection.level,
+      time: rejection.time,
+      direction:
+        rejection.type === "bullishRejection"
+          ? "bullish"
+          : rejection.type === "bearishRejection"
+            ? "bearish"
+            : "neutral",
+      strength: rejection.strength,
+    })
+  );
+
+  return rejectionLines.slice(-maxLines);
 }
 
 export function buildAlphaXZones(
