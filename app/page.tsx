@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import SignalCard from '@/components/SignalCard'
 import LightweightCandlestickChart, { ChartMode, DashboardCandle } from '@/components/LightweightCandlestickChart'
+import { GhostCandle } from '@/components/GhostCandleOverlay'
 import PressureGauges from '@/components/PressureGauges'
 import FactorConfirmationTable from '@/components/FactorConfirmationTable'
 import GhostCandleProjection from '@/components/GhostCandleProjection'
@@ -14,9 +15,22 @@ import { motion } from 'framer-motion'
 import { useApiPolling } from '@/hooks/useApiPolling'
 
 type PythonGhostCandle = {
+  time?: unknown
+  timestamp?: unknown
+  t?: unknown
+  open?: unknown
+  high?: unknown
+  low?: unknown
+  close?: unknown
+  o?: unknown
+  h?: unknown
+  l?: unknown
+  c?: unknown
   confidence?: number
   direction?: string
   source?: string
+  label?: string
+  reason?: string
 }
 
 type PythonEngineState = {
@@ -506,6 +520,150 @@ function normalizeCandlePayload(payload: any): DashboardCandle[] {
     })
 }
 
+function timeToUnixSeconds(time: DashboardCandle['time'] | undefined): number | null {
+  if (typeof time === 'number') return time
+  if (typeof time === 'string') {
+    if (/^\d+$/.test(time)) return Number(time)
+    const parsed = Date.parse(time)
+    return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null
+  }
+
+  return null
+}
+
+function timeframeToSeconds(timeframe: string): number {
+  const normalized = normalizeTimeframe(timeframe)
+
+  if (normalized.endsWith('m')) {
+    return Math.max(1, Number(normalized.replace('m', '')) || 1) * 60
+  }
+
+  if (normalized.endsWith('h')) {
+    return Math.max(1, Number(normalized.replace('h', '')) || 1) * 60 * 60
+  }
+
+  if (normalized.endsWith('d')) {
+    return Math.max(1, Number(normalized.replace('d', '')) || 1) * 24 * 60 * 60
+  }
+
+  if (normalized.endsWith('w')) {
+    return Math.max(1, Number(normalized.replace('w', '')) || 1) * 7 * 24 * 60 * 60
+  }
+
+  return 60
+}
+
+function buildFallbackGhostCandle(
+  previous: DashboardCandle | GhostCandle,
+  direction: string | undefined,
+  confidence: number | undefined,
+  index: number,
+  timeframeSeconds: number
+): GhostCandle {
+  const previousClose = toFiniteNumber(previous.close, 0)
+  const previousOpen = toFiniteNumber(previous.open, previousClose)
+  const previousHigh = toFiniteNumber(previous.high, Math.max(previousOpen, previousClose))
+  const previousLow = toFiniteNumber(previous.low, Math.min(previousOpen, previousClose))
+  const previousRange = Math.max(previousHigh - previousLow, Math.abs(previousClose * 0.001), 0.01)
+
+  const normalizedDirection = String(direction ?? '').toLowerCase()
+  const directionalMultiplier =
+    normalizedDirection.includes('bear') ||
+    normalizedDirection.includes('down') ||
+    normalizedDirection.includes('sell')
+      ? -1
+      : normalizedDirection.includes('bull') ||
+          normalizedDirection.includes('up') ||
+          normalizedDirection.includes('buy')
+        ? 1
+        : previousClose >= previousOpen
+          ? 1
+          : -1
+
+  const confidenceScale = Math.max(0.25, Math.min(1, toFiniteNumber(confidence, 35) / 100))
+  const bodyMove = previousRange * 0.35 * confidenceScale * directionalMultiplier
+  const open = previousClose
+  const close = previousClose + bodyMove
+  const wick = previousRange * 0.25
+
+  const previousTime = timeToUnixSeconds(previous.time as DashboardCandle['time']) ?? Math.floor(Date.now() / 1000)
+
+  return {
+    time: (previousTime + timeframeSeconds * (index + 1)) as GhostCandle['time'],
+    open,
+    high: Math.max(open, close) + wick,
+    low: Math.min(open, close) - wick,
+    close,
+    confidence,
+    direction,
+    source: 'python-fallback',
+    label: `PY #${index + 1}`,
+  }
+}
+
+function buildGhostCandlesForChart(
+  engineState: PythonEngineState | null | undefined,
+  chartCandles: DashboardCandle[],
+  timeframe: string
+): GhostCandle[] {
+  const pythonGhostCandles = getPythonGhostCandles(engineState)
+
+  if (chartCandles.length === 0 || pythonGhostCandles.length === 0) return []
+
+  const timeframeSeconds = timeframeToSeconds(timeframe)
+  const lastRealCandle = chartCandles[chartCandles.length - 1]
+  const lastRealTime = timeToUnixSeconds(lastRealCandle.time)
+  let previousProjected: DashboardCandle | GhostCandle = lastRealCandle
+
+  return pythonGhostCandles.slice(0, 10).map((ghost, index) => {
+    const open = toFiniteNumber(ghost.open ?? ghost.o, NaN)
+    const high = toFiniteNumber(ghost.high ?? ghost.h, NaN)
+    const low = toFiniteNumber(ghost.low ?? ghost.l, NaN)
+    const close = toFiniteNumber(ghost.close ?? ghost.c, NaN)
+
+    const explicitTime = normalizeCandleTime(
+      ghost.time ?? ghost.timestamp ?? ghost.t ?? (
+        lastRealTime ? lastRealTime + timeframeSeconds * (index + 1) : undefined
+      )
+    )
+
+    if (
+      Number.isFinite(open) &&
+      Number.isFinite(high) &&
+      Number.isFinite(low) &&
+      Number.isFinite(close)
+    ) {
+      const projected: GhostCandle = {
+        time: explicitTime as GhostCandle['time'],
+        open,
+        high,
+        low,
+        close,
+        confidence: ghost.confidence,
+        direction: ghost.direction,
+        source: ghost.source ?? 'python',
+        label: ghost.label ?? `PY #${index + 1}`,
+        reason: ghost.reason,
+      }
+
+      previousProjected = projected
+      return projected
+    }
+
+    const fallback = buildFallbackGhostCandle(
+      previousProjected,
+      ghost.direction,
+      ghost.confidence,
+      index,
+      timeframeSeconds
+    )
+
+    previousProjected = fallback
+    return fallback
+  })
+}
+
+
 function useChartCandles(
   apiBaseUrl: string | undefined,
   isClient: boolean,
@@ -584,6 +742,8 @@ type LightweightChartPanelProps = {
   symbol: string
   timeframe: string
   candleMode: CandleModeLabel
+  ghostCandles?: GhostCandle[]
+  engineState?: PythonEngineState | null
   height: number
   compact?: boolean
   apiBaseUrl?: string
@@ -596,6 +756,8 @@ function LightweightChartPanel({
   symbol,
   timeframe,
   candleMode,
+  ghostCandles = [],
+  engineState = null,
   height,
   compact = false,
   apiBaseUrl,
@@ -612,6 +774,12 @@ function LightweightChartPanel({
     compact ? 300 : 700,
     compact ? 10000 : 5000
   )
+
+  const chartGhostCandles = useMemo(() => {
+    if (ghostCandles.length > 0) return ghostCandles
+    if (compact) return []
+    return buildGhostCandlesForChart(engineState, candles, normalizedTimeframe)
+  }, [candles, compact, engineState, ghostCandles, normalizedTimeframe])
 
   return (
     <div className="rounded-xl border border-dark-700 bg-dark-800/80 p-4 shadow-xl">
@@ -693,6 +861,7 @@ function LightweightChartPanel({
 
       <LightweightCandlestickChart
         candles={candles}
+        ghostCandles={chartGhostCandles}
         mode={candleModeToLightweightMode(candleMode)}
         height={height}
         symbol={normalizedSymbol}
@@ -1091,6 +1260,7 @@ export default function Dashboard() {
             height={760}
             apiBaseUrl={apiBaseUrl}
             isClient={isClient}
+            engineState={pythonEngineState}
             onChange={(selection) => {
               setMainChartSelection({
                 symbol: normalizeSymbol(selection.symbol),
