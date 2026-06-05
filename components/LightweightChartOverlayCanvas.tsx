@@ -15,17 +15,15 @@ import {
  * Purpose:
  * - Custom TradingView-style drawing layer over Lightweight Charts.
  *
- * Fix in this version:
- * - Premium / Equilibrium / Discount now draw as right-side zone blocks,
- *   closer to the TradingView reference screenshot.
- * - Order blocks / FVG zones draw as normal boxes.
- * - Liquidity profile stays on the far right and does not cover candles as much.
- * - Labels are reduced to avoid stacked BOS / Sweep clutter.
+ * This version fixes:
+ * - Premium / Equilibrium / Discount are drawn as compact right-side bands.
+ * - Premium / Discount no longer cover the whole chart as giant boxes.
+ * - Liquidity profile is locked to the far right side of the chart canvas.
+ * - Market structure labels are only drawn when their time maps cleanly to candles.
+ * - Canvas redraws on chart scroll/zoom so overlays stay aligned.
  *
- * Important:
- * - TradingView webhook times can arrive as labels like "6/4 09:30".
- *   Those are not always valid Lightweight Charts time values, so this canvas
- *   uses a safer right-side fallback for Premium / Discount zones.
+ * Rule:
+ * TradingView chartOverlays = visual SMC/AlphaX source of truth
  */
 
 type LightweightChartOverlayCanvasProps = {
@@ -45,7 +43,6 @@ type LightweightChartOverlayCanvasProps = {
 type LiquidityProfileBin = {
   low: number;
   high: number;
-  mid: number;
   totalVolume: number;
   bullVolume: number;
   bearVolume: number;
@@ -62,9 +59,81 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function timeToCoordinate(chart: IChartApi, time: unknown): number | null {
+function normalizeUnixTime(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 10_000_000_000 ? Math.floor(value / 1000) : value;
+  }
+
+  if (typeof value !== "string") return null;
+
+  const trimmed = value.trim();
+
+  if (/^\d+$/.test(trimmed)) {
+    const numeric = Number(trimmed);
+    return numeric > 10_000_000_000 ? Math.floor(numeric / 1000) : numeric;
+  }
+
+  // Pine currently exports time as M/d HH:mm, example "6/4 09:30".
+  const pineTimeMatch = trimmed.match(/^(\d{1,2})\/(\d{1,2})\s+(\d{1,2}):(\d{2})$/);
+  if (pineTimeMatch) {
+    const currentYear = new Date().getFullYear();
+    const month = Number(pineTimeMatch[1]) - 1;
+    const day = Number(pineTimeMatch[2]);
+    const hour = Number(pineTimeMatch[3]);
+    const minute = Number(pineTimeMatch[4]);
+    const parsed = new Date(currentYear, month, day, hour, minute, 0).getTime();
+
+    return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null;
+  }
+
+  const parsed = Date.parse(trimmed);
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null;
+}
+
+function candleTimeToUnix(time: OverlayCandle["time"]): number | null {
+  return normalizeUnixTime(time);
+}
+
+function findNearestCandleTime(
+  candles: OverlayCandle[] | undefined,
+  targetUnix: number | null,
+  maxDistanceSeconds = 20 * 60
+): number | null {
+  if (!targetUnix || !Array.isArray(candles) || candles.length === 0) return null;
+
+  let bestTime: number | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  for (const candle of candles) {
+    const candleUnix = candleTimeToUnix(candle.time);
+    if (!candleUnix) continue;
+
+    const distance = Math.abs(candleUnix - targetUnix);
+
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestTime = candleUnix;
+    }
+  }
+
+  return bestDistance <= maxDistanceSeconds ? bestTime : null;
+}
+
+function timeToCoordinate(
+  chart: IChartApi,
+  time: unknown,
+  candles?: OverlayCandle[]
+): number | null {
   if (typeof time === "number" || typeof time === "string") {
-    const coordinate = chart.timeScale().timeToCoordinate(time as Time);
+    const direct = chart.timeScale().timeToCoordinate(time as Time);
+    if (isFiniteNumber(direct)) return direct;
+  }
+
+  const unix = normalizeUnixTime(time);
+  const nearest = findNearestCandleTime(candles, unix);
+
+  if (nearest) {
+    const coordinate = chart.timeScale().timeToCoordinate(nearest as Time);
     return isFiniteNumber(coordinate) ? coordinate : null;
   }
 
@@ -99,12 +168,22 @@ function isPdZone(zone: ChartOverlayZone): boolean {
   return isPremiumZone(zone) || isDiscountZone(zone) || isEquilibriumZone(zone);
 }
 
+function isOrderBlockOrFvg(zone: ChartOverlayZone): boolean {
+  const label = zone.label.toLowerCase();
+  return (
+    label.includes("ob") ||
+    label.includes("order block") ||
+    label.includes("fvg") ||
+    label.includes("imbalance")
+  );
+}
+
 function getZoneColor(zone: ChartOverlayZone): string {
   const label = zone.label.toLowerCase();
 
-  if (label.includes("premium")) return "rgba(239, 83, 80, 0.22)";
-  if (label.includes("discount")) return "rgba(38, 166, 154, 0.20)";
-  if (label.includes("equilibrium")) return "rgba(148, 163, 184, 0.18)";
+  if (label.includes("premium")) return "rgba(239, 83, 80, 0.20)";
+  if (label.includes("discount")) return "rgba(38, 166, 154, 0.19)";
+  if (label.includes("equilibrium")) return "rgba(148, 163, 184, 0.22)";
 
   if (
     zone.type === "demand" ||
@@ -130,7 +209,7 @@ function getZoneBorderColor(zone: ChartOverlayZone): string {
 
   if (label.includes("premium")) return "rgba(239, 83, 80, 0.42)";
   if (label.includes("discount")) return "rgba(38, 166, 154, 0.42)";
-  if (label.includes("equilibrium")) return "rgba(148, 163, 184, 0.34)";
+  if (label.includes("equilibrium")) return "rgba(148, 163, 184, 0.38)";
 
   if (
     zone.type === "demand" ||
@@ -158,9 +237,9 @@ function getMarkerTextColor(marker: ChartOverlayMarker): string {
 }
 
 function getMarkerBackgroundColor(marker: ChartOverlayMarker): string {
-  if (marker.direction === "bullish") return "rgba(38, 166, 154, 0.12)";
-  if (marker.direction === "bearish") return "rgba(239, 83, 80, 0.12)";
-  return "rgba(234, 179, 8, 0.12)";
+  if (marker.direction === "bullish") return "rgba(38, 166, 154, 0.13)";
+  if (marker.direction === "bearish") return "rgba(239, 83, 80, 0.13)";
+  return "rgba(234, 179, 8, 0.13)";
 }
 
 function drawRoundedRect(
@@ -235,9 +314,25 @@ function drawZoneLabel(
   context.restore();
 }
 
+function getProfilePanelWidth(canvasWidth: number): number {
+  return Math.min(175, Math.max(118, canvasWidth * 0.155));
+}
+
 function getProfilePanelLeft(canvasWidth: number): number {
-  const panelWidth = Math.min(190, Math.max(115, canvasWidth * 0.17));
-  return canvasWidth - panelWidth;
+  return canvasWidth - getProfilePanelWidth(canvasWidth);
+}
+
+function getPdBandGeometry(canvasWidth: number) {
+  const profileLeft = getProfilePanelLeft(canvasWidth);
+  const bandWidth = Math.min(270, Math.max(145, canvasWidth * 0.22));
+  const right = profileLeft - 8;
+  const left = Math.max(0, right - bandWidth);
+
+  return {
+    left,
+    right,
+    width: Math.max(80, right - left),
+  };
 }
 
 function groupPremiumDiscountZones(zones: ChartOverlayZone[]): PdZoneGroup {
@@ -265,22 +360,15 @@ function drawPremiumDiscountZones(
 
   if (!premium && !discount) return;
 
-  const profileLeft = getProfilePanelLeft(canvasWidth);
-  const right = profileLeft - 12;
-  const left = Math.max(0, canvasWidth * 0.58);
-  const width = Math.max(80, right - left);
-
+  const { left, right, width } = getPdBandGeometry(canvasWidth);
   const drawableZones: ChartOverlayZone[] = [];
 
   if (premium) drawableZones.push(premium);
 
   if (premium && discount) {
-    const equilibriumHigh = Math.min(premium.low, discount.high);
-    const equilibriumLow = Math.max(discount.high, premium.low);
-
     const mid = (premium.low + discount.high) / 2;
-    const range = Math.abs((premium.high - discount.low) || (premium.high - premium.low) || 1);
-    const thickness = range * 0.035;
+    const wholeRange = Math.abs(premium.high - discount.low);
+    const thickness = Math.max(wholeRange * 0.02, Math.abs(premium.high - premium.low) * 0.08, 0.01);
 
     drawableZones.push({
       id: "derived-equilibrium-zone",
@@ -288,8 +376,8 @@ function drawPremiumDiscountZones(
       label: "Equilibrium",
       startTime: premium.startTime,
       endTime: premium.endTime,
-      high: Number.isFinite(equilibriumHigh) && equilibriumHigh !== equilibriumLow ? Math.max(equilibriumHigh, equilibriumLow) : mid + thickness,
-      low: Number.isFinite(equilibriumHigh) && equilibriumHigh !== equilibriumLow ? Math.min(equilibriumHigh, equilibriumLow) : mid - thickness,
+      high: mid + thickness,
+      low: mid - thickness,
       direction: "neutral",
     });
   }
@@ -315,10 +403,14 @@ function drawPremiumDiscountZones(
     context.fillRect(left, top, width, height);
     context.strokeRect(left, top, width, height);
 
-    const labelY = top + height / 2;
-    const labelX = right + 7;
-
-    drawZoneLabel(context, zone.label, labelX, labelY, getZoneBorderColor(zone), "left");
+    drawZoneLabel(
+      context,
+      zone.label,
+      right + 6,
+      top + height / 2,
+      getZoneBorderColor(zone),
+      "left"
+    );
 
     context.restore();
   }
@@ -329,12 +421,15 @@ function drawRegularZones(
   chart: IChartApi,
   mainSeries: ISeriesApi<"Candlestick">,
   zones: ChartOverlayZone[],
-  canvasWidth: number
+  canvasWidth: number,
+  candles: OverlayCandle[]
 ) {
   const profileLeft = getProfilePanelLeft(canvasWidth);
+
   const regularZones = zones
     .filter((zone) => !isPdZone(zone))
-    .slice(-8);
+    .filter(isOrderBlockOrFvg)
+    .slice(-6);
 
   for (const zone of regularZones) {
     const yHigh = priceToCoordinate(mainSeries, zone.high);
@@ -342,19 +437,20 @@ function drawRegularZones(
 
     if (yHigh === null || yLow === null) continue;
 
-    const xStart = timeToCoordinate(chart, zone.startTime);
-    const xEndFromTime = timeToCoordinate(chart, zone.endTime);
-
-    const fallbackWidth = Math.min(260, Math.max(120, canvasWidth * 0.22));
-    const right = xEndFromTime ?? profileLeft - 18;
-    const left = xStart ?? Math.max(0, right - fallbackWidth);
+    const xStart = timeToCoordinate(chart, zone.startTime, candles);
+    const xEndFromTime = timeToCoordinate(chart, zone.endTime, candles);
 
     const top = Math.min(yHigh, yLow);
     const bottom = Math.max(yHigh, yLow);
-    const width = Math.max(24, right - left);
     const height = Math.max(4, bottom - top);
 
     if (height < 3) continue;
+
+    // If Pine time cannot map to chart time, keep the OB/FVG compact and right-aligned.
+    const fallbackWidth = Math.min(210, Math.max(90, canvasWidth * 0.17));
+    const right = xEndFromTime ?? profileLeft - 14;
+    const left = xStart ?? Math.max(0, right - fallbackWidth);
+    const width = Math.max(24, Math.min(right - left, fallbackWidth));
 
     context.save();
     context.fillStyle = getZoneColor(zone);
@@ -364,7 +460,7 @@ function drawRegularZones(
     context.fillRect(left, top, width, height);
     context.strokeRect(left, top, width, height);
 
-    if (width > 70 && height > 16) {
+    if (width > 75 && height > 16) {
       drawZoneLabel(context, zone.label, left + 6, top + 10, getZoneBorderColor(zone), "left");
     }
 
@@ -377,17 +473,28 @@ function drawZones(
   chart: IChartApi,
   mainSeries: ISeriesApi<"Candlestick">,
   zones: ChartOverlayZone[],
-  canvasWidth: number
+  canvasWidth: number,
+  candles: OverlayCandle[]
 ) {
-  drawRegularZones(context, chart, mainSeries, zones, canvasWidth);
+  drawRegularZones(context, chart, mainSeries, zones, canvasWidth, candles);
   drawPremiumDiscountZones(context, mainSeries, zones, canvasWidth);
 }
 
 function getCompactMarkerText(marker: ChartOverlayMarker): string {
+  const label = marker.label.toLowerCase();
+
+  if (label.includes("pressure")) return "";
+  if (label.includes("score")) return "";
   if (marker.type === "Rejection") return "";
-  if (marker.label.toLowerCase().includes("pressure")) return "";
-  if (marker.label.toLowerCase().includes("score")) return "";
-  if (marker.type === "Sweep") return marker.label || "Sweep";
+
+  if (marker.type === "Sweep") {
+    if (label.includes("sell-side")) return "SSL";
+    if (label.includes("buy-side")) return "BSL";
+    if (label.includes("ils")) return "iLS";
+    if (label.includes("ihs")) return "iHS";
+    return marker.label || "Sweep";
+  }
+
   return marker.label || marker.type;
 }
 
@@ -402,13 +509,12 @@ function selectVisibleMarkers(markers: ChartOverlayMarker[]): ChartOverlayMarker
     if (!text) continue;
 
     const key = `${marker.type}-${marker.label}-${marker.direction}`;
-
     if (seen.has(key)) continue;
 
     selected.push(marker);
     seen.add(key);
 
-    if (selected.length >= 12) break;
+    if (selected.length >= 10) break;
   }
 
   return selected.reverse();
@@ -418,15 +524,17 @@ function drawMarkers(
   context: CanvasRenderingContext2D,
   chart: IChartApi,
   mainSeries: ISeriesApi<"Candlestick">,
-  markers: ChartOverlayMarker[]
+  markers: ChartOverlayMarker[],
+  candles: OverlayCandle[]
 ) {
   const visibleMarkers = selectVisibleMarkers(markers);
   const placed: Array<{ x: number; y: number }> = [];
 
   for (const marker of visibleMarkers) {
-    const x = timeToCoordinate(chart, marker.time);
+    const x = timeToCoordinate(chart, marker.time, candles);
     const y = priceToCoordinate(mainSeries, marker.price);
 
+    // Do not draw floating random labels if Pine time cannot map to this chart.
     if (x === null || y === null) continue;
 
     const text = getCompactMarkerText(marker);
@@ -435,7 +543,7 @@ function drawMarkers(
     let labelY = marker.direction === "bullish" ? y + 14 : y - 14;
 
     for (const previous of placed) {
-      const overlapsX = Math.abs(previous.x - x) < 46;
+      const overlapsX = Math.abs(previous.x - x) < 48;
       const overlapsY = Math.abs(previous.y - labelY) < 18;
 
       if (overlapsX && overlapsY) {
@@ -492,7 +600,6 @@ function buildLiquidityProfile(
     return {
       low: binLow,
       high: binHigh,
-      mid: (binLow + binHigh) / 2,
       totalVolume: 0,
       bullVolume: 0,
       bearVolume: 0,
@@ -545,11 +652,11 @@ function drawLiquidityProfile(
 
   const panelLeft = getProfilePanelLeft(canvasWidth);
   const panelWidth = canvasWidth - panelLeft;
-  const maxBarWidth = panelWidth - 34;
+  const maxBarWidth = panelWidth - 28;
 
   context.save();
 
-  context.fillStyle = "rgba(0, 0, 0, 0.28)";
+  context.fillStyle = "rgba(0, 0, 0, 0.34)";
   context.fillRect(panelLeft, 0, panelWidth, canvasHeight);
 
   for (const bin of bins) {
@@ -566,23 +673,23 @@ function drawLiquidityProfile(
     const totalWidth = Math.max(2, (bin.totalVolume / maxVolume) * maxBarWidth);
     const bearWidth = totalWidth * (bin.bearPercent / 100);
     const bullWidth = totalWidth * (bin.bullPercent / 100);
-    const x = panelLeft + 8;
+    const x = panelLeft + 7;
 
     if (bearWidth > 1) {
-      context.fillStyle = "rgba(239, 83, 80, 0.44)";
+      context.fillStyle = "rgba(239, 83, 80, 0.45)";
       context.fillRect(x, y, bearWidth, height);
     }
 
     if (bullWidth > 1) {
-      context.fillStyle = "rgba(38, 166, 154, 0.50)";
+      context.fillStyle = "rgba(38, 166, 154, 0.52)";
       context.fillRect(x + bearWidth, y, bullWidth, height);
     }
 
-    if (totalWidth > maxBarWidth * 0.42) {
+    if (totalWidth > maxBarWidth * 0.46) {
       context.font = "600 10px Inter, system-ui, sans-serif";
       context.textAlign = "left";
       context.textBaseline = "middle";
-      context.fillStyle = "rgba(209, 213, 219, 0.74)";
+      context.fillStyle = "rgba(209, 213, 219, 0.76)";
       context.fillText(formatCompactVolume(bin.totalVolume), x + totalWidth + 4, y + height / 2);
     }
   }
@@ -613,6 +720,7 @@ export default function LightweightChartOverlayCanvas({
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [measuredSize, setMeasuredSize] = React.useState({ width: 0, height: 0 });
+  const [redrawVersion, setRedrawVersion] = React.useState(0);
 
   const canvasWidth = width ?? measuredSize.width;
   const canvasHeight = height ?? measuredSize.height;
@@ -643,6 +751,30 @@ export default function LightweightChartOverlayCanvas({
   }, [width, height]);
 
   useEffect(() => {
+    if (!chart) return;
+
+    let frameId: number | null = null;
+
+    const requestRedraw = () => {
+      if (frameId !== null) cancelAnimationFrame(frameId);
+
+      frameId = requestAnimationFrame(() => {
+        setRedrawVersion((value) => value + 1);
+      });
+    };
+
+    chart.timeScale().subscribeVisibleLogicalRangeChange(requestRedraw);
+    chart.timeScale().subscribeVisibleTimeRangeChange(requestRedraw);
+
+    return () => {
+      if (frameId !== null) cancelAnimationFrame(frameId);
+
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(requestRedraw);
+      chart.timeScale().unsubscribeVisibleTimeRangeChange(requestRedraw);
+    };
+  }, [chart]);
+
+  useEffect(() => {
     const canvas = canvasRef.current;
 
     if (!canvas || !chart || !mainSeries || canvasWidth <= 0 || canvasHeight <= 0) {
@@ -662,11 +794,11 @@ export default function LightweightChartOverlayCanvas({
     context.clearRect(0, 0, canvasWidth, canvasHeight);
 
     if (showZones) {
-      drawZones(context, chart, mainSeries, zones, canvasWidth);
+      drawZones(context, chart, mainSeries, zones, canvasWidth, candles);
     }
 
     if (showLabels) {
-      drawMarkers(context, chart, mainSeries, markers);
+      drawMarkers(context, chart, mainSeries, markers, candles);
     }
 
     if (showLiquidityProfile) {
@@ -687,6 +819,7 @@ export default function LightweightChartOverlayCanvas({
     mainSeries,
     markers,
     profileLookback,
+    redrawVersion,
     showLabels,
     showLiquidityProfile,
     showZones,
