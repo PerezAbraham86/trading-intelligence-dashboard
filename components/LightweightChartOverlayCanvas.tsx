@@ -13,17 +13,19 @@ import {
  * components/LightweightChartOverlayCanvas.tsx
  *
  * Purpose:
- * - Custom TradingView-style drawing layer over Lightweight Charts.
+ * - TradingView-style custom canvas drawing layer.
  *
  * This version fixes:
- * - Premium / Equilibrium / Discount are drawn as compact right-side bands.
- * - Premium / Discount no longer cover the whole chart as giant boxes.
- * - Liquidity profile is locked to the far right side of the chart canvas.
- * - Market structure labels are only drawn when their time maps cleanly to candles.
- * - Canvas redraws on chart scroll/zoom so overlays stay aligned.
+ * - Profile/liquidity bars are NOT fixed to the far-right forever.
+ * - Profile/liquidity bars anchor a few candles to the right of the latest visible candle.
+ * - If the latest candle is not visible, the profile/liquidity bars are hidden.
+ * - Premium / Equilibrium / Discount also anchor near the latest candle area.
+ * - Market-structure labels are only drawn when their time maps to visible candles.
+ * - No RJ labels / no fake pressure blocks.
  *
  * Rule:
- * TradingView chartOverlays = visual SMC/AlphaX source of truth
+ * Python backend calculates overlays.
+ * React canvas only renders them.
  */
 
 type LightweightChartOverlayCanvasProps = {
@@ -43,15 +45,22 @@ type LightweightChartOverlayCanvasProps = {
 type LiquidityProfileBin = {
   low: number;
   high: number;
-  totalVolume: number;
-  bullVolume: number;
-  bearVolume: number;
-  bullPercent: number;
-  bearPercent: number;
+  price?: number;
+  volume: number;
+  buyVolume?: number;
+  sellVolume?: number;
+  buyPct: number;
+  sellPct: number;
+  widthPct?: number;
+  dominantSide?: "buy" | "sell";
+  isPOC?: boolean;
+  isBuyLiquidity?: boolean;
+  isSellLiquidity?: boolean;
 };
 
 type PdZoneGroup = {
   premium?: ChartOverlayZone;
+  equilibrium?: ChartOverlayZone;
   discount?: ChartOverlayZone;
 };
 
@@ -73,19 +82,6 @@ function normalizeUnixTime(value: unknown): number | null {
     return numeric > 10_000_000_000 ? Math.floor(numeric / 1000) : numeric;
   }
 
-  // Pine currently exports time as M/d HH:mm, example "6/4 09:30".
-  const pineTimeMatch = trimmed.match(/^(\d{1,2})\/(\d{1,2})\s+(\d{1,2}):(\d{2})$/);
-  if (pineTimeMatch) {
-    const currentYear = new Date().getFullYear();
-    const month = Number(pineTimeMatch[1]) - 1;
-    const day = Number(pineTimeMatch[2]);
-    const hour = Number(pineTimeMatch[3]);
-    const minute = Number(pineTimeMatch[4]);
-    const parsed = new Date(currentYear, month, day, hour, minute, 0).getTime();
-
-    return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null;
-  }
-
   const parsed = Date.parse(trimmed);
   return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null;
 }
@@ -94,8 +90,8 @@ function candleTimeToUnix(time: OverlayCandle["time"]): number | null {
   return normalizeUnixTime(time);
 }
 
-function findNearestCandleTime(
-  candles: OverlayCandle[] | undefined,
+function nearestCandleTimeForTarget(
+  candles: OverlayCandle[],
   targetUnix: number | null,
   maxDistanceSeconds = 20 * 60
 ): number | null {
@@ -122,7 +118,7 @@ function findNearestCandleTime(
 function timeToCoordinate(
   chart: IChartApi,
   time: unknown,
-  candles?: OverlayCandle[]
+  candles: OverlayCandle[] = []
 ): number | null {
   if (typeof time === "number" || typeof time === "string") {
     const direct = chart.timeScale().timeToCoordinate(time as Time);
@@ -130,7 +126,7 @@ function timeToCoordinate(
   }
 
   const unix = normalizeUnixTime(time);
-  const nearest = findNearestCandleTime(candles, unix);
+  const nearest = nearestCandleTimeForTarget(candles, unix);
 
   if (nearest) {
     const coordinate = chart.timeScale().timeToCoordinate(nearest as Time);
@@ -140,16 +136,56 @@ function timeToCoordinate(
   return null;
 }
 
-function priceToCoordinate(
-  mainSeries: ISeriesApi<"Candlestick">,
-  price: unknown
-): number | null {
+function priceToCoordinate(mainSeries: ISeriesApi<"Candlestick">, price: unknown): number | null {
   const numericPrice = Number(price);
-
   if (!Number.isFinite(numericPrice)) return null;
 
   const coordinate = mainSeries.priceToCoordinate(numericPrice);
   return isFiniteNumber(coordinate) ? coordinate : null;
+}
+
+function getLatestVisibleCandleX(
+  chart: IChartApi,
+  candles: OverlayCandle[],
+  canvasWidth: number
+): number | null {
+  if (!candles.length) return null;
+
+  const latest = candles[candles.length - 1];
+  const x = timeToCoordinate(chart, latest.time, candles);
+
+  if (x === null) return null;
+
+  // Important:
+  // If user scrolls into historical candles, latest candle / ghost area is off screen.
+  // Profile and current PD bands should disappear just like ghost candles disappear.
+  if (x < -40 || x > canvasWidth + 80) return null;
+
+  return x;
+}
+
+function getFutureAnchorX(chart: IChartApi, candles: OverlayCandle[], canvasWidth: number): number | null {
+  const latestX = getLatestVisibleCandleX(chart, candles, canvasWidth);
+  if (latestX === null) return null;
+
+  const spacing = estimateBarSpacing(chart, candles);
+  return latestX + spacing * 4;
+}
+
+function estimateBarSpacing(chart: IChartApi, candles: OverlayCandle[]): number {
+  if (candles.length < 2) return 8;
+
+  const last = candles[candles.length - 1];
+  const prev = candles[candles.length - 2];
+
+  const lastX = chart.timeScale().timeToCoordinate(last.time as Time);
+  const prevX = chart.timeScale().timeToCoordinate(prev.time as Time);
+
+  if (isFiniteNumber(lastX) && isFiniteNumber(prevX)) {
+    return Math.max(4, Math.min(18, Math.abs(lastX - prevX)));
+  }
+
+  return 8;
 }
 
 function isPremiumZone(zone: ChartOverlayZone): boolean {
@@ -170,38 +206,28 @@ function isPdZone(zone: ChartOverlayZone): boolean {
 
 function isOrderBlockOrFvg(zone: ChartOverlayZone): boolean {
   const label = zone.label.toLowerCase();
+  const typeText = String(zone.type).toLowerCase();
+
   return (
     label.includes("ob") ||
     label.includes("order block") ||
     label.includes("fvg") ||
-    label.includes("imbalance")
+    label.includes("imbalance") ||
+    typeText.includes("imbalance")
   );
 }
 
 function getZoneColor(zone: ChartOverlayZone): string {
   const label = zone.label.toLowerCase();
 
-  if (label.includes("premium")) return "rgba(239, 83, 80, 0.20)";
-  if (label.includes("discount")) return "rgba(38, 166, 154, 0.19)";
-  if (label.includes("equilibrium")) return "rgba(148, 163, 184, 0.22)";
+  if (label.includes("premium")) return "rgba(239, 83, 80, 0.19)";
+  if (label.includes("discount")) return "rgba(38, 166, 154, 0.18)";
+  if (label.includes("equilibrium")) return "rgba(148, 163, 184, 0.21)";
 
-  if (
-    zone.type === "demand" ||
-    zone.type === "bullishPressure" ||
-    zone.type === "bullishImbalance"
-  ) {
-    return "rgba(38, 166, 154, 0.15)";
-  }
+  if (zone.direction === "bullish") return "rgba(38, 166, 154, 0.14)";
+  if (zone.direction === "bearish") return "rgba(239, 83, 80, 0.14)";
 
-  if (
-    zone.type === "supply" ||
-    zone.type === "bearishPressure" ||
-    zone.type === "bearishImbalance"
-  ) {
-    return "rgba(239, 83, 80, 0.15)";
-  }
-
-  return "rgba(148, 163, 184, 0.13)";
+  return "rgba(148, 163, 184, 0.12)";
 }
 
 function getZoneBorderColor(zone: ChartOverlayZone): string {
@@ -211,21 +237,8 @@ function getZoneBorderColor(zone: ChartOverlayZone): string {
   if (label.includes("discount")) return "rgba(38, 166, 154, 0.42)";
   if (label.includes("equilibrium")) return "rgba(148, 163, 184, 0.38)";
 
-  if (
-    zone.type === "demand" ||
-    zone.type === "bullishPressure" ||
-    zone.type === "bullishImbalance"
-  ) {
-    return "rgba(38, 166, 154, 0.40)";
-  }
-
-  if (
-    zone.type === "supply" ||
-    zone.type === "bearishPressure" ||
-    zone.type === "bearishImbalance"
-  ) {
-    return "rgba(239, 83, 80, 0.40)";
-  }
+  if (zone.direction === "bullish") return "rgba(38, 166, 154, 0.40)";
+  if (zone.direction === "bearish") return "rgba(239, 83, 80, 0.40)";
 
   return "rgba(148, 163, 184, 0.30)";
 }
@@ -314,37 +327,17 @@ function drawZoneLabel(
   context.restore();
 }
 
-function getProfilePanelWidth(canvasWidth: number): number {
-  return Math.min(175, Math.max(118, canvasWidth * 0.155));
-}
-
-function getProfilePanelLeft(canvasWidth: number): number {
-  return canvasWidth - getProfilePanelWidth(canvasWidth);
-}
-
-function getPdBandGeometry(canvasWidth: number) {
-  const profileLeft = getProfilePanelLeft(canvasWidth);
-  const bandWidth = Math.min(270, Math.max(145, canvasWidth * 0.22));
-  const right = profileLeft - 8;
-  const left = Math.max(0, right - bandWidth);
-
-  return {
-    left,
-    right,
-    width: Math.max(80, right - left),
-  };
-}
-
-function groupPremiumDiscountZones(zones: ChartOverlayZone[]): PdZoneGroup {
+function groupPdZones(zones: ChartOverlayZone[]): PdZoneGroup {
   const group: PdZoneGroup = {};
 
-  for (let index = zones.length - 1; index >= 0; index -= 1) {
-    const zone = zones[index];
+  for (let i = zones.length - 1; i >= 0; i -= 1) {
+    const zone = zones[i];
 
     if (!group.premium && isPremiumZone(zone)) group.premium = zone;
+    if (!group.equilibrium && isEquilibriumZone(zone)) group.equilibrium = zone;
     if (!group.discount && isDiscountZone(zone)) group.discount = zone;
 
-    if (group.premium && group.discount) break;
+    if (group.premium && group.equilibrium && group.discount) break;
   }
 
   return group;
@@ -352,39 +345,28 @@ function groupPremiumDiscountZones(zones: ChartOverlayZone[]): PdZoneGroup {
 
 function drawPremiumDiscountZones(
   context: CanvasRenderingContext2D,
+  chart: IChartApi,
   mainSeries: ISeriesApi<"Candlestick">,
   zones: ChartOverlayZone[],
+  candles: OverlayCandle[],
   canvasWidth: number
 ) {
-  const { premium, discount } = groupPremiumDiscountZones(zones);
+  const anchorX = getFutureAnchorX(chart, candles, canvasWidth);
+  if (anchorX === null) return;
 
-  if (!premium && !discount) return;
+  const { premium, equilibrium, discount } = groupPdZones(zones);
+  const drawable = [premium, equilibrium, discount].filter(Boolean) as ChartOverlayZone[];
 
-  const { left, right, width } = getPdBandGeometry(canvasWidth);
-  const drawableZones: ChartOverlayZone[] = [];
+  if (!drawable.length) return;
 
-  if (premium) drawableZones.push(premium);
+  const bandWidth = Math.min(260, Math.max(120, canvasWidth * 0.18));
+  const left = anchorX + 8;
+  const right = left + bandWidth;
 
-  if (premium && discount) {
-    const mid = (premium.low + discount.high) / 2;
-    const wholeRange = Math.abs(premium.high - discount.low);
-    const thickness = Math.max(wholeRange * 0.02, Math.abs(premium.high - premium.low) * 0.08, 0.01);
+  // If the anchor is off to the right, do not draw. This mimics ghost candles.
+  if (left > canvasWidth + 20 || right < -20) return;
 
-    drawableZones.push({
-      id: "derived-equilibrium-zone",
-      type: "neutralPressure",
-      label: "Equilibrium",
-      startTime: premium.startTime,
-      endTime: premium.endTime,
-      high: mid + thickness,
-      low: mid - thickness,
-      direction: "neutral",
-    });
-  }
-
-  if (discount) drawableZones.push(discount);
-
-  for (const zone of drawableZones) {
+  for (const zone of drawable) {
     const yHigh = priceToCoordinate(mainSeries, zone.high);
     const yLow = priceToCoordinate(mainSeries, zone.low);
 
@@ -395,21 +377,20 @@ function drawPremiumDiscountZones(
     const height = Math.max(5, bottom - top);
 
     context.save();
-
     context.fillStyle = getZoneColor(zone);
     context.strokeStyle = getZoneBorderColor(zone);
     context.lineWidth = 1;
 
-    context.fillRect(left, top, width, height);
-    context.strokeRect(left, top, width, height);
+    context.fillRect(left, top, bandWidth, height);
+    context.strokeRect(left, top, bandWidth, height);
 
     drawZoneLabel(
       context,
       zone.label,
-      right + 6,
+      Math.min(right + 6, canvasWidth - 8),
       top + height / 2,
       getZoneBorderColor(zone),
-      "left"
+      right + 60 > canvasWidth ? "right" : "left"
     );
 
     context.restore();
@@ -424,8 +405,6 @@ function drawRegularZones(
   canvasWidth: number,
   candles: OverlayCandle[]
 ) {
-  const profileLeft = getProfilePanelLeft(canvasWidth);
-
   const regularZones = zones
     .filter((zone) => !isPdZone(zone))
     .filter(isOrderBlockOrFvg)
@@ -438,19 +417,23 @@ function drawRegularZones(
     if (yHigh === null || yLow === null) continue;
 
     const xStart = timeToCoordinate(chart, zone.startTime, candles);
-    const xEndFromTime = timeToCoordinate(chart, zone.endTime, candles);
+    const xEnd = timeToCoordinate(chart, zone.endTime, candles);
+
+    // Do not draw floating OB/FVG if neither side maps to a real chart coordinate.
+    if (xStart === null && xEnd === null) continue;
+
+    const fallbackWidth = Math.min(220, Math.max(90, canvasWidth * 0.16));
+    const right = xEnd ?? Math.min(canvasWidth - 20, (xStart ?? 0) + fallbackWidth);
+    const left = xStart ?? Math.max(0, right - fallbackWidth);
+    const width = Math.max(16, Math.min(right - left, fallbackWidth));
+
+    if (right < -20 || left > canvasWidth + 20) continue;
 
     const top = Math.min(yHigh, yLow);
     const bottom = Math.max(yHigh, yLow);
     const height = Math.max(4, bottom - top);
 
     if (height < 3) continue;
-
-    // If Pine time cannot map to chart time, keep the OB/FVG compact and right-aligned.
-    const fallbackWidth = Math.min(210, Math.max(90, canvasWidth * 0.17));
-    const right = xEndFromTime ?? profileLeft - 14;
-    const left = xStart ?? Math.max(0, right - fallbackWidth);
-    const width = Math.max(24, Math.min(right - left, fallbackWidth));
 
     context.save();
     context.fillStyle = getZoneColor(zone);
@@ -460,7 +443,7 @@ function drawRegularZones(
     context.fillRect(left, top, width, height);
     context.strokeRect(left, top, width, height);
 
-    if (width > 75 && height > 16) {
+    if (width > 80 && height > 16) {
       drawZoneLabel(context, zone.label, left + 6, top + 10, getZoneBorderColor(zone), "left");
     }
 
@@ -477,7 +460,7 @@ function drawZones(
   candles: OverlayCandle[]
 ) {
   drawRegularZones(context, chart, mainSeries, zones, canvasWidth, candles);
-  drawPremiumDiscountZones(context, mainSeries, zones, canvasWidth);
+  drawPremiumDiscountZones(context, chart, mainSeries, zones, candles, canvasWidth);
 }
 
 function getCompactMarkerText(marker: ChartOverlayMarker): string {
@@ -488,11 +471,11 @@ function getCompactMarkerText(marker: ChartOverlayMarker): string {
   if (marker.type === "Rejection") return "";
 
   if (marker.type === "Sweep") {
-    if (label.includes("sell-side")) return "SSL";
-    if (label.includes("buy-side")) return "BSL";
+    if (label.includes("sell")) return "SSL";
+    if (label.includes("buy")) return "BSL";
     if (label.includes("ils")) return "iLS";
     if (label.includes("ihs")) return "iHS";
-    return marker.label || "Sweep";
+    return "Sweep";
   }
 
   return marker.label || marker.type;
@@ -502,8 +485,8 @@ function selectVisibleMarkers(markers: ChartOverlayMarker[]): ChartOverlayMarker
   const selected: ChartOverlayMarker[] = [];
   const seen = new Set<string>();
 
-  for (let index = markers.length - 1; index >= 0; index -= 1) {
-    const marker = markers[index];
+  for (let i = markers.length - 1; i >= 0; i -= 1) {
+    const marker = markers[i];
     const text = getCompactMarkerText(marker);
 
     if (!text) continue;
@@ -514,7 +497,7 @@ function selectVisibleMarkers(markers: ChartOverlayMarker[]): ChartOverlayMarker
     selected.push(marker);
     seen.add(key);
 
-    if (selected.length >= 10) break;
+    if (selected.length >= 12) break;
   }
 
   return selected.reverse();
@@ -525,7 +508,8 @@ function drawMarkers(
   chart: IChartApi,
   mainSeries: ISeriesApi<"Candlestick">,
   markers: ChartOverlayMarker[],
-  candles: OverlayCandle[]
+  candles: OverlayCandle[],
+  canvasWidth: number
 ) {
   const visibleMarkers = selectVisibleMarkers(markers);
   const placed: Array<{ x: number; y: number }> = [];
@@ -534,8 +518,11 @@ function drawMarkers(
     const x = timeToCoordinate(chart, marker.time, candles);
     const y = priceToCoordinate(mainSeries, marker.price);
 
-    // Do not draw floating random labels if Pine time cannot map to this chart.
+    // Critical fix:
+    // If the marker time does not map to a candle currently on screen,
+    // do not draw it. This prevents floating random structure labels.
     if (x === null || y === null) continue;
+    if (x < -20 || x > canvasWidth + 20) continue;
 
     const text = getCompactMarkerText(marker);
     if (!text) continue;
@@ -554,7 +541,6 @@ function drawMarkers(
     placed.push({ x, y: labelY });
 
     context.save();
-
     context.strokeStyle = getMarkerTextColor(marker);
     context.lineWidth = 1;
     context.beginPath();
@@ -576,7 +562,44 @@ function drawMarkers(
   }
 }
 
-function buildLiquidityProfile(
+function normalizePayloadBins(overlayPayload: ChartOverlayPayload | null | undefined): LiquidityProfileBin[] {
+  const rawBins = (overlayPayload as any)?.liquidityProfileBins;
+
+  if (!Array.isArray(rawBins)) return [];
+
+  return rawBins
+    .map((bin: any): LiquidityProfileBin | null => {
+      const low = Number(bin.low ?? bin.price);
+      const high = Number(bin.high ?? bin.price);
+      const volume = Number(bin.volume ?? 0);
+      const buyPct = Number(bin.buyPct ?? 0);
+      const sellPct = Number(bin.sellPct ?? 0);
+      const widthPct = Number(bin.widthPct ?? 0);
+
+      if (!Number.isFinite(low) || !Number.isFinite(high) || !Number.isFinite(volume)) {
+        return null;
+      }
+
+      return {
+        low: Math.min(low, high),
+        high: Math.max(low, high),
+        price: Number(bin.price ?? (low + high) / 2),
+        volume,
+        buyVolume: Number(bin.buyVolume ?? 0),
+        sellVolume: Number(bin.sellVolume ?? 0),
+        buyPct: Number.isFinite(buyPct) ? buyPct : 0,
+        sellPct: Number.isFinite(sellPct) ? sellPct : 0,
+        widthPct: Number.isFinite(widthPct) ? widthPct : 0,
+        dominantSide: bin.dominantSide === "sell" ? "sell" : "buy",
+        isPOC: Boolean(bin.isPOC),
+        isBuyLiquidity: Boolean(bin.isBuyLiquidity),
+        isSellLiquidity: Boolean(bin.isSellLiquidity),
+      };
+    })
+    .filter((bin): bin is LiquidityProfileBin => Boolean(bin));
+}
+
+function buildFallbackProfileFromCandles(
   candles: OverlayCandle[] | undefined,
   binCount = 24,
   lookback = 260
@@ -590,7 +613,6 @@ function buildLiquidityProfile(
   if (!Number.isFinite(high) || !Number.isFinite(low) || high <= low) return [];
 
   const step = (high - low) / binCount;
-
   if (step <= 0) return [];
 
   const bins: LiquidityProfileBin[] = Array.from({ length: binCount }, (_, index) => {
@@ -600,11 +622,14 @@ function buildLiquidityProfile(
     return {
       low: binLow,
       high: binHigh,
-      totalVolume: 0,
-      bullVolume: 0,
-      bearVolume: 0,
-      bullPercent: 0,
-      bearPercent: 0,
+      price: (binLow + binHigh) / 2,
+      volume: 0,
+      buyVolume: 0,
+      sellVolume: 0,
+      buyPct: 0,
+      sellPct: 0,
+      widthPct: 0,
+      dominantSide: "buy",
     };
   });
 
@@ -614,50 +639,63 @@ function buildLiquidityProfile(
     const index = Math.max(0, Math.min(binCount - 1, rawIndex));
     const volume = Number.isFinite(candle.volume) ? Number(candle.volume) : 1;
 
-    bins[index].totalVolume += volume;
+    bins[index].volume += volume;
 
     if (candle.close >= candle.open) {
-      bins[index].bullVolume += volume;
+      bins[index].buyVolume = (bins[index].buyVolume ?? 0) + volume;
     } else {
-      bins[index].bearVolume += volume;
+      bins[index].sellVolume = (bins[index].sellVolume ?? 0) + volume;
     }
   }
 
-  return bins.map((bin) => {
-    const total = Math.max(bin.totalVolume, 0.0000001);
+  const maxVolume = Math.max(...bins.map((bin) => bin.volume), 0.0000001);
 
-    return {
-      ...bin,
-      bullPercent: (bin.bullVolume / total) * 100,
-      bearPercent: (bin.bearVolume / total) * 100,
-    };
-  });
+  return bins
+    .filter((bin) => bin.volume > 0)
+    .map((bin) => {
+      const total = Math.max(bin.volume, 0.0000001);
+      const buyVolume = bin.buyVolume ?? 0;
+      const sellVolume = bin.sellVolume ?? 0;
+
+      return {
+        ...bin,
+        buyPct: (buyVolume / total) * 100,
+        sellPct: (sellVolume / total) * 100,
+        widthPct: (bin.volume / maxVolume) * 100,
+        dominantSide: buyVolume >= sellVolume ? "buy" : "sell",
+      };
+    });
 }
 
 function drawLiquidityProfile(
   context: CanvasRenderingContext2D,
+  chart: IChartApi,
   mainSeries: ISeriesApi<"Candlestick">,
+  overlayPayload: ChartOverlayPayload | null | undefined,
   candles: OverlayCandle[] | undefined,
   canvasWidth: number,
-  canvasHeight: number,
-  lookback: number
+  profileLookback: number
 ) {
-  const bins = buildLiquidityProfile(candles, 24, lookback);
+  const anchorX = getFutureAnchorX(chart, candles ?? [], canvasWidth);
+
+  // Same rule as ghost candles:
+  // if latest candle / ghost area is not visible, profile is not visible.
+  if (anchorX === null) return;
+
+  let bins = normalizePayloadBins(overlayPayload);
+
+  if (bins.length === 0) {
+    bins = buildFallbackProfileFromCandles(candles, 24, profileLookback);
+  }
 
   if (bins.length === 0) return;
 
-  const maxVolume = Math.max(...bins.map((bin) => bin.totalVolume));
+  const maxWidth = Math.min(180, Math.max(95, canvasWidth * 0.14));
+  const startX = anchorX + 12;
 
-  if (!Number.isFinite(maxVolume) || maxVolume <= 0) return;
-
-  const panelLeft = getProfilePanelLeft(canvasWidth);
-  const panelWidth = canvasWidth - panelLeft;
-  const maxBarWidth = panelWidth - 28;
+  if (startX > canvasWidth + 20) return;
 
   context.save();
-
-  context.fillStyle = "rgba(0, 0, 0, 0.34)";
-  context.fillRect(panelLeft, 0, panelWidth, canvasHeight);
 
   for (const bin of bins) {
     const yHigh = priceToCoordinate(mainSeries, bin.high);
@@ -670,27 +708,37 @@ function drawLiquidityProfile(
     const height = Math.max(2, bottom - top - 1);
     const y = top + 1;
 
-    const totalWidth = Math.max(2, (bin.totalVolume / maxVolume) * maxBarWidth);
-    const bearWidth = totalWidth * (bin.bearPercent / 100);
-    const bullWidth = totalWidth * (bin.bullPercent / 100);
-    const x = panelLeft + 7;
+    const widthPct = Number.isFinite(bin.widthPct ?? NaN)
+      ? Math.max(2, Math.min(100, bin.widthPct ?? 0))
+      : 35;
+
+    const totalWidth = (widthPct / 100) * maxWidth;
+    const bearWidth = totalWidth * (bin.sellPct / 100);
+    const bullWidth = totalWidth * (bin.buyPct / 100);
 
     if (bearWidth > 1) {
-      context.fillStyle = "rgba(239, 83, 80, 0.45)";
-      context.fillRect(x, y, bearWidth, height);
+      context.fillStyle = "rgba(239, 83, 80, 0.46)";
+      context.fillRect(startX, y, bearWidth, height);
     }
 
     if (bullWidth > 1) {
-      context.fillStyle = "rgba(38, 166, 154, 0.52)";
-      context.fillRect(x + bearWidth, y, bullWidth, height);
+      context.fillStyle = "rgba(38, 166, 154, 0.54)";
+      context.fillRect(startX + bearWidth, y, bullWidth, height);
     }
 
-    if (totalWidth > maxBarWidth * 0.46) {
+    const shouldLabel = bin.isPOC || bin.isBuyLiquidity || bin.isSellLiquidity || totalWidth > maxWidth * 0.52;
+
+    if (shouldLabel) {
       context.font = "600 10px Inter, system-ui, sans-serif";
       context.textAlign = "left";
       context.textBaseline = "middle";
-      context.fillStyle = "rgba(209, 213, 219, 0.76)";
-      context.fillText(formatCompactVolume(bin.totalVolume), x + totalWidth + 4, y + height / 2);
+      context.fillStyle = bin.dominantSide === "sell"
+        ? "rgba(239, 83, 80, 0.78)"
+        : "rgba(38, 166, 154, 0.80)";
+
+      const pct = bin.dominantSide === "sell" ? bin.sellPct : bin.buyPct;
+      context.fillText(`${Math.round(pct)}%`, startX - 24, y + height / 2);
+      context.fillText(formatCompactVolume(bin.volume), startX + totalWidth + 4, y + height / 2);
     }
   }
 
@@ -798,16 +846,17 @@ export default function LightweightChartOverlayCanvas({
     }
 
     if (showLabels) {
-      drawMarkers(context, chart, mainSeries, markers, candles);
+      drawMarkers(context, chart, mainSeries, markers, candles, canvasWidth);
     }
 
     if (showLiquidityProfile) {
       drawLiquidityProfile(
         context,
+        chart,
         mainSeries,
+        overlayPayload,
         candles,
         canvasWidth,
-        canvasHeight,
         profileLookback
       );
     }
@@ -818,6 +867,7 @@ export default function LightweightChartOverlayCanvas({
     chart,
     mainSeries,
     markers,
+    overlayPayload,
     profileLookback,
     redrawVersion,
     showLabels,
