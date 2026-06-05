@@ -95,6 +95,32 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+function getQualityScore(value: unknown): number {
+  if (!value || typeof value !== "object") return 0;
+
+  const raw = value as any;
+  const parsed = Number(raw.qualityScore ?? raw.quality_score ?? 0);
+
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(10, parsed)) : 0;
+}
+
+function qualityAlphaBoost(value: unknown): number {
+  const score = getQualityScore(value);
+
+  if (score >= 8) return 0.10;
+  if (score >= 5) return 0.05;
+  return 0;
+}
+
+function qualityLineWidth(value: unknown, base = 1): number {
+  const score = getQualityScore(value);
+
+  if (score >= 8) return base + 0.75;
+  if (score >= 5) return base + 0.35;
+  return base;
+}
+
+
 function normalizeUnixTime(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value > 10_000_000_000 ? Math.floor(value / 1000) : value;
@@ -211,8 +237,9 @@ function getFutureOverlayGeometry(chart: IChartApi, candles: OverlayCandle[], ca
   /**
    * Profile bars should behave like ghost candles:
    * close to the latest/future candle area, not pinned far away after the PD box.
+   * Current offset: 10 candles to the right of latest candle.
    */
-  const profileLeft = latestX + spacing * 12;
+  const profileLeft = latestX + spacing * 10;
   const profileWidth = Math.min(165, Math.max(85, canvasWidth * 0.12));
 
   return {
@@ -328,6 +355,20 @@ function getZoneBorderColor(zone: ChartOverlayZone): string {
   if (zone.direction === "bearish") return "rgba(239, 83, 80, 0.40)";
 
   return "rgba(148, 163, 184, 0.30)";
+}
+
+function addAlpha(color: string, boost: number): string {
+  if (!boost) return color;
+
+  const match = color.match(/rgba\(([^,]+),\s*([^,]+),\s*([^,]+),\s*([^)]+)\)/);
+  if (!match) return color;
+
+  const r = match[1];
+  const g = match[2];
+  const b = match[3];
+  const alpha = Math.max(0, Math.min(1, Number(match[4]) + boost));
+
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
 function getMarkerTextColor(marker: ChartOverlayMarker): string {
@@ -569,9 +610,9 @@ function drawPremiumDiscountZones(
     const height = Math.max(5, bottomY - topY);
 
     context.save();
-    context.fillStyle = getZoneColor(zone);
-    context.strokeStyle = getZoneBorderColor(zone);
-    context.lineWidth = 1;
+    context.fillStyle = addAlpha(getZoneColor(zone), qualityAlphaBoost(zone));
+    context.strokeStyle = addAlpha(getZoneBorderColor(zone), qualityAlphaBoost(zone));
+    context.lineWidth = qualityLineWidth(zone, 1);
 
     context.fillRect(horizontal.left, topY, horizontal.width, height);
     context.strokeRect(horizontal.left, topY, horizontal.width, height);
@@ -698,9 +739,9 @@ function drawRegularZones(
     if (height < 3) continue;
 
     context.save();
-    context.fillStyle = getZoneColor(zone);
-    context.strokeStyle = getZoneBorderColor(zone);
-    context.lineWidth = 1;
+    context.fillStyle = addAlpha(getZoneColor(zone), qualityAlphaBoost(zone));
+    context.strokeStyle = addAlpha(getZoneBorderColor(zone), qualityAlphaBoost(zone));
+    context.lineWidth = qualityLineWidth(zone, 1);
 
     context.fillRect(clippedLeft, top, width, height);
     context.strokeRect(clippedLeft, top, width, height);
@@ -954,7 +995,7 @@ function drawStructureLines(
     context.save();
 
     context.strokeStyle = color;
-    context.lineWidth = isInternal ? 1 : 1.25;
+    context.lineWidth = qualityLineWidth(line, isInternal ? 1 : 1.25);
     context.setLineDash(isInternal ? [3, 3] : []);
     context.beginPath();
     context.moveTo(clippedLeft, y);
@@ -1240,13 +1281,16 @@ function drawLiquidityProfile(
     const bearWidth = totalWidth * (bin.sellPct / 100);
     const bullWidth = totalWidth * (bin.buyPct / 100);
 
+    const liquidityScore = Number((bin as any).liquidityScore ?? 0);
+    const profileBoost = liquidityScore >= 4 ? 0.12 : liquidityScore >= 2 ? 0.06 : 0;
+
     if (bearWidth > 1) {
-      context.fillStyle = "rgba(239, 83, 80, 0.46)";
+      context.fillStyle = addAlpha("rgba(239, 83, 80, 0.46)", profileBoost);
       context.fillRect(startX, y, bearWidth, height);
     }
 
     if (bullWidth > 1) {
-      context.fillStyle = "rgba(38, 166, 154, 0.54)";
+      context.fillStyle = addAlpha("rgba(38, 166, 154, 0.54)", profileBoost);
       context.fillRect(startX + bearWidth, y, bullWidth, height);
     }
 
