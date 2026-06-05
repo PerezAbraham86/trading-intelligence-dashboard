@@ -52,6 +52,12 @@ export type ChartOverlayLine = {
   time: OverlayTime;
   direction: OverlayDirection;
   strength?: number;
+  fromTime?: OverlayTime;
+  fromIndex?: number;
+  breakIndex?: number;
+  pivotIndex?: number;
+  brokenLevel?: number;
+  scope?: string;
 };
 
 export type ChartOverlayZone = {
@@ -88,6 +94,11 @@ export type ChartOverlayMarker = {
     | "Imbalance"
     | "Pressure";
   strength?: number;
+  fromTime?: OverlayTime;
+  fromIndex?: number;
+  breakIndex?: number;
+  pivotIndex?: number;
+  scope?: string;
 };
 
 export type ChartOverlaySummary = {
@@ -109,6 +120,8 @@ export type ChartOverlayPayload = {
   lines: ChartOverlayLine[];
   zones: ChartOverlayZone[];
   markers: ChartOverlayMarker[];
+  smcEvents?: unknown[];
+  liquidityProfileBins?: unknown[];
   summary: ChartOverlaySummary;
 };
 
@@ -284,31 +297,34 @@ function prioritizeLines(lines: ChartOverlayLine[]): ChartOverlayLine[] {
 }
 
 export function buildSMCLines(smc: SMCAnalysisResult, maxLines = DEFAULT_OPTIONS.maxLines): ChartOverlayLine[] {
-  const lines: ChartOverlayLine[] = [];
+  const structureLines: ChartOverlayLine[] = smc.structureEvents.slice(-Math.max(maxLines, 24)).map((event) => ({
+    id: `structure-${event.type}-${event.index}-${event.fromIndex ?? "pivot"}`,
+    type:
+      event.type === "BOS"
+        ? "bos"
+        : event.type === "CHoCH"
+          ? "choch"
+          : "mss",
+    label: event.label || event.type,
+    price: event.brokenLevel,
+    brokenLevel: event.brokenLevel,
+    time: event.time,
+    fromTime: event.fromTime,
+    fromIndex: event.fromIndex,
+    pivotIndex: event.pivotIndex ?? event.fromIndex,
+    breakIndex: event.breakIndex ?? event.index,
+    scope: "internal",
+    direction: normalizeDirection(event.direction),
+  }));
 
-  const latestStructure = smc.latestEvent;
   const latestSwingHigh = smc.latestSwingHigh;
   const latestSwingLow = smc.latestSwingLow;
   const latestSweep = smc.liquiditySweeps[smc.liquiditySweeps.length - 1];
 
-  if (latestStructure) {
-    lines.push({
-      id: `structure-${latestStructure.type}-${latestStructure.index}`,
-      type:
-        latestStructure.type === "BOS"
-          ? "bos"
-          : latestStructure.type === "CHoCH"
-            ? "choch"
-            : "mss",
-      label: latestStructure.label,
-      price: latestStructure.brokenLevel,
-      time: latestStructure.time,
-      direction: normalizeDirection(latestStructure.direction),
-    });
-  }
+  const contextLines: ChartOverlayLine[] = [];
 
   if (latestSweep) {
-    lines.push({
+    contextLines.push({
       id: `sweep-${latestSweep.direction}-${latestSweep.index}`,
       type: "liquiditySweep",
       label: latestSweep.direction === "buySide" ? "Buy-side sweep" : "Sell-side sweep",
@@ -319,7 +335,7 @@ export function buildSMCLines(smc: SMCAnalysisResult, maxLines = DEFAULT_OPTIONS
   }
 
   if (latestSwingHigh) {
-    lines.push({
+    contextLines.push({
       id: `swing-high-${latestSwingHigh.index}`,
       type: "swingHigh",
       label: "Swing high",
@@ -330,7 +346,7 @@ export function buildSMCLines(smc: SMCAnalysisResult, maxLines = DEFAULT_OPTIONS
   }
 
   if (latestSwingLow) {
-    lines.push({
+    contextLines.push({
       id: `swing-low-${latestSwingLow.index}`,
       type: "swingLow",
       label: "Swing low",
@@ -340,7 +356,7 @@ export function buildSMCLines(smc: SMCAnalysisResult, maxLines = DEFAULT_OPTIONS
     });
   }
 
-  return prioritizeLines(lines).slice(0, maxLines);
+  return [...structureLines, ...prioritizeLines(contextLines).slice(0, 4)];
 }
 
 export function buildSMCZones(smc: SMCAnalysisResult, maxZones = DEFAULT_OPTIONS.maxZones): ChartOverlayZone[] {
@@ -536,14 +552,23 @@ export function buildChartOverlayPayload(
 
   const currentPrice = getCurrentPrice(validCandles);
 
-  const rawLines = [
-    ...buildSMCLines(smc, settings.maxLines),
+  const structureLines = buildSMCLines(smc, Math.max(settings.maxLines, 24)).filter((line) => {
+    return line.type === "bos" || line.type === "choch" || line.type === "mss";
+  });
+
+  const contextLines = [
+    ...buildSMCLines(smc, settings.maxLines).filter((line) => {
+      return line.type !== "bos" && line.type !== "choch" && line.type !== "mss";
+    }),
     ...buildAlphaXLines(alphaX, settings.maxLines),
   ];
 
-  const lines = dedupeLinesByPrice(
-    prioritizeLines(rawLines.filter((line) => isNearCurrentPrice(line, currentPrice, 6)))
-  ).slice(0, Math.min(settings.maxLines, 5));
+  const lines = [
+    ...structureLines.slice(-24),
+    ...dedupeLinesByPrice(
+      prioritizeLines(contextLines.filter((line) => isNearCurrentPrice(line, currentPrice, 6)))
+    ).slice(0, Math.min(settings.maxLines, 5)),
+  ];
 
   const zones = [
     ...buildSMCZones(smc, settings.maxZones),
@@ -560,6 +585,7 @@ export function buildChartOverlayPayload(
     lines,
     zones,
     markers,
+    smcEvents: smc.structureEvents,
     summary,
   };
 }
