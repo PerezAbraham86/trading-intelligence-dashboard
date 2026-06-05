@@ -548,6 +548,60 @@ function drawPremiumDiscountZones(
   }
 }
 
+function getZoneIndexCoordinate(
+  chart: IChartApi,
+  candles: OverlayCandle[],
+  indexValue: unknown
+): number | null {
+  const index = Number(indexValue);
+
+  if (!Number.isFinite(index)) return null;
+
+  const safeIndex = Math.floor(index);
+
+  if (safeIndex < 0 || safeIndex >= candles.length) return null;
+
+  return timeToCoordinate(chart, candles[safeIndex].time, candles);
+}
+
+function getZoneRightCoordinate(
+  chart: IChartApi,
+  zone: ChartOverlayZone,
+  candles: OverlayCandle[],
+  canvasWidth: number
+): number | null {
+  const zoneWithIndexes = zone as ChartOverlayZone & { endIndex?: number };
+  const byIndex = getZoneIndexCoordinate(chart, candles, zoneWithIndexes.endIndex);
+
+  if (byIndex !== null) return byIndex;
+
+  const byTime = timeToCoordinate(chart, zone.endTime, candles);
+
+  if (byTime !== null) return byTime;
+
+  const latest = candles[candles.length - 1];
+  const latestX = latest ? timeToCoordinate(chart, latest.time, candles) : null;
+
+  if (latestX !== null && latestX >= -40 && latestX <= canvasWidth + 80) {
+    return latestX;
+  }
+
+  return null;
+}
+
+function getZoneLeftCoordinate(
+  chart: IChartApi,
+  zone: ChartOverlayZone,
+  candles: OverlayCandle[]
+): number | null {
+  const zoneWithIndexes = zone as ChartOverlayZone & { startIndex?: number };
+  const byIndex = getZoneIndexCoordinate(chart, candles, zoneWithIndexes.startIndex);
+
+  if (byIndex !== null) return byIndex;
+
+  return timeToCoordinate(chart, zone.startTime, candles);
+}
+
 function drawRegularZones(
   context: CanvasRenderingContext2D,
   chart: IChartApi,
@@ -559,7 +613,7 @@ function drawRegularZones(
   const regularZones = zones
     .filter((zone) => !isPdZone(zone))
     .filter(isOrderBlockOrFvg)
-    .slice(-6);
+    .slice(-8);
 
   for (const zone of regularZones) {
     const yHigh = priceToCoordinate(mainSeries, zone.high);
@@ -567,18 +621,24 @@ function drawRegularZones(
 
     if (yHigh === null || yLow === null) continue;
 
-    const xStart = timeToCoordinate(chart, zone.startTime, candles);
-    const xEnd = timeToCoordinate(chart, zone.endTime, candles);
+    const xStart = getZoneLeftCoordinate(chart, zone, candles);
+    const xEnd = getZoneRightCoordinate(chart, zone, candles, canvasWidth);
 
-    // Do not draw floating OB/FVG if neither side maps to a real chart coordinate.
-    if (xStart === null && xEnd === null) continue;
+    // Do not draw floating OB/FVG if no real chart coordinate exists.
+    if (xStart === null || xEnd === null) continue;
 
-    const fallbackWidth = Math.min(220, Math.max(90, canvasWidth * 0.16));
-    const right = xEnd ?? Math.min(canvasWidth - 20, (xStart ?? 0) + fallbackWidth);
-    const left = xStart ?? Math.max(0, right - fallbackWidth);
-    const width = Math.max(16, Math.min(right - left, fallbackWidth));
+    const left = Math.min(xStart, xEnd);
+    const right = Math.max(xStart, xEnd);
 
     if (right < -20 || left > canvasWidth + 20) continue;
+
+    const clippedLeft = Math.max(0, left);
+    const clippedRight = Math.min(canvasWidth, right);
+    const width = clippedRight - clippedLeft;
+
+    // Pine OB boxes extend from the source candle to current time.
+    // If the mapped width is too tiny, it is not a useful order block.
+    if (width < 12) continue;
 
     const top = Math.min(yHigh, yLow);
     const bottom = Math.max(yHigh, yLow);
@@ -591,11 +651,11 @@ function drawRegularZones(
     context.strokeStyle = getZoneBorderColor(zone);
     context.lineWidth = 1;
 
-    context.fillRect(left, top, width, height);
-    context.strokeRect(left, top, width, height);
+    context.fillRect(clippedLeft, top, width, height);
+    context.strokeRect(clippedLeft, top, width, height);
 
-    if (width > 80 && height > 16) {
-      drawZoneLabel(context, zone.label, left + 6, top + 10, getZoneBorderColor(zone), "left");
+    if (width > 70 && height > 12) {
+      drawZoneLabel(context, zone.label, clippedLeft + 6, top + Math.min(10, height / 2), getZoneBorderColor(zone), "left");
     }
 
     context.restore();
