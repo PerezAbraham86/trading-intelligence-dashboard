@@ -843,6 +843,224 @@ function useChartCandles(
 }
 
 
+function isStructureOverlayLine(line: any) {
+  const type = String(line?.type ?? '').toLowerCase()
+  const label = String(line?.label ?? line?.tag ?? '').toUpperCase()
+
+  return (
+    type === 'bos' ||
+    type === 'choch' ||
+    type === 'mss' ||
+    label.includes('BOS') ||
+    label.includes('CHOCH') ||
+    label.includes('MSS')
+  )
+}
+
+function isPdOverlayZone(zone: any) {
+  const label = String(zone?.label ?? '').toLowerCase()
+  const kind = String(zone?.kind ?? zone?.type ?? '').toLowerCase()
+
+  return (
+    label.includes('premium') ||
+    label.includes('equilibrium') ||
+    label.includes('discount') ||
+    kind.includes('premium') ||
+    kind.includes('equilibrium') ||
+    kind.includes('discount')
+  )
+}
+
+function isOrderBlockOverlayZone(zone: any) {
+  const label = String(zone?.label ?? '').toLowerCase()
+  const kind = String(zone?.kind ?? zone?.type ?? '').toLowerCase()
+  const sourceEvent = String(zone?.sourceEvent ?? '').toLowerCase()
+
+  return (
+    label.includes('ob') ||
+    label.includes('order block') ||
+    kind.includes('ob') ||
+    kind.includes('order') ||
+    sourceEvent === 'bos' ||
+    sourceEvent === 'choch' ||
+    sourceEvent === 'mss' ||
+    sourceEvent === 'ibos' ||
+    sourceEvent === 'ichoch'
+  )
+}
+
+function mergeStableOverlayZones(fallbackPayload: any, backendPayload: any) {
+  const fallbackZones = Array.isArray(fallbackPayload?.zones) ? fallbackPayload.zones : []
+  const backendZones = Array.isArray(backendPayload?.zones) ? backendPayload.zones : []
+  const backendOrderBlocks = Array.isArray(backendPayload?.orderBlocks) ? backendPayload.orderBlocks : []
+
+  /**
+   * Stable rule:
+   * - Fallback/frontend SMC is the source of truth for active BOS/CHoCH OB boxes.
+   * - Backend is the source of truth for Premium / Equilibrium / Discount.
+   * - Backend orderBlocks are used only if fallback has no order blocks.
+   */
+  const fallbackOrderBlocks = fallbackZones.filter(isOrderBlockOverlayZone)
+  const fallbackOtherZones = fallbackZones.filter((zone: any) => !isOrderBlockOverlayZone(zone))
+
+  const backendPdZones = backendZones.filter(isPdOverlayZone)
+  const backendOtherNonOrderZones = backendZones.filter(
+    (zone: any) => !isPdOverlayZone(zone) && !isOrderBlockOverlayZone(zone)
+  )
+
+  const backendOrderBlockZones = [
+    ...backendZones.filter(isOrderBlockOverlayZone),
+    ...backendOrderBlocks,
+  ]
+
+  const orderBlockSource =
+    fallbackOrderBlocks.length > 0 ? fallbackOrderBlocks : backendOrderBlockZones
+
+  const merged: any[] = []
+  const seen = new Set<string>()
+
+  for (const zone of [
+    ...orderBlockSource,
+    ...backendPdZones,
+    ...backendOtherNonOrderZones,
+    ...fallbackOtherZones.filter((zone: any) => !isPdOverlayZone(zone)),
+  ]) {
+    if (!zone) continue
+
+    const high = Number(zone.high ?? zone.top)
+    const low = Number(zone.low ?? zone.bottom)
+
+    if (!Number.isFinite(high) || !Number.isFinite(low)) continue
+
+    const key = [
+      zone.kind ?? zone.type,
+      zone.label ?? zone.fullLabel,
+      zone.direction,
+      Math.round(high * 100) / 100,
+      Math.round(low * 100) / 100,
+      zone.startIndex ?? zone.startTime,
+      zone.endIndex ?? zone.endTime,
+    ].join('|')
+
+    if (seen.has(key)) continue
+
+    seen.add(key)
+    merged.push(zone)
+  }
+
+  return merged
+}
+
+function mergeStableOverlayLines(fallbackPayload: any, backendPayload: any) {
+  const fallbackLines = Array.isArray(fallbackPayload?.lines) ? fallbackPayload.lines : []
+  const backendLines = Array.isArray(backendPayload?.lines) ? backendPayload.lines : []
+
+  /**
+   * Stable rule:
+   * - Fallback/frontend SMC lines stay visible.
+   * - Backend structure lines are used only if fallback has none.
+   * - Backend non-structure lines can still come through later.
+   */
+  const fallbackStructureLines = fallbackLines.filter(isStructureOverlayLine)
+  const backendStructureLines = backendLines.filter(isStructureOverlayLine)
+  const backendOtherLines = backendLines.filter((line: any) => !isStructureOverlayLine(line))
+  const fallbackOtherLines = fallbackLines.filter((line: any) => !isStructureOverlayLine(line))
+
+  const structureSource =
+    fallbackStructureLines.length > 0 ? fallbackStructureLines : backendStructureLines
+
+  const merged: any[] = []
+  const seen = new Set<string>()
+
+  for (const line of [
+    ...structureSource,
+    ...backendOtherLines,
+    ...fallbackOtherLines,
+  ]) {
+    if (!line) continue
+
+    const price = Number(line.price ?? line.brokenLevel)
+    if (!Number.isFinite(price)) continue
+
+    const key = [
+      line.type,
+      line.label ?? line.tag,
+      Math.round(price * 100) / 100,
+      line.fromIndex ?? line.pivotIndex ?? line.fromTime,
+      line.breakIndex ?? line.index ?? line.time,
+    ].join('|')
+
+    if (seen.has(key)) continue
+
+    seen.add(key)
+    merged.push(line)
+  }
+
+  return merged
+}
+
+function mergeStableOverlayPayloads(fallbackPayload: any, backendPayload: any) {
+  if (!fallbackPayload && !backendPayload) return null
+  if (!backendPayload) return fallbackPayload
+  if (!fallbackPayload) return backendPayload
+
+  const fallbackMarkers = Array.isArray(fallbackPayload.markers) ? fallbackPayload.markers : []
+  const backendMarkers = Array.isArray(backendPayload.markers) ? backendPayload.markers : []
+
+  const mergedMarkers: any[] = []
+  const seenMarkers = new Set<string>()
+
+  for (const marker of [...fallbackMarkers, ...backendMarkers]) {
+    if (!marker) continue
+
+    const key = [
+      marker.type,
+      marker.label,
+      marker.price,
+      marker.time,
+      marker.index,
+    ].join('|')
+
+    if (seenMarkers.has(key)) continue
+
+    seenMarkers.add(key)
+    mergedMarkers.push(marker)
+  }
+
+  const lines = mergeStableOverlayLines(fallbackPayload, backendPayload)
+  const zones = mergeStableOverlayZones(fallbackPayload, backendPayload)
+
+  return {
+    ...backendPayload,
+    // Keep fallback SMC analysis attached because it is the current stable SMC layer.
+    smc: fallbackPayload.smc ?? backendPayload.smc,
+    alphaX: backendPayload.alphaX ?? fallbackPayload.alphaX,
+
+    // Final merged draw sources.
+    lines,
+    zones,
+    markers: mergedMarkers.slice(-60),
+
+    // Preserve backend unified extras.
+    smcEvents: fallbackPayload.smcEvents ?? backendPayload.smcEvents,
+    orderBlocks: zones.filter(isOrderBlockOverlayZone),
+    liquidityEvents: backendPayload.liquidityEvents ?? fallbackPayload.liquidityEvents,
+    liquidityProfileBins:
+      backendPayload.liquidityProfileBins ?? fallbackPayload.liquidityProfileBins,
+    dlmLevels: backendPayload.dlmLevels ?? fallbackPayload.dlmLevels,
+    ghostCandles: backendPayload.ghostCandles ?? fallbackPayload.ghostCandles,
+
+    summary: {
+      ...(fallbackPayload.summary ?? {}),
+      ...(backendPayload.summary ?? {}),
+      lineCount: lines.length,
+      zoneCount: zones.length,
+      markerCount: mergedMarkers.length,
+      overlayMergeMode: 'fallback-smc-plus-backend-pd-profile',
+    },
+  }
+}
+
 type LightweightChartPanelProps = {
   title: string
   symbol: string
@@ -910,27 +1128,32 @@ function LightweightChartPanel({
       engineState
     )
 
-    if (backendOverlayPayload) {
-      return backendOverlayPayload
-    }
+    const fallbackPayload = candles.length >= 20
+      ? buildChartOverlayPayload(dashboardCandlesToOverlayCandles(candles), {
+          smcSwingLength: 3,
+          smcUseCloseBreak: true,
+          alphaXLookback: 20,
+          alphaXRejectionWickPercent: 45,
+          maxLines: 12,
+          maxZones: 12,
+          maxMarkers: 20,
+        })
+      : null
 
     /**
-     * Safety fallback only:
-     * The final architecture expects /api/candles to return one unified
-     * overlayPayload. This browser calculation is only here so the chart
-     * still has basic overlays if the backend response is missing overlays.
+     * Critical rule:
+     * Do not let PD/profile loading replace SMC drawings.
+     *
+     * Backend overlay provides:
+     * - Premium / Equilibrium / Discount
+     * - Liquidity profile bars
+     * - DLM / ghost extras
+     *
+     * Fallback SMC provides the currently stable:
+     * - BOS / CHoCH lines
+     * - order blocks
      */
-    if (candles.length < 20) return null
-
-    return buildChartOverlayPayload(dashboardCandlesToOverlayCandles(candles), {
-      smcSwingLength: 3,
-      smcUseCloseBreak: true,
-      alphaXLookback: 20,
-      alphaXRejectionWickPercent: 45,
-      maxLines: 12,
-      maxZones: 12,
-      maxMarkers: 20,
-    })
+    return mergeStableOverlayPayloads(fallbackPayload, backendOverlayPayload)
   }, [candles, compact, engineState, showOverlayLines, unifiedOverlayPayload])
 
   return (
