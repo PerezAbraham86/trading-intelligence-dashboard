@@ -89,6 +89,7 @@ CANDLE_SITE_CACHE_MAX_AGE_SECONDS = int(os.getenv("CANDLE_SITE_CACHE_MAX_AGE_SEC
 
 MAX_RECENT_SIGNALS = 50
 MAX_RECENT_CANDLES = 5000
+OVERLAY_PAYLOAD_VERSION = "unified_v1"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1824,12 +1825,13 @@ def normalize_backend_overlay_payload(
     ghosts: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
-    Convert api/overlay_engine.py output into the chartOverlays shape already
-    consumed by the React dashboard.
+    Normalize api/overlay_engine.py unified output into the chartOverlays shape
+    already consumed by the React dashboard.
 
-    Important:
-    - Python overlay engine is now the source of truth.
-    - TradingView chartOverlays/webhook overlays are not required.
+    Unified architecture rule:
+    - /api/candles returns candles + one complete overlayPayload.
+    - overlayPayload carries SMC, OBs, PD zones, DLM/profile, and ghosts together.
+    - TradingView webhook overlays are no longer required for the dashboard.
     """
     if not isinstance(backend_payload, dict):
         payload = empty_overlay_payload()
@@ -1856,6 +1858,14 @@ def normalize_backend_overlay_payload(
         normalized_bin["buyPressurePct"] = buy_pct
         normalized_bin["sellPressurePct"] = sell_pct
 
+        # Backwards compatibility for older chart code.
+        if "top" not in normalized_bin and "high" in normalized_bin:
+            normalized_bin["top"] = normalized_bin.get("high")
+        if "bottom" not in normalized_bin and "low" in normalized_bin:
+            normalized_bin["bottom"] = normalized_bin.get("low")
+        if "mid" not in normalized_bin and "price" in normalized_bin:
+            normalized_bin["mid"] = normalized_bin.get("price")
+
         alpha_profile_bins.append(normalized_bin)
 
     summary = backend_payload.get("summary", {})
@@ -1878,11 +1888,30 @@ def normalize_backend_overlay_payload(
                 last_price = to_float(level.get("price"), 0)
                 break
 
+    lines = backend_payload.get("lines", []) if isinstance(backend_payload.get("lines"), list) else []
+    zones = backend_payload.get("zones", []) if isinstance(backend_payload.get("zones"), list) else []
+    markers = backend_payload.get("markers", []) if isinstance(backend_payload.get("markers"), list) else []
+    smc_events = backend_payload.get("smcEvents", []) if isinstance(backend_payload.get("smcEvents"), list) else []
+    order_blocks = backend_payload.get("orderBlocks", []) if isinstance(backend_payload.get("orderBlocks"), list) else []
+    liquidity_events = backend_payload.get("liquidityEvents", []) if isinstance(backend_payload.get("liquidityEvents"), list) else []
+    dlm_levels = backend_payload.get("dlmLevels", []) if isinstance(backend_payload.get("dlmLevels"), list) else []
+
+    normalized_ghosts = backend_payload.get("ghostCandles", []) if isinstance(backend_payload.get("ghostCandles"), list) else []
+    if ghosts:
+        normalized_ghosts = ghosts
+
     return {
-        "smcEvents": backend_payload.get("smcEvents", []) if isinstance(backend_payload.get("smcEvents"), list) else [],
-        "dlmLevels": backend_payload.get("dlmLevels", []) if isinstance(backend_payload.get("dlmLevels"), list) else [],
-        "zones": backend_payload.get("zones", []) if isinstance(backend_payload.get("zones"), list) else [],
-        "liquidityEvents": backend_payload.get("liquidityEvents", []) if isinstance(backend_payload.get("liquidityEvents"), list) else [],
+        "lines": lines,
+        "zones": zones,
+        "markers": markers,
+        "smcEvents": smc_events,
+        "orderBlocks": order_blocks,
+        "liquidityEvents": liquidity_events,
+        "liquidityProfileBins": profile_bins,
+        "dlmLevels": dlm_levels,
+        "ghostCandles": normalized_ghosts,
+
+        # Backwards-compatible names still used by existing chart/panels.
         "dlmConfluenceMarkers": [],
         "scoreMarkers": [{
             "time": now_iso(),
@@ -1893,7 +1922,6 @@ def normalize_backend_overlay_payload(
             "score": score,
             "grade": "A" if score >= 70 else "B" if score >= 55 else "C",
         }],
-        "liquidityProfileBins": profile_bins,
         "alphaProfileBins": alpha_profile_bins,
         "alphaProfileMeta": {
             **dlm_meta,
@@ -1901,9 +1929,9 @@ def normalize_backend_overlay_payload(
             "bearPressurePct": bear_pressure,
             "source": "api.overlay_engine",
         },
-        "ghostCandles": ghosts or [],
         "summary": summary,
-        "source": "python_overlay_engine_no_tradingview_webhook",
+        "overlayVersion": OVERLAY_PAYLOAD_VERSION,
+        "source": "python_unified_overlay_engine",
     }
 
 
@@ -1921,15 +1949,28 @@ def build_python_chart_overlays(candles: List[Dict[str, Any]], ghosts: Optional[
 
     if build_backend_overlay_payload is not None:
         try:
-            backend_payload = build_backend_overlay_payload(
-                candles,
-                internal_pivot_length=5,
-                swing_pivot_length=50,
-                internal_order_blocks=5,
-                swing_order_blocks=5,
-                dlm_lookback=300,
-                dlm_bins=50,
-            )
+            try:
+                backend_payload = build_backend_overlay_payload(
+                    candles,
+                    internal_pivot_length=5,
+                    swing_pivot_length=50,
+                    internal_order_blocks=5,
+                    swing_order_blocks=5,
+                    dlm_lookback=300,
+                    dlm_bins=50,
+                    ghost_candles=ghosts or [],
+                )
+            except TypeError:
+                # Backwards compatibility if an older overlay_engine.py is deployed.
+                backend_payload = build_backend_overlay_payload(
+                    candles,
+                    internal_pivot_length=5,
+                    swing_pivot_length=50,
+                    internal_order_blocks=5,
+                    swing_order_blocks=5,
+                    dlm_lookback=300,
+                    dlm_bins=50,
+                )
             return normalize_backend_overlay_payload(backend_payload, ghosts)
         except Exception as error:
             print(f"[Overlay Engine] api.overlay_engine failed, using legacy fallback: {error}")
@@ -2744,15 +2785,21 @@ def calculate_latest_sentiment(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def empty_overlay_payload() -> Dict[str, Any]:
     return {
-        "smcEvents": [],
-        "dlmLevels": [],
+        "lines": [],
         "zones": [],
+        "markers": [],
+        "smcEvents": [],
+        "orderBlocks": [],
         "liquidityEvents": [],
+        "liquidityProfileBins": [],
+        "dlmLevels": [],
+        "ghostCandles": [],
         "dlmConfluenceMarkers": [],
         "scoreMarkers": [],
         "alphaProfileBins": [],
-        "liquidityProfileBins": [],
         "alphaProfileMeta": {},
+        "overlayVersion": OVERLAY_PAYLOAD_VERSION,
+        "source": "empty_overlay_payload",
     }
 
 
@@ -4757,6 +4804,41 @@ def latest_signal(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 50
     return build_python_dashboard_signal(symbol, timeframe, limit)
 
 
+
+def build_candle_route_payload(
+    *,
+    route_source: str,
+    symbol: str,
+    timeframe: str,
+    candles: List[Dict[str, Any]],
+    provider: Optional[str],
+    cache_label: str,
+    ghosts: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Build one unified candle response with overlays attached."""
+    overlay_payload = build_python_chart_overlays(candles, ghosts or []) if candles else empty_overlay_payload()
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "count": len(candles),
+        "candles": candles,
+        "overlayPayload": overlay_payload,
+        "chartOverlays": overlay_payload,
+        "liquidityProfileBins": overlay_payload.get("liquidityProfileBins", []),
+        "dlmLevels": overlay_payload.get("dlmLevels", []),
+        "lines": overlay_payload.get("lines", []),
+        "zones": overlay_payload.get("zones", []),
+        "markers": overlay_payload.get("markers", []),
+        "smcEvents": overlay_payload.get("smcEvents", []),
+        "orderBlocks": overlay_payload.get("orderBlocks", []),
+        "ghostCandles": overlay_payload.get("ghostCandles", ghosts or []),
+        "source": route_source,
+        "provider": provider,
+        "cache": cache_label,
+        "overlayVersion": OVERLAY_PAYLOAD_VERSION,
+        "createdAt": now_iso(),
+    }
+
 @app.get("/api/recent-signals")
 def recent_signals(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 50) -> Dict[str, Any]:
     safe_limit = max(1, min(int(limit or 50), 200))
@@ -4783,14 +4865,14 @@ def recent_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 3
     safe_limit = max(1, min(int(limit or 300), 5000))
     candles = get_live_recent_candles(normalized_symbol, normalized_timeframe)[-safe_limit:]
 
-    return {
-        "symbol": normalized_symbol,
-        "timeframe": normalized_timeframe,
-        "count": len(candles),
-        "candles": candles,
-        "source": "recent_candles",
-        "provider": "tradingview_webhook",
-    }
+    return build_candle_route_payload(
+        route_source="recent_candles",
+        symbol=normalized_symbol,
+        timeframe=normalized_timeframe,
+        candles=candles,
+        provider="tradingview_webhook",
+        cache_label="live",
+    )
 
 
 @app.get("/api/historical-candles")
@@ -4802,25 +4884,32 @@ def historical_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int
     if not force:
         cached = candle_cache_get("historical", normalized_symbol, normalized_timeframe, safe_limit, CANDLE_SITE_CACHE_MAX_AGE_SECONDS)
         if cached:
+            cached_candles = cached.get("candles")
+            if isinstance(cached_candles, list):
+                rebuilt = build_candle_route_payload(
+                    route_source="historical_candle_route",
+                    symbol=normalized_symbol,
+                    timeframe=normalized_timeframe,
+                    candles=cached_candles,
+                    provider=cached.get("provider"),
+                    cache_label=str(cached.get("cache") or "site_cached"),
+                )
+                rebuilt["siteCache"] = cached.get("siteCache", True)
+                rebuilt["siteCacheAgeSeconds"] = cached.get("siteCacheAgeSeconds")
+                return rebuilt
             return cached
 
     candles = fetch_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
     provider = candles[-1].get("provider") if candles else None
 
-    overlay_payload = build_python_chart_overlays(candles, []) if candles else empty_overlay_payload()
-
-    payload = {
-        "symbol": normalized_symbol,
-        "timeframe": normalized_timeframe,
-        "count": len(candles),
-        "candles": candles,
-        "overlayPayload": overlay_payload,
-        "chartOverlays": overlay_payload,
-        "source": "historical_candle_route",
-        "provider": provider,
-        "cache": "refreshed",
-        "createdAt": now_iso(),
-    }
+    payload = build_candle_route_payload(
+        route_source="historical_candle_route",
+        symbol=normalized_symbol,
+        timeframe=normalized_timeframe,
+        candles=candles,
+        provider=provider,
+        cache_label="refreshed",
+    )
 
     if candles:
         return candle_cache_set("historical", normalized_symbol, normalized_timeframe, safe_limit, payload)
@@ -4839,29 +4928,31 @@ def candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500, for
         cached = candle_cache_get("dashboard", normalized_symbol, normalized_timeframe, safe_limit, CANDLE_SITE_CACHE_MAX_AGE_SECONDS)
         if cached:
             cached_candles = cached.get("candles")
-            if isinstance(cached_candles, list) and "overlayPayload" not in cached:
-                overlay_payload = build_python_chart_overlays(cached_candles, [])
-                cached["overlayPayload"] = overlay_payload
-                cached["chartOverlays"] = overlay_payload
+            if isinstance(cached_candles, list):
+                rebuilt = build_candle_route_payload(
+                    route_source="dashboard_merged_candles",
+                    symbol=normalized_symbol,
+                    timeframe=normalized_timeframe,
+                    candles=cached_candles,
+                    provider=cached.get("provider"),
+                    cache_label=str(cached.get("cache") or "site_cached"),
+                )
+                rebuilt["siteCache"] = cached.get("siteCache", True)
+                rebuilt["siteCacheAgeSeconds"] = cached.get("siteCacheAgeSeconds")
+                return rebuilt
             return cached
 
     merged = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit)
     provider = merged[-1].get("provider") if merged else None
 
-    overlay_payload = build_python_chart_overlays(merged, []) if merged else empty_overlay_payload()
-
-    payload = {
-        "symbol": normalized_symbol,
-        "timeframe": normalized_timeframe,
-        "count": len(merged),
-        "candles": merged,
-        "overlayPayload": overlay_payload,
-        "chartOverlays": overlay_payload,
-        "source": "dashboard_merged_candles",
-        "provider": provider,
-        "cache": "refreshed",
-        "createdAt": now_iso(),
-    }
+    payload = build_candle_route_payload(
+        route_source="dashboard_merged_candles",
+        symbol=normalized_symbol,
+        timeframe=normalized_timeframe,
+        candles=merged,
+        provider=provider,
+        cache_label="refreshed",
+    )
 
     if merged:
         return candle_cache_set("dashboard", normalized_symbol, normalized_timeframe, safe_limit, payload)
@@ -5062,6 +5153,13 @@ def engine_state(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500
         "chartOverlays": overlays,
         "overlayPayload": overlays,
         "liquidityProfileBins": overlays.get("liquidityProfileBins", overlays.get("alphaProfileBins", [])) if isinstance(overlays, dict) else [],
+        "dlmLevels": overlays.get("dlmLevels", []) if isinstance(overlays, dict) else [],
+        "lines": overlays.get("lines", []) if isinstance(overlays, dict) else [],
+        "zones": overlays.get("zones", []) if isinstance(overlays, dict) else [],
+        "markers": overlays.get("markers", []) if isinstance(overlays, dict) else [],
+        "smcEvents": overlays.get("smcEvents", []) if isinstance(overlays, dict) else [],
+        "orderBlocks": overlays.get("orderBlocks", []) if isinstance(overlays, dict) else [],
+        "overlayVersion": OVERLAY_PAYLOAD_VERSION,
         "scorecards": scorecards,
         "smc": scorecards.get("smc"),
         "alphax": scorecards.get("alphax"),
