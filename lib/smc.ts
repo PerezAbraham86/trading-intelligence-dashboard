@@ -77,6 +77,9 @@ export type SMCZone = {
   low: number;
   type: SMCZoneType;
   sourceEvent?: StructureEventType;
+  sourceEventIndex?: number;
+  sourceEventTime?: SMCCandleTime;
+  sourcePivotIndex?: number;
   label: string;
 };
 
@@ -355,6 +358,95 @@ export function detectLiquiditySweeps(
   return sweeps;
 }
 
+function isHighVolatilityCandle(candle: SMCCandle, averageRange: number): boolean {
+  if (!Number.isFinite(averageRange) || averageRange <= 0) return false;
+  return candle.high - candle.low >= averageRange * 2;
+}
+
+function getAverageRange(candles: SMCCandle[], endIndex: number, length = 200): number {
+  const start = Math.max(0, endIndex - length + 1);
+  const window = candles.slice(start, endIndex + 1);
+
+  if (window.length === 0) return 0;
+
+  return window.reduce((sum, candle) => sum + Math.max(candle.high - candle.low, 0), 0) / window.length;
+}
+
+function getParsedHigh(candle: SMCCandle, averageRange: number): number {
+  return isHighVolatilityCandle(candle, averageRange) ? candle.low : candle.high;
+}
+
+function getParsedLow(candle: SMCCandle, averageRange: number): number {
+  return isHighVolatilityCandle(candle, averageRange) ? candle.high : candle.low;
+}
+
+function findOrderBlockSourceCandle(
+  candles: SMCCandle[],
+  event: StructureEvent
+): { index: number; candle: SMCCandle; high: number; low: number } | null {
+  const validCandles = normalizeSMCCandles(candles);
+
+  if (validCandles.length === 0) return null;
+
+  const start = Math.max(0, Math.min(event.fromIndex ?? event.pivotIndex ?? event.index, event.index));
+  const end = Math.max(0, Math.min(event.index, validCandles.length - 1));
+
+  if (end <= start) return null;
+
+  let selectedIndex = start;
+  let selectedValue = event.direction === "bearish" ? Number.NEGATIVE_INFINITY : Number.POSITIVE_INFINITY;
+
+  for (let index = start; index <= end; index += 1) {
+    const candle = validCandles[index];
+    const averageRange = getAverageRange(validCandles, index);
+    const parsedHigh = getParsedHigh(candle, averageRange);
+    const parsedLow = getParsedLow(candle, averageRange);
+
+    // Pine logic:
+    // bearish OB = max parsedHigh between pivot and break
+    // bullish OB = min parsedLow between pivot and break
+    if (event.direction === "bearish") {
+      if (parsedHigh > selectedValue) {
+        selectedValue = parsedHigh;
+        selectedIndex = index;
+      }
+    } else if (parsedLow < selectedValue) {
+      selectedValue = parsedLow;
+      selectedIndex = index;
+    }
+  }
+
+  const selectedCandle = validCandles[selectedIndex];
+  const averageRange = getAverageRange(validCandles, selectedIndex);
+
+  return {
+    index: selectedIndex,
+    candle: selectedCandle,
+    high: getParsedHigh(selectedCandle, averageRange),
+    low: getParsedLow(selectedCandle, averageRange),
+  };
+}
+
+function isOrderBlockMitigated(
+  zone: SMCZone,
+  candles: SMCCandle[],
+  useCloseBreak: boolean
+): boolean {
+  const validCandles = normalizeSMCCandles(candles);
+  const start = Math.min(validCandles.length - 1, Math.max(zone.endIndex + 1, zone.startIndex + 1));
+
+  for (let index = start; index < validCandles.length; index += 1) {
+    const candle = validCandles[index];
+    const bearishMitigationSource = useCloseBreak ? candle.close : candle.high;
+    const bullishMitigationSource = useCloseBreak ? candle.close : candle.low;
+
+    if (zone.type === "supply" && bearishMitigationSource > zone.high) return true;
+    if (zone.type === "demand" && bullishMitigationSource < zone.low) return true;
+  }
+
+  return false;
+}
+
 export function buildStructureZones(
   candles: SMCCandle[],
   structureEvents: StructureEvent[],
@@ -362,37 +454,35 @@ export function buildStructureZones(
 ): SMCZone[] {
   const validCandles = normalizeSMCCandles(candles);
   const settings = normalizeOptions(options);
+  const latestCandle = validCandles[validCandles.length - 1];
+
+  if (!latestCandle) return [];
 
   const zones: SMCZone[] = [];
 
   for (const event of structureEvents) {
-    const startIndex = Math.max(0, event.index - settings.zoneLookback);
-    const endIndex = event.index;
-    const zoneCandles = validCandles.slice(startIndex, endIndex + 1);
+    const source = findOrderBlockSourceCandle(validCandles, event);
 
-    if (zoneCandles.length === 0) continue;
+    if (!source) continue;
 
-    const oppositeCandles =
-      event.direction === "bullish"
-        ? zoneCandles.filter((candle) => candle.close < candle.open)
-        : zoneCandles.filter((candle) => candle.close > candle.open);
-
-    const baseCandles = oppositeCandles.length > 0 ? oppositeCandles : zoneCandles;
-    const sourceCandle = baseCandles[baseCandles.length - 1];
-
-    if (!sourceCandle) continue;
-
-    zones.push({
-      startIndex,
-      endIndex,
-      startTime: validCandles[startIndex].time,
-      endTime: validCandles[endIndex].time,
-      high: sourceCandle.high,
-      low: sourceCandle.low,
+    const zone: SMCZone = {
+      startIndex: source.index,
+      endIndex: validCandles.length - 1,
+      startTime: source.candle.time,
+      endTime: latestCandle.time,
+      high: Math.max(source.high, source.low),
+      low: Math.min(source.high, source.low),
       type: event.direction === "bullish" ? "demand" : "supply",
       sourceEvent: event.type,
-      label: event.direction === "bullish" ? "Demand zone" : "Supply zone",
-    });
+      sourceEventIndex: event.index,
+      sourceEventTime: event.time,
+      sourcePivotIndex: event.fromIndex ?? event.pivotIndex,
+      label: event.direction === "bullish" ? "Bullish OB" : "Bearish OB",
+    };
+
+    if (!isOrderBlockMitigated(zone, validCandles, settings.useCloseBreak)) {
+      zones.push(zone);
+    }
   }
 
   return zones;
