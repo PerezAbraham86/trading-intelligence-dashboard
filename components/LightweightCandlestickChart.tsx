@@ -8,6 +8,7 @@ import {
   IChartApi,
   ISeriesApi,
   LineData,
+  WhitespaceData,
   Time,
   createChart,
 } from "lightweight-charts";
@@ -53,6 +54,9 @@ export type DashboardCandle = {
 };
 
 export type ChartMode = "regular" | "heikinAshi";
+export type NrtrOverlayMode = "Off" | "ATR-Based" | "Percentage";
+export type NrtrPresetMode = "Scalping" | "Swing" | "Long";
+export type NrtrExitMode = "Off" | "Pivot Pullback" | "Internal SuperTrend End";
 
 type LightweightCandlestickChartProps = {
   candles: DashboardCandle[];
@@ -72,6 +76,10 @@ type LightweightCandlestickChartProps = {
   showLiquidityProfile?: boolean;
   showSmma20?: boolean;
   smmaLength?: number;
+  showNrtr?: boolean;
+  nrtrMode?: NrtrOverlayMode;
+  nrtrPreset?: NrtrPresetMode;
+  nrtrExitMode?: NrtrExitMode;
 };
 
 function isValidCandle(candle: DashboardCandle | null | undefined): candle is DashboardCandle {
@@ -187,6 +195,537 @@ function calculateSmmaLineData(
   return result;
 }
 
+
+type NrtrPoint = {
+  time: Time;
+  value: number | null;
+  direction: 1 | -1 | 0;
+  buy: boolean;
+  sell: boolean;
+};
+
+type NrtrExitPoint = {
+  time: Time;
+  value: number;
+  direction: 1 | -1;
+  label: string;
+};
+
+type NrtrTradeStats = {
+  direction: 1 | -1 | 0;
+  directionText: string;
+  entryPrice: number | null;
+  currentPrice: number | null;
+  trailingStop: number | null;
+  pnlPoints: number | null;
+  pnlPercent: number | null;
+  lockedProfit: number | null;
+  lockedPercent: number | null;
+  moveDistance: number | null;
+  distancePercent: number | null;
+  barsInTrade: number;
+  lastSignalText: string;
+};
+
+type NrtrLineData = Array<LineData<Time> | WhitespaceData<Time>>;
+
+function getNrtrPresetValues(preset: NrtrPresetMode) {
+  if (preset === "Long") {
+    return {
+      atrMultiplier: 5.0,
+      percent: 0.5,
+      label: "Long",
+    };
+  }
+
+  if (preset === "Swing") {
+    return {
+      atrMultiplier: 3.0,
+      percent: 0.25,
+      label: "Swing",
+    };
+  }
+
+  return {
+    atrMultiplier: 1.5,
+    percent: 0.15,
+    label: "Scalping",
+  };
+}
+
+function calculateAtr(candles: DashboardCandle[], length: number): Array<number | null> {
+  const validCandles = candles.filter(isValidCandle);
+  const atrValues: Array<number | null> = Array(validCandles.length).fill(null);
+
+  if (validCandles.length === 0 || length <= 0) return atrValues;
+
+  const trueRanges = validCandles.map((candle, index) => {
+    const previousClose = index > 0 ? validCandles[index - 1].close : candle.close;
+
+    return Math.max(
+      candle.high - candle.low,
+      Math.abs(candle.high - previousClose),
+      Math.abs(candle.low - previousClose)
+    );
+  });
+
+  let seedSum = 0;
+
+  for (let index = 0; index < trueRanges.length; index += 1) {
+    const value = trueRanges[index];
+
+    if (index < length) {
+      seedSum += value;
+
+      if (index === length - 1) {
+        atrValues[index] = seedSum / length;
+      }
+
+      continue;
+    }
+
+    const previousAtr = atrValues[index - 1];
+
+    atrValues[index] =
+      previousAtr === null || !Number.isFinite(previousAtr)
+        ? null
+        : (previousAtr * (length - 1) + value) / length;
+  }
+
+  return atrValues;
+}
+
+function calculateNrtrPercentage(candles: DashboardCandle[], percent = 0.25): NrtrPoint[] {
+  const validCandles = candles.filter(isValidCandle);
+  const result: NrtrPoint[] = [];
+  const coefficient = Math.max(0, Math.min(100, percent)) / 100;
+
+  if (validCandles.length === 0) return result;
+
+  let trend: 1 | -1 = 1;
+  let highestPoint = validCandles[0].high;
+  let lowestPoint = validCandles[0].low;
+  let nrtr = highestPoint * (1 - coefficient);
+
+  for (let index = 0; index < validCandles.length; index += 1) {
+    const candle = validCandles[index];
+    const previousTrend = trend;
+
+    if (trend === 1) {
+      if (candle.high > highestPoint) highestPoint = candle.high;
+      nrtr = highestPoint * (1 - coefficient);
+
+      if (candle.low <= nrtr) {
+        trend = -1;
+        lowestPoint = candle.low;
+        nrtr = lowestPoint * (1 + coefficient);
+      }
+    } else {
+      if (candle.low < lowestPoint) lowestPoint = candle.low;
+      nrtr = lowestPoint * (1 + coefficient);
+
+      if (candle.high >= nrtr) {
+        trend = 1;
+        highestPoint = candle.high;
+        nrtr = highestPoint * (1 - coefficient);
+      }
+    }
+
+    result.push({
+      time: candle.time as Time,
+      value: Number.isFinite(nrtr) ? nrtr : null,
+      direction: trend,
+      buy: index > 0 && trend === 1 && previousTrend === -1,
+      sell: index > 0 && trend === -1 && previousTrend === 1,
+    });
+  }
+
+  return result;
+}
+
+function calculateNrtrAtrSuperTrend(
+  candles: DashboardCandle[],
+  atrLength = 14,
+  atrMultiplier = 3
+): NrtrPoint[] {
+  const validCandles = candles.filter(isValidCandle);
+  const result: NrtrPoint[] = [];
+
+  if (validCandles.length === 0) return result;
+
+  const atrValues = calculateAtr(validCandles, atrLength);
+
+  let finalUpper: number | null = null;
+  let finalLower: number | null = null;
+  let previousSuperTrend: number | null = null;
+  let previousFinalUpper: number | null = null;
+  let previousFinalLower: number | null = null;
+  let direction: 1 | -1 | 0 = 0;
+
+  for (let index = 0; index < validCandles.length; index += 1) {
+    const candle = validCandles[index];
+    const previousClose = index > 0 ? validCandles[index - 1].close : candle.close;
+    const atr = atrValues[index];
+    const previousDirection = direction;
+
+    if (atr === null || !Number.isFinite(atr)) {
+      result.push({
+        time: candle.time as Time,
+        value: null,
+        direction: 0,
+        buy: false,
+        sell: false,
+      });
+      continue;
+    }
+
+    const hl2 = (candle.high + candle.low) / 2;
+    const basicUpper = hl2 + atrMultiplier * atr;
+    const basicLower = hl2 - atrMultiplier * atr;
+
+    if (previousFinalUpper === null || previousFinalLower === null) {
+      finalUpper = basicUpper;
+      finalLower = basicLower;
+    } else {
+      finalUpper =
+        basicUpper < previousFinalUpper || previousClose > previousFinalUpper
+          ? basicUpper
+          : previousFinalUpper;
+
+      finalLower =
+        basicLower > previousFinalLower || previousClose < previousFinalLower
+          ? basicLower
+          : previousFinalLower;
+    }
+
+    if (previousSuperTrend === null) {
+      direction = candle.close >= hl2 ? 1 : -1;
+    } else if (
+      previousFinalUpper !== null &&
+      Math.abs(previousSuperTrend - previousFinalUpper) <= 1e-10
+    ) {
+      direction = candle.close > finalUpper ? 1 : -1;
+    } else {
+      direction = candle.close < finalLower ? -1 : 1;
+    }
+
+    const superTrend = direction === 1 ? finalLower : finalUpper;
+
+    result.push({
+      time: candle.time as Time,
+      value: Number.isFinite(superTrend ?? NaN) ? Number(superTrend) : null,
+      direction,
+      buy: index > 0 && previousDirection === -1 && direction === 1,
+      sell: index > 0 && previousDirection === 1 && direction === -1,
+    });
+
+    previousSuperTrend = superTrend;
+    previousFinalUpper = finalUpper;
+    previousFinalLower = finalLower;
+  }
+
+  return result;
+}
+
+function calculateNrtrOverlay(
+  candles: DashboardCandle[],
+  mode: NrtrOverlayMode,
+  preset: NrtrPresetMode
+): NrtrPoint[] {
+  const presetValues = getNrtrPresetValues(preset);
+
+  if (mode === "ATR-Based") {
+    return calculateNrtrAtrSuperTrend(candles, 14, presetValues.atrMultiplier);
+  }
+
+  if (mode === "Percentage") {
+    return calculateNrtrPercentage(candles, presetValues.percent);
+  }
+
+  return [];
+}
+
+function calculateNrtrExitPoints(
+  candles: DashboardCandle[],
+  nrtrPoints: NrtrPoint[],
+  exitMode: NrtrExitMode,
+  pivotLength = 5
+): NrtrExitPoint[] {
+  const validCandles = candles.filter(isValidCandle);
+
+  if (exitMode === "Off" || validCandles.length === 0 || nrtrPoints.length === 0) {
+    return [];
+  }
+
+  const exits: NrtrExitPoint[] = [];
+  let exitLocked = false;
+
+  const internalPoints =
+    exitMode === "Internal SuperTrend End"
+      ? calculateNrtrAtrSuperTrend(validCandles, 10, 1.5)
+      : [];
+
+  for (let index = 1; index < validCandles.length; index += 1) {
+    const point = nrtrPoints[index];
+    const previousPoint = nrtrPoints[index - 1];
+    const direction = point?.direction ?? 0;
+    const previousDirection = previousPoint?.direction ?? 0;
+
+    if (direction !== previousDirection) {
+      exitLocked = false;
+    }
+
+    if (direction === 0) continue;
+
+    if (exitMode === "Pivot Pullback") {
+      const previousLookbackStart = Math.max(0, index - 1 - pivotLength);
+      const previousWindow = validCandles.slice(previousLookbackStart, index);
+
+      if (previousWindow.length === 0) continue;
+
+      const previousHighest = Math.max(...previousWindow.map((candle) => candle.high));
+      const previousLowest = Math.min(...previousWindow.map((candle) => candle.low));
+      const candle = validCandles[index];
+      const previousCandle = validCandles[index - 1];
+      const trendValue = Number(point.value ?? NaN);
+      const previousTrendValue = Number(previousPoint?.value ?? NaN);
+
+      const newExtremeLong = direction === 1 && candle.high > previousHighest;
+      const newExtremeShort = direction === -1 && candle.low < previousLowest;
+
+      if (newExtremeLong || newExtremeShort) {
+        exitLocked = false;
+      }
+
+      const exitLong =
+        direction === 1 &&
+        previousCandle.high >= previousHighest &&
+        candle.close < previousCandle.close &&
+        Number.isFinite(trendValue) &&
+        Number.isFinite(previousTrendValue) &&
+        trendValue <= previousTrendValue;
+
+      const exitShort =
+        direction === -1 &&
+        previousCandle.low <= previousLowest &&
+        candle.close > previousCandle.close &&
+        Number.isFinite(trendValue) &&
+        Number.isFinite(previousTrendValue) &&
+        trendValue >= previousTrendValue;
+
+      if (!exitLocked && exitLong) {
+        exits.push({
+          time: candle.time as Time,
+          value: candle.high,
+          direction: 1,
+          label: "Exit Long",
+        });
+        exitLocked = true;
+      }
+
+      if (!exitLocked && exitShort) {
+        exits.push({
+          time: candle.time as Time,
+          value: candle.low,
+          direction: -1,
+          label: "Exit Short",
+        });
+        exitLocked = true;
+      }
+    }
+
+    if (exitMode === "Internal SuperTrend End") {
+      const internalPoint = internalPoints[index];
+      const previousInternalPoint = internalPoints[index - 1];
+
+      if (!internalPoint || !previousInternalPoint) continue;
+
+      const internalResetLong =
+        direction === 1 &&
+        internalPoint.direction === 1 &&
+        previousInternalPoint.direction === -1;
+
+      const internalResetShort =
+        direction === -1 &&
+        internalPoint.direction === -1 &&
+        previousInternalPoint.direction === 1;
+
+      if (internalResetLong || internalResetShort) {
+        exitLocked = false;
+      }
+
+      const exitLong =
+        direction === 1 &&
+        internalPoint.direction === -1 &&
+        previousInternalPoint.direction === 1;
+
+      const exitShort =
+        direction === -1 &&
+        internalPoint.direction === 1 &&
+        previousInternalPoint.direction === -1;
+
+      const candle = validCandles[index];
+
+      if (!exitLocked && exitLong) {
+        exits.push({
+          time: candle.time as Time,
+          value: candle.high,
+          direction: 1,
+          label: "Exit Long",
+        });
+        exitLocked = true;
+      }
+
+      if (!exitLocked && exitShort) {
+        exits.push({
+          time: candle.time as Time,
+          value: candle.low,
+          direction: -1,
+          label: "Exit Short",
+        });
+        exitLocked = true;
+      }
+    }
+  }
+
+  return exits;
+}
+
+function splitNrtrLineData(points: NrtrPoint[], direction: 1 | -1): NrtrLineData {
+  return points.map((point) => {
+    if (point.direction === direction && point.value !== null && Number.isFinite(point.value)) {
+      return {
+        time: point.time,
+        value: point.value,
+      };
+    }
+
+    return {
+      time: point.time,
+    };
+  });
+}
+
+function buildNrtrMarkers(points: NrtrPoint[], exits: NrtrExitPoint[]) {
+  const signalMarkers = points
+    .filter((point) => point.buy || point.sell)
+    .slice(-30)
+    .map((point) => ({
+      time: point.time,
+      position: point.buy ? "belowBar" : "aboveBar",
+      color: point.buy ? "#26a69a" : "#ef5350",
+      shape: point.buy ? "arrowUp" : "arrowDown",
+      text: point.buy ? "Buy" : "Sell",
+      size: 1,
+    }));
+
+  const exitMarkers = exits.slice(-30).map((exit) => ({
+    time: exit.time,
+    position: exit.direction === 1 ? "aboveBar" : "belowBar",
+    color: "#f59e0b",
+    shape: "square",
+    text: exit.direction === 1 ? "Exit Long" : "Exit Short",
+    size: 1,
+  }));
+
+  return [...signalMarkers, ...exitMarkers].sort((a, b) =>
+    String(a.time).localeCompare(String(b.time))
+  );
+}
+
+function calculateNrtrTradeStats(candles: DashboardCandle[], points: NrtrPoint[]): NrtrTradeStats {
+  const validCandles = candles.filter(isValidCandle);
+  const empty: NrtrTradeStats = {
+    direction: 0,
+    directionText: "Flat",
+    entryPrice: null,
+    currentPrice: validCandles.length > 0 ? validCandles[validCandles.length - 1].close : null,
+    trailingStop: null,
+    pnlPoints: null,
+    pnlPercent: null,
+    lockedProfit: null,
+    lockedPercent: null,
+    moveDistance: null,
+    distancePercent: null,
+    barsInTrade: 0,
+    lastSignalText: "No Signal",
+  };
+
+  if (validCandles.length === 0 || points.length === 0) return empty;
+
+  const lastPoint = [...points].reverse().find((point) => point.direction !== 0 && point.value !== null);
+  const lastCandle = validCandles[validCandles.length - 1];
+
+  if (!lastPoint || lastPoint.value === null) return empty;
+
+  let entryIndex = -1;
+
+  for (let index = points.length - 1; index >= 0; index -= 1) {
+    if (points[index].buy || points[index].sell) {
+      entryIndex = index;
+      break;
+    }
+  }
+
+  if (entryIndex === -1) {
+    entryIndex = Math.max(0, points.findIndex((point) => point.direction === lastPoint.direction));
+  }
+
+  const entryCandle = validCandles[entryIndex] ?? validCandles[0];
+  const entryPrice = entryCandle.close;
+  const currentPrice = lastCandle.close;
+  const trailingStop = lastPoint.value;
+  const direction = lastPoint.direction;
+  const pnlPoints =
+    direction === 1
+      ? currentPrice - entryPrice
+      : direction === -1
+        ? entryPrice - currentPrice
+        : 0;
+  const pnlPercent = entryPrice !== 0 ? (pnlPoints / entryPrice) * 100 : 0;
+  const lockedProfit =
+    direction === 1
+      ? trailingStop - entryPrice
+      : direction === -1
+        ? entryPrice - trailingStop
+        : 0;
+  const lockedPercent = entryPrice !== 0 ? (lockedProfit / entryPrice) * 100 : 0;
+  const moveDistance = Math.abs(currentPrice - trailingStop);
+  const distancePercent = currentPrice !== 0 ? (moveDistance / currentPrice) * 100 : 0;
+
+  return {
+    direction,
+    directionText: direction === 1 ? "Long" : direction === -1 ? "Short" : "Flat",
+    entryPrice,
+    currentPrice,
+    trailingStop,
+    pnlPoints,
+    pnlPercent,
+    lockedProfit,
+    lockedPercent,
+    moveDistance,
+    distancePercent,
+    barsInTrade: Math.max(0, validCandles.length - 1 - entryIndex),
+    lastSignalText:
+      entryIndex >= 0 && points[entryIndex]?.buy
+        ? "Buy"
+        : entryIndex >= 0 && points[entryIndex]?.sell
+          ? "Sell"
+          : "Trend Active",
+  };
+}
+
+function formatNrtrNumber(value: number | null | undefined, decimals = 2): string {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return "—";
+  return Number(value).toFixed(decimals);
+}
+
+function formatNrtrSigned(value: number | null | undefined, decimals = 2): string {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return "—";
+  const number = Number(value);
+  return `${number > 0 ? "+" : ""}${number.toFixed(decimals)}`;
+}
+
 function getOverlayLineColor(line: ChartOverlayLine): string {
   if (line.direction === "bullish") return "rgba(38, 166, 154, 0.85)";
   if (line.direction === "bearish") return "rgba(239, 83, 80, 0.85)";
@@ -235,11 +774,17 @@ export default function LightweightCandlestickChart({
   showLiquidityProfile = true,
   showSmma20 = true,
   smmaLength = 20,
+  showNrtr = true,
+  nrtrMode = "ATR-Based",
+  nrtrPreset = "Scalping",
+  nrtrExitMode = "Pivot Pullback",
 }: LightweightCandlestickChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const smmaSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const nrtrLongSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const nrtrShortSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const ghostCandleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const hasFitContentRef = useRef(false);
@@ -271,6 +816,30 @@ export default function LightweightCandlestickChart({
   const smma20Data = useMemo(() => {
     return calculateSmmaLineData(candles, smmaLength);
   }, [candles, smmaLength]);
+
+  const nrtrPoints = useMemo(() => {
+    return showNrtr ? calculateNrtrOverlay(candles, nrtrMode, nrtrPreset) : [];
+  }, [candles, nrtrMode, nrtrPreset, showNrtr]);
+
+  const nrtrLongLineData = useMemo(() => {
+    return splitNrtrLineData(nrtrPoints, 1);
+  }, [nrtrPoints]);
+
+  const nrtrShortLineData = useMemo(() => {
+    return splitNrtrLineData(nrtrPoints, -1);
+  }, [nrtrPoints]);
+
+  const nrtrExitPoints = useMemo(() => {
+    return showNrtr ? calculateNrtrExitPoints(candles, nrtrPoints, nrtrExitMode) : [];
+  }, [candles, nrtrExitMode, nrtrPoints, showNrtr]);
+
+  const nrtrMarkers = useMemo(() => {
+    return showNrtr ? buildNrtrMarkers(nrtrPoints, nrtrExitPoints) : [];
+  }, [nrtrExitPoints, nrtrPoints, showNrtr]);
+
+  const nrtrStats = useMemo(() => {
+    return calculateNrtrTradeStats(candles, nrtrPoints);
+  }, [candles, nrtrPoints]);
 
   /**
    * Ghost Candles are projected visuals only.
@@ -371,6 +940,22 @@ export default function LightweightCandlestickChart({
       crosshairMarkerVisible: true,
     });
 
+    const nrtrLongSeries = chart.addLineSeries({
+      color: "rgba(38, 166, 154, 0.95)",
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+
+    const nrtrShortSeries = chart.addLineSeries({
+      color: "rgba(239, 83, 80, 0.95)",
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+
     const ghostCandleSeries = chart.addCandlestickSeries({
       upColor: "rgba(38, 166, 154, 0.28)",
       downColor: "rgba(239, 83, 80, 0.28)",
@@ -385,6 +970,8 @@ export default function LightweightCandlestickChart({
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
     smmaSeriesRef.current = smmaSeries;
+    nrtrLongSeriesRef.current = nrtrLongSeries;
+    nrtrShortSeriesRef.current = nrtrShortSeries;
     ghostCandleSeriesRef.current = ghostCandleSeries;
 
     setOverlaySize({
@@ -421,6 +1008,8 @@ export default function LightweightCandlestickChart({
       chartRef.current = null;
       candleSeriesRef.current = null;
       smmaSeriesRef.current = null;
+      nrtrLongSeriesRef.current = null;
+      nrtrShortSeriesRef.current = null;
       ghostCandleSeriesRef.current = null;
       hasFitContentRef.current = false;
     };
@@ -442,6 +1031,23 @@ export default function LightweightCandlestickChart({
 
     smmaSeriesRef.current.setData(showSmma20 ? smma20Data : []);
   }, [showSmma20, smma20Data]);
+
+  useEffect(() => {
+    nrtrLongSeriesRef.current?.setData(showNrtr ? nrtrLongLineData : []);
+    nrtrShortSeriesRef.current?.setData(showNrtr ? nrtrShortLineData : []);
+  }, [nrtrLongLineData, nrtrShortLineData, showNrtr]);
+
+  useEffect(() => {
+    if (!candleSeriesRef.current) return;
+
+    const candleSeries = candleSeriesRef.current as unknown as {
+      setMarkers?: (markers: any[]) => void;
+    };
+
+    if (typeof candleSeries.setMarkers === "function") {
+      candleSeries.setMarkers(nrtrMarkers);
+    }
+  }, [nrtrMarkers]);
 
   useEffect(() => {
     if (!ghostCandleSeriesRef.current) return;
@@ -480,6 +1086,12 @@ export default function LightweightCandlestickChart({
               <span>{smmaLength} SMMA</span>
             </>
           )}
+          {showNrtr && nrtrPoints.length > 0 && (
+            <>
+              <span className="text-slate-500">•</span>
+              <span>NRTR+ {nrtrMode}</span>
+            </>
+          )}
           {ghostDisplayData.length > 0 && (
             <>
               <span className="text-slate-500">•</span>
@@ -498,6 +1110,60 @@ export default function LightweightCandlestickChart({
               <span>Canvas Overlay</span>
             </>
           )}
+        </div>
+      )}
+
+
+      {showNrtr && nrtrPoints.length > 0 && (
+        <div className="pointer-events-none absolute right-3 top-3 z-10 w-[230px] rounded-xl border border-slate-800 bg-black/45 p-3 text-[11px] text-slate-300 shadow-lg backdrop-blur">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="font-semibold text-slate-100">NRTR+</span>
+            <span
+              className={
+                nrtrStats.direction === 1
+                  ? "text-emerald-300"
+                  : nrtrStats.direction === -1
+                    ? "text-red-300"
+                    : "text-slate-400"
+              }
+            >
+              {nrtrStats.directionText}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+            <span className="text-slate-500">Mode</span>
+            <span className="text-right">{nrtrMode}</span>
+            <span className="text-slate-500">Preset</span>
+            <span className="text-right">{nrtrPreset}</span>
+            <span className="text-slate-500">Entry</span>
+            <span className="text-right">{formatNrtrNumber(nrtrStats.entryPrice)}</span>
+            <span className="text-slate-500">Stop</span>
+            <span className="text-right">{formatNrtrNumber(nrtrStats.trailingStop)}</span>
+            <span className="text-slate-500">P/L pts</span>
+            <span
+              className={
+                Number(nrtrStats.pnlPoints) >= 0
+                  ? "text-right text-emerald-300"
+                  : "text-right text-red-300"
+              }
+            >
+              {formatNrtrSigned(nrtrStats.pnlPoints)}
+            </span>
+            <span className="text-slate-500">Locked</span>
+            <span
+              className={
+                Number(nrtrStats.lockedProfit) >= 0
+                  ? "text-right text-emerald-300"
+                  : "text-right text-red-300"
+              }
+            >
+              {formatNrtrSigned(nrtrStats.lockedProfit)}
+            </span>
+            <span className="text-slate-500">Stretch</span>
+            <span className="text-right">{formatNrtrNumber(nrtrStats.distancePercent, 2)}%</span>
+            <span className="text-slate-500">Bars</span>
+            <span className="text-right">{nrtrStats.barsInTrade}</span>
+          </div>
         </div>
       )}
 
