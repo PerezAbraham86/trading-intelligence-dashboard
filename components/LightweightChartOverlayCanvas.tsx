@@ -182,6 +182,30 @@ function getFutureAnchorX(chart: IChartApi, candles: OverlayCandle[], canvasWidt
   return latestX + spacing * 4;
 }
 
+function getFutureOverlayGeometry(chart: IChartApi, candles: OverlayCandle[], canvasWidth: number) {
+  const latestX = getLatestVisibleCandleX(chart, candles, canvasWidth);
+
+  if (latestX === null) return null;
+
+  const spacing = estimateBarSpacing(chart, candles);
+  const pdLeft = latestX + spacing * 4;
+  const pdWidth = Math.min(260, Math.max(130, canvasWidth * 0.18));
+  const gap = Math.max(8, spacing * 1.5);
+  const profileLeft = pdLeft + pdWidth + gap;
+  const profileWidth = Math.min(180, Math.max(90, canvasWidth * 0.13));
+
+  return {
+    latestX,
+    spacing,
+    pdLeft,
+    pdRight: pdLeft + pdWidth,
+    pdWidth,
+    profileLeft,
+    profileWidth,
+    profileRight: profileLeft + profileWidth,
+  };
+}
+
 function estimateBarSpacing(chart: IChartApi, candles: OverlayCandle[]): number {
   if (candles.length < 2) return 8;
 
@@ -361,19 +385,19 @@ function drawPremiumDiscountZones(
   candles: OverlayCandle[],
   canvasWidth: number
 ) {
-  const anchorX = getFutureAnchorX(chart, candles, canvasWidth);
-  if (anchorX === null) return;
+  const geometry = getFutureOverlayGeometry(chart, candles, canvasWidth);
+  if (!geometry) return;
 
   const { premium, equilibrium, discount } = groupPdZones(zones);
   const drawable = [premium, equilibrium, discount].filter(Boolean) as ChartOverlayZone[];
 
   if (!drawable.length) return;
 
-  const bandWidth = Math.min(260, Math.max(120, canvasWidth * 0.18));
-  const left = anchorX + 8;
-  const right = left + bandWidth;
+  const left = geometry.pdLeft;
+  const width = geometry.pdWidth;
+  const right = geometry.pdRight;
 
-  // If the anchor is off to the right, do not draw. This mimics ghost candles.
+  // Same rule as ghost candles: if future drawing area is off screen, hide.
   if (left > canvasWidth + 20 || right < -20) return;
 
   for (const zone of drawable) {
@@ -391,16 +415,19 @@ function drawPremiumDiscountZones(
     context.strokeStyle = getZoneBorderColor(zone);
     context.lineWidth = 1;
 
-    context.fillRect(left, top, bandWidth, height);
-    context.strokeRect(left, top, bandWidth, height);
+    context.fillRect(left, top, width, height);
+    context.strokeRect(left, top, width, height);
+
+    const labelX = Math.min(right + 6, canvasWidth - 8);
+    const labelAlign = right + 70 > canvasWidth ? "right" : "left";
 
     drawZoneLabel(
       context,
       zone.label,
-      Math.min(right + 6, canvasWidth - 8),
+      labelX,
       top + height / 2,
       getZoneBorderColor(zone),
-      right + 60 > canvasWidth ? "right" : "left"
+      labelAlign
     );
 
     context.restore();
@@ -579,11 +606,7 @@ function getCompactMarkerText(marker: ChartOverlayMarker): string {
   if (marker.type === "BOS" || marker.type === "CHoCH" || marker.type === "MSS") return "";
 
   if (marker.type === "Sweep") {
-    if (label.includes("sell")) return "SSL";
-    if (label.includes("buy")) return "BSL";
-    if (label.includes("ils")) return "iLS";
-    if (label.includes("ihs")) return "iHS";
-    return "Sweep";
+    return "";
   }
 
   return marker.label || marker.type;
@@ -784,11 +807,11 @@ function drawLiquidityProfile(
   canvasWidth: number,
   profileLookback: number
 ) {
-  const anchorX = getFutureAnchorX(chart, candles ?? [], canvasWidth);
+  const geometry = getFutureOverlayGeometry(chart, candles ?? [], canvasWidth);
 
   // Same rule as ghost candles:
   // if latest candle / ghost area is not visible, profile is not visible.
-  if (anchorX === null) return;
+  if (!geometry) return;
 
   let bins = normalizePayloadBins(overlayPayload);
 
@@ -798,10 +821,11 @@ function drawLiquidityProfile(
 
   if (bins.length === 0) return;
 
-  const maxWidth = Math.min(180, Math.max(95, canvasWidth * 0.14));
-  const startX = anchorX + 12;
+  const maxWidth = geometry.profileWidth;
+  const startX = geometry.profileLeft;
 
-  if (startX > canvasWidth + 20) return;
+  // If profile is out of view, hide it rather than pinning to the edge.
+  if (startX > canvasWidth + 20 || geometry.profileRight < -20) return;
 
   context.save();
 
