@@ -581,10 +581,40 @@ export function buildChartOverlayPayload(
     ).slice(0, Math.min(settings.maxLines, 5)),
   ];
 
+  /**
+   * IMPORTANT:
+   * Do not let AlphaX / DLM / rejection zones slice off SMC order blocks.
+   *
+   * The previous version did:
+   *   [...SMC zones, ...AlphaX zones].slice(-maxZones)
+   *
+   * That means once AlphaX/PD/profile data loaded, the latest AlphaX zones could
+   * push every SMC order block out of the final `zones` array. That is why the
+   * chart had BOS/CHoCH + PD/profile, but no visible order blocks.
+   *
+   * New rule:
+   * - Preserve SMC order blocks first.
+   * - Fill remaining zone capacity with AlphaX zones.
+   */
+  const smcOrderBlockZones = buildSMCZones(
+    smc,
+    Math.max(settings.maxZones, 20)
+  ).slice(-Math.min(settings.maxZones, 10));
+
+  const remainingZoneSlots = Math.max(
+    0,
+    settings.maxZones - smcOrderBlockZones.length
+  );
+
+  const alphaXZones = buildAlphaXZones(
+    alphaX,
+    Math.max(settings.maxZones, 20)
+  ).slice(-remainingZoneSlots);
+
   const zones = [
-    ...buildSMCZones(smc, settings.maxZones),
-    ...buildAlphaXZones(alphaX, settings.maxZones),
-  ].slice(-settings.maxZones);
+    ...smcOrderBlockZones,
+    ...alphaXZones,
+  ];
 
   const markers = buildOverlayMarkers(smc, alphaX, settings.maxMarkers);
 
