@@ -830,29 +830,29 @@ function mergeOverlayZones(basePayload: any, priorityPayload: any) {
   const baseZones = Array.isArray(basePayload?.zones) ? basePayload.zones : []
   const priorityZones = Array.isArray(priorityPayload?.zones) ? priorityPayload.zones : []
 
-  const baseOrderBlocks = baseZones.filter(isOrderBlockOverlayZone)
-  const priorityNonOrderBlocks = priorityZones.filter((zone: any) => !isOrderBlockOverlayZone(zone))
-  const priorityOrderBlocks = priorityZones.filter(isOrderBlockOverlayZone)
-
   /**
-   * Keep priority PD/profile-related zones, but do not let them erase
-   * fallback SMC order blocks.
-   *
-   * If the priority payload has order blocks, they are often tiny webhook-style
-   * single-candle blocks. Fallback SMC order blocks are the Pine-style extended
-   * boxes we want on the dashboard.
+   * Stable OB rule:
+   * - Fallback/frontend SMC is the source of truth for order blocks.
+   * - Priority payload is the source of truth for Premium / Equilibrium / Discount.
+   * - Do not let priority/webhook/Python zones replace, remove, or duplicate SMC OBs
+   *   when PD zones finish loading.
    */
+  const baseOrderBlocks = baseZones.filter(isOrderBlockOverlayZone)
+  const baseNonOrderBlocks = baseZones.filter((zone: any) => !isOrderBlockOverlayZone(zone))
+
+  const priorityPdZones = priorityZones.filter(isPdOverlayZone)
+  const priorityOtherNonOrderBlocks = priorityZones.filter(
+    (zone: any) => !isOrderBlockOverlayZone(zone) && !isPdOverlayZone(zone)
+  )
+
   const merged: any[] = []
   const seen = new Set<string>()
 
   for (const zone of [
     ...baseOrderBlocks,
-    ...priorityNonOrderBlocks,
-    ...priorityOrderBlocks.filter((zone: any) => !baseOrderBlocks.some((base: any) => {
-      const baseDirection = String(base?.direction ?? '')
-      const zoneDirection = String(zone?.direction ?? '')
-      return baseDirection && zoneDirection && baseDirection === zoneDirection
-    })),
+    ...priorityPdZones,
+    ...priorityOtherNonOrderBlocks,
+    ...baseNonOrderBlocks.filter((zone: any) => !isPdOverlayZone(zone)),
   ]) {
     if (!zone) continue
 
