@@ -361,14 +361,25 @@ export function buildSMCLines(smc: SMCAnalysisResult, maxLines = DEFAULT_OPTIONS
 
 export function buildSMCZones(smc: SMCAnalysisResult, maxZones = DEFAULT_OPTIONS.maxZones): ChartOverlayZone[] {
   return smc.zones.slice(-maxZones).map((zone, index) => ({
-    id: `smc-zone-${zone.type}-${zone.startIndex}-${zone.endIndex}-${index}`,
+    id: `smc-ob-${zone.type}-${zone.startIndex}-${zone.endIndex}-${zone.sourceEventIndex ?? index}`,
     type: zone.type,
-    label: zone.label,
+    label: zone.label || (zone.type === "demand" ? "Bullish OB" : "Bearish OB"),
     startTime: zone.startTime,
     endTime: zone.endTime,
     high: zone.high,
     low: zone.low,
     direction: zone.type === "demand" ? "bullish" : "bearish",
+    startIndex: zone.startIndex,
+    endIndex: zone.endIndex,
+    sourceEvent: zone.sourceEvent,
+    sourceEventIndex: zone.sourceEventIndex,
+    sourcePivotIndex: zone.sourcePivotIndex,
+  } as ChartOverlayZone & {
+    startIndex?: number;
+    endIndex?: number;
+    sourceEvent?: string;
+    sourceEventIndex?: number;
+    sourcePivotIndex?: number;
   }));
 }
 
