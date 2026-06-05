@@ -592,24 +592,55 @@ function calculateNrtrExitPoints(
 }
 
 function splitNrtrLineData(points: NrtrPoint[], direction: 1 | -1): NrtrLineData {
-  return points.map((point) => {
-    if (point.direction === direction && point.value !== null && Number.isFinite(point.value)) {
-      return {
+  /**
+   * Pine uses plot.style_linebr for NRTR / SuperTrend.
+   * Lightweight Charts line series can visually connect across missing points
+   * when the same series receives time-only whitespace points.
+   *
+   * To emulate linebr:
+   * - keep only active points for this direction
+   * - insert one whitespace point exactly at every inactive / flip bar
+   * - this forces a visible break instead of a continuous connected line
+   */
+  const lineData: NrtrLineData = [];
+  let wasActive = false;
+
+  for (const point of points) {
+    const isActive =
+      point.direction === direction &&
+      point.value !== null &&
+      Number.isFinite(point.value);
+
+    if (isActive) {
+      lineData.push({
         time: point.time,
-        value: point.value,
-      };
+        value: Number(point.value),
+      });
+      wasActive = true;
+      continue;
     }
 
-    return {
-      time: point.time,
-    };
-  });
+    if (wasActive) {
+      lineData.push({
+        time: point.time,
+      });
+    }
+
+    wasActive = false;
+  }
+
+  return lineData;
 }
 
 function buildNrtrMarkers(points: NrtrPoint[], exits: NrtrExitPoint[]) {
+  /**
+   * Keep NRTR labels usable instead of covering the chart.
+   * TradingView can handle hundreds of labels, but dashboard readability is better
+   * with only the most recent meaningful flips/exits.
+   */
   const signalMarkers = points
     .filter((point) => point.buy || point.sell)
-    .slice(-30)
+    .slice(-8)
     .map((point) => ({
       time: point.time,
       position: point.buy ? "belowBar" : "aboveBar",
@@ -619,7 +650,7 @@ function buildNrtrMarkers(points: NrtrPoint[], exits: NrtrExitPoint[]) {
       size: 1,
     }));
 
-  const exitMarkers = exits.slice(-30).map((exit) => ({
+  const exitMarkers = exits.slice(-8).map((exit) => ({
     time: exit.time,
     position: exit.direction === 1 ? "aboveBar" : "belowBar",
     color: "#f59e0b",
@@ -776,7 +807,7 @@ export default function LightweightCandlestickChart({
   smmaLength = 20,
   showNrtr = true,
   nrtrMode = "ATR-Based",
-  nrtrPreset = "Scalping",
+  nrtrPreset = "Swing",
   nrtrExitMode = "Pivot Pullback",
 }: LightweightCandlestickChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -946,7 +977,7 @@ export default function LightweightCandlestickChart({
       priceLineVisible: false,
       lastValueVisible: false,
       crosshairMarkerVisible: false,
-    });
+    } as any);
 
     const nrtrShortSeries = chart.addLineSeries({
       color: "rgba(239, 83, 80, 0.95)",
@@ -954,7 +985,7 @@ export default function LightweightCandlestickChart({
       priceLineVisible: false,
       lastValueVisible: false,
       crosshairMarkerVisible: false,
-    });
+    } as any);
 
     const ghostCandleSeries = chart.addCandlestickSeries({
       upColor: "rgba(38, 166, 154, 0.28)",
@@ -1089,7 +1120,7 @@ export default function LightweightCandlestickChart({
           {showNrtr && nrtrPoints.length > 0 && (
             <>
               <span className="text-slate-500">•</span>
-              <span>NRTR+ {nrtrMode}</span>
+              <span>NRTR+ {nrtrMode} {nrtrPreset}</span>
             </>
           )}
           {ghostDisplayData.length > 0 && (
