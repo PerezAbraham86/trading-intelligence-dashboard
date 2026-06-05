@@ -245,6 +245,7 @@ function buildStructureLines(events: RawTradingViewSMCEvent[]): ChartOverlayLine
         label: tag,
         price,
         time: normalizeTime(event.time),
+        fromTime: normalizeTime(event.fromTime),
         direction: normalizeDirection(event.direction),
       };
     })
