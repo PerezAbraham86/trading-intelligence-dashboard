@@ -50,6 +50,10 @@ export type StructureEvent = {
   price: number;
   brokenLevel: number;
   label: string;
+  fromIndex: number;
+  fromTime: SMCCandleTime;
+  pivotIndex: number;
+  breakIndex: number;
 };
 
 export type LiquiditySweep = {
@@ -240,7 +244,11 @@ export function detectStructureEvents(
           direction: "bullish",
           price: breakPrice,
           brokenLevel: lastSwingHigh.price,
-          label: `${type} Bullish`,
+          label: type,
+          fromIndex: lastSwingHigh.index,
+          fromTime: lastSwingHigh.time,
+          pivotIndex: lastSwingHigh.index,
+          breakIndex: index,
         });
 
         lastSwingHigh = undefined;
@@ -267,7 +275,11 @@ export function detectStructureEvents(
           direction: "bearish",
           price: breakPrice,
           brokenLevel: lastSwingLow.price,
-          label: `${type} Bearish`,
+          label: type,
+          fromIndex: lastSwingLow.index,
+          fromTime: lastSwingLow.time,
+          pivotIndex: lastSwingLow.index,
+          breakIndex: index,
         });
 
         lastSwingLow = undefined;
