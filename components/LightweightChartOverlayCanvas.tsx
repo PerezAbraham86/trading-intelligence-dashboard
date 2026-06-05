@@ -664,7 +664,7 @@ function drawRegularZones(
   const regularZones = zones
     .filter((zone) => !isPdZone(zone))
     .filter(isOrderBlockOrFvg)
-    .slice(-8);
+    .slice(-24);
 
   for (const zone of regularZones) {
     const yHigh = priceToCoordinate(mainSeries, getZoneHigh(zone));
@@ -722,8 +722,10 @@ function drawZones(
   canvasWidth: number,
   candles: OverlayCandle[]
 ) {
-  drawRegularZones(context, chart, mainSeries, zones, canvasWidth, candles);
+  // Draw PD zones first as the background layer.
+  // Then draw SMC order blocks on top so OBs remain visible both inside and outside PD.
   drawPremiumDiscountZones(context, chart, mainSeries, zones, candles, canvasWidth);
+  drawRegularZones(context, chart, mainSeries, zones, canvasWidth, candles);
 }
 
 function getStructureLineColor(line: StructureOverlayLine): string {
@@ -1280,10 +1282,38 @@ function normalizeOverlayZones(overlayPayload: ChartOverlayPayload | null | unde
   const zones = Array.isArray(payload?.zones) ? payload.zones : [];
   const orderBlocks = Array.isArray(payload?.orderBlocks) ? payload.orderBlocks : [];
 
+  /**
+   * Important:
+   * app/page.tsx already merges fallback SMC order blocks into `zones`.
+   * If we append `orderBlocks` again, the canvas duplicates OBs and then
+   * `.slice(-N)` can remove the older outside-PD order blocks.
+   *
+   * Rule:
+   * - If zones already has OBs, trust zones and do not append orderBlocks.
+   * - If zones has no OBs, use orderBlocks as a fallback.
+   */
+  const zonesAlreadyHaveOrderBlocks = zones.some((zone: any) => {
+    const label = String(zone?.label ?? zone?.fullLabel ?? "").toLowerCase();
+    const kind = String(zone?.kind ?? zone?.type ?? "").toLowerCase();
+    const sourceEvent = String(zone?.sourceEvent ?? "").toLowerCase();
+
+    return (
+      label.includes("ob") ||
+      label.includes("order block") ||
+      kind.includes("ob") ||
+      kind.includes("order") ||
+      Boolean(sourceEvent)
+    );
+  });
+
+  const rawZones = zonesAlreadyHaveOrderBlocks
+    ? zones
+    : [...zones, ...orderBlocks];
+
   const merged: ChartOverlayZone[] = [];
   const seen = new Set<string>();
 
-  for (const rawZone of [...zones, ...orderBlocks]) {
+  for (const rawZone of rawZones) {
     if (!rawZone || typeof rawZone !== "object") continue;
 
     const high = Number(rawZone.high ?? rawZone.top);
@@ -1329,8 +1359,17 @@ function normalizeOverlayZones(overlayPayload: ChartOverlayPayload | null | unde
     } as UnifiedOverlayZone);
   }
 
-  return merged;
+  /**
+   * Stable layer order:
+   * - Non-PD zones first
+   * - PD zones last in the array is fine because drawZones() explicitly draws PD first.
+   */
+  const nonPdZones = merged.filter((zone) => !isPdZone(zone));
+  const pdZones = merged.filter(isPdZone);
+
+  return [...nonPdZones, ...pdZones];
 }
+
 
 export default function LightweightChartOverlayCanvas({
   chart,
