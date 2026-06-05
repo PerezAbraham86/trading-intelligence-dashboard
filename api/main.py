@@ -18,6 +18,14 @@ from pydantic import BaseModel, Field
 
 from api.ghost_ml import evaluate_ghost_ml_records, ghost_ml_summary_from_candles, record_ghost_ml_projection
 
+try:
+    from api.overlay_engine import build_overlay_payload as build_backend_overlay_payload
+except Exception:
+    try:
+        from overlay_engine import build_overlay_payload as build_backend_overlay_payload
+    except Exception:
+        build_backend_overlay_payload = None
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1811,12 +1819,122 @@ def build_python_alphax_dlm(candles: List[Dict[str, Any]], lookback: int = 300, 
     }
 
 
+def normalize_backend_overlay_payload(
+    backend_payload: Dict[str, Any],
+    ghosts: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Convert api/overlay_engine.py output into the chartOverlays shape already
+    consumed by the React dashboard.
+
+    Important:
+    - Python overlay engine is now the source of truth.
+    - TradingView chartOverlays/webhook overlays are not required.
+    """
+    if not isinstance(backend_payload, dict):
+        payload = empty_overlay_payload()
+        payload["ghostCandles"] = ghosts or []
+        payload["source"] = "python_overlay_engine_empty"
+        return payload
+
+    profile_bins = backend_payload.get("liquidityProfileBins", [])
+    if not isinstance(profile_bins, list):
+        profile_bins = []
+
+    alpha_profile_bins: List[Dict[str, Any]] = []
+    for item in profile_bins:
+        if not isinstance(item, dict):
+            continue
+
+        width_pct = to_float(item.get("widthPct", item.get("volumePct")), 0)
+        buy_pct = to_float(item.get("buyPct", item.get("buyPressurePct")), 0)
+        sell_pct = to_float(item.get("sellPct", item.get("sellPressurePct")), 0)
+
+        normalized_bin = dict(item)
+        normalized_bin["volumePct"] = width_pct
+        normalized_bin["widthPct"] = width_pct
+        normalized_bin["buyPressurePct"] = buy_pct
+        normalized_bin["sellPressurePct"] = sell_pct
+
+        alpha_profile_bins.append(normalized_bin)
+
+    summary = backend_payload.get("summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
+
+    dlm_meta = summary.get("dlm", {})
+    if not isinstance(dlm_meta, dict):
+        dlm_meta = {}
+
+    bull_pressure = to_float(dlm_meta.get("bullPressurePct"), 50)
+    bear_pressure = to_float(dlm_meta.get("bearPressurePct"), 50)
+    direction = "bullish" if bull_pressure >= bear_pressure else "bearish"
+    score = round(max(bull_pressure, bear_pressure))
+
+    last_price = 0.0
+    if isinstance(backend_payload.get("dlmLevels"), list):
+        for level in backend_payload.get("dlmLevels", []):
+            if isinstance(level, dict) and str(level.get("label", "")).lower() == "alphax poc":
+                last_price = to_float(level.get("price"), 0)
+                break
+
+    return {
+        "smcEvents": backend_payload.get("smcEvents", []) if isinstance(backend_payload.get("smcEvents"), list) else [],
+        "dlmLevels": backend_payload.get("dlmLevels", []) if isinstance(backend_payload.get("dlmLevels"), list) else [],
+        "zones": backend_payload.get("zones", []) if isinstance(backend_payload.get("zones"), list) else [],
+        "liquidityEvents": backend_payload.get("liquidityEvents", []) if isinstance(backend_payload.get("liquidityEvents"), list) else [],
+        "dlmConfluenceMarkers": [],
+        "scoreMarkers": [{
+            "time": now_iso(),
+            "price": round(last_price, 5),
+            "label": "Python SMC+AlphaX",
+            "direction": direction,
+            "kind": "python_overlay_engine_score",
+            "score": score,
+            "grade": "A" if score >= 70 else "B" if score >= 55 else "C",
+        }],
+        "liquidityProfileBins": profile_bins,
+        "alphaProfileBins": alpha_profile_bins,
+        "alphaProfileMeta": {
+            **dlm_meta,
+            "bullPressurePct": bull_pressure,
+            "bearPressurePct": bear_pressure,
+            "source": "api.overlay_engine",
+        },
+        "ghostCandles": ghosts or [],
+        "summary": summary,
+        "source": "python_overlay_engine_no_tradingview_webhook",
+    }
+
+
 def build_python_chart_overlays(candles: List[Dict[str, Any]], ghosts: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """
+    Build SMC + AlphaX DLM overlays directly from backend OHLCV candles.
+
+    This intentionally does NOT depend on TradingView webhook chartOverlays.
+    """
     if len(candles) < 30:
         payload = empty_overlay_payload()
         payload["ghostCandles"] = ghosts or []
+        payload["source"] = "python_overlay_engine_not_enough_candles"
         return payload
 
+    if build_backend_overlay_payload is not None:
+        try:
+            backend_payload = build_backend_overlay_payload(
+                candles,
+                internal_pivot_length=5,
+                swing_pivot_length=50,
+                internal_order_blocks=5,
+                swing_order_blocks=5,
+                dlm_lookback=300,
+                dlm_bins=50,
+            )
+            return normalize_backend_overlay_payload(backend_payload, ghosts)
+        except Exception as error:
+            print(f"[Overlay Engine] api.overlay_engine failed, using legacy fallback: {error}")
+
+    # Legacy fallback kept only as a safety net.
     dlm = build_python_alphax_dlm(candles)
     smc_events = build_python_smc_events(candles)
     zones = build_python_smc_zones(candles)
@@ -1843,10 +1961,11 @@ def build_python_chart_overlays(candles: List[Dict[str, Any]], ghosts: Optional[
             "score": score,
             "grade": "A" if score >= 70 else "B" if score >= 55 else "C",
         }],
+        "liquidityProfileBins": dlm.get("profileBins", []),
         "alphaProfileBins": dlm.get("profileBins", []),
         "alphaProfileMeta": meta,
         "ghostCandles": ghosts or [],
-        "source": "python_only_no_webhook",
+        "source": "python_legacy_overlay_fallback",
     }
 
 
@@ -2632,6 +2751,7 @@ def empty_overlay_payload() -> Dict[str, Any]:
         "dlmConfluenceMarkers": [],
         "scoreMarkers": [],
         "alphaProfileBins": [],
+        "liquidityProfileBins": [],
         "alphaProfileMeta": {},
     }
 
@@ -4349,12 +4469,17 @@ def trim_chart_overlays_for_dashboard(
         if isinstance(overlays.get("dlmLevels"), list):
             trimmed["dlmLevels"] = overlays["dlmLevels"][-12:]
 
-        if isinstance(overlays.get("alphaProfileBins"), list):
+        profile_source = overlays.get("liquidityProfileBins")
+        if not isinstance(profile_source, list):
+            profile_source = overlays.get("alphaProfileBins")
+
+        if isinstance(profile_source, list):
             bins = [
-                item for item in overlays["alphaProfileBins"]
-                if isinstance(item, dict) and to_float(item.get("volumePct"), 0) > 1
+                item for item in profile_source
+                if isinstance(item, dict) and to_float(item.get("widthPct", item.get("volumePct")), 0) > 1
             ]
-            trimmed["alphaProfileBins"] = bins[-28:]
+            trimmed["liquidityProfileBins"] = bins[-36:]
+            trimmed["alphaProfileBins"] = bins[-36:]
 
         if isinstance(overlays.get("alphaProfileMeta"), dict):
             trimmed["alphaProfileMeta"] = overlays.get("alphaProfileMeta", {})
@@ -4472,6 +4597,7 @@ def build_fast_chart_overlay_payload(
             "chartOverlays": overlays,
             "ghostCandles": overlays.get("ghostCandles", []),
             "alphaProfileMeta": overlays.get("alphaProfileMeta", {}),
+            "liquidityProfileBins": overlays.get("liquidityProfileBins", overlays.get("alphaProfileBins", [])),
             "cache": "filtered_from_raw_cache",
             "rawCache": raw_payload.get("cache", "unknown"),
             "source": "python_fast_chart_overlay_flags_raw_cache",
@@ -4585,7 +4711,7 @@ def root() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "Trading Intelligence Dashboard API",
-        "engine": "main_v33_site_level_candle_cache",
+        "engine": "main_v34_python_overlay_engine",
         "endpoints": [
             "/api/latest-signal",
             "/api/recent-signals",
@@ -4681,11 +4807,15 @@ def historical_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int
     candles = fetch_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
     provider = candles[-1].get("provider") if candles else None
 
+    overlay_payload = build_python_chart_overlays(candles, []) if candles else empty_overlay_payload()
+
     payload = {
         "symbol": normalized_symbol,
         "timeframe": normalized_timeframe,
         "count": len(candles),
         "candles": candles,
+        "overlayPayload": overlay_payload,
+        "chartOverlays": overlay_payload,
         "source": "historical_candle_route",
         "provider": provider,
         "cache": "refreshed",
@@ -4708,16 +4838,25 @@ def candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500, for
     if not force:
         cached = candle_cache_get("dashboard", normalized_symbol, normalized_timeframe, safe_limit, CANDLE_SITE_CACHE_MAX_AGE_SECONDS)
         if cached:
+            cached_candles = cached.get("candles")
+            if isinstance(cached_candles, list) and "overlayPayload" not in cached:
+                overlay_payload = build_python_chart_overlays(cached_candles, [])
+                cached["overlayPayload"] = overlay_payload
+                cached["chartOverlays"] = overlay_payload
             return cached
 
     merged = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit)
     provider = merged[-1].get("provider") if merged else None
+
+    overlay_payload = build_python_chart_overlays(merged, []) if merged else empty_overlay_payload()
 
     payload = {
         "symbol": normalized_symbol,
         "timeframe": normalized_timeframe,
         "count": len(merged),
         "candles": merged,
+        "overlayPayload": overlay_payload,
+        "chartOverlays": overlay_payload,
         "source": "dashboard_merged_candles",
         "provider": provider,
         "cache": "refreshed",
@@ -4921,6 +5060,8 @@ def engine_state(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500
         "sentiment": sentiment,
         "ghostCandles": ghosts,
         "chartOverlays": overlays,
+        "overlayPayload": overlays,
+        "liquidityProfileBins": overlays.get("liquidityProfileBins", overlays.get("alphaProfileBins", [])) if isinstance(overlays, dict) else [],
         "scorecards": scorecards,
         "smc": scorecards.get("smc"),
         "alphax": scorecards.get("alphax"),
