@@ -902,6 +902,7 @@ export default function LightweightCandlestickChart({
   const nrtrLongSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const nrtrShortSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const nrtrCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const nrtrAnimationFrameRef = useRef<number | null>(null);
   const ghostCandleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const hasFitContentRef = useRef(false);
@@ -1126,6 +1127,11 @@ export default function LightweightCandlestickChart({
     return () => {
       chart.timeScale().unsubscribeVisibleTimeRangeChange(redrawNrtrCanvas);
 
+      if (nrtrAnimationFrameRef.current !== null) {
+        window.cancelAnimationFrame(nrtrAnimationFrameRef.current);
+        nrtrAnimationFrameRef.current = null;
+      }
+
       resizeObserverRef.current?.disconnect();
       resizeObserverRef.current = null;
 
@@ -1168,34 +1174,69 @@ export default function LightweightCandlestickChart({
   }, [nrtrLongLineData, nrtrShortLineData, showNrtr]);
 
   useEffect(() => {
+    /**
+     * NRTR is drawn on a dedicated canvas because it must behave like
+     * Pine plot.style_linebr. Since Lightweight Charts scroll/zoom transforms
+     * change continuously, this canvas must redraw with the chart, not only
+     * when data changes.
+     */
+    if (nrtrAnimationFrameRef.current !== null) {
+      window.cancelAnimationFrame(nrtrAnimationFrameRef.current);
+      nrtrAnimationFrameRef.current = null;
+    }
+
+    const clearNrtrCanvas = () => {
+      const canvas = nrtrCanvasRef.current;
+      const context = canvas?.getContext("2d");
+
+      if (!canvas || !context) return;
+
+      context.clearRect(0, 0, canvas.width, canvas.height);
+    };
+
     if (
       !showNrtr ||
-      !nrtrCanvasRef.current ||
-      !chartRef.current ||
-      !candleSeriesRef.current ||
+      nrtrPoints.length === 0 ||
       overlaySize.width <= 0 ||
       overlaySize.height <= 0
     ) {
-      const context = nrtrCanvasRef.current?.getContext("2d");
-      if (context && nrtrCanvasRef.current) {
-        context.clearRect(
-          0,
-          0,
-          nrtrCanvasRef.current.width,
-          nrtrCanvasRef.current.height
-        );
-      }
+      clearNrtrCanvas();
       return;
     }
 
-    drawNrtrLineBreakCanvas(
-      nrtrCanvasRef.current,
-      chartRef.current,
-      candleSeriesRef.current,
-      nrtrPoints,
-      overlaySize.width,
-      overlaySize.height
-    );
+    let cancelled = false;
+
+    const drawFrame = () => {
+      if (cancelled) return;
+
+      if (
+        nrtrCanvasRef.current &&
+        chartRef.current &&
+        candleSeriesRef.current
+      ) {
+        drawNrtrLineBreakCanvas(
+          nrtrCanvasRef.current,
+          chartRef.current,
+          candleSeriesRef.current,
+          nrtrPoints,
+          overlaySize.width,
+          overlaySize.height
+        );
+      }
+
+      nrtrAnimationFrameRef.current = window.requestAnimationFrame(drawFrame);
+    };
+
+    nrtrAnimationFrameRef.current = window.requestAnimationFrame(drawFrame);
+
+    return () => {
+      cancelled = true;
+
+      if (nrtrAnimationFrameRef.current !== null) {
+        window.cancelAnimationFrame(nrtrAnimationFrameRef.current);
+        nrtrAnimationFrameRef.current = null;
+      }
+    };
   }, [nrtrPoints, overlaySize.height, overlaySize.width, showNrtr]);
 
   useEffect(() => {
