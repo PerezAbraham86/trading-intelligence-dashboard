@@ -6,7 +6,6 @@ import LightweightCandlestickChart, { ChartMode, DashboardCandle } from '@/compo
 import { GhostCandle } from '@/components/GhostCandleOverlay'
 import ChartOverlayStatusPanel from '@/components/ChartOverlayStatusPanel'
 import { buildChartOverlayPayload } from '@/lib/chartOverlayPrep'
-import { buildTradingViewOverlayPayload } from '@/lib/tradingViewOverlays'
 import PressureGauges from '@/components/PressureGauges'
 import FactorConfirmationTable from '@/components/FactorConfirmationTable'
 import GhostCandleProjection from '@/components/GhostCandleProjection'
@@ -37,6 +36,17 @@ type PythonGhostCandle = {
 }
 
 type PythonEngineState = {
+  overlayPayload?: unknown
+  chartOverlays?: unknown
+  chart_overlays?: unknown
+  overlays?: unknown
+  lines?: unknown[]
+  zones?: unknown[]
+  markers?: unknown[]
+  smcEvents?: unknown[]
+  liquidityEvents?: unknown[]
+  dlmLevels?: unknown[]
+  liquidityProfileBins?: unknown[]
   ghostCandles?: PythonGhostCandle[]
   ghostProjections?: PythonGhostCandle[]
   projections?: PythonGhostCandle[]
@@ -544,23 +554,48 @@ function dashboardCandlesToOverlayCandles(candles: DashboardCandle[]) {
   })
 }
 
-function getTradingViewOverlaySource(engineState: PythonEngineState | null | undefined): unknown {
-  if (!engineState || typeof engineState !== 'object') return null
+function isOverlayPayloadLike(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false
 
-  const state = engineState as any
+  const raw = value as any
 
   return (
-    state.chartOverlays ??
-    state.chart_overlays ??
-    state.overlays ??
-    state.tradingViewOverlays ??
-    state.tvOverlays ??
-    state.latestSignal?.chartOverlays ??
-    state.latestSignal?.chart_overlays ??
-    state.latestSignal?.overlays ??
-    state.latestSignal ??
-    state
+    Array.isArray(raw.lines) ||
+    Array.isArray(raw.zones) ||
+    Array.isArray(raw.markers) ||
+    Array.isArray(raw.smcEvents) ||
+    Array.isArray(raw.liquidityEvents) ||
+    Array.isArray(raw.dlmLevels) ||
+    Array.isArray(raw.liquidityProfileBins)
   )
+}
+
+function getBackendOverlayPayload(...sources: unknown[]) {
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue
+
+    const raw = source as any
+
+    const candidates = [
+      raw.overlayPayload,
+      raw.chartOverlays,
+      raw.chart_overlays,
+      raw.overlays,
+      raw.latestSignal?.overlayPayload,
+      raw.latestSignal?.chartOverlays,
+      raw.latestSignal?.chart_overlays,
+      raw.latestSignal?.overlays,
+      raw,
+    ]
+
+    for (const candidate of candidates) {
+      if (isOverlayPayloadLike(candidate)) {
+        return candidate as any
+      }
+    }
+  }
+
+  return null
 }
 
 
@@ -717,6 +752,7 @@ function useChartCandles(
   pollMs = 5000
 ) {
   const [candles, setCandles] = useState<DashboardCandle[]>([])
+  const [backendOverlayPayload, setBackendOverlayPayload] = useState<any | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [errorText, setErrorText] = useState('')
 
@@ -747,9 +783,11 @@ function useChartCandles(
 
         const json = await response.json()
         const nextCandles = normalizeCandlePayload(json)
+        const nextOverlayPayload = getBackendOverlayPayload(json)
 
         if (!cancelled) {
           setCandles(nextCandles)
+          setBackendOverlayPayload(nextOverlayPayload)
         }
       } catch (error) {
         console.error('Lightweight chart candle sync error:', error)
@@ -765,6 +803,7 @@ function useChartCandles(
     }
 
     setCandles([])
+    setBackendOverlayPayload(null)
     fetchCandles()
     intervalId = setInterval(fetchCandles, pollMs)
 
@@ -776,6 +815,7 @@ function useChartCandles(
 
   return {
     candles,
+    backendOverlayPayload,
     isLoading,
     errorText,
   }
@@ -814,7 +854,7 @@ function LightweightChartPanel({
 }: LightweightChartPanelProps) {
   const normalizedSymbol = normalizeSymbol(symbol)
   const normalizedTimeframe = normalizeTimeframe(timeframe)
-  const { candles, isLoading, errorText } = useChartCandles(
+  const { candles, backendOverlayPayload, isLoading, errorText } = useChartCandles(
     apiBaseUrl,
     isClient,
     normalizedSymbol,
@@ -832,12 +872,13 @@ function LightweightChartPanel({
   const overlayPayload = useMemo(() => {
     if (!showOverlayLines || compact) return null
 
-    const tradingViewPayload = buildTradingViewOverlayPayload(
-      getTradingViewOverlaySource(engineState)
+    const pythonBackendPayload = getBackendOverlayPayload(
+      backendOverlayPayload,
+      engineState
     )
 
-    if (tradingViewPayload) {
-      return tradingViewPayload
+    if (pythonBackendPayload) {
+      return pythonBackendPayload
     }
 
     if (candles.length < 20) return null
@@ -851,7 +892,7 @@ function LightweightChartPanel({
       maxZones: 12,
       maxMarkers: 20,
     })
-  }, [candles, compact, engineState, showOverlayLines])
+  }, [backendOverlayPayload, candles, compact, engineState, showOverlayLines])
 
   return (
     <div className="rounded-xl border border-dark-700 bg-dark-800/80 p-4 shadow-xl">
@@ -951,7 +992,7 @@ function LightweightChartPanel({
         <div className="mt-4">
           <ChartOverlayStatusPanel
             candles={dashboardCandlesToOverlayCandles(candles)}
-            title="TradingView SMC + AlphaX Overlay Prep"
+            title="Python SMC + AlphaX Overlay Prep"
             compact
           />
         </div>
