@@ -293,10 +293,13 @@ def _find_order_block_between(
     atrs: Optional[list[float]] = None,
 ) -> Optional[OrderBlock]:
     """
-    Approximation of the Pine order block selection:
-    - After a bullish break, select the lowest candle low in the pivot-to-break range.
-    - After a bearish break, select the highest candle high in the pivot-to-break range.
-    - Use parsed highs/lows idea by ignoring obvious high-volatility candles when ATR exists.
+    TradingView-style order block approximation.
+
+    Correct behavior:
+    - Bullish break: select the latest bearish candle before the break.
+    - Bearish break: select the latest bullish candle before the break.
+    - Extend the block to the latest candle / active chart area, not just the break candle.
+    - Avoid tiny doji candles and obvious abnormal spike candles.
     """
 
     if not candles:
@@ -308,34 +311,43 @@ def _find_order_block_between(
     if end < start:
         return None
 
-    candidates = candles[start : end + 1]
-    candidate_indexes = list(range(start, end + 1))
+    selected_index: Optional[int] = None
 
-    if atrs:
-        filtered: list[tuple[int, Candle]] = []
+    # Prefer the closest valid opposite candle before the break.
+    for idx in range(end, start - 1, -1):
+        candle = candles[idx]
+        body = abs(candle.close - candle.open)
+        full_range = max(candle.high - candle.low, 1e-12)
+        body_pct = body / full_range
 
-        for idx, candle in zip(candidate_indexes, candidates):
+        if body_pct < 0.20:
+            continue
+
+        if atrs:
             atr = atrs[idx] if idx < len(atrs) else 0.0
-            full_range = candle.high - candle.low
+            if atr > 0 and full_range > atr * 2.75:
+                continue
 
-            # Pine swaps parsed high/low on high volatility bars. For our first
-            # backend version, just avoid selecting extreme anomaly candles.
-            if atr <= 0 or full_range <= atr * 2.5:
-                filtered.append((idx, candle))
+        is_bearish_candle = candle.close < candle.open
+        is_bullish_candle = candle.close > candle.open
 
-        if filtered:
-            candidate_indexes = [item[0] for item in filtered]
-            candidates = [item[1] for item in filtered]
+        if direction == "bullish" and is_bearish_candle:
+            selected_index = idx
+            break
 
-    if not candidates:
-        return None
+        if direction == "bearish" and is_bullish_candle:
+            selected_index = idx
+            break
 
-    if direction == "bullish":
-        selected_local_index = min(range(len(candidates)), key=lambda i: candidates[i].low)
-    else:
-        selected_local_index = max(range(len(candidates)), key=lambda i: candidates[i].high)
+    # Fallback to the most extreme candle in the pivot-to-break range.
+    if selected_index is None:
+        candidate_indexes = list(range(start, end + 1))
 
-    selected_index = candidate_indexes[selected_local_index]
+        if direction == "bullish":
+            selected_index = min(candidate_indexes, key=lambda i: candles[i].low)
+        else:
+            selected_index = max(candidate_indexes, key=lambda i: candles[i].high)
+
     selected = candles[selected_index]
 
     return OrderBlock(
@@ -363,6 +375,7 @@ def _structure_event(
         "tag": tag,
         "direction": direction,
         "scope": scope,
+        "pivotIndex": pivot.index,
     }
 
 
@@ -454,7 +467,7 @@ def _detect_structure_for_scope(
                     end_index=index,
                     direction=direction,
                     kind="internal_ob" if scope == "internal" else "swing_ob",
-                    end_time=candle.time,
+                    end_time=candles[-1].time,
                     atrs=atrs,
                 )
 
@@ -485,7 +498,7 @@ def _detect_structure_for_scope(
                     end_index=index,
                     direction=direction,
                     kind="internal_ob" if scope == "internal" else "swing_ob",
-                    end_time=candle.time,
+                    end_time=candles[-1].time,
                     atrs=atrs,
                 )
 
