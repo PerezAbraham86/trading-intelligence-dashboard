@@ -796,6 +796,90 @@ function isStructureOverlayLine(line: any) {
   )
 }
 
+function isPdOverlayZone(zone: any) {
+  const label = String(zone?.label ?? '').toLowerCase()
+  const kind = String(zone?.kind ?? zone?.type ?? '').toLowerCase()
+
+  return (
+    label.includes('premium') ||
+    label.includes('equilibrium') ||
+    label.includes('discount') ||
+    kind.includes('premium') ||
+    kind.includes('equilibrium') ||
+    kind.includes('discount')
+  )
+}
+
+function isOrderBlockOverlayZone(zone: any) {
+  const label = String(zone?.label ?? '').toLowerCase()
+  const kind = String(zone?.kind ?? zone?.type ?? '').toLowerCase()
+  const sourceEvent = String(zone?.sourceEvent ?? '').toLowerCase()
+
+  return (
+    label.includes('ob') ||
+    label.includes('order block') ||
+    kind.includes('ob') ||
+    kind.includes('order') ||
+    sourceEvent === 'bos' ||
+    sourceEvent === 'choch' ||
+    sourceEvent === 'mss'
+  )
+}
+
+function mergeOverlayZones(basePayload: any, priorityPayload: any) {
+  const baseZones = Array.isArray(basePayload?.zones) ? basePayload.zones : []
+  const priorityZones = Array.isArray(priorityPayload?.zones) ? priorityPayload.zones : []
+
+  const baseOrderBlocks = baseZones.filter(isOrderBlockOverlayZone)
+  const priorityNonOrderBlocks = priorityZones.filter((zone: any) => !isOrderBlockOverlayZone(zone))
+  const priorityOrderBlocks = priorityZones.filter(isOrderBlockOverlayZone)
+
+  /**
+   * Keep priority PD/profile-related zones, but do not let them erase
+   * fallback SMC order blocks.
+   *
+   * If the priority payload has order blocks, they are often tiny webhook-style
+   * single-candle blocks. Fallback SMC order blocks are the Pine-style extended
+   * boxes we want on the dashboard.
+   */
+  const merged: any[] = []
+  const seen = new Set<string>()
+
+  for (const zone of [
+    ...baseOrderBlocks,
+    ...priorityNonOrderBlocks,
+    ...priorityOrderBlocks.filter((zone: any) => !baseOrderBlocks.some((base: any) => {
+      const baseDirection = String(base?.direction ?? '')
+      const zoneDirection = String(zone?.direction ?? '')
+      return baseDirection && zoneDirection && baseDirection === zoneDirection
+    })),
+  ]) {
+    if (!zone) continue
+
+    const high = Number(zone.high ?? zone.top)
+    const low = Number(zone.low ?? zone.bottom)
+
+    if (!Number.isFinite(high) || !Number.isFinite(low)) continue
+
+    const key = [
+      zone.kind ?? zone.type,
+      zone.label,
+      zone.direction,
+      Math.round(high * 100) / 100,
+      Math.round(low * 100) / 100,
+      zone.startIndex ?? zone.startTime,
+      zone.endIndex ?? zone.endTime,
+    ].join('|')
+
+    if (seen.has(key)) continue
+
+    seen.add(key)
+    merged.push(zone)
+  }
+
+  return merged
+}
+
 function mergeOverlayPayloads(basePayload: any, priorityPayload: any) {
   if (!basePayload) return priorityPayload ?? null
   if (!priorityPayload) return basePayload ?? null
@@ -833,8 +917,7 @@ function mergeOverlayPayloads(basePayload: any, priorityPayload: any) {
     mergedLines.push(line)
   }
 
-  const priorityZones = Array.isArray(priorityPayload.zones) ? priorityPayload.zones : []
-  const baseZones = Array.isArray(basePayload.zones) ? basePayload.zones : []
+  const mergedZones = mergeOverlayZones(basePayload, priorityPayload)
 
   const priorityMarkers = Array.isArray(priorityPayload.markers) ? priorityPayload.markers : []
   const baseMarkers = Array.isArray(basePayload.markers) ? basePayload.markers : []
@@ -859,7 +942,7 @@ function mergeOverlayPayloads(basePayload: any, priorityPayload: any) {
     alphaX: priorityPayload.alphaX ?? basePayload.alphaX,
     smcEvents: priorityPayload.smcEvents ?? basePayload.smcEvents,
     lines: mergedLines,
-    zones: priorityZones.length > 0 ? priorityZones : baseZones,
+    zones: mergedZones,
     markers: mergedMarkers.slice(-40),
     liquidityProfileBins:
       priorityPayload.liquidityProfileBins ?? basePayload.liquidityProfileBins,
@@ -867,7 +950,7 @@ function mergeOverlayPayloads(basePayload: any, priorityPayload: any) {
       ...(basePayload.summary ?? {}),
       ...(priorityPayload.summary ?? {}),
       lineCount: mergedLines.length,
-      zoneCount: priorityZones.length > 0 ? priorityZones.length : baseZones.length,
+      zoneCount: mergedZones.length,
       markerCount: mergedMarkers.length,
     },
   }
