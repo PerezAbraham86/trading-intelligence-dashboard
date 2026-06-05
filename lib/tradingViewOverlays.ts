@@ -39,8 +39,13 @@ type RawTradingViewSMCEvent = {
   fromTime?: unknown;
   price?: unknown;
   tag?: unknown;
+  label?: unknown;
   direction?: unknown;
   scope?: unknown;
+  index?: unknown;
+  breakIndex?: unknown;
+  pivotIndex?: unknown;
+  fromIndex?: unknown;
 };
 
 type RawTradingViewZone = {
@@ -230,14 +235,19 @@ function buildStructureMarkers(events: RawTradingViewSMCEvent[]): ChartOverlayMa
     .filter((item): item is ChartOverlayMarker => Boolean(item));
 }
 
+function toOptionalNumber(value: unknown): number | undefined {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 function buildStructureLines(events: RawTradingViewSMCEvent[]): ChartOverlayLine[] {
   return events
-    .slice(-4)
+    .slice(-40)
     .map((event, index): ChartOverlayLine | null => {
       const price = toNumber(event.price);
       if (!Number.isFinite(price)) return null;
 
-      const tag = toText(event.tag, "BOS");
+      const tag = toText(event.tag ?? event.label, "BOS");
 
       return {
         id: `tv-smc-line-${tag}-${index}-${toText(event.time)}`,
@@ -247,7 +257,19 @@ function buildStructureLines(events: RawTradingViewSMCEvent[]): ChartOverlayLine
         time: normalizeTime(event.time),
         direction: normalizeDirection(event.direction),
         fromTime: normalizeTime(event.fromTime),
-      } as ChartOverlayLine & { fromTime: number | string };
+        index: toOptionalNumber(event.index ?? event.breakIndex),
+        breakIndex: toOptionalNumber(event.breakIndex ?? event.index),
+        pivotIndex: toOptionalNumber(event.pivotIndex ?? event.fromIndex),
+        fromIndex: toOptionalNumber(event.fromIndex ?? event.pivotIndex),
+        scope: toText(event.scope, ""),
+      } as ChartOverlayLine & {
+        fromTime: number | string;
+        index?: number;
+        breakIndex?: number;
+        pivotIndex?: number;
+        fromIndex?: number;
+        scope?: string;
+      };
     })
     .filter((item): item is ChartOverlayLine => Boolean(item));
 }
