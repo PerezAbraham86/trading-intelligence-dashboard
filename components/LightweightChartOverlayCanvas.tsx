@@ -72,6 +72,11 @@ type StructureOverlayLine = {
   time?: unknown;
   fromTime?: unknown;
   direction?: "bullish" | "bearish" | "neutral";
+  index?: number;
+  breakIndex?: number;
+  pivotIndex?: number;
+  fromIndex?: number;
+  scope?: string;
 };
 
 function isFiniteNumber(value: unknown): value is number {
@@ -631,11 +636,40 @@ function normalizeStructureLines(overlayPayload: ChartOverlayPayload | null | un
 
       return (
         (type === "bos" || type === "choch" || type === "mss" || label.includes("BOS") || label.includes("CHOCH") || label.includes("MSS")) &&
-        line?.fromTime !== undefined &&
+        (line?.fromTime !== undefined || line?.fromIndex !== undefined || line?.pivotIndex !== undefined) &&
         Number.isFinite(Number(line?.price))
       );
     })
     .slice(-18);
+}
+
+function candleIndexToCoordinate(
+  chart: IChartApi,
+  candles: OverlayCandle[],
+  index: unknown
+): number | null {
+  const parsed = Number(index);
+
+  if (!Number.isFinite(parsed)) return null;
+
+  const safeIndex = Math.floor(parsed);
+
+  if (safeIndex < 0 || safeIndex >= candles.length) return null;
+
+  return timeToCoordinate(chart, candles[safeIndex].time, candles);
+}
+
+function structureXFromIndexOrTime(
+  chart: IChartApi,
+  candles: OverlayCandle[],
+  indexValue: unknown,
+  timeValue: unknown
+): number | null {
+  const fromIndex = candleIndexToCoordinate(chart, candles, indexValue);
+
+  if (fromIndex !== null) return fromIndex;
+
+  return timeToCoordinate(chart, timeValue, candles);
 }
 
 function drawStructureLines(
@@ -651,8 +685,18 @@ function drawStructureLines(
 
   for (const line of structureLines) {
     const y = priceToCoordinate(mainSeries, line.price);
-    const x1 = timeToCoordinate(chart, line.fromTime, candles);
-    const x2 = timeToCoordinate(chart, line.time, candles);
+    const x1 = structureXFromIndexOrTime(
+      chart,
+      candles,
+      line.fromIndex ?? line.pivotIndex,
+      line.fromTime
+    );
+    const x2 = structureXFromIndexOrTime(
+      chart,
+      candles,
+      line.breakIndex ?? line.index,
+      line.time
+    );
 
     if (y === null || x1 === null || x2 === null) continue;
 
