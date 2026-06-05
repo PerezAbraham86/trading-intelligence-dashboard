@@ -67,16 +67,18 @@ type PdZoneGroup = {
 type StructureOverlayLine = {
   id?: string;
   type?: string;
+  tag?: string;
   label?: string;
   price?: number;
+  brokenLevel?: number;
   time?: unknown;
   fromTime?: unknown;
   direction?: "bullish" | "bearish" | "neutral";
+  scope?: string;
   index?: number;
   breakIndex?: number;
   pivotIndex?: number;
   fromIndex?: number;
-  scope?: string;
 };
 
 function isFiniteNumber(value: unknown): value is number {
@@ -672,6 +674,105 @@ function structureXFromIndexOrTime(
   return timeToCoordinate(chart, timeValue, candles);
 }
 
+function normalizeStructureLines(overlayPayload: ChartOverlayPayload | null | undefined): StructureOverlayLine[] {
+  const payload = overlayPayload as any;
+
+  const rawLines = Array.isArray(payload?.lines) ? payload.lines : [];
+  const rawEvents = Array.isArray(payload?.smcEvents)
+    ? payload.smcEvents
+    : Array.isArray(payload?.chartOverlays?.smcEvents)
+      ? payload.chartOverlays.smcEvents
+      : [];
+
+  const fromLines: StructureOverlayLine[] = rawLines
+    .filter((line: any) => {
+      const type = String(line?.type ?? "").toLowerCase();
+      const label = String(line?.label ?? line?.tag ?? "").toUpperCase();
+
+      return (
+        (type === "bos" ||
+          type === "choch" ||
+          type === "mss" ||
+          label.includes("BOS") ||
+          label.includes("CHOCH") ||
+          label.includes("MSS")) &&
+        Number.isFinite(Number(line?.price ?? line?.brokenLevel))
+      );
+    })
+    .map((line: any): StructureOverlayLine => ({
+      id: String(line.id ?? `line-${line.label ?? line.tag ?? line.type}-${line.index ?? ""}`),
+      type: String(line.type ?? "").toLowerCase(),
+      tag: String(line.tag ?? line.label ?? ""),
+      label: String(line.label ?? line.tag ?? line.type ?? ""),
+      price: Number(line.price ?? line.brokenLevel),
+      brokenLevel: Number(line.brokenLevel ?? line.price),
+      time: line.time,
+      fromTime: line.fromTime,
+      direction: line.direction,
+      scope: line.scope,
+      index: Number.isFinite(Number(line.index)) ? Number(line.index) : undefined,
+      breakIndex: Number.isFinite(Number(line.breakIndex)) ? Number(line.breakIndex) : undefined,
+      pivotIndex: Number.isFinite(Number(line.pivotIndex)) ? Number(line.pivotIndex) : undefined,
+      fromIndex: Number.isFinite(Number(line.fromIndex)) ? Number(line.fromIndex) : undefined,
+    }));
+
+  const fromEvents: StructureOverlayLine[] = rawEvents
+    .filter((event: any) => {
+      const tag = String(event?.tag ?? event?.label ?? "").toUpperCase();
+
+      return (
+        (tag.includes("BOS") || tag.includes("CHOCH") || tag.includes("MSS")) &&
+        Number.isFinite(Number(event?.price ?? event?.brokenLevel))
+      );
+    })
+    .map((event: any, index: number): StructureOverlayLine => {
+      const tag = String(event.tag ?? event.label ?? "BOS");
+
+      return {
+        id: String(event.id ?? `event-${tag}-${event.breakIndex ?? event.index ?? index}`),
+        type: tag.toUpperCase().includes("CHOCH")
+          ? "choch"
+          : tag.toUpperCase().includes("MSS")
+            ? "mss"
+            : "bos",
+        tag,
+        label: tag,
+        price: Number(event.price ?? event.brokenLevel),
+        brokenLevel: Number(event.brokenLevel ?? event.price),
+        time: event.time,
+        fromTime: event.fromTime,
+        direction: event.direction,
+        scope: event.scope,
+        index: Number.isFinite(Number(event.index)) ? Number(event.index) : undefined,
+        breakIndex: Number.isFinite(Number(event.breakIndex ?? event.index))
+          ? Number(event.breakIndex ?? event.index)
+          : undefined,
+        pivotIndex: Number.isFinite(Number(event.pivotIndex ?? event.fromIndex))
+          ? Number(event.pivotIndex ?? event.fromIndex)
+          : undefined,
+        fromIndex: Number.isFinite(Number(event.fromIndex ?? event.pivotIndex))
+          ? Number(event.fromIndex ?? event.pivotIndex)
+          : undefined,
+      };
+    });
+
+  const combined = [...fromLines, ...fromEvents];
+  const deduped: StructureOverlayLine[] = [];
+  const seen = new Set<string>();
+
+  for (const line of combined) {
+    const key = `${line.label}-${line.price}-${line.fromIndex ?? line.fromTime}-${line.breakIndex ?? line.index ?? line.time}`;
+
+    if (seen.has(key)) continue;
+
+    seen.add(key);
+    deduped.push(line);
+  }
+
+  return deduped.slice(-40);
+}
+
+function getStructureLabelText
 function drawStructureLines(
   context: CanvasRenderingContext2D,
   chart: IChartApi,
