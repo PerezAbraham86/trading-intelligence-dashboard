@@ -156,6 +156,7 @@ function findRawChartOverlays(source: unknown): RawTradingViewOverlayPayload | n
 
   if (
     Array.isArray(record.smcEvents) ||
+    Array.isArray(record.lines) ||
     Array.isArray(record.zones) ||
     Array.isArray(record.liquidityEvents) ||
     Array.isArray(record.dlmLevels)
@@ -437,7 +438,11 @@ export function buildTradingViewOverlayPayload(source: unknown): ChartOverlayPay
   const liquidityLines = buildLiquidityLines(liquidityEvents);
   const dlmLines = buildDlmLines(dlmLevels).slice(-3);
 
-  const lines = [...structureLines, ...liquidityLines, ...dlmLines].slice(-8);
+  const lines = [
+    ...structureLines.slice(-30),
+    ...liquidityLines.slice(-4),
+    ...dlmLines.slice(-3),
+  ];
   const markers = [...structureMarkers, ...liquidityMarkers].slice(-40);
   const combinedBias = getCombinedBiasFromLines(lines);
 
