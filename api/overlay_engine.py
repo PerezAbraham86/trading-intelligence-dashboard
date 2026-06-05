@@ -367,15 +367,29 @@ def _structure_event(
     tag: str,
     direction: Direction,
     scope: EventScope,
+    break_index: int,
 ) -> dict[str, Any]:
+    """
+    Structure events carry both time and index.
+
+    Why both:
+    - time is good when the chart can map it directly.
+    - index is safer for Lightweight Charts when timestamps are normalized,
+      converted, or slightly mismatched between backend/API/browser.
+    """
     return {
         "time": _format_time(candle.time),
         "fromTime": _format_time(pivot.time),
         "price": pivot.price,
+        "brokenLevel": pivot.price,
         "tag": tag,
+        "label": tag,
         "direction": direction,
         "scope": scope,
+        "index": break_index,
+        "breakIndex": break_index,
         "pivotIndex": pivot.index,
+        "fromIndex": pivot.index,
     }
 
 
@@ -458,6 +472,7 @@ def _detect_structure_for_scope(
                         tag="i" + tag if scope == "internal" else tag,
                         direction=direction,
                         scope=scope,
+                        break_index=index,
                     )
                 )
 
@@ -489,6 +504,7 @@ def _detect_structure_for_scope(
                         tag="i" + tag if scope == "internal" else tag,
                         direction=direction,
                         scope=scope,
+                        break_index=index,
                     )
                 )
 
