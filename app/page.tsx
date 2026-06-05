@@ -6,6 +6,7 @@ import LightweightCandlestickChart, { ChartMode, DashboardCandle } from '@/compo
 import { GhostCandle } from '@/components/GhostCandleOverlay'
 import ChartOverlayStatusPanel from '@/components/ChartOverlayStatusPanel'
 import { buildChartOverlayPayload } from '@/lib/chartOverlayPrep'
+import { buildTradingViewOverlayPayload } from '@/lib/tradingViewOverlays'
 import PressureGauges from '@/components/PressureGauges'
 import FactorConfirmationTable from '@/components/FactorConfirmationTable'
 import GhostCandleProjection from '@/components/GhostCandleProjection'
@@ -543,6 +544,25 @@ function dashboardCandlesToOverlayCandles(candles: DashboardCandle[]) {
   })
 }
 
+function getTradingViewOverlaySource(engineState: PythonEngineState | null | undefined): unknown {
+  if (!engineState || typeof engineState !== 'object') return null
+
+  const state = engineState as any
+
+  return (
+    state.chartOverlays ??
+    state.chart_overlays ??
+    state.overlays ??
+    state.tradingViewOverlays ??
+    state.tvOverlays ??
+    state.latestSignal?.chartOverlays ??
+    state.latestSignal?.chart_overlays ??
+    state.latestSignal?.overlays ??
+    state.latestSignal ??
+    state
+  )
+}
+
 
 function timeToUnixSeconds(time: DashboardCandle['time'] | undefined): number | null {
   if (typeof time === 'number') return time
@@ -810,18 +830,28 @@ function LightweightChartPanel({
   }, [candles, compact, engineState, ghostCandles, normalizedTimeframe])
 
   const overlayPayload = useMemo(() => {
-    if (!showOverlayLines || compact || candles.length < 20) return null
+    if (!showOverlayLines || compact) return null
+
+    const tradingViewPayload = buildTradingViewOverlayPayload(
+      getTradingViewOverlaySource(engineState)
+    )
+
+    if (tradingViewPayload) {
+      return tradingViewPayload
+    }
+
+    if (candles.length < 20) return null
 
     return buildChartOverlayPayload(dashboardCandlesToOverlayCandles(candles), {
       smcSwingLength: 3,
       smcUseCloseBreak: true,
       alphaXLookback: 20,
       alphaXRejectionWickPercent: 45,
-      maxLines: 18,
+      maxLines: 5,
       maxZones: 12,
-      maxMarkers: 30,
+      maxMarkers: 20,
     })
-  }, [candles, compact, showOverlayLines])
+  }, [candles, compact, engineState, showOverlayLines])
 
   return (
     <div className="rounded-xl border border-dark-700 bg-dark-800/80 p-4 shadow-xl">
@@ -921,7 +951,7 @@ function LightweightChartPanel({
         <div className="mt-4">
           <ChartOverlayStatusPanel
             candles={dashboardCandlesToOverlayCandles(candles)}
-            title="SMC + AlphaX Overlay Prep"
+            title="TradingView SMC + AlphaX Overlay Prep"
             compact
           />
         </div>
