@@ -769,6 +769,7 @@ function drawNrtrLineBreakCanvas(
   const context = canvas.getContext("2d");
   if (!context) return;
 
+  const ctx: CanvasRenderingContext2D = context;
   const pixelRatio = window.devicePixelRatio || 1;
 
   canvas.width = Math.max(1, Math.floor(width * pixelRatio));
@@ -776,15 +777,15 @@ function drawNrtrLineBreakCanvas(
   canvas.style.width = `${width}px`;
   canvas.style.height = `${height}px`;
 
-  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-  context.clearRect(0, 0, width, height);
+  ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  ctx.clearRect(0, 0, width, height);
 
   function drawDirection(direction: 1 | -1, color: string) {
-    context.save();
-    context.strokeStyle = color;
-    context.lineWidth = 2;
-    context.lineCap = "round";
-    context.lineJoin = "round";
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
 
     let previousX: number | null = null;
     let previousY: number | null = null;
@@ -823,10 +824,10 @@ function drawNrtrLineBreakCanvas(
         previousY !== null &&
         previousDirection === direction
       ) {
-        context.beginPath();
-        context.moveTo(previousX, previousY);
-        context.lineTo(x, y);
-        context.stroke();
+        ctx.beginPath();
+        ctx.moveTo(previousX, previousY);
+        ctx.lineTo(x, y);
+        ctx.stroke();
       }
 
       previousX = x;
@@ -834,7 +835,7 @@ function drawNrtrLineBreakCanvas(
       previousDirection = point.direction;
     }
 
-    context.restore();
+    ctx.restore();
   }
 
   drawDirection(1, "rgba(38, 166, 154, 0.95)");
