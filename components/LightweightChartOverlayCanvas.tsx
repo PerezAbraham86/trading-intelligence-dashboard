@@ -663,9 +663,11 @@ function normalizeStructureLines(
   const rawLines = Array.isArray(payload?.lines) ? payload.lines : [];
   const rawEvents = Array.isArray(payload?.smcEvents)
     ? payload.smcEvents
-    : Array.isArray(payload?.chartOverlays?.smcEvents)
-      ? payload.chartOverlays.smcEvents
-      : [];
+    : Array.isArray(payload?.smc?.structureEvents)
+      ? payload.smc.structureEvents
+      : Array.isArray(payload?.chartOverlays?.smcEvents)
+        ? payload.chartOverlays.smcEvents
+        : [];
 
   const fromLines: StructureOverlayLine[] = rawLines
     .filter((line: any) => {
