@@ -81,6 +81,16 @@ type StructureOverlayLine = {
   fromIndex?: number;
 };
 
+type UnifiedOverlayZone = ChartOverlayZone & {
+  kind?: string;
+  top?: number;
+  bottom?: number;
+  startIndex?: number;
+  endIndex?: number;
+  sourceEvent?: string;
+  fullLabel?: string;
+};
+
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
@@ -233,16 +243,41 @@ function estimateBarSpacing(chart: IChartApi, candles: OverlayCandle[]): number 
   return 8;
 }
 
+function getZoneLabel(zone: ChartOverlayZone): string {
+  return String((zone as UnifiedOverlayZone).label ?? "");
+}
+
+function getZoneKind(zone: ChartOverlayZone): string {
+  const unified = zone as UnifiedOverlayZone;
+  return String(unified.kind ?? unified.type ?? "").toLowerCase();
+}
+
+function getZoneHigh(zone: ChartOverlayZone): number {
+  const unified = zone as UnifiedOverlayZone;
+  return Number(unified.high ?? unified.top);
+}
+
+function getZoneLow(zone: ChartOverlayZone): number {
+  const unified = zone as UnifiedOverlayZone;
+  return Number(unified.low ?? unified.bottom);
+}
+
 function isPremiumZone(zone: ChartOverlayZone): boolean {
-  return zone.label.toLowerCase().includes("premium");
+  const label = getZoneLabel(zone).toLowerCase();
+  const kind = getZoneKind(zone);
+  return label.includes("premium") || kind.includes("premium");
 }
 
 function isDiscountZone(zone: ChartOverlayZone): boolean {
-  return zone.label.toLowerCase().includes("discount");
+  const label = getZoneLabel(zone).toLowerCase();
+  const kind = getZoneKind(zone);
+  return label.includes("discount") || kind.includes("discount");
 }
 
 function isEquilibriumZone(zone: ChartOverlayZone): boolean {
-  return zone.label.toLowerCase().includes("equilibrium");
+  const label = getZoneLabel(zone).toLowerCase();
+  const kind = getZoneKind(zone);
+  return label.includes("equilibrium") || kind.includes("equilibrium");
 }
 
 function isPdZone(zone: ChartOverlayZone): boolean {
@@ -250,20 +285,27 @@ function isPdZone(zone: ChartOverlayZone): boolean {
 }
 
 function isOrderBlockOrFvg(zone: ChartOverlayZone): boolean {
-  const label = zone.label.toLowerCase();
-  const typeText = String(zone.type).toLowerCase();
+  const unified = zone as UnifiedOverlayZone;
+  const label = getZoneLabel(zone).toLowerCase();
+  const kind = getZoneKind(zone);
+  const sourceEvent = String(unified.sourceEvent ?? "").toLowerCase();
 
   return (
     label.includes("ob") ||
     label.includes("order block") ||
     label.includes("fvg") ||
     label.includes("imbalance") ||
-    typeText.includes("imbalance")
+    kind.includes("ob") ||
+    kind.includes("orderblock") ||
+    kind.includes("order_block") ||
+    kind.includes("fvg") ||
+    kind.includes("imbalance") ||
+    Boolean(sourceEvent)
   );
 }
 
 function getZoneColor(zone: ChartOverlayZone): string {
-  const label = zone.label.toLowerCase();
+  const label = getZoneLabel(zone).toLowerCase();
 
   if (label.includes("premium")) return "rgba(239, 83, 80, 0.19)";
   if (label.includes("discount")) return "rgba(38, 166, 154, 0.18)";
@@ -276,7 +318,7 @@ function getZoneColor(zone: ChartOverlayZone): string {
 }
 
 function getZoneBorderColor(zone: ChartOverlayZone): string {
-  const label = zone.label.toLowerCase();
+  const label = getZoneLabel(zone).toLowerCase();
 
   if (label.includes("premium")) return "rgba(239, 83, 80, 0.42)";
   if (label.includes("discount")) return "rgba(38, 166, 154, 0.42)";
@@ -342,7 +384,12 @@ function drawTextBadge(
   const metrics = context.measureText(text);
   const badgeWidth = Math.ceil(metrics.width + paddingX * 2);
   const badgeHeight = fontSize + paddingY * 2 + 1;
-  const left = align === "right" ? x - badgeWidth : x;
+  const left =
+    align === "right"
+      ? x - badgeWidth
+      : align === "center"
+        ? x - badgeWidth / 2
+        : x;
 
   drawRoundedRect(context, left, y - badgeHeight / 2, badgeWidth, badgeHeight, 4);
   context.fillStyle = backgroundColor;
@@ -429,8 +476,8 @@ function getPdSourceRange(zones: ChartOverlayZone[]) {
 
   if (!allPd.length) return null;
 
-  const top = Math.max(...allPd.map((zone) => Math.max(zone.high, zone.low)));
-  const bottom = Math.min(...allPd.map((zone) => Math.min(zone.high, zone.low)));
+  const top = Math.max(...allPd.map((zone) => Math.max(getZoneHigh(zone), getZoneLow(zone))));
+  const bottom = Math.min(...allPd.map((zone) => Math.min(getZoneHigh(zone), getZoneLow(zone))));
 
   if (!Number.isFinite(top) || !Number.isFinite(bottom) || top <= bottom) return null;
 
@@ -512,8 +559,8 @@ function drawPremiumDiscountZones(
   ];
 
   for (const zone of drawable) {
-    const yHigh = priceToCoordinate(mainSeries, zone.high);
-    const yLow = priceToCoordinate(mainSeries, zone.low);
+    const yHigh = priceToCoordinate(mainSeries, getZoneHigh(zone));
+    const yLow = priceToCoordinate(mainSeries, getZoneLow(zone));
 
     if (yHigh === null || yLow === null) continue;
 
@@ -574,7 +621,7 @@ function getZoneRightCoordinate(
   candles: OverlayCandle[],
   canvasWidth: number
 ): number | null {
-  const zoneWithIndexes = zone as ChartOverlayZone & { endIndex?: number };
+  const zoneWithIndexes = zone as UnifiedOverlayZone;
   const byIndex = getZoneIndexCoordinate(chart, candles, zoneWithIndexes.endIndex);
 
   if (byIndex !== null) return byIndex;
@@ -598,7 +645,7 @@ function getZoneLeftCoordinate(
   zone: ChartOverlayZone,
   candles: OverlayCandle[]
 ): number | null {
-  const zoneWithIndexes = zone as ChartOverlayZone & { startIndex?: number };
+  const zoneWithIndexes = zone as UnifiedOverlayZone;
   const byIndex = getZoneIndexCoordinate(chart, candles, zoneWithIndexes.startIndex);
 
   if (byIndex !== null) return byIndex;
@@ -620,8 +667,8 @@ function drawRegularZones(
     .slice(-8);
 
   for (const zone of regularZones) {
-    const yHigh = priceToCoordinate(mainSeries, zone.high);
-    const yLow = priceToCoordinate(mainSeries, zone.low);
+    const yHigh = priceToCoordinate(mainSeries, getZoneHigh(zone));
+    const yLow = priceToCoordinate(mainSeries, getZoneLow(zone));
 
     if (yHigh === null || yLow === null) continue;
 
@@ -659,7 +706,8 @@ function drawRegularZones(
     context.strokeRect(clippedLeft, top, width, height);
 
     if (width > 70 && height > 12) {
-      drawZoneLabel(context, zone.label, clippedLeft + 6, top + Math.min(10, height / 2), getZoneBorderColor(zone), "left");
+      const zoneText = String((zone as UnifiedOverlayZone).fullLabel ?? zone.label ?? "");
+      drawZoneLabel(context, zoneText, clippedLeft + 6, top + Math.min(10, height / 2), getZoneBorderColor(zone), "left");
     }
 
     context.restore();
@@ -1225,6 +1273,65 @@ function formatCompactVolume(value: number): string {
   return Math.round(value).toString();
 }
 
+
+function normalizeOverlayZones(overlayPayload: ChartOverlayPayload | null | undefined): ChartOverlayZone[] {
+  const payload = overlayPayload as any;
+
+  const zones = Array.isArray(payload?.zones) ? payload.zones : [];
+  const orderBlocks = Array.isArray(payload?.orderBlocks) ? payload.orderBlocks : [];
+
+  const merged: ChartOverlayZone[] = [];
+  const seen = new Set<string>();
+
+  for (const rawZone of [...zones, ...orderBlocks]) {
+    if (!rawZone || typeof rawZone !== "object") continue;
+
+    const high = Number(rawZone.high ?? rawZone.top);
+    const low = Number(rawZone.low ?? rawZone.bottom);
+
+    if (!Number.isFinite(high) || !Number.isFinite(low)) continue;
+
+    const label = String(rawZone.label ?? rawZone.fullLabel ?? rawZone.kind ?? rawZone.type ?? "");
+    const kind = String(rawZone.kind ?? rawZone.type ?? "");
+    const direction = String(rawZone.direction ?? "neutral");
+
+    const key = [
+      rawZone.id,
+      kind,
+      label,
+      direction,
+      Math.round(high * 100) / 100,
+      Math.round(low * 100) / 100,
+      rawZone.startIndex ?? rawZone.startTime,
+      rawZone.endIndex ?? rawZone.endTime,
+    ].join("|");
+
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    merged.push({
+      id: String(rawZone.id ?? key),
+      type: rawZone.type ?? (kind.includes("ob") ? (direction === "bearish" ? "supply" : "demand") : "neutralPressure"),
+      label,
+      startTime: rawZone.startTime ?? "",
+      endTime: rawZone.endTime ?? "",
+      high,
+      low,
+      direction: direction === "bullish" || direction === "bearish" ? direction : "neutral",
+      strength: Number.isFinite(Number(rawZone.strength)) ? Number(rawZone.strength) : undefined,
+      kind,
+      top: high,
+      bottom: low,
+      startIndex: Number.isFinite(Number(rawZone.startIndex)) ? Number(rawZone.startIndex) : undefined,
+      endIndex: Number.isFinite(Number(rawZone.endIndex)) ? Number(rawZone.endIndex) : undefined,
+      sourceEvent: rawZone.sourceEvent,
+      fullLabel: rawZone.fullLabel,
+    } as UnifiedOverlayZone);
+  }
+
+  return merged;
+}
+
 export default function LightweightChartOverlayCanvas({
   chart,
   mainSeries,
@@ -1247,7 +1354,7 @@ export default function LightweightChartOverlayCanvas({
   const canvasWidth = width ?? measuredSize.width;
   const canvasHeight = height ?? measuredSize.height;
 
-  const zones = useMemo(() => overlayPayload?.zones ?? [], [overlayPayload]);
+  const zones = useMemo(() => normalizeOverlayZones(overlayPayload), [overlayPayload]);
   const markers = useMemo(() => overlayPayload?.markers ?? [], [overlayPayload]);
 
   useEffect(() => {
