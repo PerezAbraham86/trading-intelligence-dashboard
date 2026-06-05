@@ -64,6 +64,16 @@ type PdZoneGroup = {
   discount?: ChartOverlayZone;
 };
 
+type StructureOverlayLine = {
+  id?: string;
+  type?: string;
+  label?: string;
+  price?: number;
+  time?: unknown;
+  fromTime?: unknown;
+  direction?: "bullish" | "bearish" | "neutral";
+};
+
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
@@ -463,12 +473,110 @@ function drawZones(
   drawPremiumDiscountZones(context, chart, mainSeries, zones, candles, canvasWidth);
 }
 
+function getStructureLineColor(line: StructureOverlayLine): string {
+  if (line.direction === "bullish") return "rgba(38, 166, 154, 0.82)";
+  if (line.direction === "bearish") return "rgba(239, 83, 80, 0.82)";
+  return "rgba(148, 163, 184, 0.72)";
+}
+
+function getStructureLineBg(line: StructureOverlayLine): string {
+  if (line.direction === "bullish") return "rgba(38, 166, 154, 0.12)";
+  if (line.direction === "bearish") return "rgba(239, 83, 80, 0.12)";
+  return "rgba(148, 163, 184, 0.12)";
+}
+
+function normalizeStructureLines(overlayPayload: ChartOverlayPayload | null | undefined): StructureOverlayLine[] {
+  const rawLines = (overlayPayload as any)?.lines;
+
+  if (!Array.isArray(rawLines)) return [];
+
+  return rawLines
+    .filter((line: any) => {
+      const type = String(line?.type ?? "").toLowerCase();
+      const label = String(line?.label ?? "").toUpperCase();
+
+      return (
+        (type === "bos" || type === "choch" || type === "mss" || label.includes("BOS") || label.includes("CHOCH") || label.includes("MSS")) &&
+        line?.fromTime !== undefined &&
+        Number.isFinite(Number(line?.price))
+      );
+    })
+    .slice(-18);
+}
+
+function drawStructureLines(
+  context: CanvasRenderingContext2D,
+  chart: IChartApi,
+  mainSeries: ISeriesApi<"Candlestick">,
+  overlayPayload: ChartOverlayPayload | null | undefined,
+  candles: OverlayCandle[],
+  canvasWidth: number
+) {
+  const structureLines = normalizeStructureLines(overlayPayload);
+  const placed: Array<{ x: number; y: number }> = [];
+
+  for (const line of structureLines) {
+    const y = priceToCoordinate(mainSeries, line.price);
+    const x1 = timeToCoordinate(chart, line.fromTime, candles);
+    const x2 = timeToCoordinate(chart, line.time, candles);
+
+    if (y === null || x1 === null || x2 === null) continue;
+
+    const left = Math.min(x1, x2);
+    const right = Math.max(x1, x2);
+
+    if (right < -20 || left > canvasWidth + 20) continue;
+
+    const clippedLeft = Math.max(0, left);
+    const clippedRight = Math.min(canvasWidth, right);
+
+    if (clippedRight - clippedLeft < 12) continue;
+
+    context.save();
+
+    context.strokeStyle = getStructureLineColor(line);
+    context.lineWidth = 1;
+    context.setLineDash([4, 3]);
+    context.beginPath();
+    context.moveTo(clippedLeft, y);
+    context.lineTo(clippedRight, y);
+    context.stroke();
+    context.setLineDash([]);
+
+    const label = String(line.label || line.type || "").replace(/^i(?=BOS|CHoCH|MSS)/, "i");
+    const labelX = clippedLeft + (clippedRight - clippedLeft) / 2;
+    let labelY = line.direction === "bullish" ? y - 10 : y + 10;
+
+    for (const previous of placed) {
+      if (Math.abs(previous.x - labelX) < 46 && Math.abs(previous.y - labelY) < 16) {
+        labelY += line.direction === "bullish" ? -16 : 16;
+      }
+    }
+
+    placed.push({ x: labelX, y: labelY });
+
+    drawTextBadge(
+      context,
+      label,
+      labelX,
+      labelY,
+      getStructureLineColor(line),
+      getStructureLineBg(line),
+      "left"
+    );
+
+    context.restore();
+  }
+}
+
+
 function getCompactMarkerText(marker: ChartOverlayMarker): string {
   const label = marker.label.toLowerCase();
 
   if (label.includes("pressure")) return "";
   if (label.includes("score")) return "";
   if (marker.type === "Rejection") return "";
+  if (marker.type === "BOS" || marker.type === "CHoCH" || marker.type === "MSS") return "";
 
   if (marker.type === "Sweep") {
     if (label.includes("sell")) return "SSL";
@@ -846,6 +954,7 @@ export default function LightweightChartOverlayCanvas({
     }
 
     if (showLabels) {
+      drawStructureLines(context, chart, mainSeries, overlayPayload, candles, canvasWidth);
       drawMarkers(context, chart, mainSeries, markers, candles, canvasWidth);
     }
 
