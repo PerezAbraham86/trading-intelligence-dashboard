@@ -6,7 +6,6 @@ import LightweightCandlestickChart, { ChartMode, DashboardCandle } from '@/compo
 import { GhostCandle } from '@/components/GhostCandleOverlay'
 import ChartOverlayStatusPanel from '@/components/ChartOverlayStatusPanel'
 import { buildChartOverlayPayload } from '@/lib/chartOverlayPrep'
-import { buildTradingViewOverlayPayload } from '@/lib/tradingViewOverlays'
 import PressureGauges from '@/components/PressureGauges'
 import FactorConfirmationTable from '@/components/FactorConfirmationTable'
 import GhostCandleProjection from '@/components/GhostCandleProjection'
@@ -37,6 +36,18 @@ type PythonGhostCandle = {
 }
 
 type PythonEngineState = {
+  overlayPayload?: unknown
+  chartOverlays?: unknown
+  chart_overlays?: unknown
+  overlays?: unknown
+  lines?: unknown[]
+  zones?: unknown[]
+  markers?: unknown[]
+  smcEvents?: unknown[]
+  orderBlocks?: unknown[]
+  liquidityEvents?: unknown[]
+  liquidityProfileBins?: unknown[]
+  dlmLevels?: unknown[]
   ghostCandles?: PythonGhostCandle[]
   ghostProjections?: PythonGhostCandle[]
   projections?: PythonGhostCandle[]
@@ -544,23 +555,68 @@ function dashboardCandlesToOverlayCandles(candles: DashboardCandle[]) {
   })
 }
 
-function getTradingViewOverlaySource(engineState: PythonEngineState | null | undefined): unknown {
-  if (!engineState || typeof engineState !== 'object') return null
+function isUnifiedOverlayPayloadLike(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false
 
-  const state = engineState as any
+  const raw = value as any
 
   return (
-    state.chartOverlays ??
-    state.chart_overlays ??
-    state.overlays ??
-    state.tradingViewOverlays ??
-    state.tvOverlays ??
-    state.latestSignal?.chartOverlays ??
-    state.latestSignal?.chart_overlays ??
-    state.latestSignal?.overlays ??
-    state.latestSignal ??
-    state
+    Array.isArray(raw.lines) ||
+    Array.isArray(raw.zones) ||
+    Array.isArray(raw.markers) ||
+    Array.isArray(raw.smcEvents) ||
+    Array.isArray(raw.orderBlocks) ||
+    Array.isArray(raw.liquidityEvents) ||
+    Array.isArray(raw.liquidityProfileBins) ||
+    Array.isArray(raw.dlmLevels) ||
+    Array.isArray(raw.ghostCandles)
   )
+}
+
+function getUnifiedOverlayPayload(...sources: unknown[]) {
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue
+
+    const raw = source as any
+
+    const candidates = [
+      raw.overlayPayload,
+      raw.chartOverlays,
+      raw.chart_overlays,
+      raw.overlays,
+      raw.latestSignal?.overlayPayload,
+      raw.latestSignal?.chartOverlays,
+      raw.latestSignal?.chart_overlays,
+      raw.latestSignal?.overlays,
+      raw,
+    ]
+
+    for (const candidate of candidates) {
+      if (isUnifiedOverlayPayloadLike(candidate)) {
+        return candidate as any
+      }
+    }
+  }
+
+  return null
+}
+
+function getGhostCandlesFromUnifiedOverlay(overlayPayload: any | null | undefined): PythonGhostCandle[] {
+  if (!overlayPayload || typeof overlayPayload !== 'object') return []
+
+  if (Array.isArray(overlayPayload.ghostCandles)) {
+    return overlayPayload.ghostCandles as PythonGhostCandle[]
+  }
+
+  if (Array.isArray(overlayPayload.ghostProjections)) {
+    return overlayPayload.ghostProjections as PythonGhostCandle[]
+  }
+
+  if (Array.isArray(overlayPayload.projections)) {
+    return overlayPayload.projections as PythonGhostCandle[]
+  }
+
+  return []
 }
 
 
@@ -717,6 +773,7 @@ function useChartCandles(
   pollMs = 5000
 ) {
   const [candles, setCandles] = useState<DashboardCandle[]>([])
+  const [overlayPayload, setOverlayPayload] = useState<any | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [errorText, setErrorText] = useState('')
 
@@ -747,9 +804,11 @@ function useChartCandles(
 
         const json = await response.json()
         const nextCandles = normalizeCandlePayload(json)
+        const nextOverlayPayload = getUnifiedOverlayPayload(json)
 
         if (!cancelled) {
           setCandles(nextCandles)
+          setOverlayPayload(nextOverlayPayload)
         }
       } catch (error) {
         console.error('Lightweight chart candle sync error:', error)
@@ -765,6 +824,7 @@ function useChartCandles(
     }
 
     setCandles([])
+    setOverlayPayload(null)
     fetchCandles()
     intervalId = setInterval(fetchCandles, pollMs)
 
@@ -776,185 +836,12 @@ function useChartCandles(
 
   return {
     candles,
+    overlayPayload,
     isLoading,
     errorText,
   }
 }
 
-
-function isStructureOverlayLine(line: any) {
-  const type = String(line?.type ?? '').toLowerCase()
-  const label = String(line?.label ?? line?.tag ?? '').toUpperCase()
-
-  return (
-    type === 'bos' ||
-    type === 'choch' ||
-    type === 'mss' ||
-    label.includes('BOS') ||
-    label.includes('CHOCH') ||
-    label.includes('MSS')
-  )
-}
-
-function isPdOverlayZone(zone: any) {
-  const label = String(zone?.label ?? '').toLowerCase()
-  const kind = String(zone?.kind ?? zone?.type ?? '').toLowerCase()
-
-  return (
-    label.includes('premium') ||
-    label.includes('equilibrium') ||
-    label.includes('discount') ||
-    kind.includes('premium') ||
-    kind.includes('equilibrium') ||
-    kind.includes('discount')
-  )
-}
-
-function isOrderBlockOverlayZone(zone: any) {
-  const label = String(zone?.label ?? '').toLowerCase()
-  const kind = String(zone?.kind ?? zone?.type ?? '').toLowerCase()
-  const sourceEvent = String(zone?.sourceEvent ?? '').toLowerCase()
-
-  return (
-    label.includes('ob') ||
-    label.includes('order block') ||
-    kind.includes('ob') ||
-    kind.includes('order') ||
-    sourceEvent === 'bos' ||
-    sourceEvent === 'choch' ||
-    sourceEvent === 'mss'
-  )
-}
-
-function mergeOverlayZones(basePayload: any, priorityPayload: any) {
-  const baseZones = Array.isArray(basePayload?.zones) ? basePayload.zones : []
-  const priorityZones = Array.isArray(priorityPayload?.zones) ? priorityPayload.zones : []
-
-  /**
-   * Stable OB rule:
-   * - Fallback/frontend SMC is the source of truth for order blocks.
-   * - Priority payload is the source of truth for Premium / Equilibrium / Discount.
-   * - Do not let priority/webhook/Python zones replace, remove, or duplicate SMC OBs
-   *   when PD zones finish loading.
-   */
-  const baseOrderBlocks = baseZones.filter(isOrderBlockOverlayZone)
-  const baseNonOrderBlocks = baseZones.filter((zone: any) => !isOrderBlockOverlayZone(zone))
-
-  const priorityPdZones = priorityZones.filter(isPdOverlayZone)
-  const priorityOtherNonOrderBlocks = priorityZones.filter(
-    (zone: any) => !isOrderBlockOverlayZone(zone) && !isPdOverlayZone(zone)
-  )
-
-  const merged: any[] = []
-  const seen = new Set<string>()
-
-  for (const zone of [
-    ...baseOrderBlocks,
-    ...priorityPdZones,
-    ...priorityOtherNonOrderBlocks,
-    ...baseNonOrderBlocks.filter((zone: any) => !isPdOverlayZone(zone)),
-  ]) {
-    if (!zone) continue
-
-    const high = Number(zone.high ?? zone.top)
-    const low = Number(zone.low ?? zone.bottom)
-
-    if (!Number.isFinite(high) || !Number.isFinite(low)) continue
-
-    const key = [
-      zone.kind ?? zone.type,
-      zone.label,
-      zone.direction,
-      Math.round(high * 100) / 100,
-      Math.round(low * 100) / 100,
-      zone.startIndex ?? zone.startTime,
-      zone.endIndex ?? zone.endTime,
-    ].join('|')
-
-    if (seen.has(key)) continue
-
-    seen.add(key)
-    merged.push(zone)
-  }
-
-  return merged
-}
-
-function mergeOverlayPayloads(basePayload: any, priorityPayload: any) {
-  if (!basePayload) return priorityPayload ?? null
-  if (!priorityPayload) return basePayload ?? null
-
-  const baseLines = Array.isArray(basePayload.lines) ? basePayload.lines : []
-  const priorityLines = Array.isArray(priorityPayload.lines) ? priorityPayload.lines : []
-
-  const baseStructureLines = baseLines.filter(isStructureOverlayLine)
-  const priorityStructureLines = priorityLines.filter(isStructureOverlayLine)
-  const priorityOtherLines = priorityLines.filter((line: any) => !isStructureOverlayLine(line))
-  const baseOtherLines = baseLines.filter((line: any) => !isStructureOverlayLine(line))
-
-  const mergedLines: any[] = []
-  const seenLines = new Set<string>()
-
-  for (const line of [
-    ...priorityStructureLines,
-    ...baseStructureLines,
-    ...priorityOtherLines,
-    ...baseOtherLines,
-  ]) {
-    if (!line || !Number.isFinite(Number(line.price ?? line.brokenLevel))) continue
-
-    const key = [
-      line.type,
-      line.label ?? line.tag,
-      line.price ?? line.brokenLevel,
-      line.fromIndex ?? line.pivotIndex ?? line.fromTime,
-      line.breakIndex ?? line.index ?? line.time,
-    ].join('|')
-
-    if (seenLines.has(key)) continue
-
-    seenLines.add(key)
-    mergedLines.push(line)
-  }
-
-  const mergedZones = mergeOverlayZones(basePayload, priorityPayload)
-
-  const priorityMarkers = Array.isArray(priorityPayload.markers) ? priorityPayload.markers : []
-  const baseMarkers = Array.isArray(basePayload.markers) ? basePayload.markers : []
-
-  const mergedMarkers: any[] = []
-  const seenMarkers = new Set<string>()
-
-  for (const marker of [...priorityMarkers, ...baseMarkers]) {
-    if (!marker) continue
-
-    const key = [marker.type, marker.label, marker.price, marker.time, marker.index].join('|')
-    if (seenMarkers.has(key)) continue
-
-    seenMarkers.add(key)
-    mergedMarkers.push(marker)
-  }
-
-  return {
-    ...basePayload,
-    ...priorityPayload,
-    smc: basePayload.smc ?? priorityPayload.smc,
-    alphaX: priorityPayload.alphaX ?? basePayload.alphaX,
-    smcEvents: priorityPayload.smcEvents ?? basePayload.smcEvents,
-    lines: mergedLines,
-    zones: mergedZones,
-    markers: mergedMarkers.slice(-40),
-    liquidityProfileBins:
-      priorityPayload.liquidityProfileBins ?? basePayload.liquidityProfileBins,
-    summary: {
-      ...(basePayload.summary ?? {}),
-      ...(priorityPayload.summary ?? {}),
-      lineCount: mergedLines.length,
-      zoneCount: mergedZones.length,
-      markerCount: mergedMarkers.length,
-    },
-  }
-}
 
 type LightweightChartPanelProps = {
   title: string
@@ -989,7 +876,7 @@ function LightweightChartPanel({
 }: LightweightChartPanelProps) {
   const normalizedSymbol = normalizeSymbol(symbol)
   const normalizedTimeframe = normalizeTimeframe(timeframe)
-  const { candles, isLoading, errorText } = useChartCandles(
+  const { candles, overlayPayload: unifiedOverlayPayload, isLoading, errorText } = useChartCandles(
     apiBaseUrl,
     isClient,
     normalizedSymbol,
@@ -1001,38 +888,50 @@ function LightweightChartPanel({
   const chartGhostCandles = useMemo(() => {
     if (ghostCandles.length > 0) return ghostCandles
     if (compact) return []
+
+    const overlayGhostCandles = getGhostCandlesFromUnifiedOverlay(unifiedOverlayPayload)
+
+    if (overlayGhostCandles.length > 0) {
+      return buildGhostCandlesForChart(
+        { ghostCandles: overlayGhostCandles },
+        candles,
+        normalizedTimeframe
+      )
+    }
+
     return buildGhostCandlesForChart(engineState, candles, normalizedTimeframe)
-  }, [candles, compact, engineState, ghostCandles, normalizedTimeframe])
+  }, [candles, compact, engineState, ghostCandles, normalizedTimeframe, unifiedOverlayPayload])
 
   const overlayPayload = useMemo(() => {
     if (!showOverlayLines || compact) return null
 
-    const fallbackPayload = candles.length >= 20
-      ? buildChartOverlayPayload(dashboardCandlesToOverlayCandles(candles), {
-          smcSwingLength: 3,
-          smcUseCloseBreak: true,
-          alphaXLookback: 20,
-          alphaXRejectionWickPercent: 45,
-          maxLines: 12,
-          maxZones: 12,
-          maxMarkers: 20,
-        })
-      : null
-
-    const tradingViewPayload = buildTradingViewOverlayPayload(
-      getTradingViewOverlaySource(engineState)
+    const backendOverlayPayload = getUnifiedOverlayPayload(
+      unifiedOverlayPayload,
+      engineState
     )
 
-    if (tradingViewPayload && fallbackPayload) {
-      return mergeOverlayPayloads(fallbackPayload, tradingViewPayload)
+    if (backendOverlayPayload) {
+      return backendOverlayPayload
     }
 
-    if (tradingViewPayload) {
-      return tradingViewPayload
-    }
+    /**
+     * Safety fallback only:
+     * The final architecture expects /api/candles to return one unified
+     * overlayPayload. This browser calculation is only here so the chart
+     * still has basic overlays if the backend response is missing overlays.
+     */
+    if (candles.length < 20) return null
 
-    return fallbackPayload
-  }, [candles, compact, engineState, showOverlayLines])
+    return buildChartOverlayPayload(dashboardCandlesToOverlayCandles(candles), {
+      smcSwingLength: 3,
+      smcUseCloseBreak: true,
+      alphaXLookback: 20,
+      alphaXRejectionWickPercent: 45,
+      maxLines: 12,
+      maxZones: 12,
+      maxMarkers: 20,
+    })
+  }, [candles, compact, engineState, showOverlayLines, unifiedOverlayPayload])
 
   return (
     <div className="rounded-xl border border-dark-700 bg-dark-800/80 p-4 shadow-xl">
@@ -1132,7 +1031,7 @@ function LightweightChartPanel({
         <div className="mt-4">
           <ChartOverlayStatusPanel
             candles={dashboardCandlesToOverlayCandles(candles)}
-            title="TradingView SMC + AlphaX Overlay Prep"
+            title="Unified Python SMC + AlphaX Overlay"
             compact
           />
         </div>
