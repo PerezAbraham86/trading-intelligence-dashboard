@@ -27,6 +27,8 @@ type AnyRecord = Record<string, unknown>;
 
 type RawTradingViewOverlayPayload = {
   smcEvents?: RawTradingViewSMCEvent[];
+  lines?: unknown[];
+  markers?: unknown[];
   zones?: RawTradingViewZone[];
   liquidityEvents?: RawTradingViewLiquidityEvent[];
   dlmLevels?: RawTradingViewDlmLevel[];
@@ -240,6 +242,49 @@ function toOptionalNumber(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function buildRawStructureLines(rawLines: unknown[]): ChartOverlayLine[] {
+  return rawLines
+    .filter((line: any) => {
+      const type = String(line?.type ?? "").toLowerCase();
+      const label = String(line?.label ?? line?.tag ?? "").toUpperCase();
+
+      return (
+        (type === "bos" ||
+          type === "choch" ||
+          type === "mss" ||
+          label.includes("BOS") ||
+          label.includes("CHOCH") ||
+          label.includes("MSS")) &&
+        Number.isFinite(Number(line?.price ?? line?.brokenLevel))
+      );
+    })
+    .map((line: any, index): ChartOverlayLine => {
+      const label = toText(line.label ?? line.tag ?? line.type, "BOS");
+
+      return {
+        id: toText(line.id, `raw-structure-line-${index}`),
+        type: getStructureLineType(label),
+        label,
+        price: toNumber(line.price ?? line.brokenLevel),
+        time: normalizeTime(line.time),
+        direction: normalizeDirection(line.direction),
+        fromTime: normalizeTime(line.fromTime),
+        index: toOptionalNumber(line.index ?? line.breakIndex),
+        breakIndex: toOptionalNumber(line.breakIndex ?? line.index),
+        pivotIndex: toOptionalNumber(line.pivotIndex ?? line.fromIndex),
+        fromIndex: toOptionalNumber(line.fromIndex ?? line.pivotIndex),
+        scope: toText(line.scope, ""),
+      } as ChartOverlayLine & {
+        fromTime: number | string;
+        index?: number;
+        breakIndex?: number;
+        pivotIndex?: number;
+        fromIndex?: number;
+        scope?: string;
+      };
+    });
+}
+
 function buildStructureLines(events: RawTradingViewSMCEvent[]): ChartOverlayLine[] {
   return events
     .slice(-40)
@@ -377,12 +422,16 @@ export function buildTradingViewOverlayPayload(source: unknown): ChartOverlayPay
   if (!raw) return null;
 
   const smcEvents = Array.isArray(raw.smcEvents) ? raw.smcEvents : [];
+  const rawLines = Array.isArray(raw.lines) ? raw.lines : [];
   const zonesRaw = Array.isArray(raw.zones) ? raw.zones : [];
   const liquidityEvents = Array.isArray(raw.liquidityEvents) ? raw.liquidityEvents : [];
   const dlmLevels = Array.isArray(raw.dlmLevels) ? raw.dlmLevels : [];
 
   const structureMarkers = buildStructureMarkers(smcEvents);
-  const structureLines = buildStructureLines(smcEvents);
+  const structureLines = [
+    ...buildRawStructureLines(rawLines),
+    ...buildStructureLines(smcEvents),
+  ];
   const zones = buildZones(zonesRaw);
   const liquidityMarkers = buildLiquidityMarkers(liquidityEvents);
   const liquidityLines = buildLiquidityLines(liquidityEvents);
@@ -395,6 +444,7 @@ export function buildTradingViewOverlayPayload(source: unknown): ChartOverlayPay
   return {
     smc: createEmptyAnalysisObject<ChartOverlayPayload["smc"]>(),
     alphaX: createEmptyAnalysisObject<ChartOverlayPayload["alphaX"]>(),
+    smcEvents,
     lines,
     zones,
     markers,
@@ -410,6 +460,8 @@ export function buildTradingViewOverlayPayload(source: unknown): ChartOverlayPay
       zoneCount: zones.length,
       markerCount: markers.length,
     },
+  } as ChartOverlayPayload & {
+    smcEvents: RawTradingViewSMCEvent[];
   };
 }
 
