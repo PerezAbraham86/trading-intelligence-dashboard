@@ -212,7 +212,7 @@ function getFutureOverlayGeometry(chart: IChartApi, candles: OverlayCandle[], ca
    * Profile bars should behave like ghost candles:
    * close to the latest/future candle area, not pinned far away after the PD box.
    */
-  const profileLeft = latestX + spacing * 8;
+  const profileLeft = latestX + spacing * 12;
   const profileWidth = Math.min(165, Math.max(85, canvasWidth * 0.12));
 
   return {
