@@ -757,6 +757,90 @@ function formatNrtrSigned(value: number | null | undefined, decimals = 2): strin
   return `${number > 0 ? "+" : ""}${number.toFixed(decimals)}`;
 }
 
+
+function drawNrtrLineBreakCanvas(
+  canvas: HTMLCanvasElement,
+  chart: IChartApi,
+  mainSeries: ISeriesApi<"Candlestick">,
+  points: NrtrPoint[],
+  width: number,
+  height: number
+) {
+  const context = canvas.getContext("2d");
+  if (!context) return;
+
+  const pixelRatio = window.devicePixelRatio || 1;
+
+  canvas.width = Math.max(1, Math.floor(width * pixelRatio));
+  canvas.height = Math.max(1, Math.floor(height * pixelRatio));
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+
+  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  context.clearRect(0, 0, width, height);
+
+  function drawDirection(direction: 1 | -1, color: string) {
+    context.save();
+    context.strokeStyle = color;
+    context.lineWidth = 2;
+    context.lineCap = "round";
+    context.lineJoin = "round";
+
+    let previousX: number | null = null;
+    let previousY: number | null = null;
+    let previousDirection: 1 | -1 | 0 = 0;
+
+    for (const point of points) {
+      const isActive =
+        point.direction === direction &&
+        point.value !== null &&
+        Number.isFinite(point.value);
+
+      if (!isActive) {
+        previousX = null;
+        previousY = null;
+        previousDirection = point.direction;
+        continue;
+      }
+
+      const x = chart.timeScale().timeToCoordinate(point.time);
+      const y = mainSeries.priceToCoordinate(Number(point.value));
+
+      if (x === null || y === null) {
+        previousX = null;
+        previousY = null;
+        previousDirection = point.direction;
+        continue;
+      }
+
+      /**
+       * This is the important plot.style_linebr behavior:
+       * only connect two adjacent active points in the same direction.
+       * Never bridge across inactive bars or trend flips.
+       */
+      if (
+        previousX !== null &&
+        previousY !== null &&
+        previousDirection === direction
+      ) {
+        context.beginPath();
+        context.moveTo(previousX, previousY);
+        context.lineTo(x, y);
+        context.stroke();
+      }
+
+      previousX = x;
+      previousY = y;
+      previousDirection = point.direction;
+    }
+
+    context.restore();
+  }
+
+  drawDirection(1, "rgba(38, 166, 154, 0.95)");
+  drawDirection(-1, "rgba(239, 83, 80, 0.95)");
+}
+
 function getOverlayLineColor(line: ChartOverlayLine): string {
   if (line.direction === "bullish") return "rgba(38, 166, 154, 0.85)";
   if (line.direction === "bearish") return "rgba(239, 83, 80, 0.85)";
@@ -816,6 +900,7 @@ export default function LightweightCandlestickChart({
   const smmaSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const nrtrLongSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const nrtrShortSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const nrtrCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const ghostCandleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const hasFitContentRef = useRef(false);
@@ -1031,7 +1116,15 @@ export default function LightweightCandlestickChart({
 
     resizeObserverRef.current.observe(container);
 
+    const redrawNrtrCanvas = () => {
+      setOverlaySize((previous) => ({ ...previous }));
+    };
+
+    chart.timeScale().subscribeVisibleTimeRangeChange(redrawNrtrCanvas);
+
     return () => {
+      chart.timeScale().unsubscribeVisibleTimeRangeChange(redrawNrtrCanvas);
+
       resizeObserverRef.current?.disconnect();
       resizeObserverRef.current = null;
 
@@ -1064,9 +1157,45 @@ export default function LightweightCandlestickChart({
   }, [showSmma20, smma20Data]);
 
   useEffect(() => {
-    nrtrLongSeriesRef.current?.setData(showNrtr ? nrtrLongLineData : []);
-    nrtrShortSeriesRef.current?.setData(showNrtr ? nrtrShortLineData : []);
+    /**
+     * NRTR/SuperTrend is drawn by the canvas below to match Pine plot.style_linebr.
+     * Lightweight line series can visually bridge old segments on some data sets,
+     * so the built-in line series stays empty.
+     */
+    nrtrLongSeriesRef.current?.setData([]);
+    nrtrShortSeriesRef.current?.setData([]);
   }, [nrtrLongLineData, nrtrShortLineData, showNrtr]);
+
+  useEffect(() => {
+    if (
+      !showNrtr ||
+      !nrtrCanvasRef.current ||
+      !chartRef.current ||
+      !candleSeriesRef.current ||
+      overlaySize.width <= 0 ||
+      overlaySize.height <= 0
+    ) {
+      const context = nrtrCanvasRef.current?.getContext("2d");
+      if (context && nrtrCanvasRef.current) {
+        context.clearRect(
+          0,
+          0,
+          nrtrCanvasRef.current.width,
+          nrtrCanvasRef.current.height
+        );
+      }
+      return;
+    }
+
+    drawNrtrLineBreakCanvas(
+      nrtrCanvasRef.current,
+      chartRef.current,
+      candleSeriesRef.current,
+      nrtrPoints,
+      overlaySize.width,
+      overlaySize.height
+    );
+  }, [nrtrPoints, overlaySize.height, overlaySize.width, showNrtr]);
 
   useEffect(() => {
     if (!candleSeriesRef.current) return;
@@ -1205,6 +1334,12 @@ export default function LightweightCandlestickChart({
       )}
 
       <div ref={containerRef} className="h-full w-full" />
+
+      <canvas
+        ref={nrtrCanvasRef}
+        className="pointer-events-none absolute inset-0 z-[4]"
+        aria-hidden="true"
+      />
 
       {showCanvasOverlay && overlayPayload && chartRef.current && candleSeriesRef.current && (
         <LightweightChartOverlayCanvas
