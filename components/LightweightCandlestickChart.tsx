@@ -6,9 +6,7 @@ import {
   ColorType,
   CrosshairMode,
   IChartApi,
-  IPriceLine,
   ISeriesApi,
-  LineStyle,
   Time,
   createChart,
 } from "lightweight-charts";
@@ -196,7 +194,6 @@ export default function LightweightCandlestickChart({
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const ghostCandleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
-  const overlayPriceLinesRef = useRef<IPriceLine[]>([]);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const hasFitContentRef = useRef(false);
   const [overlaySize, setOverlaySize] = useState({ width: 0, height });
@@ -228,8 +225,13 @@ export default function LightweightCandlestickChart({
     return toGhostChartCandles(ghostCandles);
   }, [ghostCandles]);
 
+  /**
+   * Price-scale labels / createPriceLine overlays are intentionally disabled.
+   * The TradingView-style visuals should be drawn by the canvas layer only.
+   * This prevents stacked right-axis labels like BOS, CHoCH, DLM levels, sweeps.
+   */
   const visibleOverlayLines = useMemo(() => {
-    return showOverlayLines ? getVisibleOverlayLines(overlayLines) : [];
+    return [] as ChartOverlayLine[];
   }, [overlayLines, showOverlayLines]);
 
   useEffect(() => {
@@ -349,11 +351,6 @@ export default function LightweightCandlestickChart({
     resizeObserverRef.current.observe(container);
 
     return () => {
-      overlayPriceLinesRef.current.forEach((priceLine) => {
-        candleSeriesRef.current?.removePriceLine(priceLine);
-      });
-      overlayPriceLinesRef.current = [];
-
       resizeObserverRef.current?.disconnect();
       resizeObserverRef.current = null;
 
@@ -381,29 +378,6 @@ export default function LightweightCandlestickChart({
 
     ghostCandleSeriesRef.current.setData(ghostDisplayData);
   }, [ghostDisplayData]);
-
-  useEffect(() => {
-    if (!candleSeriesRef.current) return;
-
-    overlayPriceLinesRef.current.forEach((priceLine) => {
-      candleSeriesRef.current?.removePriceLine(priceLine);
-    });
-
-    overlayPriceLinesRef.current = [];
-
-    for (const line of visibleOverlayLines) {
-      const priceLine = candleSeriesRef.current.createPriceLine({
-        price: line.price,
-        color: getOverlayLineColor(line),
-        lineWidth: 1,
-        lineStyle: LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: getOverlayLineTitle(line),
-      });
-
-      overlayPriceLinesRef.current.push(priceLine);
-    }
-  }, [visibleOverlayLines]);
 
   useEffect(() => {
     if (!chartRef.current) return;
