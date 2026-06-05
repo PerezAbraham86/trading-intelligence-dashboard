@@ -788,6 +788,68 @@ def _build_dlm_profile(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Chart drawable conversion
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _structure_line_from_event(event: dict[str, Any]) -> dict[str, Any]:
+    tag = str(event.get("tag", event.get("label", "BOS")))
+    upper = tag.upper()
+
+    if "CHOCH" in upper:
+        line_type = "choch"
+    elif "MSS" in upper:
+        line_type = "mss"
+    else:
+        line_type = "bos"
+
+    price = _num(event.get("brokenLevel", event.get("price")), 0.0)
+
+    return {
+        "id": f"structure-{tag}-{event.get('pivotIndex', event.get('fromIndex', 'x'))}-{event.get('breakIndex', event.get('index', 'y'))}",
+        "type": line_type,
+        "label": tag,
+        "price": price,
+        "brokenLevel": price,
+        "time": event.get("time"),
+        "fromTime": event.get("fromTime"),
+        "direction": event.get("direction", "neutral"),
+        "scope": event.get("scope", "internal" if tag.startswith("i") else "swing"),
+        "index": event.get("index", event.get("breakIndex")),
+        "breakIndex": event.get("breakIndex", event.get("index")),
+        "pivotIndex": event.get("pivotIndex", event.get("fromIndex")),
+        "fromIndex": event.get("fromIndex", event.get("pivotIndex")),
+    }
+
+
+def _structure_marker_from_event(event: dict[str, Any]) -> dict[str, Any]:
+    tag = str(event.get("tag", event.get("label", "BOS")))
+    price = _num(event.get("brokenLevel", event.get("price")), 0.0)
+
+    if "CHOCH" in tag.upper():
+        marker_type = "CHoCH"
+    elif "MSS" in tag.upper():
+        marker_type = "MSS"
+    else:
+        marker_type = "BOS"
+
+    return {
+        "id": f"marker-{tag}-{event.get('breakIndex', event.get('index', 'x'))}",
+        "time": event.get("time"),
+        "price": price,
+        "label": tag,
+        "direction": event.get("direction", "neutral"),
+        "type": marker_type,
+        "index": event.get("index", event.get("breakIndex")),
+        "breakIndex": event.get("breakIndex", event.get("index")),
+        "pivotIndex": event.get("pivotIndex", event.get("fromIndex")),
+        "fromIndex": event.get("fromIndex", event.get("pivotIndex")),
+        "fromTime": event.get("fromTime"),
+        "scope": event.get("scope", "internal" if tag.startswith("i") else "swing"),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main overlay builder
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -865,8 +927,14 @@ def build_overlay_payload(
 
     trend = swing_state.trend if swing_state.trend != "neutral" else internal_state.trend
 
+    drawable_structure_events = smc_events[-80:]
+    structure_lines = [_structure_line_from_event(event) for event in drawable_structure_events]
+    structure_markers = [_structure_marker_from_event(event) for event in drawable_structure_events]
+
     return {
-        "smcEvents": smc_events[-80:],
+        "smcEvents": drawable_structure_events,
+        "lines": structure_lines,
+        "markers": structure_markers,
         "zones": zones[-30:],
         "liquidityEvents": liquidity_events[-30:],
         "dlmLevels": dlm_levels,
