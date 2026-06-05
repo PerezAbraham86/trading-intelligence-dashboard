@@ -7,6 +7,7 @@ import {
   CrosshairMode,
   IChartApi,
   ISeriesApi,
+  LineData,
   Time,
   createChart,
 } from "lightweight-charts";
@@ -69,6 +70,8 @@ type LightweightCandlestickChartProps = {
   showOverlayZones?: boolean;
   showOverlayLabels?: boolean;
   showLiquidityProfile?: boolean;
+  showSmma20?: boolean;
+  smmaLength?: number;
 };
 
 function isValidCandle(candle: DashboardCandle | null | undefined): candle is DashboardCandle {
@@ -143,6 +146,47 @@ function toGhostChartCandles(ghostCandles: GhostCandle[] | undefined): Candlesti
   }));
 }
 
+
+function calculateSmmaLineData(
+  candles: DashboardCandle[],
+  length = 20
+): LineData<Time>[] {
+  const validCandles = candles.filter(isValidCandle);
+  const safeLength = Math.max(1, Math.floor(length));
+
+  if (validCandles.length === 0) return [];
+
+  const result: LineData<Time>[] = [];
+  let smma: number | null = null;
+  let runningSum = 0;
+
+  for (let index = 0; index < validCandles.length; index += 1) {
+    const candle = validCandles[index];
+    const close = candle.close;
+
+    runningSum += close;
+
+    if (index < safeLength - 1) {
+      continue;
+    }
+
+    if (index === safeLength - 1) {
+      smma = runningSum / safeLength;
+    } else if (smma !== null) {
+      smma = (smma * (safeLength - 1) + close) / safeLength;
+    }
+
+    if (smma !== null && Number.isFinite(smma)) {
+      result.push({
+        time: candle.time as Time,
+        value: smma,
+      });
+    }
+  }
+
+  return result;
+}
+
 function getOverlayLineColor(line: ChartOverlayLine): string {
   if (line.direction === "bullish") return "rgba(38, 166, 154, 0.85)";
   if (line.direction === "bearish") return "rgba(239, 83, 80, 0.85)";
@@ -189,10 +233,13 @@ export default function LightweightCandlestickChart({
   showOverlayZones = true,
   showOverlayLabels = true,
   showLiquidityProfile = true,
+  showSmma20 = true,
+  smmaLength = 20,
 }: LightweightCandlestickChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const smmaSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const ghostCandleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const hasFitContentRef = useRef(false);
@@ -218,6 +265,14 @@ export default function LightweightCandlestickChart({
   const displayData = mode === "heikinAshi" ? chartData.heikinAshi : chartData.regular;
 
   /**
+   * 20 SMMA uses real close prices.
+   * It does not use Heikin Ashi values because raw OHLC remains the truth.
+   */
+  const smma20Data = useMemo(() => {
+    return calculateSmmaLineData(candles, smmaLength);
+  }, [candles, smmaLength]);
+
+  /**
    * Ghost Candles are projected visuals only.
    * They should be future candles from the backend/ML layer.
    */
@@ -227,8 +282,7 @@ export default function LightweightCandlestickChart({
 
   /**
    * Price-scale labels / createPriceLine overlays are intentionally disabled.
-   * The TradingView-style visuals should be drawn by the canvas layer only.
-   * This prevents stacked right-axis labels like BOS, CHoCH, DLM levels, sweeps.
+   * TradingView-style SMC visuals are drawn by the canvas layer only.
    */
   const visibleOverlayLines = useMemo(() => {
     return [] as ChartOverlayLine[];
@@ -309,6 +363,14 @@ export default function LightweightCandlestickChart({
       lastValueVisible: true,
     });
 
+    const smmaSeries = chart.addLineSeries({
+      color: "rgba(251, 191, 36, 0.95)",
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: true,
+    });
+
     const ghostCandleSeries = chart.addCandlestickSeries({
       upColor: "rgba(38, 166, 154, 0.28)",
       downColor: "rgba(239, 83, 80, 0.28)",
@@ -322,6 +384,7 @@ export default function LightweightCandlestickChart({
 
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
+    smmaSeriesRef.current = smmaSeries;
     ghostCandleSeriesRef.current = ghostCandleSeries;
 
     setOverlaySize({
@@ -357,6 +420,7 @@ export default function LightweightCandlestickChart({
       chartRef.current?.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
+      smmaSeriesRef.current = null;
       ghostCandleSeriesRef.current = null;
       hasFitContentRef.current = false;
     };
@@ -372,6 +436,12 @@ export default function LightweightCandlestickChart({
       hasFitContentRef.current = true;
     }
   }, [displayData, autoFit]);
+
+  useEffect(() => {
+    if (!smmaSeriesRef.current) return;
+
+    smmaSeriesRef.current.setData(showSmma20 ? smma20Data : []);
+  }, [showSmma20, smma20Data]);
 
   useEffect(() => {
     if (!ghostCandleSeriesRef.current) return;
@@ -404,6 +474,12 @@ export default function LightweightCandlestickChart({
           {timeframe && <span>{timeframe}</span>}
           <span className="text-slate-500">•</span>
           <span>{mode === "heikinAshi" ? "Heikin Ashi" : "Regular"}</span>
+          {showSmma20 && smma20Data.length > 0 && (
+            <>
+              <span className="text-slate-500">•</span>
+              <span>{smmaLength} SMMA</span>
+            </>
+          )}
           {ghostDisplayData.length > 0 && (
             <>
               <span className="text-slate-500">•</span>
