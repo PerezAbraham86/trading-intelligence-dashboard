@@ -13,28 +13,19 @@ import {
  * components/LightweightChartOverlayCanvas.tsx
  *
  * Purpose:
- * - Custom drawing layer for TradingView-style visuals over Lightweight Charts.
- * - Draws boxes/zones, labels around candles, and right-side liquidity profile bars.
+ * - Custom TradingView-style drawing layer over Lightweight Charts.
  *
- * This is the layer needed for visuals like:
- * - Order block boxes
- * - FVG boxes
- * - Premium / discount zones
- * - BOS / CHoCH labels around candles
- * - Sweep / rejection labels
- * - Right-side liquidity profile bars
+ * Fix in this version:
+ * - Premium / Equilibrium / Discount now draw as right-side zone blocks,
+ *   closer to the TradingView reference screenshot.
+ * - Order blocks / FVG zones draw as normal boxes.
+ * - Liquidity profile stays on the far right and does not cover candles as much.
+ * - Labels are reduced to avoid stacked BOS / Sweep clutter.
  *
- * Current role:
- * - New standalone overlay canvas component.
- * - Safe to add first.
- * - Next step is connecting it inside LightweightCandlestickChart.tsx.
- *
- * Rule:
- * Raw OHLC = truth
- * Heikin Ashi = visual trend filter
- * SMC = structure context
- * AlphaX DLM = liquidity and pressure context
- * Ghost Candles = projected visual path
+ * Important:
+ * - TradingView webhook times can arrive as labels like "6/4 09:30".
+ *   Those are not always valid Lightweight Charts time values, so this canvas
+ *   uses a safer right-side fallback for Premium / Discount zones.
  */
 
 type LightweightChartOverlayCanvasProps = {
@@ -62,6 +53,11 @@ type LiquidityProfileBin = {
   bearPercent: number;
 };
 
+type PdZoneGroup = {
+  premium?: ChartOverlayZone;
+  discount?: ChartOverlayZone;
+};
+
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
@@ -79,19 +75,43 @@ function priceToCoordinate(
   mainSeries: ISeriesApi<"Candlestick">,
   price: unknown
 ): number | null {
-  if (!isFiniteNumber(Number(price))) return null;
+  const numericPrice = Number(price);
 
-  const coordinate = mainSeries.priceToCoordinate(Number(price));
+  if (!Number.isFinite(numericPrice)) return null;
+
+  const coordinate = mainSeries.priceToCoordinate(numericPrice);
   return isFiniteNumber(coordinate) ? coordinate : null;
 }
 
+function isPremiumZone(zone: ChartOverlayZone): boolean {
+  return zone.label.toLowerCase().includes("premium");
+}
+
+function isDiscountZone(zone: ChartOverlayZone): boolean {
+  return zone.label.toLowerCase().includes("discount");
+}
+
+function isEquilibriumZone(zone: ChartOverlayZone): boolean {
+  return zone.label.toLowerCase().includes("equilibrium");
+}
+
+function isPdZone(zone: ChartOverlayZone): boolean {
+  return isPremiumZone(zone) || isDiscountZone(zone) || isEquilibriumZone(zone);
+}
+
 function getZoneColor(zone: ChartOverlayZone): string {
+  const label = zone.label.toLowerCase();
+
+  if (label.includes("premium")) return "rgba(239, 83, 80, 0.22)";
+  if (label.includes("discount")) return "rgba(38, 166, 154, 0.20)";
+  if (label.includes("equilibrium")) return "rgba(148, 163, 184, 0.18)";
+
   if (
     zone.type === "demand" ||
     zone.type === "bullishPressure" ||
     zone.type === "bullishImbalance"
   ) {
-    return "rgba(38, 166, 154, 0.16)";
+    return "rgba(38, 166, 154, 0.15)";
   }
 
   if (
@@ -99,19 +119,25 @@ function getZoneColor(zone: ChartOverlayZone): string {
     zone.type === "bearishPressure" ||
     zone.type === "bearishImbalance"
   ) {
-    return "rgba(239, 83, 80, 0.16)";
+    return "rgba(239, 83, 80, 0.15)";
   }
 
-  return "rgba(148, 163, 184, 0.14)";
+  return "rgba(148, 163, 184, 0.13)";
 }
 
 function getZoneBorderColor(zone: ChartOverlayZone): string {
+  const label = zone.label.toLowerCase();
+
+  if (label.includes("premium")) return "rgba(239, 83, 80, 0.42)";
+  if (label.includes("discount")) return "rgba(38, 166, 154, 0.42)";
+  if (label.includes("equilibrium")) return "rgba(148, 163, 184, 0.34)";
+
   if (
     zone.type === "demand" ||
     zone.type === "bullishPressure" ||
     zone.type === "bullishImbalance"
   ) {
-    return "rgba(38, 166, 154, 0.45)";
+    return "rgba(38, 166, 154, 0.40)";
   }
 
   if (
@@ -119,10 +145,10 @@ function getZoneBorderColor(zone: ChartOverlayZone): string {
     zone.type === "bearishPressure" ||
     zone.type === "bearishImbalance"
   ) {
-    return "rgba(239, 83, 80, 0.45)";
+    return "rgba(239, 83, 80, 0.40)";
   }
 
-  return "rgba(148, 163, 184, 0.35)";
+  return "rgba(148, 163, 184, 0.30)";
 }
 
 function getMarkerTextColor(marker: ChartOverlayMarker): string {
@@ -132,9 +158,9 @@ function getMarkerTextColor(marker: ChartOverlayMarker): string {
 }
 
 function getMarkerBackgroundColor(marker: ChartOverlayMarker): string {
-  if (marker.direction === "bullish") return "rgba(38, 166, 154, 0.14)";
-  if (marker.direction === "bearish") return "rgba(239, 83, 80, 0.14)";
-  return "rgba(234, 179, 8, 0.14)";
+  if (marker.direction === "bullish") return "rgba(38, 166, 154, 0.12)";
+  if (marker.direction === "bearish") return "rgba(239, 83, 80, 0.12)";
+  return "rgba(234, 179, 8, 0.12)";
 }
 
 function drawRoundedRect(
@@ -192,16 +218,125 @@ function drawTextBadge(
   context.restore();
 }
 
-function drawZones(
+function drawZoneLabel(
+  context: CanvasRenderingContext2D,
+  label: string,
+  x: number,
+  y: number,
+  color: string,
+  align: "left" | "right" = "left"
+) {
+  context.save();
+  context.font = "600 10px Inter, system-ui, sans-serif";
+  context.fillStyle = color;
+  context.textAlign = align;
+  context.textBaseline = "middle";
+  context.fillText(label, x, y);
+  context.restore();
+}
+
+function getProfilePanelLeft(canvasWidth: number): number {
+  const panelWidth = Math.min(190, Math.max(115, canvasWidth * 0.17));
+  return canvasWidth - panelWidth;
+}
+
+function groupPremiumDiscountZones(zones: ChartOverlayZone[]): PdZoneGroup {
+  const group: PdZoneGroup = {};
+
+  for (let index = zones.length - 1; index >= 0; index -= 1) {
+    const zone = zones[index];
+
+    if (!group.premium && isPremiumZone(zone)) group.premium = zone;
+    if (!group.discount && isDiscountZone(zone)) group.discount = zone;
+
+    if (group.premium && group.discount) break;
+  }
+
+  return group;
+}
+
+function drawPremiumDiscountZones(
+  context: CanvasRenderingContext2D,
+  mainSeries: ISeriesApi<"Candlestick">,
+  zones: ChartOverlayZone[],
+  canvasWidth: number
+) {
+  const { premium, discount } = groupPremiumDiscountZones(zones);
+
+  if (!premium && !discount) return;
+
+  const profileLeft = getProfilePanelLeft(canvasWidth);
+  const right = profileLeft - 12;
+  const left = Math.max(0, canvasWidth * 0.58);
+  const width = Math.max(80, right - left);
+
+  const drawableZones: ChartOverlayZone[] = [];
+
+  if (premium) drawableZones.push(premium);
+
+  if (premium && discount) {
+    const equilibriumHigh = Math.min(premium.low, discount.high);
+    const equilibriumLow = Math.max(discount.high, premium.low);
+
+    const mid = (premium.low + discount.high) / 2;
+    const range = Math.abs((premium.high - discount.low) || (premium.high - premium.low) || 1);
+    const thickness = range * 0.035;
+
+    drawableZones.push({
+      id: "derived-equilibrium-zone",
+      type: "neutralPressure",
+      label: "Equilibrium",
+      startTime: premium.startTime,
+      endTime: premium.endTime,
+      high: Number.isFinite(equilibriumHigh) && equilibriumHigh !== equilibriumLow ? Math.max(equilibriumHigh, equilibriumLow) : mid + thickness,
+      low: Number.isFinite(equilibriumHigh) && equilibriumHigh !== equilibriumLow ? Math.min(equilibriumHigh, equilibriumLow) : mid - thickness,
+      direction: "neutral",
+    });
+  }
+
+  if (discount) drawableZones.push(discount);
+
+  for (const zone of drawableZones) {
+    const yHigh = priceToCoordinate(mainSeries, zone.high);
+    const yLow = priceToCoordinate(mainSeries, zone.low);
+
+    if (yHigh === null || yLow === null) continue;
+
+    const top = Math.min(yHigh, yLow);
+    const bottom = Math.max(yHigh, yLow);
+    const height = Math.max(5, bottom - top);
+
+    context.save();
+
+    context.fillStyle = getZoneColor(zone);
+    context.strokeStyle = getZoneBorderColor(zone);
+    context.lineWidth = 1;
+
+    context.fillRect(left, top, width, height);
+    context.strokeRect(left, top, width, height);
+
+    const labelY = top + height / 2;
+    const labelX = right + 7;
+
+    drawZoneLabel(context, zone.label, labelX, labelY, getZoneBorderColor(zone), "left");
+
+    context.restore();
+  }
+}
+
+function drawRegularZones(
   context: CanvasRenderingContext2D,
   chart: IChartApi,
   mainSeries: ISeriesApi<"Candlestick">,
   zones: ChartOverlayZone[],
   canvasWidth: number
 ) {
-  const visibleZones = zones.slice(-12);
+  const profileLeft = getProfilePanelLeft(canvasWidth);
+  const regularZones = zones
+    .filter((zone) => !isPdZone(zone))
+    .slice(-8);
 
-  for (const zone of visibleZones) {
+  for (const zone of regularZones) {
     const yHigh = priceToCoordinate(mainSeries, zone.high);
     const yLow = priceToCoordinate(mainSeries, zone.low);
 
@@ -210,12 +345,16 @@ function drawZones(
     const xStart = timeToCoordinate(chart, zone.startTime);
     const xEndFromTime = timeToCoordinate(chart, zone.endTime);
 
-    const left = xStart ?? 0;
-    const right = xEndFromTime ?? canvasWidth - 80;
+    const fallbackWidth = Math.min(260, Math.max(120, canvasWidth * 0.22));
+    const right = xEndFromTime ?? profileLeft - 18;
+    const left = xStart ?? Math.max(0, right - fallbackWidth);
+
     const top = Math.min(yHigh, yLow);
     const bottom = Math.max(yHigh, yLow);
     const width = Math.max(24, right - left);
     const height = Math.max(4, bottom - top);
+
+    if (height < 3) continue;
 
     context.save();
     context.fillStyle = getZoneColor(zone);
@@ -225,16 +364,54 @@ function drawZones(
     context.fillRect(left, top, width, height);
     context.strokeRect(left, top, width, height);
 
-    if (width > 60 && height > 14) {
-      context.font = "600 10px Inter, system-ui, sans-serif";
-      context.fillStyle = getZoneBorderColor(zone);
-      context.textAlign = "left";
-      context.textBaseline = "top";
-      context.fillText(zone.label, left + 6, top + 4);
+    if (width > 70 && height > 16) {
+      drawZoneLabel(context, zone.label, left + 6, top + 10, getZoneBorderColor(zone), "left");
     }
 
     context.restore();
   }
+}
+
+function drawZones(
+  context: CanvasRenderingContext2D,
+  chart: IChartApi,
+  mainSeries: ISeriesApi<"Candlestick">,
+  zones: ChartOverlayZone[],
+  canvasWidth: number
+) {
+  drawRegularZones(context, chart, mainSeries, zones, canvasWidth);
+  drawPremiumDiscountZones(context, mainSeries, zones, canvasWidth);
+}
+
+function getCompactMarkerText(marker: ChartOverlayMarker): string {
+  if (marker.type === "Rejection") return "";
+  if (marker.label.toLowerCase().includes("pressure")) return "";
+  if (marker.label.toLowerCase().includes("score")) return "";
+  if (marker.type === "Sweep") return marker.label || "Sweep";
+  return marker.label || marker.type;
+}
+
+function selectVisibleMarkers(markers: ChartOverlayMarker[]): ChartOverlayMarker[] {
+  const selected: ChartOverlayMarker[] = [];
+  const seen = new Set<string>();
+
+  for (let index = markers.length - 1; index >= 0; index -= 1) {
+    const marker = markers[index];
+    const text = getCompactMarkerText(marker);
+
+    if (!text) continue;
+
+    const key = `${marker.type}-${marker.label}-${marker.direction}`;
+
+    if (seen.has(key)) continue;
+
+    selected.push(marker);
+    seen.add(key);
+
+    if (selected.length >= 12) break;
+  }
+
+  return selected.reverse();
 }
 
 function drawMarkers(
@@ -243,7 +420,8 @@ function drawMarkers(
   mainSeries: ISeriesApi<"Candlestick">,
   markers: ChartOverlayMarker[]
 ) {
-  const visibleMarkers = markers.slice(-30);
+  const visibleMarkers = selectVisibleMarkers(markers);
+  const placed: Array<{ x: number; y: number }> = [];
 
   for (const marker of visibleMarkers) {
     const x = timeToCoordinate(chart, marker.time);
@@ -251,9 +429,21 @@ function drawMarkers(
 
     if (x === null || y === null) continue;
 
-    const yOffset = marker.direction === "bullish" ? 16 : -16;
-    const labelY = y + yOffset;
-    const text = marker.type === "Rejection" ? "RJ" : marker.type;
+    const text = getCompactMarkerText(marker);
+    if (!text) continue;
+
+    let labelY = marker.direction === "bullish" ? y + 14 : y - 14;
+
+    for (const previous of placed) {
+      const overlapsX = Math.abs(previous.x - x) < 46;
+      const overlapsY = Math.abs(previous.y - labelY) < 18;
+
+      if (overlapsX && overlapsY) {
+        labelY += marker.direction === "bullish" ? 18 : -18;
+      }
+    }
+
+    placed.push({ x, y: labelY });
 
     context.save();
 
@@ -280,8 +470,8 @@ function drawMarkers(
 
 function buildLiquidityProfile(
   candles: OverlayCandle[] | undefined,
-  binCount = 18,
-  lookback = 160
+  binCount = 24,
+  lookback = 260
 ): LiquidityProfileBin[] {
   if (!Array.isArray(candles) || candles.length === 0) return [];
 
@@ -345,7 +535,7 @@ function drawLiquidityProfile(
   canvasHeight: number,
   lookback: number
 ) {
-  const bins = buildLiquidityProfile(candles, 18, lookback);
+  const bins = buildLiquidityProfile(candles, 24, lookback);
 
   if (bins.length === 0) return;
 
@@ -353,13 +543,13 @@ function drawLiquidityProfile(
 
   if (!Number.isFinite(maxVolume) || maxVolume <= 0) return;
 
-  const panelWidth = Math.min(170, Math.max(95, canvasWidth * 0.16));
-  const panelLeft = canvasWidth - panelWidth;
-  const maxBarWidth = panelWidth - 36;
+  const panelLeft = getProfilePanelLeft(canvasWidth);
+  const panelWidth = canvasWidth - panelLeft;
+  const maxBarWidth = panelWidth - 34;
 
   context.save();
 
-  context.fillStyle = "rgba(0, 0, 0, 0.22)";
+  context.fillStyle = "rgba(0, 0, 0, 0.28)";
   context.fillRect(panelLeft, 0, panelWidth, canvasHeight);
 
   for (const bin of bins) {
@@ -374,25 +564,25 @@ function drawLiquidityProfile(
     const y = top + 1;
 
     const totalWidth = Math.max(2, (bin.totalVolume / maxVolume) * maxBarWidth);
-    const bullWidth = totalWidth * (bin.bullPercent / 100);
     const bearWidth = totalWidth * (bin.bearPercent / 100);
+    const bullWidth = totalWidth * (bin.bullPercent / 100);
     const x = panelLeft + 8;
 
     if (bearWidth > 1) {
-      context.fillStyle = "rgba(239, 83, 80, 0.42)";
+      context.fillStyle = "rgba(239, 83, 80, 0.44)";
       context.fillRect(x, y, bearWidth, height);
     }
 
     if (bullWidth > 1) {
-      context.fillStyle = "rgba(38, 166, 154, 0.42)";
+      context.fillStyle = "rgba(38, 166, 154, 0.50)";
       context.fillRect(x + bearWidth, y, bullWidth, height);
     }
 
-    if (totalWidth > maxBarWidth * 0.55) {
+    if (totalWidth > maxBarWidth * 0.42) {
       context.font = "600 10px Inter, system-ui, sans-serif";
       context.textAlign = "left";
       context.textBaseline = "middle";
-      context.fillStyle = "rgba(209, 213, 219, 0.75)";
+      context.fillStyle = "rgba(209, 213, 219, 0.74)";
       context.fillText(formatCompactVolume(bin.totalVolume), x + totalWidth + 4, y + height / 2);
     }
   }
@@ -416,7 +606,7 @@ export default function LightweightChartOverlayCanvas({
   showZones = true,
   showLabels = true,
   showLiquidityProfile = true,
-  profileLookback = 160,
+  profileLookback = 260,
   className = "",
 }: LightweightChartOverlayCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
