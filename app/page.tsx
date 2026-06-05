@@ -1244,6 +1244,9 @@ function LightweightChartPanel({
         showOverlayZones={showOverlayLines}
         showOverlayLabels={showOverlayLines}
         showLiquidityProfile={showOverlayLines}
+        // Main chart keeps 20 SMMA + NRTR+. Mini charts hide both.
+        showSmma20={!compact}
+        showNrtr={!compact}
         mode={candleModeToLightweightMode(candleMode)}
         height={height}
         symbol={normalizedSymbol}
