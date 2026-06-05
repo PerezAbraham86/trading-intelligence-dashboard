@@ -319,7 +319,7 @@ function drawTextBadge(
   y: number,
   textColor: string,
   backgroundColor: string,
-  align: "left" | "right" = "left"
+  align: "left" | "right" | "center" = "left"
 ) {
   const paddingX = 5;
   const paddingY = 3;
@@ -350,7 +350,7 @@ function drawZoneLabel(
   x: number,
   y: number,
   color: string,
-  align: "left" | "right" = "left"
+  align: "left" | "right" | "center" = "left"
 ) {
   context.save();
   context.font = "600 10px Inter, system-ui, sans-serif";
@@ -377,6 +377,110 @@ function groupPdZones(zones: ChartOverlayZone[]): PdZoneGroup {
   return group;
 }
 
+function getPdHorizontalRange(
+  chart: IChartApi,
+  zones: ChartOverlayZone[],
+  candles: OverlayCandle[],
+  canvasWidth: number
+) {
+  const latest = candles[candles.length - 1];
+  if (!latest) return null;
+
+  const latestX = timeToCoordinate(chart, latest.time, candles);
+  if (latestX === null || latestX < -40 || latestX > canvasWidth + 80) return null;
+
+  const firstPdZone = zones.find((zone) => isPdZone(zone));
+  const xStart = firstPdZone
+    ? timeToCoordinate(chart, firstPdZone.startTime, candles)
+    : null;
+
+  const spacing = estimateBarSpacing(chart, candles);
+  const fallbackLeft = Math.max(0, latestX - spacing * 80);
+  const left = xStart !== null ? Math.max(0, xStart) : fallbackLeft;
+
+  // Pine draws PD zones from trailing.barTime to current time.
+  // We stop at latest candle area, before profile/ghost continuation.
+  const right = Math.min(canvasWidth - 8, latestX + spacing * 2);
+
+  if (right - left < 40) return null;
+
+  return {
+    left,
+    right,
+    width: right - left,
+  };
+}
+
+function getPdSourceRange(zones: ChartOverlayZone[]) {
+  const { premium, equilibrium, discount } = groupPdZones(zones);
+
+  const allPd = [premium, equilibrium, discount].filter(Boolean) as ChartOverlayZone[];
+
+  if (!allPd.length) return null;
+
+  const top = Math.max(...allPd.map((zone) => Math.max(zone.high, zone.low)));
+  const bottom = Math.min(...allPd.map((zone) => Math.min(zone.high, zone.low)));
+
+  if (!Number.isFinite(top) || !Number.isFinite(bottom) || top <= bottom) return null;
+
+  return {
+    top,
+    bottom,
+    premium,
+    equilibrium,
+    discount,
+  };
+}
+
+function makePdBand(
+  label: "Premium" | "Equilibrium" | "Discount",
+  top: number,
+  bottom: number,
+  template: ChartOverlayZone | undefined
+): ChartOverlayZone {
+  const premiumBottom = 0.95 * top + 0.05 * bottom;
+  const equilibriumTop = 0.525 * top + 0.475 * bottom;
+  const equilibriumBottom = 0.525 * bottom + 0.475 * top;
+  const discountTop = 0.95 * bottom + 0.05 * top;
+
+  if (label === "Premium") {
+    return {
+      id: "pd-premium-band",
+      type: "supply",
+      label,
+      startTime: template?.startTime ?? "",
+      endTime: template?.endTime ?? "",
+      high: top,
+      low: premiumBottom,
+      direction: "bearish",
+    };
+  }
+
+  if (label === "Equilibrium") {
+    return {
+      id: "pd-equilibrium-band",
+      type: "neutralPressure",
+      label,
+      startTime: template?.startTime ?? "",
+      endTime: template?.endTime ?? "",
+      high: Math.max(equilibriumTop, equilibriumBottom),
+      low: Math.min(equilibriumTop, equilibriumBottom),
+      direction: "neutral",
+    };
+  }
+
+  return {
+    id: "pd-discount-band",
+    type: "demand",
+    label,
+    startTime: template?.startTime ?? "",
+    endTime: template?.endTime ?? "",
+    high: discountTop,
+    low: bottom,
+    direction: "bullish",
+  };
+}
+
 function drawPremiumDiscountZones(
   context: CanvasRenderingContext2D,
   chart: IChartApi,
@@ -385,20 +489,16 @@ function drawPremiumDiscountZones(
   candles: OverlayCandle[],
   canvasWidth: number
 ) {
-  const geometry = getFutureOverlayGeometry(chart, candles, canvasWidth);
-  if (!geometry) return;
+  const horizontal = getPdHorizontalRange(chart, zones, candles, canvasWidth);
+  const source = getPdSourceRange(zones);
 
-  const { premium, equilibrium, discount } = groupPdZones(zones);
-  const drawable = [premium, equilibrium, discount].filter(Boolean) as ChartOverlayZone[];
+  if (!horizontal || !source) return;
 
-  if (!drawable.length) return;
-
-  const left = geometry.pdLeft;
-  const width = geometry.pdWidth;
-  const right = geometry.pdRight;
-
-  // Same rule as ghost candles: if future drawing area is off screen, hide.
-  if (left > canvasWidth + 20 || right < -20) return;
+  const drawable: ChartOverlayZone[] = [
+    makePdBand("Premium", source.top, source.bottom, source.premium),
+    makePdBand("Equilibrium", source.top, source.bottom, source.equilibrium),
+    makePdBand("Discount", source.top, source.bottom, source.discount),
+  ];
 
   for (const zone of drawable) {
     const yHigh = priceToCoordinate(mainSeries, zone.high);
@@ -406,28 +506,35 @@ function drawPremiumDiscountZones(
 
     if (yHigh === null || yLow === null) continue;
 
-    const top = Math.min(yHigh, yLow);
-    const bottom = Math.max(yHigh, yLow);
-    const height = Math.max(5, bottom - top);
+    const topY = Math.min(yHigh, yLow);
+    const bottomY = Math.max(yHigh, yLow);
+    const height = Math.max(5, bottomY - topY);
 
     context.save();
     context.fillStyle = getZoneColor(zone);
     context.strokeStyle = getZoneBorderColor(zone);
     context.lineWidth = 1;
 
-    context.fillRect(left, top, width, height);
-    context.strokeRect(left, top, width, height);
+    context.fillRect(horizontal.left, topY, horizontal.width, height);
+    context.strokeRect(horizontal.left, topY, horizontal.width, height);
 
-    const labelX = Math.min(right + 6, canvasWidth - 8);
-    const labelAlign = right + 70 > canvasWidth ? "right" : "left";
+    const labelX =
+      zone.label === "Equilibrium"
+        ? Math.min(horizontal.right + 6, canvasWidth - 8)
+        : horizontal.left + horizontal.width / 2;
+
+    const labelAlign =
+      zone.label === "Equilibrium"
+        ? horizontal.right + 70 > canvasWidth ? "right" : "left"
+        : "center";
 
     drawZoneLabel(
       context,
       zone.label,
       labelX,
-      top + height / 2,
+      topY + height / 2,
       getZoneBorderColor(zone),
-      labelAlign
+      labelAlign as "left" | "right" | "center"
     );
 
     context.restore();
