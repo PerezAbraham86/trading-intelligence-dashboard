@@ -781,6 +781,98 @@ function useChartCandles(
   }
 }
 
+
+function isStructureOverlayLine(line: any) {
+  const type = String(line?.type ?? '').toLowerCase()
+  const label = String(line?.label ?? line?.tag ?? '').toUpperCase()
+
+  return (
+    type === 'bos' ||
+    type === 'choch' ||
+    type === 'mss' ||
+    label.includes('BOS') ||
+    label.includes('CHOCH') ||
+    label.includes('MSS')
+  )
+}
+
+function mergeOverlayPayloads(basePayload: any, priorityPayload: any) {
+  if (!basePayload) return priorityPayload ?? null
+  if (!priorityPayload) return basePayload ?? null
+
+  const baseLines = Array.isArray(basePayload.lines) ? basePayload.lines : []
+  const priorityLines = Array.isArray(priorityPayload.lines) ? priorityPayload.lines : []
+
+  const baseStructureLines = baseLines.filter(isStructureOverlayLine)
+  const priorityStructureLines = priorityLines.filter(isStructureOverlayLine)
+  const priorityOtherLines = priorityLines.filter((line: any) => !isStructureOverlayLine(line))
+  const baseOtherLines = baseLines.filter((line: any) => !isStructureOverlayLine(line))
+
+  const mergedLines: any[] = []
+  const seenLines = new Set<string>()
+
+  for (const line of [
+    ...priorityStructureLines,
+    ...baseStructureLines,
+    ...priorityOtherLines,
+    ...baseOtherLines,
+  ]) {
+    if (!line || !Number.isFinite(Number(line.price ?? line.brokenLevel))) continue
+
+    const key = [
+      line.type,
+      line.label ?? line.tag,
+      line.price ?? line.brokenLevel,
+      line.fromIndex ?? line.pivotIndex ?? line.fromTime,
+      line.breakIndex ?? line.index ?? line.time,
+    ].join('|')
+
+    if (seenLines.has(key)) continue
+
+    seenLines.add(key)
+    mergedLines.push(line)
+  }
+
+  const priorityZones = Array.isArray(priorityPayload.zones) ? priorityPayload.zones : []
+  const baseZones = Array.isArray(basePayload.zones) ? basePayload.zones : []
+
+  const priorityMarkers = Array.isArray(priorityPayload.markers) ? priorityPayload.markers : []
+  const baseMarkers = Array.isArray(basePayload.markers) ? basePayload.markers : []
+
+  const mergedMarkers: any[] = []
+  const seenMarkers = new Set<string>()
+
+  for (const marker of [...priorityMarkers, ...baseMarkers]) {
+    if (!marker) continue
+
+    const key = [marker.type, marker.label, marker.price, marker.time, marker.index].join('|')
+    if (seenMarkers.has(key)) continue
+
+    seenMarkers.add(key)
+    mergedMarkers.push(marker)
+  }
+
+  return {
+    ...basePayload,
+    ...priorityPayload,
+    smc: basePayload.smc ?? priorityPayload.smc,
+    alphaX: priorityPayload.alphaX ?? basePayload.alphaX,
+    smcEvents: priorityPayload.smcEvents ?? basePayload.smcEvents,
+    lines: mergedLines,
+    zones: priorityZones.length > 0 ? priorityZones : baseZones,
+    markers: mergedMarkers.slice(-40),
+    liquidityProfileBins:
+      priorityPayload.liquidityProfileBins ?? basePayload.liquidityProfileBins,
+    summary: {
+      ...(basePayload.summary ?? {}),
+      ...(priorityPayload.summary ?? {}),
+      lineCount: mergedLines.length,
+      zoneCount: priorityZones.length > 0 ? priorityZones.length : baseZones.length,
+      markerCount: mergedMarkers.length,
+    },
+  }
+}
+
 type LightweightChartPanelProps = {
   title: string
   symbol: string
@@ -832,25 +924,31 @@ function LightweightChartPanel({
   const overlayPayload = useMemo(() => {
     if (!showOverlayLines || compact) return null
 
+    const fallbackPayload = candles.length >= 20
+      ? buildChartOverlayPayload(dashboardCandlesToOverlayCandles(candles), {
+          smcSwingLength: 3,
+          smcUseCloseBreak: true,
+          alphaXLookback: 20,
+          alphaXRejectionWickPercent: 45,
+          maxLines: 12,
+          maxZones: 12,
+          maxMarkers: 20,
+        })
+      : null
+
     const tradingViewPayload = buildTradingViewOverlayPayload(
       getTradingViewOverlaySource(engineState)
     )
+
+    if (tradingViewPayload && fallbackPayload) {
+      return mergeOverlayPayloads(fallbackPayload, tradingViewPayload)
+    }
 
     if (tradingViewPayload) {
       return tradingViewPayload
     }
 
-    if (candles.length < 20) return null
-
-    return buildChartOverlayPayload(dashboardCandlesToOverlayCandles(candles), {
-      smcSwingLength: 3,
-      smcUseCloseBreak: true,
-      alphaXLookback: 20,
-      alphaXRejectionWickPercent: 45,
-      maxLines: 5,
-      maxZones: 12,
-      maxMarkers: 20,
-    })
+    return fallbackPayload
   }, [candles, compact, engineState, showOverlayLines])
 
   return (
@@ -951,7 +1049,7 @@ function LightweightChartPanel({
         <div className="mt-4">
           <ChartOverlayStatusPanel
             candles={dashboardCandlesToOverlayCandles(candles)}
-            title="SMC + AlphaX Overlay Prep"
+            title="TradingView SMC + AlphaX Overlay Prep"
             compact
           />
         </div>
