@@ -3,38 +3,32 @@ from __future__ import annotations
 """
 api/overlay_engine.py
 
-Purpose:
-- Recreate TradingView-style SMC + AlphaX DLM visual overlay data directly
-  from raw OHLCV candles on the Python dashboard backend.
-- No TradingView webhook overlay dependency.
-- TradingView/Pine is only the visual reference.
+Unified dashboard overlay engine.
 
-Dashboard rule:
-Raw OHLCV candles = source of truth
-Python backend = calculates overlays
-React dashboard = renders overlays
-TradingView = visual reference only
+Final architecture:
+- Raw OHLCV candles are the source of truth.
+- Python calculates one unified overlayPayload per candle response.
+- React / Lightweight Charts only renders the payload.
+- TradingView is only a visual reference, not a dashboard data source.
 
-This engine returns chart-ready overlay JSON:
+Returned payload shape:
 
 {
-    "smcEvents": [...],
-    "zones": [...],
-    "liquidityEvents": [...],
-    "dlmLevels": [...],
-    "liquidityProfileBins": [...],
+    "lines": [...],                 # BOS / CHoCH / MSS structure lines
+    "zones": [...],                 # order blocks + premium/equilibrium/discount
+    "markers": [...],               # optional lightweight labels
+    "smcEvents": [...],             # raw SMC events for panels/debugging
+    "orderBlocks": [...],           # raw order block objects for panels/debugging
+    "liquidityProfileBins": [...],  # AlphaX-style DLM profile bars
+    "dlmLevels": [...],             # AlphaX POC / buy liquidity / sell liquidity
+    "ghostCandles": [...],          # reserved / passthrough placeholder
     "summary": {...}
 }
 
-Main visuals supported:
-- Internal / swing BOS
-- Internal / swing CHoCH
-- Internal / swing order blocks
-- Premium / Equilibrium / Discount
-- AlphaX DLM profile bins
-- AlphaX POC
-- DLM buy liquidity level
-- DLM sell liquidity level
+Main rules:
+- Candles render from real OHLCV.
+- Heikin Ashi remains visual only on frontend.
+- Entries/exits/backend validation should use real prices.
 """
 
 from dataclasses import dataclass
@@ -43,19 +37,12 @@ from typing import Any, Literal, Optional
 
 
 Direction = Literal["bullish", "bearish", "neutral"]
-ZoneKind = Literal[
-    "internal_ob",
-    "swing_ob",
-    "fvg",
-    "premium",
-    "equilibrium",
-    "discount",
-]
-EventScope = Literal["internal", "swing"]
+PivotKind = Literal["high", "low"]
+Scope = Literal["internal", "swing"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Data models
+# Models
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -74,18 +61,8 @@ class Pivot:
     price: float
     time: int | float | str
     index: int
-    kind: Literal["high", "low"]
+    kind: PivotKind
     crossed: bool = False
-
-
-@dataclass
-class OrderBlock:
-    start_time: int | float | str
-    end_time: int | float | str
-    high: float
-    low: float
-    direction: Direction
-    kind: Literal["internal_ob", "swing_ob"]
 
 
 @dataclass
@@ -95,8 +72,23 @@ class StructureState:
     trend: Direction = "neutral"
 
 
+@dataclass
+class OrderBlock:
+    id: str
+    start_time: int | float | str
+    end_time: int | float | str
+    start_index: int
+    end_index: int
+    high: float
+    low: float
+    direction: Direction
+    scope: Scope
+    source_event: str
+    mitigated: bool = False
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Basic helpers
+# Utility helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -108,45 +100,33 @@ def _num(value: Any, fallback: float = 0.0) -> float:
         return fallback
 
 
-def _is_valid_candle(candle: Any) -> bool:
-    if isinstance(candle, Candle):
-        return all(
-            isfinite(value)
-            for value in [candle.open, candle.high, candle.low, candle.close]
-        )
+def _time_value(item: dict[str, Any]) -> int | float | str | None:
+    return item.get("time", item.get("timestamp", item.get("t")))
 
-    if not isinstance(candle, dict):
-        return False
 
+def _is_valid_ohlc(item: dict[str, Any]) -> bool:
     return all(
-        key in candle and isfinite(_num(candle.get(key), float("nan")))
-        for key in ["open", "high", "low", "close"]
+        key in item and isfinite(_num(item.get(key), float("nan")))
+        for key in ("open", "high", "low", "close")
     )
 
 
 def normalize_candles(raw_candles: list[dict[str, Any] | Candle]) -> list[Candle]:
-    """
-    Accepts backend candle dictionaries or Candle objects.
-
-    Supported time keys:
-    - time
-    - timestamp
-    - t
-    """
-
     candles: list[Candle] = []
 
     for item in raw_candles or []:
         if isinstance(item, Candle):
-            if _is_valid_candle(item):
+            if all(isfinite(v) for v in (item.open, item.high, item.low, item.close)):
                 candles.append(item)
             continue
 
-        if not _is_valid_candle(item):
+        if not isinstance(item, dict):
             continue
 
-        time_value = item.get("time", item.get("timestamp", item.get("t")))
+        if not _is_valid_ohlc(item):
+            continue
 
+        time_value = _time_value(item)
         if time_value is None:
             continue
 
@@ -168,69 +148,85 @@ def _average_true_range(candles: list[Candle], period: int = 200) -> list[float]
     if not candles:
         return []
 
-    trs: list[float] = []
+    true_ranges: list[float] = []
 
     for index, candle in enumerate(candles):
         if index == 0:
-            trs.append(max(candle.high - candle.low, 0.0))
+            true_ranges.append(max(candle.high - candle.low, 0.0))
             continue
 
         previous_close = candles[index - 1].close
-
-        true_range = max(
-            candle.high - candle.low,
-            abs(candle.high - previous_close),
-            abs(candle.low - previous_close),
-            0.0,
+        true_ranges.append(
+            max(
+                candle.high - candle.low,
+                abs(candle.high - previous_close),
+                abs(candle.low - previous_close),
+                0.0,
+            )
         )
-        trs.append(true_range)
 
     atrs: list[float] = []
-
-    for index in range(len(trs)):
+    for index in range(len(true_ranges)):
         start = max(0, index - period + 1)
-        window = trs[start : index + 1]
+        window = true_ranges[start : index + 1]
         atrs.append(sum(window) / max(len(window), 1))
 
     return atrs
 
 
-def _rolling_mean(values: list[float], end_index: int, length: int) -> float:
-    start = max(0, end_index - length + 1)
-    window = values[start : end_index + 1]
-    return sum(window) / max(len(window), 1)
-
-
-def _format_time(time_value: int | float | str) -> int | float | str:
+def _parsed_high_low(candle: Candle, atr: float) -> tuple[float, float]:
     """
-    Keep the exact chart candle time. React/Lightweight Charts can map this
-    if candle times and overlay times use the same source.
+    Pine reference:
+    highVolatilityBar = (high - low) >= 2 * volatilityMeasure
+    parsedHigh = highVolatilityBar ? low : high
+    parsedLow  = highVolatilityBar ? high : low
+
+    This helps avoid abnormal spike candles dominating order block selection.
     """
-    return time_value
+    full_range = candle.high - candle.low
+    high_volatility = atr > 0 and full_range >= 2.0 * atr
+
+    if high_volatility:
+        return candle.low, candle.high
+
+    return candle.high, candle.low
 
 
-def _direction_from_bias(bias: int) -> Direction:
-    if bias > 0:
+def _direction_from_bias(value: int) -> Direction:
+    if value > 0:
         return "bullish"
-    if bias < 0:
+    if value < 0:
         return "bearish"
     return "neutral"
 
 
+def _line_type_from_tag(tag: str) -> str:
+    upper = tag.upper()
+
+    if "CHOCH" in upper:
+        return "choch"
+    if "MSS" in upper:
+        return "mss"
+    return "bos"
+
+
+def _safe_round(value: float, decimals: int = 2) -> float:
+    if not isfinite(value):
+        return 0.0
+    return round(value, decimals)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Pivots / structure
+# Pivot and structure logic
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 def _detect_pivots(candles: list[Candle], length: int) -> list[Pivot]:
     """
-    Pine-style delayed pivots:
-    A pivot high is high[length] greater than highs around it.
-    A pivot low is low[length] lower than lows around it.
+    Pivot detection matching TradingView-style delayed pivots.
 
-    The pivot is confirmed `length` bars after the pivot candle.
+    A pivot is confirmed after `length` candles to the right.
     """
-
     if len(candles) < length * 2 + 1:
         return []
 
@@ -242,146 +238,32 @@ def _detect_pivots(candles: list[Candle], length: int) -> list[Pivot]:
         right = candles[index + 1 : index + length + 1]
 
         if all(center.high > candle.high for candle in left + right):
-            pivots.append(
-                Pivot(
-                    price=center.high,
-                    time=center.time,
-                    index=index,
-                    kind="high",
-                )
-            )
+            pivots.append(Pivot(center.high, center.time, index, "high"))
 
         if all(center.low < candle.low for candle in left + right):
-            pivots.append(
-                Pivot(
-                    price=center.low,
-                    time=center.time,
-                    index=index,
-                    kind="low",
-                )
-            )
+            pivots.append(Pivot(center.low, center.time, index, "low"))
 
     pivots.sort(key=lambda pivot: pivot.index)
     return pivots
 
 
-def _find_latest_pivot_before(
-    pivots: list[Pivot],
-    kind: Literal["high", "low"],
-    index: int,
-) -> Optional[Pivot]:
-    for pivot in reversed(pivots):
-        if pivot.kind == kind and pivot.index < index:
-            return Pivot(
-                price=pivot.price,
-                time=pivot.time,
-                index=pivot.index,
-                kind=pivot.kind,
-                crossed=pivot.crossed,
-            )
-
-    return None
-
-
-def _find_order_block_between(
-    candles: list[Candle],
-    start_index: int,
-    end_index: int,
-    direction: Direction,
-    kind: Literal["internal_ob", "swing_ob"],
-    end_time: int | float | str,
-    atrs: Optional[list[float]] = None,
-) -> Optional[OrderBlock]:
-    """
-    TradingView-style order block approximation.
-
-    Correct behavior:
-    - Bullish break: select the latest bearish candle before the break.
-    - Bearish break: select the latest bullish candle before the break.
-    - Extend the block to the latest candle / active chart area, not just the break candle.
-    - Avoid tiny doji candles and obvious abnormal spike candles.
-    """
-
-    if not candles:
-        return None
-
-    start = max(0, min(start_index, end_index))
-    end = min(len(candles) - 1, max(start_index, end_index))
-
-    if end < start:
-        return None
-
-    selected_index: Optional[int] = None
-
-    # Prefer the closest valid opposite candle before the break.
-    for idx in range(end, start - 1, -1):
-        candle = candles[idx]
-        body = abs(candle.close - candle.open)
-        full_range = max(candle.high - candle.low, 1e-12)
-        body_pct = body / full_range
-
-        if body_pct < 0.20:
-            continue
-
-        if atrs:
-            atr = atrs[idx] if idx < len(atrs) else 0.0
-            if atr > 0 and full_range > atr * 2.75:
-                continue
-
-        is_bearish_candle = candle.close < candle.open
-        is_bullish_candle = candle.close > candle.open
-
-        if direction == "bullish" and is_bearish_candle:
-            selected_index = idx
-            break
-
-        if direction == "bearish" and is_bullish_candle:
-            selected_index = idx
-            break
-
-    # Fallback to the most extreme candle in the pivot-to-break range.
-    if selected_index is None:
-        candidate_indexes = list(range(start, end + 1))
-
-        if direction == "bullish":
-            selected_index = min(candidate_indexes, key=lambda i: candles[i].low)
-        else:
-            selected_index = max(candidate_indexes, key=lambda i: candles[i].high)
-
-    selected = candles[selected_index]
-
-    return OrderBlock(
-        start_time=selected.time,
-        end_time=end_time,
-        high=selected.high,
-        low=selected.low,
-        direction=direction,
-        kind=kind,
-    )
-
-
-def _structure_event(
+def _make_structure_event(
     *,
     candle: Candle,
     pivot: Pivot,
     tag: str,
     direction: Direction,
-    scope: EventScope,
+    scope: Scope,
     break_index: int,
 ) -> dict[str, Any]:
-    """
-    Structure events carry both time and index.
+    price = pivot.price
 
-    Why both:
-    - time is good when the chart can map it directly.
-    - index is safer for Lightweight Charts when timestamps are normalized,
-      converted, or slightly mismatched between backend/API/browser.
-    """
     return {
-        "time": _format_time(candle.time),
-        "fromTime": _format_time(pivot.time),
-        "price": pivot.price,
-        "brokenLevel": pivot.price,
+        "id": f"{scope}-{tag}-{pivot.index}-{break_index}",
+        "time": candle.time,
+        "fromTime": pivot.time,
+        "price": price,
+        "brokenLevel": price,
         "tag": tag,
         "label": tag,
         "direction": direction,
@@ -393,101 +275,228 @@ def _structure_event(
     }
 
 
-def _order_block_zone(order_block: OrderBlock) -> dict[str, Any]:
-    if order_block.kind == "internal_ob":
-        label = (
-            "Internal Bullish OB"
-            if order_block.direction == "bullish"
-            else "Internal Bearish OB"
-        )
-    else:
-        label = (
-            "Swing Bullish OB"
-            if order_block.direction == "bullish"
-            else "Swing Bearish OB"
-        )
+def _make_structure_line(event: dict[str, Any]) -> dict[str, Any]:
+    tag = str(event.get("tag", event.get("label", "BOS")))
+    price = _num(event.get("brokenLevel", event.get("price")), 0.0)
 
     return {
-        "startTime": _format_time(order_block.start_time),
-        "endTime": _format_time(order_block.end_time),
-        "top": order_block.high,
-        "bottom": order_block.low,
-        "label": label,
-        "direction": order_block.direction,
-        "kind": order_block.kind,
+        "id": f"line-{event.get('id', tag)}",
+        "type": _line_type_from_tag(tag),
+        "label": tag,
+        "price": price,
+        "brokenLevel": price,
+        "time": event.get("time"),
+        "fromTime": event.get("fromTime"),
+        "direction": event.get("direction", "neutral"),
+        "scope": event.get("scope", "internal" if tag.startswith("i") else "swing"),
+        "index": event.get("index", event.get("breakIndex")),
+        "breakIndex": event.get("breakIndex", event.get("index")),
+        "pivotIndex": event.get("pivotIndex", event.get("fromIndex")),
+        "fromIndex": event.get("fromIndex", event.get("pivotIndex")),
     }
 
 
-def _detect_structure_for_scope(
+def _make_structure_marker(event: dict[str, Any]) -> dict[str, Any]:
+    tag = str(event.get("tag", event.get("label", "BOS")))
+    price = _num(event.get("brokenLevel", event.get("price")), 0.0)
+
+    return {
+        "id": f"marker-{event.get('id', tag)}",
+        "time": event.get("time"),
+        "price": price,
+        "label": tag,
+        "direction": event.get("direction", "neutral"),
+        "type": "CHoCH" if "CHOCH" in tag.upper() else "MSS" if "MSS" in tag.upper() else "BOS",
+        "index": event.get("index", event.get("breakIndex")),
+        "breakIndex": event.get("breakIndex", event.get("index")),
+        "pivotIndex": event.get("pivotIndex", event.get("fromIndex")),
+        "fromIndex": event.get("fromIndex", event.get("pivotIndex")),
+        "fromTime": event.get("fromTime"),
+        "scope": event.get("scope", "internal" if tag.startswith("i") else "swing"),
+    }
+
+
+def _order_block_from_range(
+    *,
+    candles: list[Candle],
+    atrs: list[float],
+    pivot_index: int,
+    break_index: int,
+    direction: Direction,
+    scope: Scope,
+    source_event: str,
+    end_index: int,
+) -> Optional[OrderBlock]:
+    """
+    Pine-style order block selection.
+
+    Reference behavior:
+    - Bullish break: select the lowest parsed low between pivot and break.
+    - Bearish break: select the highest parsed high between pivot and break.
+    - OB starts at selected candle time and extends to latest candle.
+    """
+    if not candles:
+        return None
+
+    start = max(0, min(pivot_index, break_index))
+    end = max(0, min(max(pivot_index, break_index), len(candles) - 1))
+
+    if end < start:
+        return None
+
+    selected_index: Optional[int] = None
+
+    if direction == "bullish":
+        best_value = float("inf")
+
+        for index in range(start, end + 1):
+            atr = atrs[index] if index < len(atrs) else 0.0
+            _, parsed_low = _parsed_high_low(candles[index], atr)
+
+            if parsed_low < best_value:
+                best_value = parsed_low
+                selected_index = index
+
+    else:
+        best_value = -float("inf")
+
+        for index in range(start, end + 1):
+            atr = atrs[index] if index < len(atrs) else 0.0
+            parsed_high, _ = _parsed_high_low(candles[index], atr)
+
+            if parsed_high > best_value:
+                best_value = parsed_high
+                selected_index = index
+
+    if selected_index is None:
+        return None
+
+    selected = candles[selected_index]
+
+    return OrderBlock(
+        id=f"{scope}-ob-{direction}-{selected_index}-{break_index}",
+        start_time=selected.time,
+        end_time=candles[end_index].time,
+        start_index=selected_index,
+        end_index=end_index,
+        high=selected.high,
+        low=selected.low,
+        direction=direction,
+        scope=scope,
+        source_event=source_event,
+    )
+
+
+def _is_order_block_mitigated(
+    block: OrderBlock,
+    candles: list[Candle],
+    order_block_mitigation: Literal["High/Low", "Close"] = "High/Low",
+) -> bool:
+    """
+    Pine reference:
+    bearishOrderBlockMitigationSource = close or high
+    bullishOrderBlockMitigationSource = close or low
+
+    Bearish OB is mitigated when price trades above block high.
+    Bullish OB is mitigated when price trades below block low.
+    """
+    if block.start_index >= len(candles) - 1:
+        return False
+
+    for candle in candles[block.start_index + 1 :]:
+        bearish_source = candle.close if order_block_mitigation == "Close" else candle.high
+        bullish_source = candle.close if order_block_mitigation == "Close" else candle.low
+
+        if block.direction == "bearish" and bearish_source > block.high:
+            return True
+
+        if block.direction == "bullish" and bullish_source < block.low:
+            return True
+
+    return False
+
+
+def _order_block_to_zone(block: OrderBlock) -> dict[str, Any]:
+    scope_label = "Internal" if block.scope == "internal" else "Swing"
+    direction_label = "Bullish" if block.direction == "bullish" else "Bearish"
+
+    return {
+        "id": block.id,
+        "type": "orderBlock",
+        "kind": f"{block.scope}_ob",
+        "label": f"{direction_label} OB",
+        "fullLabel": f"{scope_label} {direction_label} OB",
+        "direction": block.direction,
+        "sourceEvent": block.source_event,
+        "startTime": block.start_time,
+        "endTime": block.end_time,
+        "startIndex": block.start_index,
+        "endIndex": block.end_index,
+        "high": block.high,
+        "low": block.low,
+        "top": block.high,
+        "bottom": block.low,
+    }
+
+
+def _detect_structure_and_order_blocks(
+    *,
     candles: list[Candle],
     pivots: list[Pivot],
-    scope: EventScope,
-    max_order_blocks: int,
+    scope: Scope,
     atrs: list[float],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], StructureState]:
+    max_order_blocks: int,
+    include_mitigated_blocks: bool,
+) -> tuple[list[dict[str, Any]], list[OrderBlock], StructureState]:
     events: list[dict[str, Any]] = []
-    zones: list[dict[str, Any]] = []
+    order_blocks: list[OrderBlock] = []
     state = StructureState()
-
-    pivot_high = _find_latest_pivot_before(pivots, "high", 1)
-    pivot_low = _find_latest_pivot_before(pivots, "low", 1)
-
-    if pivot_high:
-        state.last_high = pivot_high
-
-    if pivot_low:
-        state.last_low = pivot_low
 
     used_high_breaks: set[int] = set()
     used_low_breaks: set[int] = set()
+    pivots_by_index: dict[int, list[Pivot]] = {}
+
+    for pivot in pivots:
+        pivots_by_index.setdefault(pivot.index, []).append(pivot)
 
     for index, candle in enumerate(candles):
-        confirmed_pivots = [pivot for pivot in pivots if pivot.index == index]
-
-        for pivot in confirmed_pivots:
+        for pivot in pivots_by_index.get(index, []):
             if pivot.kind == "high":
-                state.last_high = Pivot(
-                    price=pivot.price,
-                    time=pivot.time,
-                    index=pivot.index,
-                    kind="high",
-                )
+                state.last_high = Pivot(pivot.price, pivot.time, pivot.index, pivot.kind)
             else:
-                state.last_low = Pivot(
-                    price=pivot.price,
-                    time=pivot.time,
-                    index=pivot.index,
-                    kind="low",
-                )
+                state.last_low = Pivot(pivot.price, pivot.time, pivot.index, pivot.kind)
 
         if state.last_high and state.last_high.index not in used_high_breaks:
             if candle.close > state.last_high.price:
                 direction: Direction = "bullish"
                 tag = "CHoCH" if state.trend == "bearish" else "BOS"
+                tag = f"i{tag}" if scope == "internal" else tag
 
-                events.append(
-                    _structure_event(
-                        candle=candle,
-                        pivot=state.last_high,
-                        tag="i" + tag if scope == "internal" else tag,
-                        direction=direction,
-                        scope=scope,
-                        break_index=index,
-                    )
-                )
-
-                order_block = _find_order_block_between(
-                    candles=candles,
-                    start_index=state.last_high.index,
-                    end_index=index,
+                event = _make_structure_event(
+                    candle=candle,
+                    pivot=state.last_high,
+                    tag=tag,
                     direction=direction,
-                    kind="internal_ob" if scope == "internal" else "swing_ob",
-                    end_time=candles[-1].time,
+                    scope=scope,
+                    break_index=index,
+                )
+                events.append(event)
+
+                block = _order_block_from_range(
+                    candles=candles,
                     atrs=atrs,
+                    pivot_index=state.last_high.index,
+                    break_index=index,
+                    direction=direction,
+                    scope=scope,
+                    source_event=tag,
+                    end_index=len(candles) - 1,
                 )
 
-                if order_block:
-                    zones.append(_order_block_zone(order_block))
+                if block:
+                    block.mitigated = _is_order_block_mitigated(block, candles)
+                    if include_mitigated_blocks or not block.mitigated:
+                        order_blocks.append(block)
 
                 used_high_breaks.add(state.last_high.index)
                 state.trend = "bullish"
@@ -496,162 +505,207 @@ def _detect_structure_for_scope(
             if candle.close < state.last_low.price:
                 direction = "bearish"
                 tag = "CHoCH" if state.trend == "bullish" else "BOS"
+                tag = f"i{tag}" if scope == "internal" else tag
 
-                events.append(
-                    _structure_event(
-                        candle=candle,
-                        pivot=state.last_low,
-                        tag="i" + tag if scope == "internal" else tag,
-                        direction=direction,
-                        scope=scope,
-                        break_index=index,
-                    )
-                )
-
-                order_block = _find_order_block_between(
-                    candles=candles,
-                    start_index=state.last_low.index,
-                    end_index=index,
+                event = _make_structure_event(
+                    candle=candle,
+                    pivot=state.last_low,
+                    tag=tag,
                     direction=direction,
-                    kind="internal_ob" if scope == "internal" else "swing_ob",
-                    end_time=candles[-1].time,
+                    scope=scope,
+                    break_index=index,
+                )
+                events.append(event)
+
+                block = _order_block_from_range(
+                    candles=candles,
                     atrs=atrs,
+                    pivot_index=state.last_low.index,
+                    break_index=index,
+                    direction=direction,
+                    scope=scope,
+                    source_event=tag,
+                    end_index=len(candles) - 1,
                 )
 
-                if order_block:
-                    zones.append(_order_block_zone(order_block))
+                if block:
+                    block.mitigated = _is_order_block_mitigated(block, candles)
+                    if include_mitigated_blocks or not block.mitigated:
+                        order_blocks.append(block)
 
                 used_low_breaks.add(state.last_low.index)
                 state.trend = "bearish"
 
-    return events, zones[-max_order_blocks:], state
+    return events, order_blocks[-max_order_blocks:], state
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Liquidity sweeps / pools
+# Premium / equilibrium / discount zones
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _detect_liquidity_events(
-    candles: list[Candle],
-    internal_pivots: list[Pivot],
-    swing_pivots: list[Pivot],
-    atrs: list[float],
-    atr_buffer: float = 0.05,
-    max_events: int = 20,
-) -> list[dict[str, Any]]:
-    events: list[dict[str, Any]] = []
+def _latest_swing_range(candles: list[Candle], swing_pivots: list[Pivot]) -> tuple[float, float, int, int | float | str]:
+    if len(candles) == 0:
+        return 0.0, 0.0, 0, ""
 
-    def scan_pivots(pivots: list[Pivot], prefix: str) -> None:
-        for pivot in pivots:
-            for index in range(pivot.index + 1, len(candles)):
-                candle = candles[index]
-                atr = atrs[index] if index < len(atrs) else 0.0
-                buffer = atr * atr_buffer
+    latest_high: Optional[Pivot] = None
+    latest_low: Optional[Pivot] = None
 
-                if pivot.kind == "low":
-                    wick_through = candle.low < pivot.price - buffer
-                    close_back = candle.close > pivot.price
+    for pivot in reversed(swing_pivots):
+        if not latest_high and pivot.kind == "high":
+            latest_high = pivot
+        if not latest_low and pivot.kind == "low":
+            latest_low = pivot
+        if latest_high and latest_low:
+            break
 
-                    if wick_through and close_back:
-                        events.append(
-                            {
-                                "time": _format_time(candle.time),
-                                "price": pivot.price,
-                                "label": "iLS" if prefix == "internal" else "LSL",
-                                "direction": "bullish",
-                                "kind": f"{prefix}_sweep",
-                            }
-                        )
-                        break
+    if latest_high and latest_low:
+        top = max(latest_high.price, latest_low.price)
+        bottom = min(latest_high.price, latest_low.price)
+        start_index = min(latest_high.index, latest_low.index)
+        start_time = candles[start_index].time
+        return top, bottom, start_index, start_time
 
-                if pivot.kind == "high":
-                    wick_through = candle.high > pivot.price + buffer
-                    close_back = candle.close < pivot.price
-
-                    if wick_through and close_back:
-                        events.append(
-                            {
-                                "time": _format_time(candle.time),
-                                "price": pivot.price,
-                                "label": "iHS" if prefix == "internal" else "LSH",
-                                "direction": "bearish",
-                                "kind": f"{prefix}_sweep",
-                            }
-                        )
-                        break
-
-    scan_pivots(internal_pivots[-60:], "internal")
-    scan_pivots(swing_pivots[-30:], "swing")
-
-    return events[-max_events:]
+    lookback_count = min(len(candles), 200)
+    recent = candles[-lookback_count:]
+    top = max(candle.high for candle in recent)
+    bottom = min(candle.low for candle in recent)
+    start_index = len(candles) - lookback_count
+    start_time = candles[start_index].time
+    return top, bottom, start_index, start_time
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Premium / equilibrium / discount
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def _premium_discount_zones(
-    candles: list[Candle],
-    swing_pivots: list[Pivot],
-) -> list[dict[str, Any]]:
+def _premium_discount_zones(candles: list[Candle], swing_pivots: list[Pivot]) -> list[dict[str, Any]]:
     if not candles:
         return []
 
-    latest_high = _find_latest_pivot_before(swing_pivots, "high", len(candles))
-    latest_low = _find_latest_pivot_before(swing_pivots, "low", len(candles))
-
-    if not latest_high or not latest_low:
-        lookback = candles[-200:] if len(candles) > 200 else candles
-        top = max(candle.high for candle in lookback)
-        bottom = min(candle.low for candle in lookback)
-        start_time = lookback[0].time
-    else:
-        top = latest_high.price
-        bottom = latest_low.price
-        start_time = latest_high.time if latest_high.index > latest_low.index else latest_low.time
+    top, bottom, start_index, start_time = _latest_swing_range(candles, swing_pivots)
 
     if not isfinite(top) or not isfinite(bottom) or top <= bottom:
         return []
 
-    mid = (top + bottom) * 0.5
-    last_time = candles[-1].time
-    thickness = max((top - bottom) * 0.015, 0.0001)
+    # Pine-style narrow bands.
+    premium_bottom = 0.95 * top + 0.05 * bottom
+    equilibrium_top = 0.525 * top + 0.475 * bottom
+    equilibrium_bottom = 0.525 * bottom + 0.475 * top
+    discount_top = 0.95 * bottom + 0.05 * top
+
+    end_index = len(candles) - 1
+    end_time = candles[end_index].time
 
     return [
         {
-            "startTime": _format_time(start_time),
-            "endTime": _format_time(last_time),
-            "top": top,
-            "bottom": mid + thickness,
+            "id": "pd-premium",
+            "type": "premium",
+            "kind": "premium",
             "label": "Premium",
             "direction": "bearish",
-            "kind": "premium",
+            "startTime": start_time,
+            "endTime": end_time,
+            "startIndex": start_index,
+            "endIndex": end_index,
+            "high": top,
+            "low": premium_bottom,
+            "top": top,
+            "bottom": premium_bottom,
         },
         {
-            "startTime": _format_time(start_time),
-            "endTime": _format_time(last_time),
-            "top": mid + thickness,
-            "bottom": mid - thickness,
+            "id": "pd-equilibrium",
+            "type": "equilibrium",
+            "kind": "equilibrium",
             "label": "Equilibrium",
             "direction": "neutral",
-            "kind": "equilibrium",
+            "startTime": start_time,
+            "endTime": end_time,
+            "startIndex": start_index,
+            "endIndex": end_index,
+            "high": max(equilibrium_top, equilibrium_bottom),
+            "low": min(equilibrium_top, equilibrium_bottom),
+            "top": max(equilibrium_top, equilibrium_bottom),
+            "bottom": min(equilibrium_top, equilibrium_bottom),
         },
         {
-            "startTime": _format_time(start_time),
-            "endTime": _format_time(last_time),
-            "top": mid - thickness,
-            "bottom": bottom,
+            "id": "pd-discount",
+            "type": "discount",
+            "kind": "discount",
             "label": "Discount",
             "direction": "bullish",
-            "kind": "discount",
+            "startTime": start_time,
+            "endTime": end_time,
+            "startIndex": start_index,
+            "endIndex": end_index,
+            "high": discount_top,
+            "low": bottom,
+            "top": discount_top,
+            "bottom": bottom,
         },
     ]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# AlphaX DLM profile
+# Liquidity sweeps
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _detect_liquidity_sweeps(
+    candles: list[Candle],
+    pivots: list[Pivot],
+    atrs: list[float],
+    scope: Scope,
+    max_events: int = 20,
+    atr_buffer: float = 0.05,
+) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+
+    for pivot in pivots[-80:]:
+        for index in range(pivot.index + 1, len(candles)):
+            candle = candles[index]
+            atr = atrs[index] if index < len(atrs) else 0.0
+            buffer = atr * atr_buffer
+
+            if pivot.kind == "low":
+                wick_through = candle.low < pivot.price - buffer
+                close_back = candle.close > pivot.price
+
+                if wick_through and close_back:
+                    events.append(
+                        {
+                            "id": f"{scope}-sweep-low-{pivot.index}-{index}",
+                            "time": candle.time,
+                            "price": pivot.price,
+                            "label": "iLS" if scope == "internal" else "LSL",
+                            "direction": "bullish",
+                            "kind": f"{scope}_sweep",
+                            "index": index,
+                            "pivotIndex": pivot.index,
+                        }
+                    )
+                    break
+
+            if pivot.kind == "high":
+                wick_through = candle.high > pivot.price + buffer
+                close_back = candle.close < pivot.price
+
+                if wick_through and close_back:
+                    events.append(
+                        {
+                            "id": f"{scope}-sweep-high-{pivot.index}-{index}",
+                            "time": candle.time,
+                            "price": pivot.price,
+                            "label": "iHS" if scope == "internal" else "LSH",
+                            "direction": "bearish",
+                            "kind": f"{scope}_sweep",
+                            "index": index,
+                            "pivotIndex": pivot.index,
+                        }
+                    )
+                    break
+
+    return events[-max_events:]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AlphaX-style DLM profile
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -660,16 +714,6 @@ def _build_dlm_profile(
     lookback: int = 300,
     bins: int = 50,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
-    """
-    Python version of the Pine DLM bridge:
-
-    - highest high / lowest low over lookback
-    - divide into bins
-    - add volume to total, buy, or sell bins by HLC3 location
-    - find POC, strongest buy, strongest sell
-    - return render-ready profile bins
-    """
-
     if not candles:
         return [], [], {}
 
@@ -682,7 +726,7 @@ def _build_dlm_profile(
         return [], [], {}
 
     bin_count = max(10, int(bins))
-    step = (top - bottom) / bin_count
+    step = max((top - bottom) / bin_count, 1e-12)
 
     total_bins = [0.0 for _ in range(bin_count)]
     buy_bins = [0.0 for _ in range(bin_count)]
@@ -691,18 +735,15 @@ def _build_dlm_profile(
     for candle in recent:
         hlc3 = (candle.high + candle.low + candle.close) / 3.0
         raw_index = int(floor((hlc3 - bottom) / step))
-        idx = max(0, min(bin_count - 1, raw_index))
-        volume = max(candle.volume, 0.0)
+        index = max(0, min(bin_count - 1, raw_index))
+        volume = max(candle.volume, 0.0) or 1.0
 
-        if volume == 0:
-            volume = 1.0
-
-        total_bins[idx] += volume
+        total_bins[index] += volume
 
         if candle.close >= candle.open:
-            buy_bins[idx] += volume
+            buy_bins[index] += volume
         else:
-            sell_bins[idx] += volume
+            sell_bins[index] += volume
 
     max_total = max(total_bins) if total_bins else 0.0
     max_buy = max(buy_bins) if buy_bins else 0.0
@@ -720,51 +761,58 @@ def _build_dlm_profile(
 
     profile_bins: list[dict[str, Any]] = []
 
-    for idx in range(bin_count):
-        total = total_bins[idx]
+    for index in range(bin_count):
+        total = total_bins[index]
 
         if total <= 0:
             continue
 
-        buy_volume = buy_bins[idx]
-        sell_volume = sell_bins[idx]
-        buy_pct = buy_volume / total * 100.0 if total > 0 else 0.0
-        sell_pct = sell_volume / total * 100.0 if total > 0 else 0.0
+        buy_volume = buy_bins[index]
+        sell_volume = sell_bins[index]
+        buy_pct = buy_volume / total * 100.0
+        sell_pct = sell_volume / total * 100.0
         width_pct = total / max_total * 100.0
 
         profile_bins.append(
             {
-                "price": level_for(idx),
-                "low": bottom + step * idx,
-                "high": bottom + step * (idx + 1),
+                "id": f"dlm-bin-{index}",
+                "price": level_for(index),
+                "low": bottom + step * index,
+                "high": bottom + step * (index + 1),
                 "volume": total,
                 "buyVolume": buy_volume,
                 "sellVolume": sell_volume,
-                "buyPct": round(buy_pct, 2),
-                "sellPct": round(sell_pct, 2),
-                "widthPct": round(width_pct, 2),
+                "buyPct": _safe_round(buy_pct, 2),
+                "sellPct": _safe_round(sell_pct, 2),
+                "widthPct": _safe_round(width_pct, 2),
                 "dominantSide": "buy" if buy_volume >= sell_volume else "sell",
-                "isPOC": idx == poc_index,
-                "isBuyLiquidity": idx == buy_index,
-                "isSellLiquidity": idx == sell_index,
+                "isPOC": index == poc_index,
+                "isBuyLiquidity": index == buy_index,
+                "isSellLiquidity": index == sell_index,
             }
         )
 
     dlm_levels = [
         {
+            "id": "dlm-poc",
             "label": "AlphaX POC",
             "price": level_for(poc_index),
             "direction": "neutral",
+            "kind": "poc",
         },
         {
+            "id": "dlm-buy-liquidity",
             "label": "DLM Buy Liquidity",
             "price": level_for(buy_index),
             "direction": "bullish",
+            "kind": "buy_liquidity",
         },
         {
+            "id": "dlm-sell-liquidity",
             "label": "DLM Sell Liquidity",
             "price": level_for(sell_index),
             "direction": "bearish",
+            "kind": "sell_liquidity",
         },
     ]
 
@@ -776,8 +824,8 @@ def _build_dlm_profile(
         "poc": level_for(poc_index),
         "buyLiquidity": level_for(buy_index),
         "sellLiquidity": level_for(sell_index),
-        "bullPressurePct": round(bull_pressure, 2),
-        "bearPressurePct": round(bear_pressure, 2),
+        "bullPressurePct": _safe_round(bull_pressure, 2),
+        "bearPressurePct": _safe_round(bear_pressure, 2),
         "top": top,
         "bottom": bottom,
         "binCount": bin_count,
@@ -788,69 +836,38 @@ def _build_dlm_profile(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Chart drawable conversion
+# Ghost candle placeholder / passthrough
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _structure_line_from_event(event: dict[str, Any]) -> dict[str, Any]:
-    tag = str(event.get("tag", event.get("label", "BOS")))
-    upper = tag.upper()
+def _normalize_ghost_candles(raw_ghost_candles: Optional[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    if not raw_ghost_candles:
+        return []
 
-    if "CHOCH" in upper:
-        line_type = "choch"
-    elif "MSS" in upper:
-        line_type = "mss"
-    else:
-        line_type = "bos"
+    normalized: list[dict[str, Any]] = []
 
-    price = _num(event.get("brokenLevel", event.get("price")), 0.0)
+    for index, ghost in enumerate(raw_ghost_candles):
+        if not isinstance(ghost, dict):
+            continue
 
-    return {
-        "id": f"structure-{tag}-{event.get('pivotIndex', event.get('fromIndex', 'x'))}-{event.get('breakIndex', event.get('index', 'y'))}",
-        "type": line_type,
-        "label": tag,
-        "price": price,
-        "brokenLevel": price,
-        "time": event.get("time"),
-        "fromTime": event.get("fromTime"),
-        "direction": event.get("direction", "neutral"),
-        "scope": event.get("scope", "internal" if tag.startswith("i") else "swing"),
-        "index": event.get("index", event.get("breakIndex")),
-        "breakIndex": event.get("breakIndex", event.get("index")),
-        "pivotIndex": event.get("pivotIndex", event.get("fromIndex")),
-        "fromIndex": event.get("fromIndex", event.get("pivotIndex")),
-    }
+        normalized.append(
+            {
+                "id": ghost.get("id", f"ghost-{index + 1}"),
+                "time": ghost.get("time"),
+                "open": _num(ghost.get("open")),
+                "high": _num(ghost.get("high")),
+                "low": _num(ghost.get("low")),
+                "close": _num(ghost.get("close")),
+                "direction": ghost.get("direction", "neutral"),
+                "confidence": _num(ghost.get("confidence", 0.0)),
+            }
+        )
 
-
-def _structure_marker_from_event(event: dict[str, Any]) -> dict[str, Any]:
-    tag = str(event.get("tag", event.get("label", "BOS")))
-    price = _num(event.get("brokenLevel", event.get("price")), 0.0)
-
-    if "CHOCH" in tag.upper():
-        marker_type = "CHoCH"
-    elif "MSS" in tag.upper():
-        marker_type = "MSS"
-    else:
-        marker_type = "BOS"
-
-    return {
-        "id": f"marker-{tag}-{event.get('breakIndex', event.get('index', 'x'))}",
-        "time": event.get("time"),
-        "price": price,
-        "label": tag,
-        "direction": event.get("direction", "neutral"),
-        "type": marker_type,
-        "index": event.get("index", event.get("breakIndex")),
-        "breakIndex": event.get("breakIndex", event.get("index")),
-        "pivotIndex": event.get("pivotIndex", event.get("fromIndex")),
-        "fromIndex": event.get("fromIndex", event.get("pivotIndex")),
-        "fromTime": event.get("fromTime"),
-        "scope": event.get("scope", "internal" if tag.startswith("i") else "swing"),
-    }
+    return normalized
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Main overlay builder
+# Main public builder
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -861,24 +878,24 @@ def build_overlay_payload(
     swing_pivot_length: int = 50,
     internal_order_blocks: int = 5,
     swing_order_blocks: int = 5,
+    include_mitigated_blocks: bool = False,
     dlm_lookback: int = 300,
     dlm_bins: int = 50,
+    ghost_candles: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
-    """
-    Main public function.
-
-    Call this from api/main.py after loading candles for the active symbol/timeframe.
-    """
-
     candles = normalize_candles(raw_candles)
 
     if len(candles) < max(internal_pivot_length * 2 + 5, 30):
         return {
-            "smcEvents": [],
+            "lines": [],
             "zones": [],
+            "markers": [],
+            "smcEvents": [],
+            "orderBlocks": [],
             "liquidityEvents": [],
-            "dlmLevels": [],
             "liquidityProfileBins": [],
+            "dlmLevels": [],
+            "ghostCandles": _normalize_ghost_candles(ghost_candles),
             "summary": {
                 "status": "not_enough_candles",
                 "candles": len(candles),
@@ -889,30 +906,40 @@ def build_overlay_payload(
     internal_pivots = _detect_pivots(candles, internal_pivot_length)
     swing_pivots = _detect_pivots(candles, swing_pivot_length)
 
-    internal_events, internal_zones, internal_state = _detect_structure_for_scope(
+    internal_events, internal_blocks, internal_state = _detect_structure_and_order_blocks(
         candles=candles,
         pivots=internal_pivots,
         scope="internal",
-        max_order_blocks=internal_order_blocks,
         atrs=atrs,
+        max_order_blocks=internal_order_blocks,
+        include_mitigated_blocks=include_mitigated_blocks,
     )
 
-    swing_events, swing_zones, swing_state = _detect_structure_for_scope(
+    swing_events, swing_blocks, swing_state = _detect_structure_and_order_blocks(
         candles=candles,
         pivots=swing_pivots,
         scope="swing",
-        max_order_blocks=swing_order_blocks,
         atrs=atrs,
+        max_order_blocks=swing_order_blocks,
+        include_mitigated_blocks=include_mitigated_blocks,
     )
 
+    smc_events = [*internal_events, *swing_events]
+    smc_events.sort(key=lambda event: int(event.get("breakIndex", event.get("index", 0))))
+
+    structure_lines = [_make_structure_line(event) for event in smc_events]
+    structure_markers = [_make_structure_marker(event) for event in smc_events]
+
+    order_blocks = [*internal_blocks, *swing_blocks]
+    order_blocks.sort(key=lambda block: block.start_index)
+
+    order_block_zones = [_order_block_to_zone(block) for block in order_blocks]
     pd_zones = _premium_discount_zones(candles, swing_pivots)
 
-    liquidity_events = _detect_liquidity_events(
-        candles=candles,
-        internal_pivots=internal_pivots,
-        swing_pivots=swing_pivots,
-        atrs=atrs,
-    )
+    liquidity_events = [
+        *_detect_liquidity_sweeps(candles, internal_pivots, atrs, "internal"),
+        *_detect_liquidity_sweeps(candles, swing_pivots, atrs, "swing"),
+    ]
 
     liquidity_profile_bins, dlm_levels, dlm_summary = _build_dlm_profile(
         candles=candles,
@@ -920,25 +947,18 @@ def build_overlay_payload(
         bins=dlm_bins,
     )
 
-    smc_events = [*internal_events, *swing_events]
-    smc_events.sort(key=lambda item: str(item.get("time", "")))
-
-    zones = [*internal_zones, *swing_zones, *pd_zones]
-
     trend = swing_state.trend if swing_state.trend != "neutral" else internal_state.trend
 
-    drawable_structure_events = smc_events[-80:]
-    structure_lines = [_structure_line_from_event(event) for event in drawable_structure_events]
-    structure_markers = [_structure_marker_from_event(event) for event in drawable_structure_events]
-
     return {
-        "smcEvents": drawable_structure_events,
-        "lines": structure_lines,
-        "markers": structure_markers,
-        "zones": zones[-30:],
-        "liquidityEvents": liquidity_events[-30:],
-        "dlmLevels": dlm_levels,
+        "lines": structure_lines[-80:],
+        "zones": [*order_block_zones, *pd_zones],
+        "markers": structure_markers[-80:],
+        "smcEvents": smc_events[-80:],
+        "orderBlocks": [_order_block_to_zone(block) for block in order_blocks],
+        "liquidityEvents": liquidity_events[-40:],
         "liquidityProfileBins": liquidity_profile_bins,
+        "dlmLevels": dlm_levels,
+        "ghostCandles": _normalize_ghost_candles(ghost_candles),
         "summary": {
             "status": "ok",
             "candles": len(candles),
@@ -948,35 +968,36 @@ def build_overlay_payload(
             "internalPivotCount": len(internal_pivots),
             "swingPivotCount": len(swing_pivots),
             "smcEventCount": len(smc_events),
-            "zoneCount": len(zones),
+            "structureLineCount": len(structure_lines),
+            "orderBlockCount": len(order_blocks),
+            "zoneCount": len(order_block_zones) + len(pd_zones),
             "liquidityEventCount": len(liquidity_events),
             "dlm": dlm_summary,
         },
     }
 
 
-# Backwards-compatible alias names for easy imports.
+# Backwards-compatible aliases used by older imports.
 build_chart_overlays = build_overlay_payload
 calculate_overlay_payload = build_overlay_payload
 
 
 if __name__ == "__main__":
-    # Minimal smoke test.
+    # Smoke test.
     sample: list[dict[str, Any]] = []
-
     price = 100.0
 
-    for i in range(400):
-        drift = 0.15 if i < 180 else -0.12
+    for index in range(500):
+        drift = 0.15 if index < 180 else -0.12 if index < 340 else 0.08
         open_price = price
-        close_price = price + drift + ((i % 7) - 3) * 0.03
-        high = max(open_price, close_price) + 0.25
-        low = min(open_price, close_price) - 0.25
-        volume = 1000 + (i % 20) * 50
+        close_price = price + drift + ((index % 7) - 3) * 0.05
+        high = max(open_price, close_price) + 0.35
+        low = min(open_price, close_price) - 0.35
+        volume = 1000 + (index % 20) * 50
 
         sample.append(
             {
-                "time": i,
+                "time": index,
                 "open": open_price,
                 "high": high,
                 "low": low,
@@ -991,8 +1012,9 @@ if __name__ == "__main__":
 
     print(
         {
-            "smcEvents": len(payload["smcEvents"]),
+            "lines": len(payload["lines"]),
             "zones": len(payload["zones"]),
+            "orderBlocks": len(payload["orderBlocks"]),
             "liquidityProfileBins": len(payload["liquidityProfileBins"]),
             "dlmLevels": payload["dlmLevels"],
             "summary": payload["summary"],
