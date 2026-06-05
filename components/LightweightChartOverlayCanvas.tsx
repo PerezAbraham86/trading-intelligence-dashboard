@@ -626,25 +626,6 @@ function getStructureLineBg(line: StructureOverlayLine): string {
   return "rgba(148, 163, 184, 0.12)";
 }
 
-function normalizeStructureLines(overlayPayload: ChartOverlayPayload | null | undefined): StructureOverlayLine[] {
-  const rawLines = (overlayPayload as any)?.lines;
-
-  if (!Array.isArray(rawLines)) return [];
-
-  return rawLines
-    .filter((line: any) => {
-      const type = String(line?.type ?? "").toLowerCase();
-      const label = String(line?.label ?? "").toUpperCase();
-
-      return (
-        (type === "bos" || type === "choch" || type === "mss" || label.includes("BOS") || label.includes("CHOCH") || label.includes("MSS")) &&
-        (line?.fromTime !== undefined || line?.fromIndex !== undefined || line?.pivotIndex !== undefined) &&
-        Number.isFinite(Number(line?.price))
-      );
-    })
-    .slice(-18);
-}
-
 function candleIndexToCoordinate(
   chart: IChartApi,
   candles: OverlayCandle[],
@@ -674,7 +655,9 @@ function structureXFromIndexOrTime(
   return timeToCoordinate(chart, timeValue, candles);
 }
 
-function normalizeStructureLines(overlayPayload: ChartOverlayPayload | null | undefined): StructureOverlayLine[] {
+function normalizeStructureLines(
+  overlayPayload: ChartOverlayPayload | null | undefined
+): StructureOverlayLine[] {
   const payload = overlayPayload as any;
 
   const rawLines = Array.isArray(payload?.lines) ? payload.lines : [];
@@ -772,7 +755,20 @@ function normalizeStructureLines(overlayPayload: ChartOverlayPayload | null | un
   return deduped.slice(-40);
 }
 
-function getStructureLabelText
+function getStructureLabelText(line: StructureOverlayLine): string {
+  const raw = String(line.label || line.tag || line.type || "").trim();
+
+  if (!raw) return "";
+
+  const upper = raw.toUpperCase();
+
+  if (upper.includes("CHOCH")) return raw.startsWith("i") ? "iCHoCH" : "CHoCH";
+  if (upper.includes("BOS")) return raw.startsWith("i") ? "iBOS" : "BOS";
+  if (upper.includes("MSS")) return raw.startsWith("i") ? "iMSS" : "MSS";
+
+  return raw;
+}
+
 function drawStructureLines(
   context: CanvasRenderingContext2D,
   chart: IChartApi,
@@ -785,19 +781,43 @@ function drawStructureLines(
   const placed: Array<{ x: number; y: number }> = [];
 
   for (const line of structureLines) {
-    const y = priceToCoordinate(mainSeries, line.price);
-    const x1 = structureXFromIndexOrTime(
+    const price = Number(line.price ?? line.brokenLevel);
+    const y = priceToCoordinate(mainSeries, price);
+
+    let x1 = structureXFromIndexOrTime(
       chart,
       candles,
       line.fromIndex ?? line.pivotIndex,
       line.fromTime
     );
-    const x2 = structureXFromIndexOrTime(
+
+    let x2 = structureXFromIndexOrTime(
       chart,
       candles,
       line.breakIndex ?? line.index,
       line.time
     );
+
+    // Last-resort fallback:
+    // if index exists but time-to-coordinate failed, estimate from latest visible candle.
+    if ((x1 === null || x2 === null) && candles.length > 0) {
+      const latestX = timeToCoordinate(chart, candles[candles.length - 1].time, candles);
+      const spacing = estimateBarSpacing(chart, candles);
+
+      if (latestX !== null) {
+        const latestIndex = candles.length - 1;
+
+        if (x1 === null) {
+          const idx = Number(line.fromIndex ?? line.pivotIndex);
+          if (Number.isFinite(idx)) x1 = latestX - (latestIndex - idx) * spacing;
+        }
+
+        if (x2 === null) {
+          const idx = Number(line.breakIndex ?? line.index);
+          if (Number.isFinite(idx)) x2 = latestX - (latestIndex - idx) * spacing;
+        }
+      }
+    }
 
     if (y === null || x1 === null || x2 === null) continue;
 
@@ -809,45 +829,49 @@ function drawStructureLines(
     const clippedLeft = Math.max(0, left);
     const clippedRight = Math.min(canvasWidth, right);
 
-    if (clippedRight - clippedLeft < 12) continue;
+    if (clippedRight - clippedLeft < 18) continue;
+
+    const color = getStructureLineColor(line);
+    const text = getStructureLabelText(line);
+    const isInternal = text.startsWith("i") || String(line.scope ?? "").toLowerCase() === "internal";
 
     context.save();
 
-    context.strokeStyle = getStructureLineColor(line);
-    context.lineWidth = 1;
-    context.setLineDash([4, 3]);
+    context.strokeStyle = color;
+    context.lineWidth = isInternal ? 1 : 1.25;
+    context.setLineDash(isInternal ? [3, 3] : []);
     context.beginPath();
     context.moveTo(clippedLeft, y);
     context.lineTo(clippedRight, y);
     context.stroke();
     context.setLineDash([]);
 
-    const label = String(line.label || line.type || "").replace(/^i(?=BOS|CHoCH|MSS)/, "i");
-    const labelX = clippedLeft + (clippedRight - clippedLeft) / 2;
-    let labelY = line.direction === "bullish" ? y - 10 : y + 10;
+    if (text) {
+      const labelX = clippedLeft + (clippedRight - clippedLeft) / 2;
+      let labelY = y + (line.direction === "bearish" ? 11 : -11);
 
-    for (const previous of placed) {
-      if (Math.abs(previous.x - labelX) < 46 && Math.abs(previous.y - labelY) < 16) {
-        labelY += line.direction === "bullish" ? -16 : 16;
+      for (const previous of placed) {
+        if (Math.abs(previous.x - labelX) < 55 && Math.abs(previous.y - labelY) < 18) {
+          labelY += line.direction === "bearish" ? 18 : -18;
+        }
       }
+
+      placed.push({ x: labelX, y: labelY });
+
+      drawTextBadge(
+        context,
+        text,
+        labelX,
+        labelY,
+        color,
+        "rgba(0, 0, 0, 0)",
+        "center"
+      );
     }
-
-    placed.push({ x: labelX, y: labelY });
-
-    drawTextBadge(
-      context,
-      label,
-      labelX,
-      labelY,
-      getStructureLineColor(line),
-      getStructureLineBg(line),
-      "left"
-    );
 
     context.restore();
   }
 }
-
 
 function getCompactMarkerText(marker: ChartOverlayMarker): string {
   const label = marker.label.toLowerCase();
