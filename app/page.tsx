@@ -1384,6 +1384,10 @@ function LightweightChartPanel({
               scorecards={scorecards as any}
               mlFeatures={mlFeatures as any}
               overlayPayload={overlayPayload as any}
+              overlaySources={[
+                unifiedOverlayPayload as any,
+                engineState as any,
+              ]}
             />
           )}
         </div>
