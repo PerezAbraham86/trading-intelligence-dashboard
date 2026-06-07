@@ -1564,6 +1564,252 @@ def _score_profile_bins(
 
     return scored
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scorecards + ML feature vector
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _safe_avg(values: list[float]) -> float:
+    clean = [value for value in values if math.isfinite(value)]
+
+    if not clean:
+        return 0.0
+
+    return sum(clean) / len(clean)
+
+
+def _score_direction_value(direction: str) -> int:
+    if direction == "bullish":
+        return 1
+    if direction == "bearish":
+        return -1
+    return 0
+
+
+def _extract_recent_quality(items: list[dict[str, Any]], limit: int = 5) -> float:
+    recent = items[-limit:]
+
+    return _safe_avg([_num(item.get("qualityScore"), 0.0) for item in recent])
+
+
+def _build_dashboard_scorecards(
+    *,
+    candles: list[Candle],
+    trend: str,
+    scored_smc_events: list[dict[str, Any]],
+    scored_order_block_zones: list[dict[str, Any]],
+    scored_pd_zones: list[dict[str, Any]],
+    scored_liquidity_profile_bins: list[dict[str, Any]],
+    ghost_candles: list[dict[str, Any]],
+    nrtr_context: Optional[dict[str, Any]],
+    calculation_context: dict[str, Any],
+    ml_feature_context: dict[str, Any],
+) -> dict[str, Any]:
+    latest_candle = candles[-1] if candles else None
+    latest_close = latest_candle.close if latest_candle else 0.0
+
+    recent_smc = scored_smc_events[-8:]
+    recent_obs = scored_order_block_zones[-8:]
+    recent_pd = scored_pd_zones[-3:]
+
+    smc_bull = sum(1 for event in recent_smc if event.get("direction") == "bullish")
+    smc_bear = sum(1 for event in recent_smc if event.get("direction") == "bearish")
+    ob_bull = sum(1 for zone in recent_obs if zone.get("direction") == "bullish")
+    ob_bear = sum(1 for zone in recent_obs if zone.get("direction") == "bearish")
+
+    smc_quality = _extract_recent_quality(scored_smc_events, 8)
+    ob_quality = _extract_recent_quality(scored_order_block_zones, 8)
+    pd_quality = _extract_recent_quality(scored_pd_zones, 3)
+
+    liquidity_scores = [
+        _num(bin_item.get("liquidityScore"), 0.0)
+        for bin_item in scored_liquidity_profile_bins[-20:]
+    ]
+    liquidity_quality = min(10.0, _safe_avg(liquidity_scores) * 2.0)
+
+    nrtr_direction = str((nrtr_context or {}).get("direction", "neutral"))
+    nrtr_direction_value = _score_direction_value(nrtr_direction)
+    nrtr_agrees_with_smc = (
+        (nrtr_direction == "bullish" and smc_bull >= smc_bear) or
+        (nrtr_direction == "bearish" and smc_bear >= smc_bull)
+    ) if nrtr_direction in {"bullish", "bearish"} and recent_smc else False
+
+    ghost_direction = "neutral"
+    ghost_confidence = 0.0
+
+    if ghost_candles:
+        latest_ghost = ghost_candles[0]
+        ghost_direction = str(latest_ghost.get("direction", latest_ghost.get("bias", "neutral"))).lower()
+        ghost_confidence = _num(
+            latest_ghost.get("confidence", latest_ghost.get("probability", latest_ghost.get("score", 0.0))),
+            0.0,
+        )
+        if ghost_confidence > 0 and ghost_confidence <= 1:
+            ghost_confidence *= 100
+
+    fvg_count = _num(ml_feature_context.get("fairValueGapCount"), 0.0)
+    sweep_count = _num(ml_feature_context.get("sweepCount"), 0.0)
+    displacement_count = _num(ml_feature_context.get("displacementCount"), 0.0)
+    inducement_count = _num(ml_feature_context.get("inducementCount"), 0.0)
+    eqh_eql_count = _num(ml_feature_context.get("equalHighLowCount"), 0.0)
+
+    hidden_context_quality = min(
+        10.0,
+        (min(sweep_count, 5) * 1.2) +
+        (min(displacement_count, 5) * 1.0) +
+        (min(inducement_count, 5) * 0.7) +
+        (min(fvg_count, 5) * 0.6) +
+        (min(eqh_eql_count, 5) * 0.5),
+    )
+
+    bull_score = 0.0
+    bear_score = 0.0
+
+    bull_score += smc_bull * 1.5
+    bear_score += smc_bear * 1.5
+    bull_score += ob_bull * 1.2
+    bear_score += ob_bear * 1.2
+
+    if trend == "bullish":
+        bull_score += 2.0
+    elif trend == "bearish":
+        bear_score += 2.0
+
+    if nrtr_direction == "bullish":
+        bull_score += 2.0
+    elif nrtr_direction == "bearish":
+        bear_score += 2.0
+
+    if ghost_direction == "bullish":
+        bull_score += min(3.0, ghost_confidence / 35.0)
+    elif ghost_direction == "bearish":
+        bear_score += min(3.0, ghost_confidence / 35.0)
+
+    context_score = (smc_quality * 0.28) + (ob_quality * 0.24) + (pd_quality * 0.18) + (liquidity_quality * 0.15) + (hidden_context_quality * 0.15)
+    net_bias = bull_score - bear_score
+
+    if net_bias >= 3:
+        direction = "bullish"
+    elif net_bias <= -3:
+        direction = "bearish"
+    else:
+        direction = "neutral"
+
+    confirmation_score = max(0.0, min(100.0, context_score * 10.0))
+    conflict_score = 0.0
+
+    if nrtr_direction in {"bullish", "bearish"} and direction in {"bullish", "bearish"} and nrtr_direction != direction:
+        conflict_score += 30.0
+
+    if ghost_direction in {"bullish", "bearish"} and direction in {"bullish", "bearish"} and ghost_direction != direction:
+        conflict_score += 25.0
+
+    if smc_bull > 0 and smc_bear > 0:
+        conflict_score += min(25.0, abs(smc_bull - smc_bear) * 4.0)
+
+    conflict_score = max(0.0, min(100.0, conflict_score))
+
+    active_factors = {
+        "smcEvents": len(recent_smc),
+        "orderBlocks": len(recent_obs),
+        "pdZones": len(recent_pd),
+        "profileBins": len(scored_liquidity_profile_bins),
+        "ghostCandles": len(ghost_candles),
+        "eqhEql": int(eqh_eql_count),
+        "fvg": int(fvg_count),
+        "sweeps": int(sweep_count),
+        "displacement": int(displacement_count),
+        "inducement": int(inducement_count),
+        "nrtr": 1 if nrtr_direction in {"bullish", "bearish"} else 0,
+    }
+
+    scorecards = {
+        "version": "scorecards-v1",
+        "asOfTime": latest_candle.time if latest_candle else None,
+        "symbolPrice": latest_close,
+        "overall": {
+            "direction": direction,
+            "netBias": round(net_bias, 2),
+            "confirmationScore": round(confirmation_score, 2),
+            "conflictScore": round(conflict_score, 2),
+            "bullScore": round(bull_score, 2),
+            "bearScore": round(bear_score, 2),
+            "contextScore": round(context_score, 2),
+        },
+        "smc": {
+            "qualityScore": round(smc_quality, 2),
+            "bullishEvents": smc_bull,
+            "bearishEvents": smc_bear,
+            "latestEvent": recent_smc[-1] if recent_smc else None,
+        },
+        "orderBlocks": {
+            "qualityScore": round(ob_quality, 2),
+            "bullishZones": ob_bull,
+            "bearishZones": ob_bear,
+            "latestZone": recent_obs[-1] if recent_obs else None,
+        },
+        "pdZones": {
+            "qualityScore": round(pd_quality, 2),
+            "zones": recent_pd,
+        },
+        "liquidityProfile": {
+            "qualityScore": round(liquidity_quality, 2),
+            "profileBinCount": len(scored_liquidity_profile_bins),
+            "strongBins": sum(1 for bin_item in scored_liquidity_profile_bins if _num(bin_item.get("liquidityScore"), 0.0) >= 3),
+        },
+        "nrtr": {
+            "direction": nrtr_direction,
+            "directionValue": nrtr_direction_value,
+            "agreesWithSmc": nrtr_agrees_with_smc,
+            "context": nrtr_context or {},
+        },
+        "ghost": {
+            "direction": ghost_direction,
+            "confidence": round(ghost_confidence, 2),
+            "count": len(ghost_candles),
+        },
+        "hiddenContext": {
+            "qualityScore": round(hidden_context_quality, 2),
+            "eqhEqlCount": int(eqh_eql_count),
+            "fvgCount": int(fvg_count),
+            "sweepCount": int(sweep_count),
+            "displacementCount": int(displacement_count),
+            "inducementCount": int(inducement_count),
+        },
+        "activeFactors": active_factors,
+    }
+
+    ml_features = {
+        "price": latest_close,
+        "trendDirection": _score_direction_value(trend),
+        "overallDirection": _score_direction_value(direction),
+        "overallNetBias": round(net_bias, 4),
+        "overallConfirmationScore": round(confirmation_score, 4),
+        "overallConflictScore": round(conflict_score, 4),
+        "smcQualityScore": round(smc_quality, 4),
+        "orderBlockQualityScore": round(ob_quality, 4),
+        "pdQualityScore": round(pd_quality, 4),
+        "liquidityProfileQualityScore": round(liquidity_quality, 4),
+        "hiddenContextQualityScore": round(hidden_context_quality, 4),
+        "nrtrDirection": nrtr_direction_value,
+        "nrtrAgreesWithSmc": 1 if nrtr_agrees_with_smc else 0,
+        "ghostDirection": _score_direction_value(ghost_direction),
+        "ghostConfidence": round(ghost_confidence, 4),
+        "eqhEqlCount": int(eqh_eql_count),
+        "fairValueGapCount": int(fvg_count),
+        "sweepCount": int(sweep_count),
+        "displacementCount": int(displacement_count),
+        "inducementCount": int(inducement_count),
+        "bullScore": round(bull_score, 4),
+        "bearScore": round(bear_score, 4),
+    }
+
+    return {
+        "scorecards": scorecards,
+        "mlFeatures": ml_features,
+    }
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main public builder
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1589,6 +1835,7 @@ def build_overlay_payload(
     displacement_body_ratio: float = 0.60,
     show_inducement: bool = True,
     inducement_lookback: int = 20,
+    nrtr_context: Optional[dict[str, Any]] = None,
     ghost_candles: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     candles = normalize_candles(raw_candles)
@@ -1733,7 +1980,59 @@ def build_overlay_payload(
         fvg_zones=fvg_zones,
     )
 
+    calculation_context = {
+        "equalHighLow": {
+            "lines": equal_lines,
+            "markers": equal_markers,
+            "count": len(equal_lines),
+        },
+        "fairValueGaps": {
+            "zones": fvg_zones,
+            "markers": fvg_markers,
+            "count": len(fvg_zones),
+        },
+        "sweeps": {
+            "events": liquidity_events,
+            "markers": sweep_markers,
+            "count": len(liquidity_events),
+        },
+        "displacement": {
+            "markers": displacement_markers,
+            "count": len(displacement_markers),
+        },
+        "inducement": {
+            "markers": inducement_markers,
+            "count": len(inducement_markers),
+        },
+    }
+
+    ml_feature_context = {
+        "equalHighLowCount": len(equal_lines),
+        "fairValueGapCount": len(fvg_zones),
+        "sweepCount": len(liquidity_events),
+        "displacementCount": len(displacement_markers),
+        "inducementCount": len(inducement_markers),
+        "hasRecentEqualHighLow": len(equal_lines) > 0,
+        "hasRecentFairValueGap": len(fvg_zones) > 0,
+        "hasRecentSweep": len(liquidity_events) > 0,
+        "hasRecentDisplacement": len(displacement_markers) > 0,
+        "hasRecentInducement": len(inducement_markers) > 0,
+    }
+
     trend = swing_state.trend if swing_state.trend != "neutral" else internal_state.trend
+
+    scorecard_bundle = _build_dashboard_scorecards(
+        candles=candles,
+        trend=trend,
+        scored_smc_events=scored_smc_events,
+        scored_order_block_zones=scored_order_block_zones,
+        scored_pd_zones=scored_pd_zones,
+        scored_liquidity_profile_bins=scored_liquidity_profile_bins,
+        ghost_candles=ghost_candles or [],
+        nrtr_context=nrtr_context,
+        calculation_context=calculation_context,
+        ml_feature_context=ml_feature_context,
+    )
 
     return {
         # Visual chart drawings only.
@@ -1748,44 +2047,11 @@ def build_overlay_payload(
 
         # Hidden calculation context for future ML / explanation engine.
         # Frontend should not render these unless we later add explicit toggles.
-        "calculationContext": {
-            "equalHighLow": {
-                "lines": equal_lines,
-                "markers": equal_markers,
-                "count": len(equal_lines),
-            },
-            "fairValueGaps": {
-                "zones": fvg_zones,
-                "markers": fvg_markers,
-                "count": len(fvg_zones),
-            },
-            "sweeps": {
-                "events": liquidity_events,
-                "markers": sweep_markers,
-                "count": len(liquidity_events),
-            },
-            "displacement": {
-                "markers": displacement_markers,
-                "count": len(displacement_markers),
-            },
-            "inducement": {
-                "markers": inducement_markers,
-                "count": len(inducement_markers),
-            },
-        },
+        "calculationContext": calculation_context,
 
-        "mlFeatureContext": {
-            "equalHighLowCount": len(equal_lines),
-            "fairValueGapCount": len(fvg_zones),
-            "sweepCount": len(liquidity_events),
-            "displacementCount": len(displacement_markers),
-            "inducementCount": len(inducement_markers),
-            "hasRecentEqualHighLow": len(equal_lines) > 0,
-            "hasRecentFairValueGap": len(fvg_zones) > 0,
-            "hasRecentSweep": len(liquidity_events) > 0,
-            "hasRecentDisplacement": len(displacement_markers) > 0,
-            "hasRecentInducement": len(inducement_markers) > 0,
-        },
+        "mlFeatureContext": ml_feature_context,
+        "scorecards": scorecard_bundle["scorecards"],
+        "mlFeatures": scorecard_bundle["mlFeatures"],
 
         "liquidityProfileBins": scored_liquidity_profile_bins,
         "dlmLevels": dlm_levels,
@@ -1816,6 +2082,10 @@ def build_overlay_payload(
                 2,
             ),
             "influenceLayer": "hidden-features-score-visible-overlays",
+            "scorecardVersion": scorecard_bundle["scorecards"]["version"],
+            "overallDirection": scorecard_bundle["scorecards"]["overall"]["direction"],
+            "overallConfirmationScore": scorecard_bundle["scorecards"]["overall"]["confirmationScore"],
+            "overallConflictScore": scorecard_bundle["scorecards"]["overall"]["conflictScore"],
             "dlm": dlm_summary,
         },
     }
