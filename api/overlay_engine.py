@@ -1571,7 +1571,7 @@ def _score_profile_bins(
 
 
 def _safe_avg(values: list[float]) -> float:
-    clean = [value for value in values if math.isfinite(value)]
+    clean = [value for value in values if isfinite(value)]
 
     if not clean:
         return 0.0
