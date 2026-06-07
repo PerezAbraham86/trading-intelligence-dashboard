@@ -13,11 +13,15 @@ from urllib.request import Request, urlopen
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DATA ENGINE
 #
-# v3 update:
-# - Keeps Massive options/crypto probes
-# - Adds FREE Binance Futures fallback for BTCUSD/ETHUSD:
-#   1) Open Interest from /fapi/v1/openInterest
-#   2) Footprint proxy from /futures/data/takerlongshortRatio
+# v4 update:
+# - Keeps Massive options-chain probe for equities.
+# - Keeps Binance Futures as a secondary crypto probe.
+# - Adds OKX public SWAP data for BTCUSD/ETHUSD because Render can receive:
+#   Binance HTTP 451 restricted-location errors.
+#
+# BTCUSD / ETHUSD real external data:
+# - Open Interest: OKX public open-interest endpoint for BTC-USDT-SWAP / ETH-USDT-SWAP
+# - Footprint Delta: OKX public recent trades using side buy/sell volume
 #
 # This file intentionally does NOT fake unavailable data.
 # If a source cannot provide a real value, it returns not_applicable/unavailable.
@@ -31,6 +35,9 @@ MASSIVE_CACHE_TTL_SECONDS = int(os.getenv("MASSIVE_CACHE_TTL_SECONDS", "45"))
 BINANCE_FUTURES_BASE_URL = os.getenv("BINANCE_FUTURES_BASE_URL", "https://fapi.binance.com").rstrip("/")
 BINANCE_TIMEOUT_SECONDS = float(os.getenv("BINANCE_TIMEOUT_SECONDS", "12"))
 
+OKX_BASE_URL = os.getenv("OKX_BASE_URL", "https://www.okx.com").rstrip("/")
+OKX_TIMEOUT_SECONDS = float(os.getenv("OKX_TIMEOUT_SECONDS", "12"))
+
 _EXTERNAL_DATA_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
@@ -42,12 +49,9 @@ def to_float(value: Any, fallback: float = 0.0) -> float:
     try:
         if value is None:
             return fallback
-
         parsed = float(value)
-
         if parsed != parsed:
             return fallback
-
         return parsed
     except Exception:
         return fallback
@@ -122,7 +126,6 @@ def normalize_timeframe(timeframe: str) -> str:
 def binance_period_from_timeframe(timeframe: str) -> str:
     tf = normalize_timeframe(timeframe)
 
-    # Binance futures data endpoints support limited periods.
     if tf in {"1m", "3m", "5m"}:
         return "5m"
 
@@ -159,6 +162,10 @@ def is_futures_symbol(symbol: str) -> bool:
     return normalize_symbol(symbol) in {"MES1!", "ES1!"}
 
 
+def massive_equity_ticker(symbol: str) -> str:
+    return normalize_symbol(symbol).replace("!", "")
+
+
 def massive_crypto_ticker(symbol: str) -> str:
     normalized = normalize_symbol(symbol)
 
@@ -171,10 +178,6 @@ def massive_crypto_ticker(symbol: str) -> str:
     return normalized
 
 
-def massive_equity_ticker(symbol: str) -> str:
-    return normalize_symbol(symbol).replace("!", "")
-
-
 def binance_futures_symbol(symbol: str) -> str:
     normalized = normalize_symbol(symbol)
 
@@ -183,6 +186,18 @@ def binance_futures_symbol(symbol: str) -> str:
 
     if normalized == "ETHUSD":
         return "ETHUSDT"
+
+    return normalized
+
+
+def okx_swap_inst_id(symbol: str) -> str:
+    normalized = normalize_symbol(symbol)
+
+    if normalized == "BTCUSD":
+        return "BTC-USDT-SWAP"
+
+    if normalized == "ETHUSD":
+        return "ETH-USDT-SWAP"
 
     return normalized
 
@@ -226,7 +241,6 @@ def cache_set(key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 def redact_key_from_text(value: str) -> str:
     if MASSIVE_API_KEY:
         return value.replace(MASSIVE_API_KEY, "***")
-
     return value
 
 
@@ -270,7 +284,7 @@ def http_json_request(
             "status": int(getattr(error, "code", 0) or 0),
             "url": redact_key_from_text(url),
             "error": str(error),
-            "body": redact_key_from_text(body[:1000]),
+            "body": redact_key_from_text(body[:1200]),
             "createdAt": utc_now_iso(),
         }
 
@@ -325,7 +339,6 @@ def massive_request(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[
 
     result = http_json_request(url, timeout=MASSIVE_TIMEOUT_SECONDS, headers=headers)
     result["path"] = path
-
     return result
 
 
@@ -344,7 +357,24 @@ def binance_request(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[
 
     result = http_json_request(url, timeout=BINANCE_TIMEOUT_SECONDS)
     result["path"] = path
+    return result
 
+
+def okx_request(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    safe_params = {
+        key: value
+        for key, value in (params or {}).items()
+        if value is not None and value != ""
+    }
+
+    query = urlencode(safe_params, doseq=True)
+    url = f"{OKX_BASE_URL}{path}"
+
+    if query:
+        url = f"{url}?{query}"
+
+    result = http_json_request(url, timeout=OKX_TIMEOUT_SECONDS)
+    result["path"] = path
     return result
 
 
@@ -357,13 +387,19 @@ def extract_results(result: Dict[str, Any]) -> List[Dict[str, Any]]:
     if not isinstance(data, dict):
         return []
 
+    # Polygon / Massive
     rows = data.get("results")
-
     if isinstance(rows, list):
         return [row for row in rows if isinstance(row, dict)]
-
     if isinstance(rows, dict):
         return [rows]
+
+    # OKX
+    okx_rows = data.get("data")
+    if isinstance(okx_rows, list):
+        return [row for row in okx_rows if isinstance(row, dict)]
+    if isinstance(okx_rows, dict):
+        return [okx_rows]
 
     return []
 
@@ -560,6 +596,198 @@ def build_massive_options_chain_context(symbol: str, timeframe: str = "1m") -> D
     return cache_set(cache_key, payload)
 
 
+def build_okx_open_interest_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
+    normalized = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    if not is_crypto_symbol(normalized):
+        return inactive_factor(
+            symbol=normalized,
+            timeframe=normalized_timeframe,
+            name="Open Interest Not Applicable",
+            source="okx_public_open_interest",
+            status="not_applicable",
+            reason=f"OKX swap open interest is only used for crypto symbols, not {normalized}",
+        )
+
+    inst_id = okx_swap_inst_id(normalized)
+    cache_key = f"okx:open-interest:{inst_id}:{normalized_timeframe}"
+    cached = cache_get(cache_key)
+
+    if cached:
+        return cached
+
+    response = okx_request(
+        "/api/v5/public/open-interest",
+        {
+            "instType": "SWAP",
+            "instId": inst_id,
+        },
+    )
+
+    rows = extract_results(response)
+
+    if not response.get("ok") or not rows:
+        payload = {
+            "status": "unavailable",
+            "label": "Open Interest Unavailable",
+            "source": "okx_public_open_interest",
+            "symbol": normalized,
+            "timeframe": normalized_timeframe,
+            "okxInstId": inst_id,
+            "direction": "neutral",
+            "strength": 0,
+            "reason": response.get("error") or response.get("body") or "okx_open_interest_failed",
+            "probe": summarize_result("okx_open_interest", response),
+            "createdAt": utc_now_iso(),
+        }
+        return cache_set(cache_key, payload)
+
+    row = rows[0]
+    open_interest = to_float(row.get("oi"), 0.0)
+    open_interest_ccy = to_float(row.get("oiCcy"), 0.0)
+
+    if open_interest <= 0 and open_interest_ccy <= 0:
+        label = "Open Interest Empty"
+        status = "unavailable"
+        direction = "neutral"
+        strength = 0
+        reason = "zero_open_interest"
+    else:
+        label = "Open Interest Active"
+        status = "active"
+        direction = "active"
+        strength = 65
+        reason = "okx_current_open_interest_available"
+
+    payload = {
+        "status": status,
+        "label": label,
+        "source": "okx_public_open_interest",
+        "symbol": normalized,
+        "timeframe": normalized_timeframe,
+        "okxInstId": inst_id,
+        "direction": direction,
+        "strength": strength,
+        "openInterest": open_interest,
+        "openInterestCurrency": open_interest_ccy,
+        "timestamp": row.get("ts"),
+        "reason": reason,
+        "probe": summarize_result("okx_open_interest", response),
+        "createdAt": utc_now_iso(),
+    }
+
+    return cache_set(cache_key, payload)
+
+
+def build_okx_footprint_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
+    normalized = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    if not is_crypto_symbol(normalized):
+        return inactive_factor(
+            symbol=normalized,
+            timeframe=normalized_timeframe,
+            name="Footprint Delta Not Applicable",
+            source="okx_public_trades_side_delta",
+            status="not_applicable",
+            reason=f"OKX swap trade-side footprint is only used for crypto symbols, not {normalized}",
+        )
+
+    inst_id = okx_swap_inst_id(normalized)
+    cache_key = f"okx:footprint:{inst_id}:{normalized_timeframe}"
+    cached = cache_get(cache_key)
+
+    if cached:
+        return cached
+
+    response = okx_request(
+        "/api/v5/market/trades",
+        {
+            "instId": inst_id,
+            "limit": 100,
+        },
+    )
+
+    rows = extract_results(response)
+
+    if not response.get("ok") or not rows:
+        payload = {
+            "status": "unavailable",
+            "label": "Footprint Delta Unavailable",
+            "source": "okx_public_trades_side_delta",
+            "symbol": normalized,
+            "timeframe": normalized_timeframe,
+            "okxInstId": inst_id,
+            "direction": "neutral",
+            "strength": 0,
+            "reason": response.get("error") or response.get("body") or "okx_trades_failed",
+            "probe": summarize_result("okx_trades", response),
+            "createdAt": utc_now_iso(),
+        }
+        return cache_set(cache_key, payload)
+
+    buy_volume = 0.0
+    sell_volume = 0.0
+
+    for row in rows:
+        side = str(row.get("side") or "").lower()
+        size = to_float(row.get("sz"), 0.0)
+
+        if side == "buy":
+            buy_volume += size
+        elif side == "sell":
+            sell_volume += size
+
+    total = buy_volume + sell_volume
+    delta = buy_volume - sell_volume
+    delta_pct = delta / max(total, 1.0) * 100.0
+    strength = clamp(abs(delta_pct))
+
+    if total <= 0:
+        status = "unavailable"
+        direction = "neutral"
+        label = "Footprint Delta Empty"
+        strength = 0
+        reason = "zero_trade_side_volume"
+    elif delta_pct > 5:
+        status = "active"
+        direction = "bullish"
+        label = "Bullish Footprint Delta"
+        reason = "okx_buy_side_volume_above_sell_side_volume"
+    elif delta_pct < -5:
+        status = "active"
+        direction = "bearish"
+        label = "Bearish Footprint Delta"
+        reason = "okx_sell_side_volume_above_buy_side_volume"
+    else:
+        status = "active"
+        direction = "active"
+        label = "Balanced Footprint Delta"
+        reason = "okx_buy_sell_side_volume_balanced"
+
+    payload = {
+        "status": status,
+        "label": label,
+        "source": "okx_public_trades_side_delta",
+        "symbol": normalized,
+        "timeframe": normalized_timeframe,
+        "okxInstId": inst_id,
+        "direction": direction,
+        "strength": round(strength),
+        "buyVolume": round(buy_volume, 6),
+        "sellVolume": round(sell_volume, 6),
+        "delta": round(delta, 6),
+        "deltaPct": round(delta_pct, 2),
+        "tradeCount": len(rows),
+        "reason": reason,
+        "probe": summarize_result("okx_trades", response),
+        "createdAt": utc_now_iso(),
+    }
+
+    return cache_set(cache_key, payload)
+
+
 def build_binance_open_interest_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
     normalized = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
@@ -581,12 +809,7 @@ def build_binance_open_interest_context(symbol: str, timeframe: str = "1m") -> D
     if cached:
         return cached
 
-    current = binance_request(
-        "/fapi/v1/openInterest",
-        {
-            "symbol": binance_symbol,
-        },
-    )
+    current = binance_request("/fapi/v1/openInterest", {"symbol": binance_symbol})
 
     if not current.get("ok"):
         payload = {
@@ -607,31 +830,18 @@ def build_binance_open_interest_context(symbol: str, timeframe: str = "1m") -> D
     data = current.get("data") if isinstance(current.get("data"), dict) else {}
     open_interest = to_float(data.get("openInterest"), 0.0)
 
-    if open_interest <= 0:
-        label = "Open Interest Empty"
-        status = "unavailable"
-        direction = "neutral"
-        strength = 0
-        reason = "zero_open_interest"
-    else:
-        label = "Open Interest Active"
-        status = "active"
-        direction = "active"
-        strength = 65
-        reason = "current_open_interest_available"
-
     payload = {
-        "status": status,
-        "label": label,
+        "status": "active" if open_interest > 0 else "unavailable",
+        "label": "Open Interest Active" if open_interest > 0 else "Open Interest Empty",
         "source": "binance_futures_open_interest",
         "symbol": normalized,
         "timeframe": normalized_timeframe,
         "binanceSymbol": binance_symbol,
-        "direction": direction,
-        "strength": strength,
+        "direction": "active" if open_interest > 0 else "neutral",
+        "strength": 65 if open_interest > 0 else 0,
         "openInterest": open_interest,
         "openInterestTime": data.get("time"),
-        "reason": reason,
+        "reason": "current_open_interest_available" if open_interest > 0 else "zero_open_interest",
         "probe": summarize_result("binance_open_interest", current),
         "createdAt": utc_now_iso(),
     }
@@ -672,7 +882,7 @@ def build_binance_footprint_context(symbol: str, timeframe: str = "1m") -> Dict[
 
     rows = extract_results(taker)
 
-    if not taker.get("ok"):
+    if not taker.get("ok") or not rows:
         payload = {
             "status": "unavailable",
             "label": "Footprint Delta Unavailable",
@@ -689,12 +899,9 @@ def build_binance_footprint_context(symbol: str, timeframe: str = "1m") -> Dict[
         }
         return cache_set(cache_key, payload)
 
-    row = rows[0] if rows else {}
-
+    row = rows[0]
     buy_volume = to_float(row.get("buyVol") or row.get("buyVolume"), 0.0)
     sell_volume = to_float(row.get("sellVol") or row.get("sellVolume"), 0.0)
-    ratio = to_float(row.get("buySellRatio"), 1.0)
-
     total = buy_volume + sell_volume
     delta = buy_volume - sell_volume
     delta_pct = delta / max(total, 1.0) * 100.0
@@ -704,7 +911,6 @@ def build_binance_footprint_context(symbol: str, timeframe: str = "1m") -> Dict[
         status = "unavailable"
         direction = "neutral"
         label = "Footprint Delta Empty"
-        strength = 0
         reason = "zero_buy_sell_volume"
     elif delta_pct > 5:
         status = "active"
@@ -731,12 +937,11 @@ def build_binance_footprint_context(symbol: str, timeframe: str = "1m") -> Dict[
         "binanceSymbol": binance_symbol,
         "period": period,
         "direction": direction,
-        "strength": round(strength),
+        "strength": round(strength) if total > 0 else 0,
         "buyVolume": round(buy_volume, 6),
         "sellVolume": round(sell_volume, 6),
         "delta": round(delta, 6),
         "deltaPct": round(delta_pct, 2),
-        "buySellRatio": round(ratio, 6),
         "timestamp": row.get("timestamp"),
         "reason": reason,
         "probe": summarize_result("binance_taker_ratio", taker),
@@ -746,145 +951,35 @@ def build_binance_footprint_context(symbol: str, timeframe: str = "1m") -> Dict[
     return cache_set(cache_key, payload)
 
 
-def build_massive_crypto_footprint_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
-    normalized = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
+def build_crypto_open_interest_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
+    okx_factor = build_okx_open_interest_context(symbol, timeframe)
 
-    if not is_crypto_symbol(normalized):
-        return inactive_factor(
-            symbol=normalized,
-            timeframe=normalized_timeframe,
-            name="Crypto Footprint Not Applicable",
-            source="massive_crypto_trades",
-            status="not_applicable",
-            reason=f"Crypto trade footprint is not applicable for {normalized}",
-        )
+    if okx_factor.get("status") == "active":
+        return okx_factor
 
-    ticker = massive_crypto_ticker(normalized)
-    cache_key = f"massive:crypto-footprint:{ticker}:{normalized_timeframe}"
-    cached = cache_get(cache_key)
+    binance_factor = build_binance_open_interest_context(symbol, timeframe)
 
-    if cached:
-        return cached
+    if binance_factor.get("status") == "active":
+        return binance_factor
 
-    trades = massive_request(
-        f"/v3/trades/{ticker}",
-        {
-            "limit": 100,
-            "order": "desc",
-            "sort": "timestamp",
-        },
-    )
-
-    rows = extract_results(trades)
-
-    if not trades.get("ok"):
-        payload = {
-            "status": "unavailable",
-            "label": "Crypto Footprint Unavailable",
-            "source": "massive_crypto_trades",
-            "symbol": normalized,
-            "timeframe": normalized_timeframe,
-            "ticker": ticker,
-            "direction": "neutral",
-            "strength": 0,
-            "reason": trades.get("error") or trades.get("body") or "massive_crypto_trades_failed",
-            "probe": summarize_result("crypto_trades", trades),
-            "createdAt": utc_now_iso(),
-        }
-        return cache_set(cache_key, payload)
-
-    prices: List[float] = []
-    sizes: List[float] = []
-
-    for row in rows:
-        price = to_float(row.get("price") or row.get("p"), 0)
-        size = to_float(row.get("size") or row.get("s") or row.get("volume"), 0)
-
-        if price > 0:
-            prices.append(price)
-            sizes.append(size if size > 0 else 1.0)
-
-    if len(prices) < 2:
-        payload = {
-            "status": "unavailable",
-            "label": "Crypto Footprint Unavailable",
-            "source": "massive_crypto_trades",
-            "symbol": normalized,
-            "timeframe": normalized_timeframe,
-            "ticker": ticker,
-            "direction": "neutral",
-            "strength": 0,
-            "reason": "not_enough_trades_for_delta_proxy",
-            "tradeCount": len(rows),
-            "probe": summarize_result("crypto_trades", trades),
-            "createdAt": utc_now_iso(),
-        }
-        return cache_set(cache_key, payload)
-
-    buy_proxy = 0.0
-    sell_proxy = 0.0
-
-    for index in range(1, len(prices)):
-        size = sizes[index]
-
-        if prices[index] >= prices[index - 1]:
-            buy_proxy += size
-        else:
-            sell_proxy += size
-
-    total_proxy = buy_proxy + sell_proxy
-    delta = buy_proxy - sell_proxy
-    delta_pct = delta / max(total_proxy, 1.0) * 100.0
-    strength = clamp(abs(delta_pct))
-
-    if delta_pct > 8:
-        direction = "bullish"
-        label = "Bullish Footprint Delta Proxy"
-    elif delta_pct < -8:
-        direction = "bearish"
-        label = "Bearish Footprint Delta Proxy"
-    else:
-        direction = "active"
-        label = "Balanced Footprint Delta Proxy"
-
-    payload = {
-        "status": "active",
-        "label": label,
-        "source": "massive_crypto_trades_delta_proxy",
-        "symbol": normalized,
-        "timeframe": normalized_timeframe,
-        "ticker": ticker,
-        "direction": direction,
-        "strength": round(strength),
-        "tradeCount": len(rows),
-        "buyVolumeProxy": round(buy_proxy, 4),
-        "sellVolumeProxy": round(sell_proxy, 4),
-        "deltaProxy": round(delta, 4),
-        "deltaPct": round(delta_pct, 2),
-        "reason": "price_tick_direction_proxy_not_true_bid_ask_footprint",
-        "probe": summarize_result("crypto_trades", trades),
-        "createdAt": utc_now_iso(),
-    }
-
-    return cache_set(cache_key, payload)
+    combined = dict(okx_factor)
+    combined["fallbackProbe"] = binance_factor
+    return combined
 
 
-def choose_crypto_footprint_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
-    # Prefer free Binance futures taker buy/sell volume for BTCUSD/ETHUSD.
+def build_crypto_footprint_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
+    okx_factor = build_okx_footprint_context(symbol, timeframe)
+
+    if okx_factor.get("status") == "active":
+        return okx_factor
+
     binance_factor = build_binance_footprint_context(symbol, timeframe)
 
     if binance_factor.get("status") == "active":
         return binance_factor
 
-    # Keep Massive as a secondary probe if the account later gets crypto trade entitlement.
-    massive_factor = build_massive_crypto_footprint_context(symbol, timeframe)
-
-    if massive_factor.get("status") == "active":
-        return massive_factor
-
-    combined = dict(binance_factor)
-    combined["fallbackProbe"] = massive_factor
+    combined = dict(okx_factor)
+    combined["fallbackProbe"] = binance_factor
     return combined
 
 
@@ -895,8 +990,8 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
     options_chain = build_massive_options_chain_context(normalized, normalized_timeframe)
 
     if is_crypto_symbol(normalized):
-        open_interest = build_binance_open_interest_context(normalized, normalized_timeframe)
-        footprint = choose_crypto_footprint_context(normalized, normalized_timeframe)
+        open_interest = build_crypto_open_interest_context(normalized, normalized_timeframe)
+        footprint = build_crypto_footprint_context(normalized, normalized_timeframe)
     else:
         open_interest = options_chain
         footprint = inactive_factor(
@@ -961,11 +1056,12 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
         "optionsBearPressure": to_float(options_chain.get("putShare"), 0) if isinstance(options_chain, dict) else 0,
         "footprintDeltaPct": to_float(footprint.get("deltaPct"), 0) if isinstance(footprint, dict) else 0,
         "openInterest": to_float(open_interest.get("openInterest"), 0) if isinstance(open_interest, dict) else 0,
+        "openInterestCurrency": to_float(open_interest.get("openInterestCurrency"), 0) if isinstance(open_interest, dict) else 0,
     }
 
     return {
         "eventType": "EXTERNAL_DATA_CONTEXT",
-        "status": "live" if MASSIVE_API_KEY else "partial_live",
+        "status": "live",
         "symbol": normalized,
         "timeframe": normalized_timeframe,
         "providerStatus": {
@@ -975,17 +1071,23 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
                 "baseUrl": MASSIVE_BASE_URL,
                 "cacheTtlSeconds": MASSIVE_CACHE_TTL_SECONDS,
             },
+            "okx": {
+                "configured": True,
+                "enabled": True,
+                "baseUrl": OKX_BASE_URL,
+                "usedFor": ["BTCUSD openInterest", "BTCUSD footprint", "ETHUSD openInterest", "ETHUSD footprint"],
+            },
             "binanceFutures": {
                 "configured": True,
                 "enabled": True,
                 "baseUrl": BINANCE_FUTURES_BASE_URL,
-                "usedFor": ["BTCUSD openInterest", "BTCUSD footprint", "ETHUSD openInterest", "ETHUSD footprint"],
+                "usedFor": ["secondary fallback if OKX fails"],
             },
         },
         "factors": factors,
         "signalFields": signal_fields,
         "scalars": scalars,
-        "source": "external_data_engine_v3_binance_crypto",
+        "source": "external_data_engine_v4_okx_crypto",
         "createdAt": utc_now_iso(),
     }
 
@@ -998,7 +1100,7 @@ def build_external_data_status(symbol: str = "BTCUSD", timeframe: str = "1m") ->
     return {
         "eventType": "EXTERNAL_DATA_STATUS",
         "status": context.get("status", "unknown"),
-        "source": "external_data_engine_v3_binance_crypto",
+        "source": "external_data_engine_v4_okx_crypto",
         "symbol": normalized,
         "timeframe": normalized_timeframe,
         "massiveKeyPresent": bool(MASSIVE_API_KEY),
