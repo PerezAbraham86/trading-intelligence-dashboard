@@ -289,6 +289,151 @@ function getObjectFromSources(sources: AnyRecord[], ...keys: string[]) {
   return {}
 }
 
+function getDeepArraysFromSources(
+  sources: AnyRecord[],
+  keyMatcher: (key: string) => boolean,
+  maxDepth = 5
+) {
+  const results: AnyRecord[] = []
+  const seen = new Set<unknown>()
+
+  function visit(value: unknown, depth: number) {
+    if (!value || typeof value !== 'object' || depth > maxDepth || seen.has(value)) return
+    seen.add(value)
+
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1)
+      return
+    }
+
+    const objectValue = value as AnyRecord
+
+    for (const [key, child] of Object.entries(objectValue)) {
+      if (Array.isArray(child) && keyMatcher(key.toLowerCase())) {
+        results.push(...(child.filter((item) => item && typeof item === 'object') as AnyRecord[]))
+      }
+
+      if (child && typeof child === 'object') {
+        visit(child, depth + 1)
+      }
+    }
+  }
+
+  for (const source of sources) visit(source, 0)
+
+  return uniqueByStableKey(results)
+}
+
+function getDeepObjectsByLabelFromSources(
+  sources: AnyRecord[],
+  labelMatcher: (label: string) => boolean,
+  maxDepth = 5
+) {
+  const results: AnyRecord[] = []
+  const seen = new Set<unknown>()
+
+  function visit(value: unknown, depth: number) {
+    if (!value || typeof value !== 'object' || depth > maxDepth || seen.has(value)) return
+    seen.add(value)
+
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1)
+      return
+    }
+
+    const objectValue = value as AnyRecord
+    const label = String(
+      objectValue.label ??
+        objectValue.name ??
+        objectValue.title ??
+        objectValue.type ??
+        objectValue.kind ??
+        objectValue.zoneType ??
+        objectValue.category ??
+        ''
+    ).toLowerCase()
+
+    if (labelMatcher(label)) {
+      results.push(objectValue)
+    }
+
+    for (const child of Object.values(objectValue)) {
+      if (child && typeof child === 'object') {
+        visit(child, depth + 1)
+      }
+    }
+  }
+
+  for (const source of sources) visit(source, 0)
+
+  return uniqueByStableKey(results)
+}
+
+function scorePdZone(item: AnyRecord) {
+  const explicit = toNumber(item.qualityScore ?? item.quality_score ?? item.score ?? item.strength, NaN)
+
+  if (Number.isFinite(explicit) && explicit > 0) {
+    return explicit > 10 ? Math.min(10, explicit / 10) : Math.min(10, explicit)
+  }
+
+  const top = toNumber(item.top ?? item.high ?? item.upper ?? item.max, NaN)
+  const bottom = toNumber(item.bottom ?? item.low ?? item.lower ?? item.min, NaN)
+
+  if (Number.isFinite(top) && Number.isFinite(bottom) && Math.abs(top - bottom) > 0) {
+    return 5
+  }
+
+  return getItemQuality(item, 4)
+}
+
+function scoreProfileBin(item: AnyRecord) {
+  const explicit = toNumber(
+    item.liquidityScore ??
+      item.score ??
+      item.strength ??
+      item.weight ??
+      item.value,
+    NaN
+  )
+
+  if (Number.isFinite(explicit) && explicit > 0) {
+    return explicit > 10 ? Math.min(10, explicit / 10) : Math.min(10, explicit)
+  }
+
+  const percent = toNumber(
+    item.widthPct ??
+      item.volumePct ??
+      item.percent ??
+      item.percentage ??
+      item.pct ??
+      item.relativeSize ??
+      item.normalized,
+    NaN
+  )
+
+  if (Number.isFinite(percent) && percent > 0) {
+    return percent > 10 ? Math.min(10, percent / 10) : Math.min(10, percent)
+  }
+
+  const volume = toNumber(
+    item.volume ??
+      item.buyVolume ??
+      item.sellVolume ??
+      item.totalVolume ??
+      item.rawVolume,
+    NaN
+  )
+
+  if (Number.isFinite(volume) && volume > 0) return 4
+
+  const top = toNumber(item.top ?? item.high ?? item.upper, NaN)
+  const bottom = toNumber(item.bottom ?? item.low ?? item.lower, NaN)
+
+  if (Number.isFinite(top) && Number.isFinite(bottom)) return 3
+
+  return 0
+}
+
 function buildFallbackScorecardsFromOverlayPayload(
   overlayPayload?: AnyRecord | null,
   mlFeatures?: MlFeatures | null,
@@ -312,10 +457,23 @@ function buildFallbackScorecardsFromOverlayPayload(
     ...getArrayFromSources(sources, 'chartZones'),
     ...getArrayFromSources(sources, 'pdZones'),
     ...getArrayFromSources(sources, 'premiumDiscountZones'),
+    ...getArrayFromSources(sources, 'premiumDiscount'),
     ...getArrayFromSources(sources, 'pdLevels'),
     ...getArrayFromSources(sources, 'orderBlockZones'),
+    ...getArrayFromSources(sources, 'orderBlocks'),
+    ...getArrayFromSources(sources, 'supplyZones'),
+    ...getArrayFromSources(sources, 'demandZones'),
+    ...getDeepArraysFromSources(
+      sources,
+      (key) =>
+        key.includes('zone') ||
+        key.includes('orderblock') ||
+        key.includes('premium') ||
+        key.includes('discount') ||
+        key.includes('equilibrium'),
+      4
+    ),
   ])
-
   const orderBlocks = [
     ...getArrayFromSources(sources, 'orderBlocks'),
     ...allZones.filter((zone) => {
@@ -324,18 +482,51 @@ function buildFallbackScorecardsFromOverlayPayload(
     }),
   ]
 
-  const pdZones = allZones.filter((zone) => {
-    const label = String(zone.label ?? zone.kind ?? zone.type ?? '').toLowerCase()
-    return label.includes('premium') || label.includes('discount') || label.includes('equilibrium')
-  })
-
-  const profileBins = uniqueByStableKey([
-    ...getArrayFromSources(sources, 'liquidityProfileBins', 'alphaProfileBins', 'profileBins', 'dlmProfileBins'),
-    ...getNestedArrayFromSources(sources, 'alphaProfile', 'bins'),
-    ...getNestedArrayFromSources(sources, 'liquidityProfile', 'bins'),
-    ...getNestedArrayFromSources(sources, 'dlm', 'profileBins', 'bins'),
+  const pdZones = uniqueByStableKey([
+    ...getArrayFromSources(sources, 'pdZones', 'premiumDiscountZones', 'premiumDiscount', 'pdLevels'),
+    ...allZones.filter((zone) => {
+      const label = String(zone.label ?? zone.kind ?? zone.type ?? zone.zoneType ?? zone.name ?? '').toLowerCase()
+      return (
+        label.includes('premium') ||
+        label.includes('discount') ||
+        label.includes('equilibrium') ||
+        label.includes('pd')
+      )
+    }),
+    ...getDeepObjectsByLabelFromSources(
+      sources,
+      (label) =>
+        label.includes('premium') ||
+        label.includes('discount') ||
+        label.includes('equilibrium') ||
+        label.includes('pd'),
+      4
+    ),
   ])
-
+  const profileBins = uniqueByStableKey([
+    ...getArrayFromSources(
+      sources,
+      'liquidityProfileBins',
+      'alphaProfileBins',
+      'profileBins',
+      'dlmProfileBins',
+      'bins',
+      'levels'
+    ),
+    ...getNestedArrayFromSources(sources, 'alphaProfile', 'bins', 'profileBins', 'levels'),
+    ...getNestedArrayFromSources(sources, 'liquidityProfile', 'bins', 'profileBins', 'levels'),
+    ...getNestedArrayFromSources(sources, 'dlm', 'profileBins', 'bins', 'liquidityProfileBins', 'levels'),
+    ...getDeepArraysFromSources(
+      sources,
+      (key) =>
+        key.includes('profilebin') ||
+        key.includes('liquidityprofile') ||
+        key.includes('dlmprofile') ||
+        key === 'bins' ||
+        key === 'levels',
+      4
+    ),
+  ])
   const ghostCandles = getArrayFromSources(sources, 'ghostCandles', 'ghostProjections', 'projections')
   const calculationContext = getObjectFromSources(sources, 'calculationContext')
   const mlFeatureContext = getObjectFromSources(sources, 'mlFeatureContext')
@@ -352,24 +543,10 @@ function buildFallbackScorecardsFromOverlayPayload(
   const smcQuality = average(recentSmc.map((item) => getItemQuality(item, 5)))
   const obQuality = average(recentObs.map((item) => getItemQuality(item, 5)))
   const pdQuality = pdZones.length > 0
-    ? Math.max(4.5, average(pdZones.map((item) => getItemQuality(item, 4))))
+    ? Math.max(4.5, average(pdZones.map((item) => scorePdZone(item))))
     : 0
   const profileQuality = profileBins.length > 0
-    ? Math.min(
-        10,
-        Math.max(
-          4.5,
-          average(
-            profileBins.map((bin) => {
-        const liquidityScore = toNumber(bin.liquidityScore, NaN)
-        if (Number.isFinite(liquidityScore)) return liquidityScore * 2
-
-        const width = toNumber(bin.widthPct ?? bin.volumePct, 0)
-              return Math.min(10, width / 10)
-            })
-          )
-        )
-      )
+    ? Math.min(10, Math.max(4.5, average(profileBins.map((bin) => scoreProfileBin(bin)))))
     : 0
 
   const sweepCount = toNumber(
