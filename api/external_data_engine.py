@@ -12,24 +12,24 @@ from urllib.request import Request, urlopen
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DATA ENGINE
-# Massive connection layer for:
-# - Options chain / options pressure probe
-# - Options open-interest proxy from option contracts
-# - Crypto trade footprint proxy
+#
+# v3 update:
+# - Keeps Massive options/crypto probes
+# - Adds FREE Binance Futures fallback for BTCUSD/ETHUSD:
+#   1) Open Interest from /fapi/v1/openInterest
+#   2) Footprint proxy from /futures/data/takerlongshortRatio
 #
 # This file intentionally does NOT fake unavailable data.
-# If a source cannot provide a real value, it returns not_applicable/unavailable
-# and the signalFields value is None.
+# If a source cannot provide a real value, it returns not_applicable/unavailable.
 # ─────────────────────────────────────────────────────────────────────────────
 
 MASSIVE_API_KEY = os.getenv("MASSIVE_API_KEY", "").strip()
-
-# Massive uses Polygon-compatible REST endpoints.
-# Keep this overridable from Render if Massive changes the host later.
 MASSIVE_BASE_URL = os.getenv("MASSIVE_BASE_URL", "https://api.polygon.io").rstrip("/")
-
 MASSIVE_TIMEOUT_SECONDS = float(os.getenv("MASSIVE_TIMEOUT_SECONDS", "12"))
 MASSIVE_CACHE_TTL_SECONDS = int(os.getenv("MASSIVE_CACHE_TTL_SECONDS", "45"))
+
+BINANCE_FUTURES_BASE_URL = os.getenv("BINANCE_FUTURES_BASE_URL", "https://fapi.binance.com").rstrip("/")
+BINANCE_TIMEOUT_SECONDS = float(os.getenv("BINANCE_TIMEOUT_SECONDS", "12"))
 
 _EXTERNAL_DATA_CACHE: Dict[str, Dict[str, Any]] = {}
 
@@ -72,18 +72,18 @@ def normalize_symbol(symbol: str) -> str:
     ]:
         raw = raw.replace(prefix, "")
 
-    raw = raw.replace("-", "").replace("_", "")
+    raw = raw.replace("-", "").replace("_", "").replace("/", "")
 
-    if raw in {"BTCUSD", "BTCUSDT", "BTC/USD", "XBTUSD"}:
+    if raw in {"BTCUSD", "BTCUSDT", "XBTUSD"}:
         return "BTCUSD"
 
-    if raw in {"ETHUSD", "ETHUSDT", "ETH/USD"}:
+    if raw in {"ETHUSD", "ETHUSDT"}:
         return "ETHUSD"
 
-    if raw in {"MES", "MES1", "MES1!", "/MES", "MES=F"}:
+    if raw in {"MES", "MES1", "MES1!", "MESF"}:
         return "MES1!"
 
-    if raw in {"ES", "ES1", "ES1!", "/ES", "ES=F"}:
+    if raw in {"ES", "ES1", "ES1!", "ESF"}:
         return "ES1!"
 
     if raw in {"SPY", "QQQ", "IWM", "AAPL", "TSLA", "NVDA", "MSFT", "AMD"}:
@@ -117,6 +117,25 @@ def normalize_timeframe(timeframe: str) -> str:
     }
 
     return mapping.get(raw, raw or "1m")
+
+
+def binance_period_from_timeframe(timeframe: str) -> str:
+    tf = normalize_timeframe(timeframe)
+
+    # Binance futures data endpoints support limited periods.
+    if tf in {"1m", "3m", "5m"}:
+        return "5m"
+
+    if tf in {"10m", "15m"}:
+        return "15m"
+
+    if tf == "30m":
+        return "30m"
+
+    if tf == "1h":
+        return "1h"
+
+    return "5m"
 
 
 def is_crypto_symbol(symbol: str) -> bool:
@@ -154,6 +173,18 @@ def massive_crypto_ticker(symbol: str) -> str:
 
 def massive_equity_ticker(symbol: str) -> str:
     return normalize_symbol(symbol).replace("!", "")
+
+
+def binance_futures_symbol(symbol: str) -> str:
+    normalized = normalize_symbol(symbol)
+
+    if normalized == "BTCUSD":
+        return "BTCUSDT"
+
+    if normalized == "ETHUSD":
+        return "ETHUSDT"
+
+    return normalized
 
 
 def cache_get(key: str) -> Optional[Dict[str, Any]]:
@@ -199,6 +230,69 @@ def redact_key_from_text(value: str) -> str:
     return value
 
 
+def http_json_request(
+    url: str,
+    *,
+    timeout: float,
+    headers: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    request = Request(
+        url,
+        headers=headers
+        or {
+            "Accept": "application/json",
+            "User-Agent": "trading-intelligence-dashboard/1.0",
+        },
+        method="GET",
+    )
+
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            data = json.loads(body) if body else {}
+
+            return {
+                "ok": True,
+                "status": int(getattr(response, "status", 200)),
+                "url": redact_key_from_text(url),
+                "data": data,
+                "createdAt": utc_now_iso(),
+            }
+
+    except HTTPError as error:
+        try:
+            body = error.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+
+        return {
+            "ok": False,
+            "status": int(getattr(error, "code", 0) or 0),
+            "url": redact_key_from_text(url),
+            "error": str(error),
+            "body": redact_key_from_text(body[:1000]),
+            "createdAt": utc_now_iso(),
+        }
+
+    except URLError as error:
+        return {
+            "ok": False,
+            "status": 0,
+            "url": redact_key_from_text(url),
+            "error": str(error),
+            "createdAt": utc_now_iso(),
+        }
+
+    except Exception as error:
+        return {
+            "ok": False,
+            "status": 0,
+            "url": redact_key_from_text(url),
+            "error": str(error),
+            "createdAt": utc_now_iso(),
+        }
+
+
 def massive_request(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not MASSIVE_API_KEY:
         return {
@@ -229,61 +323,36 @@ def massive_request(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[
         "Authorization": f"Bearer {MASSIVE_API_KEY}",
     }
 
-    request = Request(url, headers=headers, method="GET")
+    result = http_json_request(url, timeout=MASSIVE_TIMEOUT_SECONDS, headers=headers)
+    result["path"] = path
 
-    try:
-        with urlopen(request, timeout=MASSIVE_TIMEOUT_SECONDS) as response:
-            body = response.read().decode("utf-8", errors="replace")
-            data = json.loads(body) if body else {}
+    return result
 
-            return {
-                "ok": True,
-                "status": int(getattr(response, "status", 200)),
-                "path": path,
-                "url": redact_key_from_text(url),
-                "data": data,
-                "createdAt": utc_now_iso(),
-            }
 
-    except HTTPError as error:
-        try:
-            body = error.read().decode("utf-8", errors="replace")
-        except Exception:
-            body = ""
+def binance_request(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    safe_params = {
+        key: value
+        for key, value in (params or {}).items()
+        if value is not None and value != ""
+    }
 
-        return {
-            "ok": False,
-            "status": int(getattr(error, "code", 0) or 0),
-            "path": path,
-            "url": redact_key_from_text(url),
-            "error": str(error),
-            "body": redact_key_from_text(body[:1000]),
-            "createdAt": utc_now_iso(),
-        }
+    query = urlencode(safe_params, doseq=True)
+    url = f"{BINANCE_FUTURES_BASE_URL}{path}"
 
-    except URLError as error:
-        return {
-            "ok": False,
-            "status": 0,
-            "path": path,
-            "url": redact_key_from_text(url),
-            "error": str(error),
-            "createdAt": utc_now_iso(),
-        }
+    if query:
+        url = f"{url}?{query}"
 
-    except Exception as error:
-        return {
-            "ok": False,
-            "status": 0,
-            "path": path,
-            "url": redact_key_from_text(url),
-            "error": str(error),
-            "createdAt": utc_now_iso(),
-        }
+    result = http_json_request(url, timeout=BINANCE_TIMEOUT_SECONDS)
+    result["path"] = path
+
+    return result
 
 
 def extract_results(result: Dict[str, Any]) -> List[Dict[str, Any]]:
     data = result.get("data") if isinstance(result, dict) else None
+
+    if isinstance(data, list):
+        return [row for row in data if isinstance(row, dict)]
 
     if not isinstance(data, dict):
         return []
@@ -307,6 +376,10 @@ def summarize_result(name: str, result: Dict[str, Any]) -> Dict[str, Any]:
         sample_keys = list(rows[0].keys())[:30]
     elif isinstance(result.get("data"), dict):
         sample_keys = list(result["data"].keys())[:30]
+    elif isinstance(result.get("data"), list) and result["data"]:
+        first = result["data"][0]
+        if isinstance(first, dict):
+            sample_keys = list(first.keys())[:30]
 
     return {
         "name": name,
@@ -487,6 +560,192 @@ def build_massive_options_chain_context(symbol: str, timeframe: str = "1m") -> D
     return cache_set(cache_key, payload)
 
 
+def build_binance_open_interest_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
+    normalized = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    if not is_crypto_symbol(normalized):
+        return inactive_factor(
+            symbol=normalized,
+            timeframe=normalized_timeframe,
+            name="Open Interest Not Applicable",
+            source="binance_futures_open_interest",
+            status="not_applicable",
+            reason=f"Binance futures open interest is only used for crypto symbols, not {normalized}",
+        )
+
+    binance_symbol = binance_futures_symbol(normalized)
+    cache_key = f"binance:open-interest:{binance_symbol}:{normalized_timeframe}"
+    cached = cache_get(cache_key)
+
+    if cached:
+        return cached
+
+    current = binance_request(
+        "/fapi/v1/openInterest",
+        {
+            "symbol": binance_symbol,
+        },
+    )
+
+    if not current.get("ok"):
+        payload = {
+            "status": "unavailable",
+            "label": "Open Interest Unavailable",
+            "source": "binance_futures_open_interest",
+            "symbol": normalized,
+            "timeframe": normalized_timeframe,
+            "binanceSymbol": binance_symbol,
+            "direction": "neutral",
+            "strength": 0,
+            "reason": current.get("error") or current.get("body") or "binance_open_interest_failed",
+            "probe": summarize_result("binance_open_interest", current),
+            "createdAt": utc_now_iso(),
+        }
+        return cache_set(cache_key, payload)
+
+    data = current.get("data") if isinstance(current.get("data"), dict) else {}
+    open_interest = to_float(data.get("openInterest"), 0.0)
+
+    if open_interest <= 0:
+        label = "Open Interest Empty"
+        status = "unavailable"
+        direction = "neutral"
+        strength = 0
+        reason = "zero_open_interest"
+    else:
+        label = "Open Interest Active"
+        status = "active"
+        direction = "active"
+        strength = 65
+        reason = "current_open_interest_available"
+
+    payload = {
+        "status": status,
+        "label": label,
+        "source": "binance_futures_open_interest",
+        "symbol": normalized,
+        "timeframe": normalized_timeframe,
+        "binanceSymbol": binance_symbol,
+        "direction": direction,
+        "strength": strength,
+        "openInterest": open_interest,
+        "openInterestTime": data.get("time"),
+        "reason": reason,
+        "probe": summarize_result("binance_open_interest", current),
+        "createdAt": utc_now_iso(),
+    }
+
+    return cache_set(cache_key, payload)
+
+
+def build_binance_footprint_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
+    normalized = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    if not is_crypto_symbol(normalized):
+        return inactive_factor(
+            symbol=normalized,
+            timeframe=normalized_timeframe,
+            name="Footprint Delta Not Applicable",
+            source="binance_futures_taker_buy_sell",
+            status="not_applicable",
+            reason=f"Binance futures footprint proxy is only used for crypto symbols, not {normalized}",
+        )
+
+    binance_symbol = binance_futures_symbol(normalized)
+    period = binance_period_from_timeframe(normalized_timeframe)
+    cache_key = f"binance:footprint:{binance_symbol}:{period}"
+    cached = cache_get(cache_key)
+
+    if cached:
+        return cached
+
+    taker = binance_request(
+        "/futures/data/takerlongshortRatio",
+        {
+            "symbol": binance_symbol,
+            "period": period,
+            "limit": 1,
+        },
+    )
+
+    rows = extract_results(taker)
+
+    if not taker.get("ok"):
+        payload = {
+            "status": "unavailable",
+            "label": "Footprint Delta Unavailable",
+            "source": "binance_futures_taker_buy_sell",
+            "symbol": normalized,
+            "timeframe": normalized_timeframe,
+            "binanceSymbol": binance_symbol,
+            "period": period,
+            "direction": "neutral",
+            "strength": 0,
+            "reason": taker.get("error") or taker.get("body") or "binance_taker_ratio_failed",
+            "probe": summarize_result("binance_taker_ratio", taker),
+            "createdAt": utc_now_iso(),
+        }
+        return cache_set(cache_key, payload)
+
+    row = rows[0] if rows else {}
+
+    buy_volume = to_float(row.get("buyVol") or row.get("buyVolume"), 0.0)
+    sell_volume = to_float(row.get("sellVol") or row.get("sellVolume"), 0.0)
+    ratio = to_float(row.get("buySellRatio"), 1.0)
+
+    total = buy_volume + sell_volume
+    delta = buy_volume - sell_volume
+    delta_pct = delta / max(total, 1.0) * 100.0
+    strength = clamp(abs(delta_pct))
+
+    if total <= 0:
+        status = "unavailable"
+        direction = "neutral"
+        label = "Footprint Delta Empty"
+        strength = 0
+        reason = "zero_buy_sell_volume"
+    elif delta_pct > 5:
+        status = "active"
+        direction = "bullish"
+        label = "Bullish Footprint Delta"
+        reason = "taker_buy_volume_above_sell_volume"
+    elif delta_pct < -5:
+        status = "active"
+        direction = "bearish"
+        label = "Bearish Footprint Delta"
+        reason = "taker_sell_volume_above_buy_volume"
+    else:
+        status = "active"
+        direction = "active"
+        label = "Balanced Footprint Delta"
+        reason = "taker_buy_sell_balanced"
+
+    payload = {
+        "status": status,
+        "label": label,
+        "source": "binance_futures_taker_buy_sell",
+        "symbol": normalized,
+        "timeframe": normalized_timeframe,
+        "binanceSymbol": binance_symbol,
+        "period": period,
+        "direction": direction,
+        "strength": round(strength),
+        "buyVolume": round(buy_volume, 6),
+        "sellVolume": round(sell_volume, 6),
+        "delta": round(delta, 6),
+        "deltaPct": round(delta_pct, 2),
+        "buySellRatio": round(ratio, 6),
+        "timestamp": row.get("timestamp"),
+        "reason": reason,
+        "probe": summarize_result("binance_taker_ratio", taker),
+        "createdAt": utc_now_iso(),
+    }
+
+    return cache_set(cache_key, payload)
+
+
 def build_massive_crypto_footprint_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
     normalized = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
@@ -566,8 +825,6 @@ def build_massive_crypto_footprint_context(symbol: str, timeframe: str = "1m") -
     buy_proxy = 0.0
     sell_proxy = 0.0
 
-    # Price-tick direction delta proxy.
-    # This is not true bid/ask footprint until we add a provider with aggressor side.
     for index in range(1, len(prices)):
         size = sizes[index]
 
@@ -613,12 +870,43 @@ def build_massive_crypto_footprint_context(symbol: str, timeframe: str = "1m") -
     return cache_set(cache_key, payload)
 
 
+def choose_crypto_footprint_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
+    # Prefer free Binance futures taker buy/sell volume for BTCUSD/ETHUSD.
+    binance_factor = build_binance_footprint_context(symbol, timeframe)
+
+    if binance_factor.get("status") == "active":
+        return binance_factor
+
+    # Keep Massive as a secondary probe if the account later gets crypto trade entitlement.
+    massive_factor = build_massive_crypto_footprint_context(symbol, timeframe)
+
+    if massive_factor.get("status") == "active":
+        return massive_factor
+
+    combined = dict(binance_factor)
+    combined["fallbackProbe"] = massive_factor
+    return combined
+
+
 def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]:
     normalized = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
 
     options_chain = build_massive_options_chain_context(normalized, normalized_timeframe)
-    crypto_footprint = build_massive_crypto_footprint_context(normalized, normalized_timeframe)
+
+    if is_crypto_symbol(normalized):
+        open_interest = build_binance_open_interest_context(normalized, normalized_timeframe)
+        footprint = choose_crypto_footprint_context(normalized, normalized_timeframe)
+    else:
+        open_interest = options_chain
+        footprint = inactive_factor(
+            symbol=normalized,
+            timeframe=normalized_timeframe,
+            name="Footprint Delta Pending",
+            source="equity_futures_footprint_pending",
+            status="not_wired_in_this_step",
+            reason="Equity/futures footprint needs quote/trade classification and will be wired after crypto proof.",
+        )
 
     fred_macro = inactive_factor(
         symbol=normalized,
@@ -649,8 +937,8 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
 
     factors = {
         "optionsFlow": options_chain,
-        "openInterest": options_chain,
-        "footprint": crypto_footprint,
+        "openInterest": open_interest,
+        "footprint": footprint,
         "fredMacro": fred_macro,
         "finraShortVolume": finra_short_volume,
         "cot": cot,
@@ -664,19 +952,20 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
 
     scalars = {
         "optionsFlowStrength": factor_strength(options_chain),
-        "openInterestStrength": factor_strength(options_chain),
-        "footprintStrength": factor_strength(crypto_footprint),
+        "openInterestStrength": factor_strength(open_interest),
+        "footprintStrength": factor_strength(footprint),
         "fredMacroStrength": factor_strength(fred_macro),
         "finraShortVolumeStrength": factor_strength(finra_short_volume),
         "cotStrength": factor_strength(cot),
         "optionsBullPressure": to_float(options_chain.get("callShare"), 0) if isinstance(options_chain, dict) else 0,
         "optionsBearPressure": to_float(options_chain.get("putShare"), 0) if isinstance(options_chain, dict) else 0,
-        "footprintDeltaPct": to_float(crypto_footprint.get("deltaPct"), 0) if isinstance(crypto_footprint, dict) else 0,
+        "footprintDeltaPct": to_float(footprint.get("deltaPct"), 0) if isinstance(footprint, dict) else 0,
+        "openInterest": to_float(open_interest.get("openInterest"), 0) if isinstance(open_interest, dict) else 0,
     }
 
     return {
         "eventType": "EXTERNAL_DATA_CONTEXT",
-        "status": "live" if MASSIVE_API_KEY else "missing_key",
+        "status": "live" if MASSIVE_API_KEY else "partial_live",
         "symbol": normalized,
         "timeframe": normalized_timeframe,
         "providerStatus": {
@@ -686,11 +975,17 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
                 "baseUrl": MASSIVE_BASE_URL,
                 "cacheTtlSeconds": MASSIVE_CACHE_TTL_SECONDS,
             },
+            "binanceFutures": {
+                "configured": True,
+                "enabled": True,
+                "baseUrl": BINANCE_FUTURES_BASE_URL,
+                "usedFor": ["BTCUSD openInterest", "BTCUSD footprint", "ETHUSD openInterest", "ETHUSD footprint"],
+            },
         },
         "factors": factors,
         "signalFields": signal_fields,
         "scalars": scalars,
-        "source": "external_data_engine_v2",
+        "source": "external_data_engine_v3_binance_crypto",
         "createdAt": utc_now_iso(),
     }
 
@@ -703,7 +998,7 @@ def build_external_data_status(symbol: str = "BTCUSD", timeframe: str = "1m") ->
     return {
         "eventType": "EXTERNAL_DATA_STATUS",
         "status": context.get("status", "unknown"),
-        "source": "external_data_engine_v2",
+        "source": "external_data_engine_v3_binance_crypto",
         "symbol": normalized,
         "timeframe": normalized_timeframe,
         "massiveKeyPresent": bool(MASSIVE_API_KEY),
