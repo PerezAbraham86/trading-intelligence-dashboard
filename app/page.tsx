@@ -718,6 +718,393 @@ function getMlFeaturesFromOverlayPayload(...sources: unknown[]) {
 }
 
 
+function overlayNumber(value: unknown, fallback = 0) {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : fallback
+}
+
+function overlayDirection(value: unknown): 'bullish' | 'bearish' | 'neutral' {
+  const text = String(value ?? '').toLowerCase()
+
+  if (
+    text.includes('bull') ||
+    text.includes('buy') ||
+    text.includes('long') ||
+    text.includes('demand')
+  ) {
+    return 'bullish'
+  }
+
+  if (
+    text.includes('bear') ||
+    text.includes('sell') ||
+    text.includes('short') ||
+    text.includes('supply')
+  ) {
+    return 'bearish'
+  }
+
+  return 'neutral'
+}
+
+function overlayAverage(values: number[]) {
+  const clean = values.filter((value) => Number.isFinite(value))
+
+  if (!clean.length) return 0
+
+  return clean.reduce((sum, value) => sum + value, 0) / clean.length
+}
+
+function overlayQuality(item: any, fallback = 5) {
+  if (!item || typeof item !== 'object') return fallback
+
+  const explicit = overlayNumber(
+    item.qualityScore ??
+      item.quality_score ??
+      item.score ??
+      item.strength ??
+      item.confidence,
+    NaN
+  )
+
+  if (Number.isFinite(explicit) && explicit > 0) {
+    return explicit > 10 ? Math.min(10, explicit / 10) : Math.min(10, explicit)
+  }
+
+  const top = overlayNumber(item.top ?? item.high ?? item.upper ?? item.max, NaN)
+  const bottom = overlayNumber(item.bottom ?? item.low ?? item.lower ?? item.min, NaN)
+
+  if (Number.isFinite(top) && Number.isFinite(bottom) && Math.abs(top - bottom) > 0) {
+    return fallback
+  }
+
+  return fallback
+}
+
+function getPayloadArray(payload: any, ...keys: string[]) {
+  if (!payload || typeof payload !== 'object') return [] as any[]
+
+  for (const key of keys) {
+    const value = payload[key]
+    if (Array.isArray(value)) return value
+  }
+
+  return [] as any[]
+}
+
+function getNestedPayloadArray(payload: any, key: string, ...arrayKeys: string[]) {
+  const nested = payload?.[key]
+  if (!nested || typeof nested !== 'object') return [] as any[]
+
+  return getPayloadArray(nested, ...arrayKeys)
+}
+
+function uniqueOverlayItems(items: any[]) {
+  const seen = new Set<string>()
+
+  return items.filter((item) => {
+    if (!item || typeof item !== 'object') return false
+
+    const key = [
+      item.id,
+      item.type,
+      item.kind,
+      item.label,
+      item.time,
+      item.fromTime,
+      item.startTime,
+      item.endTime,
+      item.index,
+      item.price,
+      item.top,
+      item.bottom,
+      item.high,
+      item.low,
+    ]
+      .map((value) => String(value ?? ''))
+      .join('|')
+
+    if (seen.has(key)) return false
+    seen.add(key)
+
+    return true
+  })
+}
+
+function scanOverlayArraysByKey(source: unknown, keyMatcher: (key: string) => boolean) {
+  const results: any[] = []
+  const seen = new Set<unknown>()
+
+  function visit(value: unknown, depth: number) {
+    if (!value || typeof value !== 'object' || depth > 4 || seen.has(value)) return
+
+    seen.add(value)
+
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1)
+      return
+    }
+
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if (Array.isArray(child) && keyMatcher(key.toLowerCase())) {
+        results.push(...child.filter((item) => item && typeof item === 'object'))
+      }
+
+      if (child && typeof child === 'object') visit(child, depth + 1)
+    }
+  }
+
+  visit(source, 0)
+
+  return uniqueOverlayItems(results)
+}
+
+function scoreVisualProfileBin(bin: any) {
+  const explicit = overlayNumber(
+    bin?.liquidityScore ??
+      bin?.score ??
+      bin?.strength ??
+      bin?.weight ??
+      bin?.value,
+    NaN
+  )
+
+  if (Number.isFinite(explicit) && explicit > 0) {
+    return explicit > 10 ? Math.min(10, explicit / 10) : Math.min(10, explicit)
+  }
+
+  const percent = overlayNumber(
+    bin?.widthPct ??
+      bin?.volumePct ??
+      bin?.percent ??
+      bin?.percentage ??
+      bin?.pct ??
+      bin?.relativeSize,
+    NaN
+  )
+
+  if (Number.isFinite(percent) && percent > 0) {
+    return percent > 10 ? Math.min(10, percent / 10) : Math.min(10, percent)
+  }
+
+  const volume = overlayNumber(
+    bin?.volume ?? bin?.buyVolume ?? bin?.sellVolume ?? bin?.totalVolume,
+    NaN
+  )
+
+  if (Number.isFinite(volume) && volume > 0) return 4
+
+  const high = overlayNumber(bin?.high ?? bin?.top ?? bin?.upper, NaN)
+  const low = overlayNumber(bin?.low ?? bin?.bottom ?? bin?.lower, NaN)
+
+  if (Number.isFinite(high) && Number.isFinite(low)) return 3
+
+  return 0
+}
+
+function buildVisualOverlayScorecards(...sources: any[]) {
+  const payloadSources = sources.filter((source) => source && typeof source === 'object')
+  if (!payloadSources.length) return null
+
+  const zones = uniqueOverlayItems(
+    payloadSources.flatMap((payload) => [
+      ...getPayloadArray(payload, 'zones', 'overlayZones', 'chartZones'),
+      ...getPayloadArray(payload, 'pdZones', 'premiumDiscountZones', 'premiumDiscount', 'pdLevels'),
+      ...getPayloadArray(payload, 'orderBlocks', 'orderBlockZones'),
+      ...scanOverlayArraysByKey(
+        payload,
+        (key) =>
+          key.includes('zone') ||
+          key.includes('orderblock') ||
+          key.includes('premium') ||
+          key.includes('discount') ||
+          key.includes('equilibrium')
+      ),
+    ])
+  )
+
+  const lines = uniqueOverlayItems(
+    payloadSources.flatMap((payload) => [
+      ...getPayloadArray(payload, 'lines', 'overlayLines', 'structureLines'),
+      ...getPayloadArray(payload, 'smcEvents', 'structureEvents', 'marketStructureEvents'),
+    ])
+  )
+
+  const smcEvents = lines.filter((item) => {
+    const label = String(item.label ?? item.type ?? item.kind ?? '').toLowerCase()
+    return label.includes('bos') || label.includes('choch') || label.includes('mss')
+  })
+
+  const orderBlocks = zones.filter((zone) => {
+    const label = String(zone.label ?? zone.type ?? zone.kind ?? zone.zoneType ?? '').toLowerCase()
+    return (
+      label.includes('ob') ||
+      label.includes('order') ||
+      label.includes('supply') ||
+      label.includes('demand') ||
+      label.includes('bearish ob') ||
+      label.includes('bullish ob')
+    )
+  })
+
+  const pdZones = zones.filter((zone) => {
+    const label = String(zone.label ?? zone.type ?? zone.kind ?? zone.zoneType ?? zone.name ?? '').toLowerCase()
+    return (
+      label.includes('premium') ||
+      label.includes('discount') ||
+      label.includes('equilibrium') ||
+      label.includes('pd')
+    )
+  })
+
+  const profileBins = uniqueOverlayItems(
+    payloadSources.flatMap((payload) => [
+      ...getPayloadArray(payload, 'liquidityProfileBins', 'profileBins', 'alphaProfileBins', 'dlmProfileBins', 'bins', 'levels'),
+      ...getNestedPayloadArray(payload, 'alphaProfile', 'bins', 'profileBins', 'levels'),
+      ...getNestedPayloadArray(payload, 'liquidityProfile', 'bins', 'profileBins', 'levels'),
+      ...getNestedPayloadArray(payload, 'dlm', 'bins', 'profileBins', 'liquidityProfileBins', 'levels'),
+      ...scanOverlayArraysByKey(
+        payload,
+        (key) =>
+          key.includes('profilebin') ||
+          key.includes('liquidityprofile') ||
+          key.includes('dlmprofile') ||
+          key === 'bins' ||
+          key === 'levels'
+      ),
+    ])
+  )
+
+  const ghostCandles = uniqueOverlayItems(
+    payloadSources.flatMap((payload) =>
+      getPayloadArray(payload, 'ghostCandles', 'ghostProjections', 'projections')
+    )
+  )
+
+  const recentSmc = smcEvents.slice(-10)
+  const recentObs = orderBlocks.slice(-10)
+
+  const smcBull = recentSmc.filter((item) => overlayDirection(item.direction ?? item.label ?? item.type) === 'bullish').length
+  const smcBear = recentSmc.filter((item) => overlayDirection(item.direction ?? item.label ?? item.type) === 'bearish').length
+  const obBull = recentObs.filter((item) => overlayDirection(item.direction ?? item.label ?? item.type) === 'bullish').length
+  const obBear = recentObs.filter((item) => overlayDirection(item.direction ?? item.label ?? item.type) === 'bearish').length
+
+  const smcQuality = recentSmc.length ? overlayAverage(recentSmc.map((item) => overlayQuality(item, 5))) : 0
+  const obQuality = recentObs.length ? overlayAverage(recentObs.map((item) => overlayQuality(item, 5))) : 0
+  const pdQuality = pdZones.length ? Math.max(4.5, overlayAverage(pdZones.map((item) => overlayQuality(item, 5)))) : 0
+  const profileQuality = profileBins.length
+    ? Math.max(4.5, overlayAverage(profileBins.map((bin) => scoreVisualProfileBin(bin))))
+    : 0
+
+  const ghost = ghostCandles[0] ?? {}
+  const ghostDirection = overlayDirection(ghost.direction ?? ghost.bias)
+  let ghostConfidence = overlayNumber(ghost.confidence ?? ghost.probability ?? ghost.score, 0)
+  if (ghostConfidence > 0 && ghostConfidence <= 1) ghostConfidence *= 100
+
+  const bullScore =
+    smcBull * 1.5 +
+    obBull * 1.2 +
+    (ghostDirection === 'bullish' ? Math.min(3, ghostConfidence / 35) : 0)
+  const bearScore =
+    smcBear * 1.5 +
+    obBear * 1.2 +
+    (ghostDirection === 'bearish' ? Math.min(3, ghostConfidence / 35) : 0)
+
+  const netBias = bullScore - bearScore
+  const direction = netBias >= 3 ? 'bullish' : netBias <= -3 ? 'bearish' : 'neutral'
+  const contextScore =
+    smcQuality * 0.28 +
+    obQuality * 0.24 +
+    pdQuality * 0.18 +
+    profileQuality * 0.15
+
+  const scorecards = {
+    version: 'visual-overlay-scorecards-v2',
+    overall: {
+      direction,
+      netBias: Number(netBias.toFixed(2)),
+      confirmationScore: Math.max(0, Math.min(100, Number((contextScore * 10).toFixed(2)))),
+      conflictScore: smcBull > 0 && smcBear > 0 ? 16 : 0,
+      bullScore: Number(bullScore.toFixed(2)),
+      bearScore: Number(bearScore.toFixed(2)),
+      contextScore: Number(contextScore.toFixed(2)),
+    },
+    smc: {
+      qualityScore: Number(smcQuality.toFixed(2)),
+      bullishEvents: smcBull,
+      bearishEvents: smcBear,
+    },
+    orderBlocks: {
+      qualityScore: Number(obQuality.toFixed(2)),
+      bullishZones: obBull,
+      bearishZones: obBear,
+    },
+    pdZones: {
+      qualityScore: Number(pdQuality.toFixed(2)),
+      count: pdZones.length,
+    },
+    liquidityProfile: {
+      qualityScore: Number(profileQuality.toFixed(2)),
+      profileBinCount: profileBins.length,
+      strongBins: profileBins.filter((bin) => scoreVisualProfileBin(bin) >= 4).length,
+    },
+    nrtr: {
+      direction: 'neutral',
+      agreesWithSmc: false,
+    },
+    ghost: {
+      direction: ghostDirection,
+      confidence: Number(ghostConfidence.toFixed(2)),
+      count: ghostCandles.length,
+    },
+    hiddenContext: {
+      qualityScore: 0,
+      eqhEqlCount: 0,
+      fvgCount: 0,
+      sweepCount: 0,
+      displacementCount: 0,
+      inducementCount: 0,
+    },
+    activeFactors: {
+      smcEvents: recentSmc.length,
+      orderBlocks: recentObs.length,
+      pdZones: pdZones.length,
+      profileBins: profileBins.length,
+      ghostCandles: ghostCandles.length,
+      eqhEql: 0,
+      fvg: 0,
+      sweeps: 0,
+      displacement: 0,
+      inducement: 0,
+      nrtr: 0,
+    },
+  }
+
+  const mlFeatures = {
+    overallDirection: direction === 'bullish' ? 1 : direction === 'bearish' ? -1 : 0,
+    overallNetBias: scorecards.overall.netBias,
+    overallConfirmationScore: scorecards.overall.confirmationScore,
+    overallConflictScore: scorecards.overall.conflictScore,
+    smcQualityScore: smcQuality,
+    orderBlockQualityScore: obQuality,
+    pdQualityScore: pdQuality,
+    liquidityProfileQualityScore: profileQuality,
+    ghostDirection: ghostDirection === 'bullish' ? 1 : ghostDirection === 'bearish' ? -1 : 0,
+    ghostConfidence,
+    bullScore,
+    bearScore,
+    visualSmcCount: recentSmc.length,
+    visualOrderBlockCount: recentObs.length,
+    visualPdZoneCount: pdZones.length,
+    visualProfileBinCount: profileBins.length,
+  }
+
+  return {
+    scorecards,
+    mlFeatures,
+  }
+}
+
 function timeToUnixSeconds(time: DashboardCandle['time'] | undefined): number | null {
   if (typeof time === 'number') return time
   if (typeof time === 'string') {
@@ -1274,6 +1661,61 @@ function LightweightChartPanel({
     )
   }, [engineState, overlayPayload, unifiedOverlayPayload])
 
+  const visualScorecardBundle = useMemo(() => {
+    return buildVisualOverlayScorecards(
+      overlayPayload,
+      unifiedOverlayPayload,
+      engineState
+    )
+  }, [engineState, overlayPayload, unifiedOverlayPayload])
+
+  const scorecardsForPanel = useMemo(() => {
+    const visualScorecards = visualScorecardBundle?.scorecards
+    const liveScorecards = scorecards as any
+
+    if (!visualScorecards) return liveScorecards
+
+    return {
+      ...(liveScorecards ?? {}),
+      ...visualScorecards,
+      overall: {
+        ...(liveScorecards?.overall ?? {}),
+        ...visualScorecards.overall,
+      },
+      smc: {
+        ...(liveScorecards?.smc ?? {}),
+        ...visualScorecards.smc,
+      },
+      orderBlocks: {
+        ...(liveScorecards?.orderBlocks ?? {}),
+        ...visualScorecards.orderBlocks,
+      },
+      pdZones: {
+        ...(liveScorecards?.pdZones ?? {}),
+        ...visualScorecards.pdZones,
+      },
+      liquidityProfile: {
+        ...(liveScorecards?.liquidityProfile ?? {}),
+        ...visualScorecards.liquidityProfile,
+      },
+      ghost: {
+        ...(liveScorecards?.ghost ?? {}),
+        ...visualScorecards.ghost,
+      },
+      activeFactors: {
+        ...(liveScorecards?.activeFactors ?? {}),
+        ...visualScorecards.activeFactors,
+      },
+    }
+  }, [scorecards, visualScorecardBundle])
+
+  const mlFeaturesForPanel = useMemo(() => {
+    return {
+      ...(mlFeatures as any ?? {}),
+      ...(visualScorecardBundle?.mlFeatures ?? {}),
+    }
+  }, [mlFeatures, visualScorecardBundle])
+
   return (
     <div className="rounded-xl border border-dark-700 bg-dark-800/80 p-4 shadow-xl">
       <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -1381,8 +1823,8 @@ function LightweightChartPanel({
 
           {!compact && (
             <ScorecardsPanel
-              scorecards={scorecards as any}
-              mlFeatures={mlFeatures as any}
+              scorecards={scorecardsForPanel as any}
+              mlFeatures={mlFeaturesForPanel as any}
               overlayPayload={overlayPayload as any}
               overlaySources={[
                 unifiedOverlayPayload as any,
