@@ -578,6 +578,15 @@ function isUnifiedOverlayPayloadLike(value: unknown): boolean {
   )
 }
 
+function hasUsefulObjectKeys(value: unknown) {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      Object.keys(value as Record<string, unknown>).length > 0
+  )
+}
+
 function getUnifiedOverlayPayload(...sources: unknown[]) {
   for (const source of sources) {
     if (!source || typeof source !== 'object') continue
@@ -597,9 +606,45 @@ function getUnifiedOverlayPayload(...sources: unknown[]) {
     ]
 
     for (const candidate of candidates) {
-      if (isUnifiedOverlayPayloadLike(candidate)) {
-        return candidate as any
+      if (!isUnifiedOverlayPayloadLike(candidate)) continue
+
+      /**
+       * Important:
+       * /api/candles can expose scorecards/mlFeatures at the top level and
+       * inside overlayPayload. Older cached payloads may have an overlayPayload
+       * but empty scorecard objects. Preserve the visual overlay object, but
+       * enrich it from the full API response so the ML Scorecards panel does
+       * not receive blank objects.
+       */
+      const enriched = {
+        ...(candidate as any),
       }
+
+      if (!hasUsefulObjectKeys(enriched.scorecards) && hasUsefulObjectKeys(raw.scorecards)) {
+        enriched.scorecards = raw.scorecards
+      }
+
+      if (!hasUsefulObjectKeys(enriched.mlFeatures) && hasUsefulObjectKeys(raw.mlFeatures)) {
+        enriched.mlFeatures = raw.mlFeatures
+      }
+
+      if (!hasUsefulObjectKeys(enriched.mlFeatureContext) && hasUsefulObjectKeys(raw.mlFeatureContext)) {
+        enriched.mlFeatureContext = raw.mlFeatureContext
+      }
+
+      if (!hasUsefulObjectKeys(enriched.calculationContext) && hasUsefulObjectKeys(raw.calculationContext)) {
+        enriched.calculationContext = raw.calculationContext
+      }
+
+      if (!hasUsefulObjectKeys(enriched.scorecards) && hasUsefulObjectKeys(raw.chartOverlays?.scorecards)) {
+        enriched.scorecards = raw.chartOverlays.scorecards
+      }
+
+      if (!hasUsefulObjectKeys(enriched.mlFeatures) && hasUsefulObjectKeys(raw.chartOverlays?.mlFeatures)) {
+        enriched.mlFeatures = raw.chartOverlays.mlFeatures
+      }
+
+      return enriched
     }
   }
 
@@ -638,7 +683,7 @@ function getScorecardsFromOverlayPayload(...sources: unknown[]) {
     ]
 
     for (const candidate of candidates) {
-      if (candidate && typeof candidate === 'object') {
+      if (hasUsefulObjectKeys(candidate)) {
         return candidate
       }
     }
@@ -663,7 +708,7 @@ function getMlFeaturesFromOverlayPayload(...sources: unknown[]) {
     ]
 
     for (const candidate of candidates) {
-      if (candidate && typeof candidate === 'object') {
+      if (hasUsefulObjectKeys(candidate)) {
         return candidate
       }
     }
@@ -845,6 +890,10 @@ function useChartCandles(
           symbol,
           timeframe,
           limit: String(limit),
+          // Force rebuild lets the dashboard receive scorecards/mlFeatures
+          // immediately after backend scoring updates instead of reusing
+          // older site-cached overlay payloads.
+          force: 'true',
         })
 
         const response = await fetch(`${apiBaseUrl}/api/candles?${params.toString()}`, {
@@ -1211,17 +1260,17 @@ function LightweightChartPanel({
 
   const scorecards = useMemo(() => {
     return getScorecardsFromOverlayPayload(
-      overlayPayload,
       unifiedOverlayPayload,
-      engineState
+      engineState,
+      overlayPayload
     )
   }, [engineState, overlayPayload, unifiedOverlayPayload])
 
   const mlFeatures = useMemo(() => {
     return getMlFeaturesFromOverlayPayload(
-      overlayPayload,
       unifiedOverlayPayload,
-      engineState
+      engineState,
+      overlayPayload
     )
   }, [engineState, overlayPayload, unifiedOverlayPayload])
 
