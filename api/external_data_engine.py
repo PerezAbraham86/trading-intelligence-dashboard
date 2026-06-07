@@ -13,15 +13,12 @@ from urllib.request import Request, urlopen
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DATA ENGINE
 #
-# v4 update:
+# v5 update:
 # - Keeps Massive options-chain probe for equities.
-# - Keeps Binance Futures as a secondary crypto probe.
-# - Adds OKX public SWAP data for BTCUSD/ETHUSD because Render can receive:
-#   Binance HTTP 451 restricted-location errors.
-#
-# BTCUSD / ETHUSD real external data:
-# - Open Interest: OKX public open-interest endpoint for BTC-USDT-SWAP / ETH-USDT-SWAP
-# - Footprint Delta: OKX public recent trades using side buy/sell volume
+# - Keeps OKX public SWAP data for BTCUSD/ETHUSD open interest + footprint.
+# - Keeps Binance Futures as secondary crypto fallback.
+# - Adds FRED macro using FRED series observations:
+#   DGS10, T10Y2Y, DFF, VIXCLS.
 #
 # This file intentionally does NOT fake unavailable data.
 # If a source cannot provide a real value, it returns not_applicable/unavailable.
@@ -37,6 +34,11 @@ BINANCE_TIMEOUT_SECONDS = float(os.getenv("BINANCE_TIMEOUT_SECONDS", "12"))
 
 OKX_BASE_URL = os.getenv("OKX_BASE_URL", "https://www.okx.com").rstrip("/")
 OKX_TIMEOUT_SECONDS = float(os.getenv("OKX_TIMEOUT_SECONDS", "12"))
+
+FRED_API_KEY = os.getenv("FRED_API_KEY", "").strip()
+FRED_BASE_URL = os.getenv("FRED_BASE_URL", "https://api.stlouisfed.org").rstrip("/")
+FRED_TIMEOUT_SECONDS = float(os.getenv("FRED_TIMEOUT_SECONDS", "12"))
+FRED_CACHE_TTL_SECONDS = int(os.getenv("FRED_CACHE_TTL_SECONDS", "1800"))
 
 _EXTERNAL_DATA_CACHE: Dict[str, Dict[str, Any]] = {}
 
@@ -375,6 +377,34 @@ def okx_request(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str,
 
     result = http_json_request(url, timeout=OKX_TIMEOUT_SECONDS)
     result["path"] = path
+    return result
+
+
+def fred_request(series_id: str, limit: int = 8) -> Dict[str, Any]:
+    if not FRED_API_KEY:
+        return {
+            "ok": False,
+            "status": 0,
+            "path": "/fred/series/observations",
+            "seriesId": series_id,
+            "error": "FRED_API_KEY missing",
+            "createdAt": utc_now_iso(),
+        }
+
+    params = {
+        "series_id": series_id,
+        "api_key": FRED_API_KEY,
+        "file_type": "json",
+        "sort_order": "desc",
+        "limit": max(2, min(int(limit or 8), 30)),
+    }
+
+    query = urlencode(params, doseq=True)
+    url = f"{FRED_BASE_URL}/fred/series/observations?{query}"
+
+    result = http_json_request(url, timeout=FRED_TIMEOUT_SECONDS)
+    result["path"] = "/fred/series/observations"
+    result["seriesId"] = series_id
     return result
 
 
@@ -983,6 +1013,252 @@ def build_crypto_footprint_context(symbol: str, timeframe: str = "1m") -> Dict[s
     return combined
 
 
+
+def latest_fred_values(response: Dict[str, Any]) -> Dict[str, Any]:
+    data = response.get("data") if isinstance(response, dict) else None
+
+    if not isinstance(data, dict):
+        return {
+            "latest": None,
+            "previous": None,
+            "latestDate": None,
+            "previousDate": None,
+            "count": 0,
+        }
+
+    observations = data.get("observations")
+    if not isinstance(observations, list):
+        return {
+            "latest": None,
+            "previous": None,
+            "latestDate": None,
+            "previousDate": None,
+            "count": 0,
+        }
+
+    cleaned: List[Dict[str, Any]] = []
+
+    for observation in observations:
+        if not isinstance(observation, dict):
+            continue
+
+        value_raw = observation.get("value")
+        if value_raw in {None, "", "."}:
+            continue
+
+        value = to_float(value_raw, float("nan"))
+        if value != value:
+            continue
+
+        cleaned.append(
+            {
+                "date": observation.get("date"),
+                "value": value,
+            }
+        )
+
+    latest = cleaned[0] if len(cleaned) >= 1 else None
+    previous = cleaned[1] if len(cleaned) >= 2 else None
+
+    return {
+        "latest": latest.get("value") if latest else None,
+        "previous": previous.get("value") if previous else None,
+        "latestDate": latest.get("date") if latest else None,
+        "previousDate": previous.get("date") if previous else None,
+        "count": len(cleaned),
+    }
+
+
+def build_fred_macro_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
+    normalized = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    cache_key = f"fred:macro:{normalized}:{normalized_timeframe}"
+    cached = cache_get(cache_key)
+
+    if cached:
+        return cached
+
+    if not FRED_API_KEY:
+        return cache_set(
+            cache_key,
+            inactive_factor(
+                symbol=normalized,
+                timeframe=normalized_timeframe,
+                name="FRED Macro Missing Key",
+                source="fred_api",
+                status="missing_key",
+                reason="Add FRED_API_KEY in Render Environment Variables to enable FRED macro.",
+            ),
+        )
+
+    # Series used:
+    # DGS10   = 10-Year Treasury Constant Maturity Rate
+    # T10Y2Y  = 10-Year Treasury minus 2-Year Treasury spread
+    # DFF     = Effective Federal Funds Rate
+    # VIXCLS  = CBOE Volatility Index
+    series_config = {
+        "DGS10": {
+            "label": "10Y Yield",
+            "riskWhen": "rising",
+            "threshold": 0.02,
+            "weight": 22,
+        },
+        "T10Y2Y": {
+            "label": "10Y-2Y Curve",
+            "riskWhen": "falling_or_inverted",
+            "threshold": 0.03,
+            "weight": 22,
+        },
+        "DFF": {
+            "label": "Fed Funds",
+            "riskWhen": "rising",
+            "threshold": 0.01,
+            "weight": 16,
+        },
+        "VIXCLS": {
+            "label": "VIX",
+            "riskWhen": "rising",
+            "threshold": 0.50,
+            "weight": 40,
+        },
+    }
+
+    series_results: Dict[str, Any] = {}
+    bull_score = 0.0
+    bear_score = 0.0
+    active_count = 0
+    warnings: List[str] = []
+
+    for series_id, config in series_config.items():
+        response = fred_request(series_id, limit=8)
+        values = latest_fred_values(response)
+        latest = values.get("latest")
+        previous = values.get("previous")
+        delta = None
+
+        if isinstance(latest, (int, float)) and isinstance(previous, (int, float)):
+            delta = latest - previous
+
+        item = {
+            "seriesId": series_id,
+            "label": config["label"],
+            "ok": bool(response.get("ok")),
+            "status": response.get("status"),
+            "latest": latest,
+            "previous": previous,
+            "delta": delta,
+            "latestDate": values.get("latestDate"),
+            "previousDate": values.get("previousDate"),
+            "count": values.get("count"),
+            "error": response.get("error"),
+            "body": response.get("body"),
+        }
+
+        if latest is None:
+            warnings.append(f"{series_id} unavailable")
+            series_results[series_id] = item
+            continue
+
+        active_count += 1
+        threshold = to_float(config.get("threshold"), 0)
+        weight = to_float(config.get("weight"), 0)
+        risk_when = str(config.get("riskWhen") or "")
+
+        if series_id == "T10Y2Y":
+            # Inverted or deeply negative curve is risk-off.
+            # Improving / positive curve is risk-on.
+            if latest < -0.25:
+                bear_score += weight
+                item["macroSignal"] = "bearish"
+                item["macroReason"] = "yield_curve_inverted"
+            elif latest > 0.25:
+                bull_score += weight * 0.70
+                item["macroSignal"] = "bullish"
+                item["macroReason"] = "yield_curve_positive"
+            elif delta is not None and delta > threshold:
+                bull_score += weight * 0.45
+                item["macroSignal"] = "bullish"
+                item["macroReason"] = "yield_curve_improving"
+            elif delta is not None and delta < -threshold:
+                bear_score += weight * 0.45
+                item["macroSignal"] = "bearish"
+                item["macroReason"] = "yield_curve_worsening"
+            else:
+                item["macroSignal"] = "neutral"
+                item["macroReason"] = "yield_curve_mixed"
+
+        elif risk_when == "rising":
+            if delta is not None and delta > threshold:
+                bear_score += weight
+                item["macroSignal"] = "bearish"
+                item["macroReason"] = f"{series_id}_rising"
+            elif delta is not None and delta < -threshold:
+                bull_score += weight
+                item["macroSignal"] = "bullish"
+                item["macroReason"] = f"{series_id}_falling"
+            else:
+                item["macroSignal"] = "neutral"
+                item["macroReason"] = f"{series_id}_flat_or_mixed"
+
+        else:
+            item["macroSignal"] = "neutral"
+            item["macroReason"] = "not_scored"
+
+        series_results[series_id] = item
+
+    if active_count <= 0:
+        payload = {
+            "status": "unavailable",
+            "label": "FRED Macro Unavailable",
+            "source": "fred_api_series_observations",
+            "symbol": normalized,
+            "timeframe": normalized_timeframe,
+            "direction": "neutral",
+            "strength": 0,
+            "reason": "; ".join(warnings) or "no_fred_series_available",
+            "series": series_results,
+            "createdAt": utc_now_iso(),
+        }
+        return cache_set(cache_key, payload)
+
+    net = bull_score - bear_score
+    max_side = max(bull_score, bear_score)
+    strength = clamp(max_side)
+
+    if net > 12:
+        direction = "bullish"
+        label = "Bullish FRED Macro"
+        reason = "macro_risk_on"
+    elif net < -12:
+        direction = "bearish"
+        label = "Bearish FRED Macro"
+        reason = "macro_risk_off"
+    else:
+        direction = "active"
+        label = "Neutral FRED Macro"
+        reason = "macro_mixed"
+
+    payload = {
+        "status": "active",
+        "label": label,
+        "source": "fred_api_series_observations",
+        "symbol": normalized,
+        "timeframe": normalized_timeframe,
+        "direction": direction,
+        "strength": strength,
+        "bullScore": round(bull_score, 2),
+        "bearScore": round(bear_score, 2),
+        "netScore": round(net, 2),
+        "activeSeries": active_count,
+        "series": series_results,
+        "reason": reason,
+        "createdAt": utc_now_iso(),
+    }
+
+    return cache_set(cache_key, payload)
+
+
 def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]:
     normalized = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
@@ -1003,14 +1279,7 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
             reason="Equity/futures footprint needs quote/trade classification and will be wired after crypto proof.",
         )
 
-    fred_macro = inactive_factor(
-        symbol=normalized,
-        timeframe=normalized_timeframe,
-        name="FRED Macro Pending",
-        source="fred_api_pending_external_data_engine",
-        status="not_wired_in_this_step",
-        reason="FRED macro will be wired in the next backend step.",
-    )
+    fred_macro = build_fred_macro_context(normalized, normalized_timeframe)
 
     finra_short_volume = inactive_factor(
         symbol=normalized,
@@ -1071,6 +1340,13 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
                 "baseUrl": MASSIVE_BASE_URL,
                 "cacheTtlSeconds": MASSIVE_CACHE_TTL_SECONDS,
             },
+            "fred": {
+                "configured": bool(FRED_API_KEY),
+                "enabled": bool(FRED_API_KEY),
+                "baseUrl": FRED_BASE_URL,
+                "cacheTtlSeconds": FRED_CACHE_TTL_SECONDS,
+                "series": ["DGS10", "T10Y2Y", "DFF", "VIXCLS"],
+            },
             "okx": {
                 "configured": True,
                 "enabled": True,
@@ -1087,7 +1363,7 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
         "factors": factors,
         "signalFields": signal_fields,
         "scalars": scalars,
-        "source": "external_data_engine_v4_okx_crypto",
+        "source": "external_data_engine_v5_fred_macro",
         "createdAt": utc_now_iso(),
     }
 
@@ -1100,7 +1376,7 @@ def build_external_data_status(symbol: str = "BTCUSD", timeframe: str = "1m") ->
     return {
         "eventType": "EXTERNAL_DATA_STATUS",
         "status": context.get("status", "unknown"),
-        "source": "external_data_engine_v4_okx_crypto",
+        "source": "external_data_engine_v5_fred_macro",
         "symbol": normalized,
         "timeframe": normalized_timeframe,
         "massiveKeyPresent": bool(MASSIVE_API_KEY),
