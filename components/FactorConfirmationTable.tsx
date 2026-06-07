@@ -1,8 +1,67 @@
 'use client'
 
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
 import { CheckCircle2, XCircle } from 'lucide-react'
+
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  'https://trading-intelligence-dashboard.onrender.com'
+
+type ExternalFactorPayload = {
+  status?: string
+  label?: string
+  source?: string
+  symbol?: string
+  timeframe?: string
+  direction?: string
+  strength?: number
+  reason?: string
+  openInterest?: number
+  openInterestCurrency?: number
+  deltaPct?: number
+  buyVolume?: number
+  sellVolume?: number
+  createdAt?: string
+}
+
+type ExternalDataStatusPayload = {
+  eventType?: string
+  status?: string
+  source?: string
+  symbol?: string
+  timeframe?: string
+  factors?: {
+    optionsFlow?: ExternalFactorPayload
+    openInterest?: ExternalFactorPayload
+    footprint?: ExternalFactorPayload
+    fredMacro?: ExternalFactorPayload
+    finraShortVolume?: ExternalFactorPayload
+    cot?: ExternalFactorPayload
+  }
+  signalFields?: {
+    optionsFlow?: string | null
+    openInterest?: string | null
+    footprint?: string | null
+    fredMacro?: string | null
+    finraShortVolume?: string | null
+    cot?: string | null
+  }
+  scalars?: {
+    optionsFlowStrength?: number
+    openInterestStrength?: number
+    footprintStrength?: number
+    fredMacroStrength?: number
+    finraShortVolumeStrength?: number
+    cotStrength?: number
+    optionsBullPressure?: number
+    optionsBearPressure?: number
+    footprintDeltaPct?: number
+    openInterest?: number
+    openInterestCurrency?: number
+  }
+  createdAt?: string
+}
 
 type TradingSignal = {
   symbol?: string
@@ -45,6 +104,7 @@ type TradingSignal = {
   unusualOptionsVolume?: number
   gammaRisk?: number
   dealerPinZone?: number | null
+  externalData?: ExternalDataStatusPayload
   chartOverlayToggles?: {
     smc?: boolean
     ghost?: boolean
@@ -93,11 +153,18 @@ type FactorRow = {
   factor: string
   status: FactorStatus
   strength: number
+  source?: string
+  details?: string
 }
 
 function clamp(value: number) {
   if (!Number.isFinite(value)) return 0
   return Math.max(0, Math.min(100, Math.round(value)))
+}
+
+function toNumber(value: unknown, fallback = 0) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
 }
 
 function normalizeSymbol(value: unknown) {
@@ -188,7 +255,13 @@ function isWaitingOrNeutral(value?: string) {
     lower.includes('waiting') ||
     lower.includes('neutral') ||
     lower.includes('none') ||
-    lower.includes('no signal')
+    lower.includes('no signal') ||
+    lower.includes('pending') ||
+    lower.includes('unavailable') ||
+    lower.includes('not applicable') ||
+    lower.includes('not_wired') ||
+    lower.includes('not wired') ||
+    lower.includes('missing')
   )
 }
 
@@ -223,6 +296,67 @@ function statusFromText(value?: string): FactorStatus {
   return 'active'
 }
 
+function statusFromExternalFactor(factor?: ExternalFactorPayload, fallbackText?: string | null): FactorStatus {
+  const status = String(factor?.status ?? '').toLowerCase()
+  const direction = String(factor?.direction ?? '').toLowerCase()
+  const label = String(factor?.label ?? fallbackText ?? '').toLowerCase()
+
+  if (
+    status.includes('not_applicable') ||
+    status.includes('not applicable') ||
+    status.includes('unavailable') ||
+    status.includes('pending') ||
+    status.includes('not_wired') ||
+    status.includes('not wired') ||
+    status.includes('missing') ||
+    status.includes('error')
+  ) {
+    return 'inactive'
+  }
+
+  if (direction.includes('bull') || label.includes('bull')) return 'bullish'
+  if (direction.includes('bear') || label.includes('bear')) return 'bearish'
+
+  if (status.includes('active') || status.includes('live')) return 'active'
+
+  return statusFromText(fallbackText ?? factor?.label)
+}
+
+function getExternalStrength(factor?: ExternalFactorPayload, scalar?: unknown, fallback = 0) {
+  const fromFactor = toNumber(factor?.strength, NaN)
+  if (Number.isFinite(fromFactor) && fromFactor > 0) return clamp(fromFactor)
+
+  const fromScalar = toNumber(scalar, NaN)
+  if (Number.isFinite(fromScalar) && fromScalar > 0) return clamp(fromScalar)
+
+  return clamp(fallback)
+}
+
+function getExternalDetails(factor?: ExternalFactorPayload) {
+  if (!factor) return undefined
+
+  const source = String(factor.source ?? '').replaceAll('_', ' ')
+  const parts: string[] = []
+
+  if (source) parts.push(source)
+
+  if (Number.isFinite(Number(factor.openInterestCurrency))) {
+    parts.push(`OI ${Number(factor.openInterestCurrency).toLocaleString(undefined, { maximumFractionDigits: 2 })}`)
+  } else if (Number.isFinite(Number(factor.openInterest))) {
+    parts.push(`OI ${Number(factor.openInterest).toLocaleString(undefined, { maximumFractionDigits: 2 })}`)
+  }
+
+  if (Number.isFinite(Number(factor.deltaPct))) {
+    parts.push(`Δ ${Number(factor.deltaPct).toFixed(2)}%`)
+  }
+
+  if (Number.isFinite(Number(factor.buyVolume)) && Number.isFinite(Number(factor.sellVolume))) {
+    parts.push(`B/S ${Number(factor.buyVolume).toFixed(2)} / ${Number(factor.sellVolume).toFixed(2)}`)
+  }
+
+  return parts.join(' • ') || factor.reason
+}
+
 function getEasternTimeParts(now = new Date()) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
@@ -249,15 +383,12 @@ function isWeekdayEastern(weekday: string) {
 function getSessionStatus(signal?: TradingSignal, symbolValue?: string): FactorStatus {
   const explicit = String(signal?.session ?? '').trim()
 
-  // Respect explicit bullish/bearish/active session values from backend,
-  // but do not allow missing/neutral/waiting session text to keep crypto inactive forever.
   if (explicit && !isWaitingOrNeutral(explicit)) {
     return statusFromText(explicit)
   }
 
   const symbol = normalizeSymbol(symbolValue ?? signal?.activeSymbol ?? signal?.symbol)
 
-  // Crypto trades 24/7, so BTCUSD and ETHUSD should not stay inactive.
   if (symbol === 'BTCUSD' || symbol === 'ETHUSD') {
     return 'active'
   }
@@ -265,7 +396,6 @@ function getSessionStatus(signal?: TradingSignal, symbolValue?: string): FactorS
   const { weekday, minutes } = getEasternTimeParts()
   const isWeekday = isWeekdayEastern(weekday)
 
-  // US equities regular session: 9:30 AM - 4:00 PM ET.
   const rthOpen = 9 * 60 + 30
   const rthClose = 16 * 60
 
@@ -273,8 +403,6 @@ function getSessionStatus(signal?: TradingSignal, symbolValue?: string): FactorS
     return isWeekday && minutes >= rthOpen && minutes < rthClose ? 'active' : 'inactive'
   }
 
-  // Futures simplified active session.
-  // Keeps MES/ES from being permanently inactive while still excluding most of the weekend.
   if (symbol === 'MES1!' || symbol === 'ES1!' || symbol.includes('MES') || symbol.includes('ES')) {
     return isWeekday ? 'active' : 'inactive'
   }
@@ -385,31 +513,78 @@ function buildCoreRows(signal?: TradingSignal, isLinked = true, activeSymbol?: s
   ]
 }
 
-function buildExternalRows(signal?: TradingSignal): FactorRow[] {
-  const bullScore = clamp(Number(signal?.bullScore ?? 50))
-  const fredStrength = factorStrength(signal?.fredMacroStrength, Number(signal?.fredMacroRisk ?? 45))
+function buildExternalRows(signal?: TradingSignal, externalData?: ExternalDataStatusPayload | null): FactorRow[] {
+  const factors = externalData?.factors ?? signal?.externalData?.factors ?? {}
+  const signalFields = externalData?.signalFields ?? signal?.externalData?.signalFields ?? {}
+  const scalars = externalData?.scalars ?? signal?.externalData?.scalars ?? {}
 
-  const optionsStrength = factorStrength(
-    signal?.optionsFlowStrength,
-    Math.max(Number(signal?.optionsBullPressure ?? 0), Number(signal?.optionsBearPressure ?? 0), Number(signal?.gammaRisk ?? 0))
-  )
-
-  const rows: Array<[string, string | undefined, number]> = [
-    ['Options Flow', signal?.optionsFlow, optionsStrength],
-    ['Open Interest', signal?.openInterest, 65],
-    ['Footprint Delta', signal?.footprint, bullScore],
-    ['FRED Macro', signal?.fredMacro ?? 'Active FRED Macro', fredStrength],
-    ['FINRA Short Volume', signal?.finraShortVolume, 71],
-    ['COT', signal?.cot, 81],
+  const rows: Array<{
+    name: string
+    factor?: ExternalFactorPayload
+    signalText?: string | null
+    fallbackSignalText?: string
+    scalarStrength?: number
+  }> = [
+    {
+      name: 'Options Flow',
+      factor: factors.optionsFlow,
+      signalText: signalFields.optionsFlow,
+      fallbackSignalText: signal?.optionsFlow,
+      scalarStrength: scalars.optionsFlowStrength ?? signal?.optionsFlowStrength,
+    },
+    {
+      name: 'Open Interest',
+      factor: factors.openInterest,
+      signalText: signalFields.openInterest,
+      fallbackSignalText: signal?.openInterest,
+      scalarStrength: scalars.openInterestStrength,
+    },
+    {
+      name: 'Footprint Delta',
+      factor: factors.footprint,
+      signalText: signalFields.footprint,
+      fallbackSignalText: signal?.footprint,
+      scalarStrength: scalars.footprintStrength,
+    },
+    {
+      name: 'FRED Macro',
+      factor: factors.fredMacro,
+      signalText: signalFields.fredMacro,
+      fallbackSignalText: signal?.fredMacro,
+      scalarStrength: scalars.fredMacroStrength ?? signal?.fredMacroStrength,
+    },
+    {
+      name: 'FINRA Short Volume',
+      factor: factors.finraShortVolume,
+      signalText: signalFields.finraShortVolume,
+      fallbackSignalText: signal?.finraShortVolume,
+      scalarStrength: scalars.finraShortVolumeStrength,
+    },
+    {
+      name: 'COT',
+      factor: factors.cot,
+      signalText: signalFields.cot,
+      fallbackSignalText: signal?.cot,
+      scalarStrength: scalars.cotStrength,
+    },
   ]
 
-  return rows.map(([factor, value, fallbackStrength]) => {
-    const status = statusFromText(value)
+  return rows.map((row) => {
+    const text = row.signalText ?? row.fallbackSignalText
+    const status = row.factor
+      ? statusFromExternalFactor(row.factor, text)
+      : statusFromText(text)
+
+    const strength = status === 'inactive'
+      ? 0
+      : getExternalStrength(row.factor, row.scalarStrength, 0)
 
     return {
-      factor,
+      factor: row.name,
       status,
-      strength: status === 'inactive' ? 0 : fallbackStrength,
+      strength,
+      source: row.factor?.source,
+      details: getExternalDetails(row.factor),
     }
   })
 }
@@ -422,6 +597,11 @@ function FactorRowItem({ row }: { row: FactorRow }) {
         <p className={`text-[10px] font-bold uppercase ${getStatusTextColor(row.status)}`}>
           {getStatusText(row.status)}
         </p>
+        {row.details && (
+          <p className="mt-0.5 truncate text-[10px] text-gray-500">
+            {row.details}
+          </p>
+        )}
       </div>
 
       <div className="flex justify-center">{getStatusIcon(row.status)}</div>
@@ -452,21 +632,62 @@ export default function FactorConfirmationTable({
   const linkedToActiveChart = isSignalLinkedToActiveChart(signal, symbol, timeframe, activePrice)
   const linkedSignal = linkedToActiveChart ? signal : undefined
 
+  const [externalData, setExternalData] = useState<ExternalDataStatusPayload | null>(null)
+
   const bullScore = clamp(Number(linkedSignal?.bullScore ?? signal?.bullScore ?? 50))
   const bearScore = clamp(Number(linkedSignal?.bearScore ?? signal?.bearScore ?? 50))
+
+  useEffect(() => {
+    let cancelled = false
+    let intervalId: ReturnType<typeof setInterval> | null = null
+
+    async function fetchExternalData() {
+      try {
+        const params = new URLSearchParams({
+          symbol,
+          timeframe,
+          v: String(Date.now()),
+        })
+
+        const response = await fetch(`${API_BASE_URL}/api/external-data/status?${params.toString()}`, {
+          cache: 'no-store',
+        })
+
+        if (!response.ok) return
+
+        const json = await response.json()
+
+        if (!cancelled && json && typeof json === 'object') {
+          setExternalData(json as ExternalDataStatusPayload)
+        }
+      } catch (error) {
+        console.error('Factor confirmation external data sync error:', error)
+      }
+    }
+
+    setExternalData(null)
+    fetchExternalData()
+    intervalId = setInterval(fetchExternalData, 10000)
+
+    return () => {
+      cancelled = true
+      if (intervalId) clearInterval(intervalId)
+    }
+  }, [symbol, timeframe])
 
   const coreRows = useMemo(
     () => buildCoreRows(linkedSignal, linkedToActiveChart, symbol),
     [linkedSignal, linkedToActiveChart, symbol]
   )
-  const externalRows = useMemo(() => buildExternalRows(signal), [signal])
+  const externalRows = useMemo(
+    () => buildExternalRows(linkedSignal ?? signal, externalData),
+    [externalData, linkedSignal, signal]
+  )
 
   const activeCoreCount = coreRows.filter((row) => row.status !== 'inactive').length
   const bullCoreCount = coreRows.filter((row) => row.status === 'bullish' || row.status === 'active').length
   const bearCoreCount = coreRows.filter((row) => row.status === 'bearish').length
 
-  // The 12-indicator technical meter now belongs ONLY under Market Sentiment.
-  // Clear the shared technical state so app/page.tsx does not duplicate it here.
   useEffect(() => {
     onTechnicalSentimentUpdate?.(null)
   }, [onTechnicalSentimentUpdate])
@@ -527,6 +748,11 @@ export default function FactorConfirmationTable({
             <p className="text-xs font-bold uppercase tracking-wide text-gray-400">
               External Data
             </p>
+            {externalData?.source && (
+              <p className="mt-1 text-[10px] text-gray-500">
+                Live source: {externalData.source}
+              </p>
+            )}
           </div>
 
           <div>
@@ -538,7 +764,7 @@ export default function FactorConfirmationTable({
       </div>
 
       <div className="mt-4 border-t border-dark-700 pt-3 text-xs text-gray-500">
-        Bull/Bear balance: {bullScore}% / {bearScore}% • Core factors are shown only when linked to the active chart
+        Bull/Bear balance: {bullScore}% / {bearScore}% • External rows now use live backend source data when available
       </div>
     </motion.div>
   )
