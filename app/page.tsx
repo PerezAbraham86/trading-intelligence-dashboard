@@ -902,7 +902,318 @@ function scoreVisualProfileBin(bin: any) {
   return 0
 }
 
-function buildVisualOverlayScorecards(...sources: any[]) {
+function calculateVisualAtr(candles: DashboardCandle[], length = 14) {
+  if (!candles.length) return [] as Array<number | null>
+
+  const trueRanges = candles.map((candle, index) => {
+    const high = overlayNumber(candle.high, 0)
+    const low = overlayNumber(candle.low, high)
+    const previousClose = index > 0 ? overlayNumber(candles[index - 1].close, overlayNumber(candle.close, high)) : overlayNumber(candle.close, high)
+
+    return Math.max(
+      high - low,
+      Math.abs(high - previousClose),
+      Math.abs(low - previousClose)
+    )
+  })
+
+  const atrValues: Array<number | null> = Array(trueRanges.length).fill(null)
+  let seed = 0
+
+  for (let index = 0; index < trueRanges.length; index += 1) {
+    const value = trueRanges[index]
+
+    if (index < length) {
+      seed += value
+
+      if (index === length - 1) {
+        atrValues[index] = seed / length
+      }
+
+      continue
+    }
+
+    const previousAtr = atrValues[index - 1]
+    atrValues[index] =
+      previousAtr === null ? null : (previousAtr * (length - 1) + value) / length
+  }
+
+  return atrValues
+}
+
+function calculateVisualNrtrContext(candles: DashboardCandle[]) {
+  if (candles.length < 20) {
+    return {
+      direction: 'neutral',
+      directionValue: 0,
+      trendDirUnified: 0,
+      trendLineUnified: null,
+      barsInTrend: 0,
+      distancePercent: 0,
+      lockedProfit: 0,
+      agreesWithSmc: false,
+      buyFlip: false,
+      sellFlip: false,
+      flipHistory: [] as any[],
+    }
+  }
+
+  const atrValues = calculateVisualAtr(candles, 14)
+  const multiplier = 3.0
+
+  let finalUpper: number | null = null
+  let finalLower: number | null = null
+  let previousFinalUpper: number | null = null
+  let previousFinalLower: number | null = null
+  let previousSuperTrend: number | null = null
+  let direction = 0
+  const points: any[] = []
+
+  for (let index = 0; index < candles.length; index += 1) {
+    const candle = candles[index]
+    const high = overlayNumber(candle.high, 0)
+    const low = overlayNumber(candle.low, high)
+    const close = overlayNumber(candle.close, high)
+    const previousClose = index > 0 ? overlayNumber(candles[index - 1].close, close) : close
+    const atr = atrValues[index]
+    const previousDirection = direction
+
+    if (atr === null || !Number.isFinite(atr)) {
+      points.push({
+        index,
+        time: candle.time,
+        price: close,
+        line: null,
+        direction: 0,
+        buy: false,
+        sell: false,
+      })
+      continue
+    }
+
+    const hl2 = (high + low) / 2
+    const basicUpper = hl2 + multiplier * atr
+    const basicLower = hl2 - multiplier * atr
+
+    if (previousFinalUpper === null || previousFinalLower === null) {
+      finalUpper = basicUpper
+      finalLower = basicLower
+    } else {
+      finalUpper =
+        basicUpper < previousFinalUpper || previousClose > previousFinalUpper
+          ? basicUpper
+          : previousFinalUpper
+
+      finalLower =
+        basicLower > previousFinalLower || previousClose < previousFinalLower
+          ? basicLower
+          : previousFinalLower
+    }
+
+    if (previousSuperTrend === null) {
+      direction = close >= hl2 ? 1 : -1
+    } else if (
+      previousFinalUpper !== null &&
+      Math.abs(previousSuperTrend - previousFinalUpper) <= 1e-10
+    ) {
+      direction = close > Number(finalUpper) ? 1 : -1
+    } else {
+      direction = close < Number(finalLower) ? -1 : 1
+    }
+
+    const trendLine = direction === 1 ? finalLower : finalUpper
+
+    points.push({
+      index,
+      time: candle.time,
+      price: close,
+      line: trendLine,
+      direction,
+      buy: index > 0 && previousDirection === -1 && direction === 1,
+      sell: index > 0 && previousDirection === 1 && direction === -1,
+    })
+
+    previousSuperTrend = trendLine
+    previousFinalUpper = finalUpper
+    previousFinalLower = finalLower
+  }
+
+  const active = points.filter((point) => point.direction !== 0 && point.line !== null)
+  const latest = active[active.length - 1]
+
+  if (!latest) {
+    return {
+      direction: 'neutral',
+      directionValue: 0,
+      trendDirUnified: 0,
+      trendLineUnified: null,
+      barsInTrend: 0,
+      distancePercent: 0,
+      lockedProfit: 0,
+      agreesWithSmc: false,
+      buyFlip: false,
+      sellFlip: false,
+      flipHistory: [] as any[],
+    }
+  }
+
+  const flips = points.filter((point) => point.buy || point.sell)
+  const latestFlip = flips[flips.length - 1]
+  const entryIndex = latestFlip?.index ?? Math.max(0, active.findIndex((point) => point.direction === latest.direction))
+  const entryCandle = candles[Math.max(0, Math.min(candles.length - 1, entryIndex))]
+  const entryPrice = overlayNumber(entryCandle?.close, latest.price)
+  const currentPrice = overlayNumber(latest.price, entryPrice)
+  const trendLine = overlayNumber(latest.line, currentPrice)
+  const lockedProfit =
+    latest.direction === 1
+      ? trendLine - entryPrice
+      : latest.direction === -1
+        ? entryPrice - trendLine
+        : 0
+  const distance = Math.abs(currentPrice - trendLine)
+  const distancePercent = currentPrice !== 0 ? (distance / currentPrice) * 100 : 0
+
+  return {
+    direction: latest.direction === 1 ? 'bullish' : latest.direction === -1 ? 'bearish' : 'neutral',
+    directionValue: latest.direction,
+    trendDirUnified: latest.direction,
+    trendLineUnified: Number(trendLine.toFixed(5)),
+    barsInTrend: Math.max(0, candles.length - 1 - entryIndex),
+    distancePercent: Number(distancePercent.toFixed(4)),
+    lockedProfit: Number(lockedProfit.toFixed(5)),
+    agreesWithSmc: false,
+    buyFlip: Boolean(latest.buy),
+    sellFlip: Boolean(latest.sell),
+    flipHistory: flips.slice(-12).map((point) => ({
+      time: point.time,
+      index: point.index,
+      type: point.buy ? 'buy' : 'sell',
+      price: Number(overlayNumber(point.price, 0).toFixed(5)),
+      line: Number(overlayNumber(point.line, 0).toFixed(5)),
+    })),
+  }
+}
+
+function calculateHiddenSmcContextFromCandles(candles: DashboardCandle[]) {
+  const lookbackCandles = candles.slice(-160)
+  if (lookbackCandles.length < 20) {
+    return {
+      qualityScore: 0,
+      eqhEqlCount: 0,
+      fvgCount: 0,
+      sweepCount: 0,
+      displacementCount: 0,
+      inducementCount: 0,
+    }
+  }
+
+  const atrValues = calculateVisualAtr(lookbackCandles, 14)
+  const latestAtr =
+    [...atrValues].reverse().find((value) => value !== null && Number.isFinite(value)) ?? 0
+  const tolerance = Math.max(Number(latestAtr) * 0.12, overlayNumber(lookbackCandles[lookbackCandles.length - 1].close, 1) * 0.00025)
+  const pivotLength = 3
+  const swingHighs: Array<{ index: number; price: number }> = []
+  const swingLows: Array<{ index: number; price: number }> = []
+
+  for (let index = pivotLength; index < lookbackCandles.length - pivotLength; index += 1) {
+    const candle = lookbackCandles[index]
+    const high = overlayNumber(candle.high, 0)
+    const low = overlayNumber(candle.low, high)
+    const left = lookbackCandles.slice(index - pivotLength, index)
+    const right = lookbackCandles.slice(index + 1, index + 1 + pivotLength)
+
+    const isSwingHigh =
+      left.every((item) => high >= overlayNumber(item.high, 0)) &&
+      right.every((item) => high > overlayNumber(item.high, 0))
+
+    const isSwingLow =
+      left.every((item) => low <= overlayNumber(item.low, 0)) &&
+      right.every((item) => low < overlayNumber(item.low, 0))
+
+    if (isSwingHigh) swingHighs.push({ index, price: high })
+    if (isSwingLow) swingLows.push({ index, price: low })
+  }
+
+  let eqhEqlCount = 0
+  for (let index = 1; index < swingHighs.length; index += 1) {
+    if (Math.abs(swingHighs[index].price - swingHighs[index - 1].price) <= tolerance) {
+      eqhEqlCount += 1
+    }
+  }
+  for (let index = 1; index < swingLows.length; index += 1) {
+    if (Math.abs(swingLows[index].price - swingLows[index - 1].price) <= tolerance) {
+      eqhEqlCount += 1
+    }
+  }
+
+  let fvgCount = 0
+  for (let index = 2; index < lookbackCandles.length; index += 1) {
+    const left = lookbackCandles[index - 2]
+    const current = lookbackCandles[index]
+    const bullishFvg = overlayNumber(left.high, 0) < overlayNumber(current.low, 0)
+    const bearishFvg = overlayNumber(left.low, 0) > overlayNumber(current.high, 0)
+    if (bullishFvg || bearishFvg) fvgCount += 1
+  }
+
+  let sweepCount = 0
+  for (let index = 10; index < lookbackCandles.length; index += 1) {
+    const candle = lookbackCandles[index]
+    const previous = lookbackCandles.slice(Math.max(0, index - 10), index)
+    const previousHigh = Math.max(...previous.map((item) => overlayNumber(item.high, 0)))
+    const previousLow = Math.min(...previous.map((item) => overlayNumber(item.low, 0)))
+    const high = overlayNumber(candle.high, 0)
+    const low = overlayNumber(candle.low, high)
+    const close = overlayNumber(candle.close, high)
+
+    const buySideSweep = high > previousHigh && close < previousHigh
+    const sellSideSweep = low < previousLow && close > previousLow
+
+    if (buySideSweep || sellSideSweep) sweepCount += 1
+  }
+
+  let displacementCount = 0
+  for (let index = 0; index < lookbackCandles.length; index += 1) {
+    const candle = lookbackCandles[index]
+    const atr = atrValues[index]
+    if (atr === null || !Number.isFinite(atr)) continue
+
+    const open = overlayNumber(candle.open, overlayNumber(candle.close, 0))
+    const close = overlayNumber(candle.close, open)
+    const high = overlayNumber(candle.high, Math.max(open, close))
+    const low = overlayNumber(candle.low, Math.min(open, close))
+    const body = Math.abs(close - open)
+    const range = Math.max(high - low, 0.000001)
+
+    if (body >= Number(atr) * 1.15 && body / range >= 0.55) {
+      displacementCount += 1
+    }
+  }
+
+  const inducementCount = Math.min(
+    sweepCount,
+    Math.max(0, Math.floor(displacementCount / 2) + Math.floor(eqhEqlCount / 2))
+  )
+
+  const qualityScore = Math.min(
+    10,
+    sweepCount * 1.2 +
+      displacementCount * 0.85 +
+      inducementCount * 0.75 +
+      fvgCount * 0.45 +
+      eqhEqlCount * 0.5
+  )
+
+  return {
+    qualityScore: Number(qualityScore.toFixed(2)),
+    eqhEqlCount,
+    fvgCount,
+    sweepCount,
+    displacementCount,
+    inducementCount,
+  }
+}
+
+function buildVisualOverlayScorecards(candles: DashboardCandle[], ...sources: any[]) {
   const payloadSources = sources.filter((source) => source && typeof source === 'object')
   if (!payloadSources.length) return null
 
@@ -1001,22 +1312,47 @@ function buildVisualOverlayScorecards(...sources: any[]) {
   let ghostConfidence = overlayNumber(ghost.confidence ?? ghost.probability ?? ghost.score, 0)
   if (ghostConfidence > 0 && ghostConfidence <= 1) ghostConfidence *= 100
 
+  const nrtrContext = calculateVisualNrtrContext(candles)
+  const hiddenContext = calculateHiddenSmcContextFromCandles(candles)
+
+  const nrtrDirection = overlayDirection(nrtrContext.direction)
+  const hiddenQuality = overlayNumber(hiddenContext.qualityScore, 0)
+
+  const smcDirection =
+    smcBull > smcBear ? 'bullish' : smcBear > smcBull ? 'bearish' : 'neutral'
+
+  const nrtrAgreesWithSmc =
+    nrtrDirection !== 'neutral' &&
+    smcDirection !== 'neutral' &&
+    nrtrDirection === smcDirection
+
   const bullScore =
     smcBull * 1.5 +
     obBull * 1.2 +
-    (ghostDirection === 'bullish' ? Math.min(3, ghostConfidence / 35) : 0)
+    (nrtrDirection === 'bullish' ? 2 : 0) +
+    (ghostDirection === 'bullish' ? Math.min(3, ghostConfidence / 35) : 0) +
+    (hiddenQuality > 0 && smcDirection === 'bullish' ? Math.min(2, hiddenQuality / 5) : 0)
   const bearScore =
     smcBear * 1.5 +
     obBear * 1.2 +
-    (ghostDirection === 'bearish' ? Math.min(3, ghostConfidence / 35) : 0)
+    (nrtrDirection === 'bearish' ? 2 : 0) +
+    (ghostDirection === 'bearish' ? Math.min(3, ghostConfidence / 35) : 0) +
+    (hiddenQuality > 0 && smcDirection === 'bearish' ? Math.min(2, hiddenQuality / 5) : 0)
 
   const netBias = bullScore - bearScore
   const direction = netBias >= 3 ? 'bullish' : netBias <= -3 ? 'bearish' : 'neutral'
   const contextScore =
-    smcQuality * 0.28 +
-    obQuality * 0.24 +
-    pdQuality * 0.18 +
-    profileQuality * 0.15
+    smcQuality * 0.24 +
+    obQuality * 0.2 +
+    pdQuality * 0.16 +
+    profileQuality * 0.14 +
+    hiddenQuality * 0.16 +
+    (nrtrDirection !== 'neutral' ? 5 : 0) * 0.1
+
+  let conflictScore = smcBull > 0 && smcBear > 0 ? 16 : 0
+  if (nrtrDirection !== 'neutral' && direction !== 'neutral' && nrtrDirection !== direction) conflictScore += 22
+  if (ghostDirection !== 'neutral' && direction !== 'neutral' && ghostDirection !== direction) conflictScore += 18
+  conflictScore = Math.max(0, Math.min(100, conflictScore))
 
   const scorecards = {
     version: 'visual-overlay-scorecards-v2',
@@ -1024,7 +1360,7 @@ function buildVisualOverlayScorecards(...sources: any[]) {
       direction,
       netBias: Number(netBias.toFixed(2)),
       confirmationScore: Math.max(0, Math.min(100, Number((contextScore * 10).toFixed(2)))),
-      conflictScore: smcBull > 0 && smcBear > 0 ? 16 : 0,
+      conflictScore: Number(conflictScore.toFixed(2)),
       bullScore: Number(bullScore.toFixed(2)),
       bearScore: Number(bearScore.toFixed(2)),
       contextScore: Number(contextScore.toFixed(2)),
@@ -1049,34 +1385,28 @@ function buildVisualOverlayScorecards(...sources: any[]) {
       strongBins: profileBins.filter((bin) => scoreVisualProfileBin(bin) >= 4).length,
     },
     nrtr: {
-      direction: 'neutral',
-      agreesWithSmc: false,
+      ...nrtrContext,
+      direction: nrtrDirection,
+      agreesWithSmc: nrtrAgreesWithSmc,
     },
     ghost: {
       direction: ghostDirection,
       confidence: Number(ghostConfidence.toFixed(2)),
       count: ghostCandles.length,
     },
-    hiddenContext: {
-      qualityScore: 0,
-      eqhEqlCount: 0,
-      fvgCount: 0,
-      sweepCount: 0,
-      displacementCount: 0,
-      inducementCount: 0,
-    },
+    hiddenContext,
     activeFactors: {
       smcEvents: recentSmc.length,
       orderBlocks: recentObs.length,
       pdZones: pdZones.length,
       profileBins: profileBins.length,
       ghostCandles: ghostCandles.length,
-      eqhEql: 0,
-      fvg: 0,
-      sweeps: 0,
-      displacement: 0,
-      inducement: 0,
-      nrtr: 0,
+      eqhEql: hiddenContext.eqhEqlCount,
+      fvg: hiddenContext.fvgCount,
+      sweeps: hiddenContext.sweepCount,
+      displacement: hiddenContext.displacementCount,
+      inducement: hiddenContext.inducementCount,
+      nrtr: nrtrDirection !== 'neutral' ? 1 : 0,
     },
   }
 
@@ -1097,6 +1427,16 @@ function buildVisualOverlayScorecards(...sources: any[]) {
     visualOrderBlockCount: recentObs.length,
     visualPdZoneCount: pdZones.length,
     visualProfileBinCount: profileBins.length,
+    nrtrDirection: nrtrDirection === 'bullish' ? 1 : nrtrDirection === 'bearish' ? -1 : 0,
+    nrtrAgreesWithSmc: nrtrAgreesWithSmc ? 1 : 0,
+    nrtrDistancePercent: nrtrContext.distancePercent,
+    nrtrLockedProfit: nrtrContext.lockedProfit,
+    hiddenContextQualityScore: hiddenContext.qualityScore,
+    eqhEqlCount: hiddenContext.eqhEqlCount,
+    fairValueGapCount: hiddenContext.fvgCount,
+    sweepCount: hiddenContext.sweepCount,
+    displacementCount: hiddenContext.displacementCount,
+    inducementCount: hiddenContext.inducementCount,
   }
 
   return {
@@ -1651,7 +1991,7 @@ function LightweightChartPanel({
       engineState,
       overlayPayload
     )
-  }, [engineState, overlayPayload, unifiedOverlayPayload])
+  }, [candles, engineState, overlayPayload, unifiedOverlayPayload])
 
   const mlFeatures = useMemo(() => {
     return getMlFeaturesFromOverlayPayload(
@@ -1663,11 +2003,12 @@ function LightweightChartPanel({
 
   const visualScorecardBundle = useMemo(() => {
     return buildVisualOverlayScorecards(
+      candles,
       overlayPayload,
       unifiedOverlayPayload,
       engineState
     )
-  }, [engineState, overlayPayload, unifiedOverlayPayload])
+  }, [candles, engineState, overlayPayload, unifiedOverlayPayload])
 
   const scorecardsForPanel = useMemo(() => {
     const visualScorecards = visualScorecardBundle?.scorecards
