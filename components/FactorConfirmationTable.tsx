@@ -111,6 +111,7 @@ function normalizeSymbol(value: unknown) {
     .replace('CME:', '')
 
   if (raw === 'MES1' || raw === 'MES1!' || raw.includes('MES')) return 'MES1!'
+  if (raw === 'ES1' || raw === 'ES1!' || raw.includes('ES1')) return 'ES1!'
   if (raw.includes('BTC')) return 'BTCUSD'
   if (raw.includes('ETH')) return 'ETHUSD'
   if (raw.includes('SPY')) return 'SPY'
@@ -158,7 +159,12 @@ function isPriceNearActiveScale(signal: TradingSignal | undefined, activePrice?:
   return Math.abs(price - activePrice) / activePrice <= 0.2
 }
 
-function isSignalLinkedToActiveChart(signal: TradingSignal | undefined, activeSymbol: string, activeTimeframe: string, activePrice?: number) {
+function isSignalLinkedToActiveChart(
+  signal: TradingSignal | undefined,
+  activeSymbol: string,
+  activeTimeframe: string,
+  activePrice?: number
+) {
   if (!signal) return false
 
   return (
@@ -217,6 +223,65 @@ function statusFromText(value?: string): FactorStatus {
   return 'active'
 }
 
+function getEasternTimeParts(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(now)
+
+  const part = (type: string) => parts.find((item) => item.type === type)?.value ?? ''
+
+  const weekday = part('weekday')
+  const hour = Number(part('hour'))
+  const minute = Number(part('minute'))
+  const minutes = hour * 60 + minute
+
+  return { weekday, hour, minute, minutes }
+}
+
+function isWeekdayEastern(weekday: string) {
+  return !['Sat', 'Sun'].includes(weekday)
+}
+
+function getSessionStatus(signal?: TradingSignal, symbolValue?: string): FactorStatus {
+  const explicit = String(signal?.session ?? '').trim()
+
+  // Respect explicit bullish/bearish/active session values from backend,
+  // but do not allow missing/neutral/waiting session text to keep crypto inactive forever.
+  if (explicit && !isWaitingOrNeutral(explicit)) {
+    return statusFromText(explicit)
+  }
+
+  const symbol = normalizeSymbol(symbolValue ?? signal?.activeSymbol ?? signal?.symbol)
+
+  // Crypto trades 24/7, so BTCUSD and ETHUSD should not stay inactive.
+  if (symbol === 'BTCUSD' || symbol === 'ETHUSD') {
+    return 'active'
+  }
+
+  const { weekday, minutes } = getEasternTimeParts()
+  const isWeekday = isWeekdayEastern(weekday)
+
+  // US equities regular session: 9:30 AM - 4:00 PM ET.
+  const rthOpen = 9 * 60 + 30
+  const rthClose = 16 * 60
+
+  if (symbol === 'SPY' || symbol.includes('QQQ') || symbol.includes('IWM')) {
+    return isWeekday && minutes >= rthOpen && minutes < rthClose ? 'active' : 'inactive'
+  }
+
+  // Futures simplified active session.
+  // Keeps MES/ES from being permanently inactive while still excluding most of the weekend.
+  if (symbol === 'MES1!' || symbol === 'ES1!' || symbol.includes('MES') || symbol.includes('ES')) {
+    return isWeekday ? 'active' : 'inactive'
+  }
+
+  return isWeekday && minutes >= rthOpen && minutes < rthClose ? 'active' : 'inactive'
+}
+
 function getStatusIcon(status: FactorStatus, size = 15) {
   if (status === 'bullish' || status === 'active') {
     return <CheckCircle2 size={size} className="text-emerald-400" />
@@ -248,7 +313,7 @@ function getStatusTextColor(status: FactorStatus) {
   return 'text-gray-500'
 }
 
-function buildCoreRows(signal?: TradingSignal, isLinked = true): FactorRow[] {
+function buildCoreRows(signal?: TradingSignal, isLinked = true, activeSymbol?: string): FactorRow[] {
   const confidence = clamp(Number(signal?.confidence ?? 0))
   const bullScore = clamp(Number(signal?.bullScore ?? 50))
   const bearScore = clamp(Number(signal?.bearScore ?? 50))
@@ -280,12 +345,16 @@ function buildCoreRows(signal?: TradingSignal, isLinked = true): FactorRow[] {
     ? statusFromText(signal?.smc ?? signal?.smcDirection)
     : 'inactive'
 
-  const sessionStatus = statusFromText(signal?.session)
+  const sessionStatus = getSessionStatus(signal, activeSymbol)
 
   const smcStrength = factorStrength(signal?.smcStrength, Math.max(confidence, bullScore, bearScore))
-  const alphaxStrength = factorStrength(signal?.alphaxStrength, Math.max(signal?.alphaxBullPressure ?? 0, signal?.alphaxBearPressure ?? 0, bullScore, bearScore))
+  const alphaxStrength = factorStrength(
+    signal?.alphaxStrength,
+    Math.max(signal?.alphaxBullPressure ?? 0, signal?.alphaxBearPressure ?? 0, bullScore, bearScore)
+  )
   const ghostStrength = factorStrength(signal?.ghostConfidence, confidence)
   const orderBlockStrength = factorStrength(signal?.smcStrength, Math.max(confidence, bullScore, bearScore))
+  const sessionStrength = sessionStatus === 'inactive' ? 0 : 100
 
   return [
     {
@@ -311,7 +380,7 @@ function buildCoreRows(signal?: TradingSignal, isLinked = true): FactorRow[] {
     {
       factor: 'Session',
       status: sessionStatus,
-      strength: sessionStatus === 'inactive' ? 0 : 55,
+      strength: sessionStrength,
     },
   ]
 }
@@ -386,7 +455,10 @@ export default function FactorConfirmationTable({
   const bullScore = clamp(Number(linkedSignal?.bullScore ?? signal?.bullScore ?? 50))
   const bearScore = clamp(Number(linkedSignal?.bearScore ?? signal?.bearScore ?? 50))
 
-  const coreRows = useMemo(() => buildCoreRows(linkedSignal, linkedToActiveChart), [linkedSignal, linkedToActiveChart])
+  const coreRows = useMemo(
+    () => buildCoreRows(linkedSignal, linkedToActiveChart, symbol),
+    [linkedSignal, linkedToActiveChart, symbol]
+  )
   const externalRows = useMemo(() => buildExternalRows(signal), [signal])
 
   const activeCoreCount = coreRows.filter((row) => row.status !== 'inactive').length
