@@ -5064,6 +5064,7 @@ def root() -> Dict[str, Any]:
         "service": "Trading Intelligence Dashboard API",
         "engine": "main_v34_python_overlay_engine",
         "endpoints": [
+            "/api/backend-version",
             "/api/latest-signal",
             "/api/recent-signals",
             "/api/recent-candles",
@@ -5096,6 +5097,18 @@ def health() -> Dict[str, Any]:
         "insightsentryHost": INSIGHTSENTRY_HOST,
     }
 
+
+
+
+@app.get("/api/backend-version")
+def backend_version() -> Dict[str, Any]:
+    return {
+        "backendVersion": "ml-feature-store-v1",
+        "hasMlFeatureStoreRoutes": True,
+        "module": __name__,
+        "file": __file__,
+        "createdAt": now_iso(),
+    }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # API ROUTES
@@ -5674,4 +5687,4 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.getenv("PORT", "8000"))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run("api.main:app", host="0.0.0.0", port=port, reload=True)
