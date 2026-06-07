@@ -9,8 +9,25 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXTERNAL DATA ENGINE
+# Massive connection layer for:
+# - Options chain / options pressure probe
+# - Options open-interest proxy from option contracts
+# - Crypto trade footprint proxy
+#
+# This file intentionally does NOT fake unavailable data.
+# If a source cannot provide a real value, it returns not_applicable/unavailable
+# and the signalFields value is None.
+# ─────────────────────────────────────────────────────────────────────────────
+
 MASSIVE_API_KEY = os.getenv("MASSIVE_API_KEY", "").strip()
-MASSIVE_BASE_URL = os.getenv("MASSIVE_BASE_URL", "https://api.massive.com").rstrip("/")
+
+# Massive uses Polygon-compatible REST endpoints.
+# Keep this overridable from Render if Massive changes the host later.
+MASSIVE_BASE_URL = os.getenv("MASSIVE_BASE_URL", "https://api.polygon.io").rstrip("/")
+
 MASSIVE_TIMEOUT_SECONDS = float(os.getenv("MASSIVE_TIMEOUT_SECONDS", "12"))
 MASSIVE_CACHE_TTL_SECONDS = int(os.getenv("MASSIVE_CACHE_TTL_SECONDS", "45"))
 
@@ -25,9 +42,12 @@ def to_float(value: Any, fallback: float = 0.0) -> float:
     try:
         if value is None:
             return fallback
+
         parsed = float(value)
+
         if parsed != parsed:
             return fallback
+
         return parsed
     except Exception:
         return fallback
@@ -56,14 +76,47 @@ def normalize_symbol(symbol: str) -> str:
 
     if raw in {"BTCUSD", "BTCUSDT", "BTC/USD", "XBTUSD"}:
         return "BTCUSD"
+
     if raw in {"ETHUSD", "ETHUSDT", "ETH/USD"}:
         return "ETHUSD"
+
     if raw in {"MES", "MES1", "MES1!", "/MES", "MES=F"}:
         return "MES1!"
+
     if raw in {"ES", "ES1", "ES1!", "/ES", "ES=F"}:
         return "ES1!"
 
+    if raw in {"SPY", "QQQ", "IWM", "AAPL", "TSLA", "NVDA", "MSFT", "AMD"}:
+        return raw
+
     return raw or "BTCUSD"
+
+
+def normalize_timeframe(timeframe: str) -> str:
+    raw = str(timeframe or "1m").strip().lower()
+
+    mapping = {
+        "1": "1m",
+        "1m": "1m",
+        "1min": "1m",
+        "3": "3m",
+        "3m": "3m",
+        "5": "5m",
+        "5m": "5m",
+        "10": "10m",
+        "10m": "10m",
+        "15": "15m",
+        "15m": "15m",
+        "30": "30m",
+        "30m": "30m",
+        "60": "1h",
+        "60m": "1h",
+        "1h": "1h",
+        "d": "1d",
+        "1d": "1d",
+    }
+
+    return mapping.get(raw, raw or "1m")
 
 
 def is_crypto_symbol(symbol: str) -> bool:
@@ -89,10 +142,13 @@ def is_futures_symbol(symbol: str) -> bool:
 
 def massive_crypto_ticker(symbol: str) -> str:
     normalized = normalize_symbol(symbol)
+
     if normalized == "BTCUSD":
         return "X:BTCUSD"
+
     if normalized == "ETHUSD":
         return "X:ETHUSD"
+
     return normalized
 
 
@@ -102,14 +158,17 @@ def massive_equity_ticker(symbol: str) -> str:
 
 def cache_get(key: str) -> Optional[Dict[str, Any]]:
     cached = _EXTERNAL_DATA_CACHE.get(key)
+
     if not isinstance(cached, dict):
         return None
 
     created_epoch = to_float(cached.get("_cacheEpoch"), 0)
+
     if created_epoch <= 0:
         return None
 
     age = time.time() - created_epoch
+
     if age > MASSIVE_CACHE_TTL_SECONDS:
         return None
 
@@ -117,6 +176,7 @@ def cache_get(key: str) -> Optional[Dict[str, Any]]:
     payload.pop("_cacheEpoch", None)
     payload["cache"] = "hit"
     payload["cacheAgeSeconds"] = round(age, 2)
+
     return payload
 
 
@@ -128,12 +188,14 @@ def cache_set(key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
     public_payload = dict(stored)
     public_payload.pop("_cacheEpoch", None)
+
     return public_payload
 
 
 def redact_key_from_text(value: str) -> str:
     if MASSIVE_API_KEY:
         return value.replace(MASSIVE_API_KEY, "***")
+
     return value
 
 
@@ -152,10 +214,12 @@ def massive_request(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[
         for key, value in (params or {}).items()
         if value is not None and value != ""
     }
+
     safe_params.setdefault("apiKey", MASSIVE_API_KEY)
 
     query = urlencode(safe_params, doseq=True)
     url = f"{MASSIVE_BASE_URL}{path}"
+
     if query:
         url = f"{url}?{query}"
 
@@ -171,6 +235,7 @@ def massive_request(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[
         with urlopen(request, timeout=MASSIVE_TIMEOUT_SECONDS) as response:
             body = response.read().decode("utf-8", errors="replace")
             data = json.loads(body) if body else {}
+
             return {
                 "ok": True,
                 "status": int(getattr(response, "status", 200)),
@@ -179,20 +244,23 @@ def massive_request(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[
                 "data": data,
                 "createdAt": utc_now_iso(),
             }
+
     except HTTPError as error:
         try:
             body = error.read().decode("utf-8", errors="replace")
         except Exception:
             body = ""
+
         return {
             "ok": False,
             "status": int(getattr(error, "code", 0) or 0),
             "path": path,
             "url": redact_key_from_text(url),
             "error": str(error),
-            "body": redact_key_from_text(body[:800]),
+            "body": redact_key_from_text(body[:1000]),
             "createdAt": utc_now_iso(),
         }
+
     except URLError as error:
         return {
             "ok": False,
@@ -202,6 +270,7 @@ def massive_request(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[
             "error": str(error),
             "createdAt": utc_now_iso(),
         }
+
     except Exception as error:
         return {
             "ok": False,
@@ -215,20 +284,25 @@ def massive_request(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[
 
 def extract_results(result: Dict[str, Any]) -> List[Dict[str, Any]]:
     data = result.get("data") if isinstance(result, dict) else None
+
     if not isinstance(data, dict):
         return []
 
     rows = data.get("results")
+
     if isinstance(rows, list):
         return [row for row in rows if isinstance(row, dict)]
+
     if isinstance(rows, dict):
         return [rows]
+
     return []
 
 
 def summarize_result(name: str, result: Dict[str, Any]) -> Dict[str, Any]:
     rows = extract_results(result)
     sample_keys: List[str] = []
+
     if rows:
         sample_keys = list(rows[0].keys())[:30]
     elif isinstance(result.get("data"), dict):
@@ -246,24 +320,73 @@ def summarize_result(name: str, result: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def build_massive_options_chain_context(symbol: str) -> Dict[str, Any]:
+def inactive_factor(
+    *,
+    symbol: str,
+    timeframe: str,
+    name: str,
+    source: str,
+    status: str,
+    reason: str,
+) -> Dict[str, Any]:
+    return {
+        "status": status,
+        "label": name,
+        "source": source,
+        "symbol": normalize_symbol(symbol),
+        "timeframe": normalize_timeframe(timeframe),
+        "direction": "neutral",
+        "strength": 0,
+        "reason": reason,
+        "createdAt": utc_now_iso(),
+    }
+
+
+def signal_text_from_factor(factor: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(factor, dict):
+        return None
+
+    status = str(factor.get("status") or "").lower()
+    direction = str(factor.get("direction") or "").lower()
+    label = str(factor.get("label") or "").strip()
+
+    if status not in {"active", "live"}:
+        return None
+
+    if direction in {"bullish", "bearish"}:
+        return label or direction
+
+    if direction == "active":
+        return label or "Active"
+
+    return None
+
+
+def factor_strength(factor: Dict[str, Any]) -> float:
+    if not isinstance(factor, dict):
+        return 0.0
+
+    return clamp(to_float(factor.get("strength"), 0))
+
+
+def build_massive_options_chain_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
     normalized = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
     underlying = massive_equity_ticker(normalized)
 
     if not is_equity_symbol(underlying):
-        return {
-            "status": "not_applicable",
-            "source": "massive_options_contracts",
-            "symbol": normalized,
-            "underlying": underlying,
-            "direction": "neutral",
-            "strength": 0,
-            "reason": f"Options chain is not applicable for {normalized}",
-            "createdAt": utc_now_iso(),
-        }
+        return inactive_factor(
+            symbol=normalized,
+            timeframe=normalized_timeframe,
+            name="Options Chain Not Applicable",
+            source="massive_options_contracts",
+            status="not_applicable",
+            reason=f"Options chain is not applicable for {normalized}",
+        )
 
-    cache_key = f"massive:options-chain:{underlying}"
+    cache_key = f"massive:options-chain:{underlying}:{normalized_timeframe}"
     cached = cache_get(cache_key)
+
     if cached:
         return cached
 
@@ -283,8 +406,10 @@ def build_massive_options_chain_context(symbol: str) -> Dict[str, Any]:
     if not contracts.get("ok"):
         payload = {
             "status": "unavailable",
+            "label": "Options Chain Unavailable",
             "source": "massive_options_contracts",
             "symbol": normalized,
+            "timeframe": normalized_timeframe,
             "underlying": underlying,
             "direction": "neutral",
             "strength": 0,
@@ -300,6 +425,7 @@ def build_massive_options_chain_context(symbol: str) -> Dict[str, Any]:
 
     for row in rows:
         contract_type = str(row.get("contract_type") or row.get("type") or "").lower()
+
         if "call" in contract_type:
             call_count += 1
         elif "put" in contract_type:
@@ -317,24 +443,33 @@ def build_massive_options_chain_context(symbol: str) -> Dict[str, Any]:
         direction = "neutral"
         strength = 0
         label = "Options Chain Empty"
+        status = "unavailable"
+        reason = "no_contracts_returned"
     elif call_share > put_share + 8:
         direction = "bullish"
         strength = clamp(call_share)
         label = "Bullish Options Chain"
+        status = "active"
+        reason = "ok"
     elif put_share > call_share + 8:
         direction = "bearish"
         strength = clamp(put_share)
         label = "Bearish Options Chain"
+        status = "active"
+        reason = "ok"
     else:
         direction = "active"
         strength = clamp(max(call_share, put_share, 40))
         label = "Balanced Options Chain"
+        status = "active"
+        reason = "ok"
 
     payload = {
-        "status": "active" if total > 0 else "unavailable",
+        "status": status,
         "label": label,
         "source": "massive_options_contracts",
         "symbol": normalized,
+        "timeframe": normalized_timeframe,
         "underlying": underlying,
         "direction": direction,
         "strength": round(strength),
@@ -344,7 +479,7 @@ def build_massive_options_chain_context(symbol: str) -> Dict[str, Any]:
         "callShare": round(call_share, 2),
         "putShare": round(put_share, 2),
         "expirationCount": len(expirations),
-        "reason": "ok" if total > 0 else "no_contracts_returned",
+        "reason": reason,
         "probe": summarize_result("options_contracts", contracts),
         "createdAt": utc_now_iso(),
     }
@@ -352,23 +487,24 @@ def build_massive_options_chain_context(symbol: str) -> Dict[str, Any]:
     return cache_set(cache_key, payload)
 
 
-def build_massive_crypto_footprint_context(symbol: str) -> Dict[str, Any]:
+def build_massive_crypto_footprint_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
     normalized = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
 
     if not is_crypto_symbol(normalized):
-        return {
-            "status": "not_applicable",
-            "source": "massive_crypto_trades",
-            "symbol": normalized,
-            "direction": "neutral",
-            "strength": 0,
-            "reason": f"Crypto trade footprint is not applicable for {normalized}",
-            "createdAt": utc_now_iso(),
-        }
+        return inactive_factor(
+            symbol=normalized,
+            timeframe=normalized_timeframe,
+            name="Crypto Footprint Not Applicable",
+            source="massive_crypto_trades",
+            status="not_applicable",
+            reason=f"Crypto trade footprint is not applicable for {normalized}",
+        )
 
     ticker = massive_crypto_ticker(normalized)
-    cache_key = f"massive:crypto-footprint:{ticker}"
+    cache_key = f"massive:crypto-footprint:{ticker}:{normalized_timeframe}"
     cached = cache_get(cache_key)
+
     if cached:
         return cached
 
@@ -386,8 +522,10 @@ def build_massive_crypto_footprint_context(symbol: str) -> Dict[str, Any]:
     if not trades.get("ok"):
         payload = {
             "status": "unavailable",
+            "label": "Crypto Footprint Unavailable",
             "source": "massive_crypto_trades",
             "symbol": normalized,
+            "timeframe": normalized_timeframe,
             "ticker": ticker,
             "direction": "neutral",
             "strength": 0,
@@ -403,6 +541,7 @@ def build_massive_crypto_footprint_context(symbol: str) -> Dict[str, Any]:
     for row in rows:
         price = to_float(row.get("price") or row.get("p"), 0)
         size = to_float(row.get("size") or row.get("s") or row.get("volume"), 0)
+
         if price > 0:
             prices.append(price)
             sizes.append(size if size > 0 else 1.0)
@@ -410,8 +549,10 @@ def build_massive_crypto_footprint_context(symbol: str) -> Dict[str, Any]:
     if len(prices) < 2:
         payload = {
             "status": "unavailable",
+            "label": "Crypto Footprint Unavailable",
             "source": "massive_crypto_trades",
             "symbol": normalized,
+            "timeframe": normalized_timeframe,
             "ticker": ticker,
             "direction": "neutral",
             "strength": 0,
@@ -425,8 +566,11 @@ def build_massive_crypto_footprint_context(symbol: str) -> Dict[str, Any]:
     buy_proxy = 0.0
     sell_proxy = 0.0
 
+    # Price-tick direction delta proxy.
+    # This is not true bid/ask footprint until we add a provider with aggressor side.
     for index in range(1, len(prices)):
         size = sizes[index]
+
         if prices[index] >= prices[index - 1]:
             buy_proxy += size
         else:
@@ -452,6 +596,7 @@ def build_massive_crypto_footprint_context(symbol: str) -> Dict[str, Any]:
         "label": label,
         "source": "massive_crypto_trades_delta_proxy",
         "symbol": normalized,
+        "timeframe": normalized_timeframe,
         "ticker": ticker,
         "direction": direction,
         "strength": round(strength),
@@ -468,58 +613,103 @@ def build_massive_crypto_footprint_context(symbol: str) -> Dict[str, Any]:
     return cache_set(cache_key, payload)
 
 
-def build_external_data_status(symbol: str = "BTCUSD") -> Dict[str, Any]:
+def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]:
     normalized = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
 
-    options_chain = build_massive_options_chain_context(normalized)
-    crypto_footprint = build_massive_crypto_footprint_context(normalized)
+    options_chain = build_massive_options_chain_context(normalized, normalized_timeframe)
+    crypto_footprint = build_massive_crypto_footprint_context(normalized, normalized_timeframe)
 
-    probes = {
-        "massiveKeyPresent": bool(MASSIVE_API_KEY),
-        "massiveBaseUrl": MASSIVE_BASE_URL,
-        "symbol": normalized,
-        "isCrypto": is_crypto_symbol(normalized),
-        "isEquity": is_equity_symbol(normalized),
-        "isFutures": is_futures_symbol(normalized),
-        "optionsChain": options_chain,
-        "cryptoFootprint": crypto_footprint,
+    fred_macro = inactive_factor(
+        symbol=normalized,
+        timeframe=normalized_timeframe,
+        name="FRED Macro Pending",
+        source="fred_api_pending_external_data_engine",
+        status="not_wired_in_this_step",
+        reason="FRED macro will be wired in the next backend step.",
+    )
+
+    finra_short_volume = inactive_factor(
+        symbol=normalized,
+        timeframe=normalized_timeframe,
+        name="FINRA Short Volume Pending",
+        source="finra_pending",
+        status="not_wired_in_this_step",
+        reason="FINRA short volume will be wired in the next backend step.",
+    )
+
+    cot = inactive_factor(
+        symbol=normalized,
+        timeframe=normalized_timeframe,
+        name="COT Pending",
+        source="cftc_pending",
+        status="not_wired_in_this_step",
+        reason="CFTC COT will be wired in the next backend step.",
+    )
+
+    factors = {
+        "optionsFlow": options_chain,
+        "openInterest": options_chain,
+        "footprint": crypto_footprint,
+        "fredMacro": fred_macro,
+        "finraShortVolume": finra_short_volume,
+        "cot": cot,
+    }
+
+    signal_fields = {
+        key: signal_text_from_factor(value)
+        for key, value in factors.items()
+        if isinstance(value, dict)
+    }
+
+    scalars = {
+        "optionsFlowStrength": factor_strength(options_chain),
+        "openInterestStrength": factor_strength(options_chain),
+        "footprintStrength": factor_strength(crypto_footprint),
+        "fredMacroStrength": factor_strength(fred_macro),
+        "finraShortVolumeStrength": factor_strength(finra_short_volume),
+        "cotStrength": factor_strength(cot),
+        "optionsBullPressure": to_float(options_chain.get("callShare"), 0) if isinstance(options_chain, dict) else 0,
+        "optionsBearPressure": to_float(options_chain.get("putShare"), 0) if isinstance(options_chain, dict) else 0,
+        "footprintDeltaPct": to_float(crypto_footprint.get("deltaPct"), 0) if isinstance(crypto_footprint, dict) else 0,
     }
 
     return {
-        "eventType": "EXTERNAL_DATA_STATUS",
+        "eventType": "EXTERNAL_DATA_CONTEXT",
         "status": "live" if MASSIVE_API_KEY else "missing_key",
-        "source": "external_data_engine_v1",
         "symbol": normalized,
-        "providers": {
+        "timeframe": normalized_timeframe,
+        "providerStatus": {
             "massive": {
+                "configured": bool(MASSIVE_API_KEY),
                 "enabled": bool(MASSIVE_API_KEY),
                 "baseUrl": MASSIVE_BASE_URL,
                 "cacheTtlSeconds": MASSIVE_CACHE_TTL_SECONDS,
             },
         },
-        "factors": {
-            "optionsFlow": options_chain,
-            "openInterest": options_chain,
-            "footprint": crypto_footprint,
-            "fredMacro": {
-                "status": "not_wired_in_this_step",
-                "source": "fred_api_existing_route",
-                "direction": "neutral",
-                "strength": 0,
-            },
-            "finraShortVolume": {
-                "status": "not_wired_in_this_step",
-                "source": "finra_pending",
-                "direction": "neutral",
-                "strength": 0,
-            },
-            "cot": {
-                "status": "not_wired_in_this_step",
-                "source": "cftc_pending",
-                "direction": "neutral",
-                "strength": 0,
-            },
-        },
-        "probes": probes,
+        "factors": factors,
+        "signalFields": signal_fields,
+        "scalars": scalars,
+        "source": "external_data_engine_v2",
+        "createdAt": utc_now_iso(),
+    }
+
+
+def build_external_data_status(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]:
+    normalized = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    context = build_external_data_context(normalized, normalized_timeframe)
+
+    return {
+        "eventType": "EXTERNAL_DATA_STATUS",
+        "status": context.get("status", "unknown"),
+        "source": "external_data_engine_v2",
+        "symbol": normalized,
+        "timeframe": normalized_timeframe,
+        "massiveKeyPresent": bool(MASSIVE_API_KEY),
+        "providers": context.get("providerStatus", {}),
+        "factors": context.get("factors", {}),
+        "signalFields": context.get("signalFields", {}),
+        "scalars": context.get("scalars", {}),
         "createdAt": utc_now_iso(),
     }
