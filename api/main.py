@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 import os
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
@@ -1820,6 +1821,247 @@ def build_python_alphax_dlm(candles: List[Dict[str, Any]], lookback: int = 300, 
     }
 
 
+
+def calculate_atr_values_for_nrtr(candles: List[Dict[str, Any]], length: int = 14) -> List[Optional[float]]:
+    """Wilder ATR used for backend NRTR scorecard context."""
+    if not candles or length <= 0:
+        return []
+
+    true_ranges: List[float] = []
+
+    for index, candle in enumerate(candles):
+        high = to_float(candle.get("high"))
+        low = to_float(candle.get("low"))
+        previous_close = to_float(candles[index - 1].get("close")) if index > 0 else to_float(candle.get("close"))
+
+        true_ranges.append(
+            max(
+                high - low,
+                abs(high - previous_close),
+                abs(low - previous_close),
+            )
+        )
+
+    atr_values: List[Optional[float]] = [None] * len(true_ranges)
+    seed_sum = 0.0
+
+    for index, value in enumerate(true_ranges):
+        if index < length:
+            seed_sum += value
+
+            if index == length - 1:
+                atr_values[index] = seed_sum / length
+
+            continue
+
+        previous_atr = atr_values[index - 1]
+        if previous_atr is None:
+            atr_values[index] = None
+        else:
+            atr_values[index] = (previous_atr * (length - 1) + value) / length
+
+    return atr_values
+
+
+def build_nrtr_scorecard_context(
+    candles: List[Dict[str, Any]],
+    *,
+    atr_length: int = 14,
+    atr_multiplier: float = 3.0,
+) -> Dict[str, Any]:
+    """
+    Backend NRTR+ context for scorecards/ML.
+
+    This mirrors the dashboard default:
+    - ATR-Based
+    - Swing preset
+    - ATR multiplier 3.0
+
+    It is not used for drawing the line; the frontend still draws the visual
+    NRTR/SuperTrend line. This context lets the backend scorecards and future
+    ML know whether NRTR agrees with SMC/OB/PD/Ghost.
+    """
+    if len(candles) < max(atr_length + 2, 20):
+        return {
+            "mode": "ATR-Based",
+            "preset": "Swing",
+            "direction": "neutral",
+            "directionValue": 0,
+            "trendLineUnified": None,
+            "trendDirUnified": 0,
+            "buyFlip": False,
+            "sellFlip": False,
+            "barsInTrend": 0,
+            "entryPrice": None,
+            "currentPrice": to_float(candles[-1].get("close")) if candles else None,
+            "distanceFromLine": None,
+            "distancePercent": None,
+            "lockedProfit": None,
+            "lockedPercent": None,
+            "flipHistory": [],
+        }
+
+    atr_values = calculate_atr_values_for_nrtr(candles, atr_length)
+
+    final_upper: Optional[float] = None
+    final_lower: Optional[float] = None
+    previous_final_upper: Optional[float] = None
+    previous_final_lower: Optional[float] = None
+    previous_supertrend: Optional[float] = None
+    direction = 0
+    points: List[Dict[str, Any]] = []
+
+    for index, candle in enumerate(candles):
+        close = to_float(candle.get("close"))
+        high = to_float(candle.get("high"))
+        low = to_float(candle.get("low"))
+        previous_close = to_float(candles[index - 1].get("close")) if index > 0 else close
+        atr = atr_values[index] if index < len(atr_values) else None
+        previous_direction = direction
+
+        if atr is None or not math.isfinite(float(atr)):
+            points.append(
+                {
+                    "time": candle.get("time") or candle.get("timestamp"),
+                    "price": close,
+                    "line": None,
+                    "direction": 0,
+                    "buy": False,
+                    "sell": False,
+                    "index": index,
+                }
+            )
+            continue
+
+        hl2 = (high + low) / 2.0
+        basic_upper = hl2 + atr_multiplier * atr
+        basic_lower = hl2 - atr_multiplier * atr
+
+        if previous_final_upper is None or previous_final_lower is None:
+            final_upper = basic_upper
+            final_lower = basic_lower
+        else:
+            final_upper = (
+                basic_upper
+                if basic_upper < previous_final_upper or previous_close > previous_final_upper
+                else previous_final_upper
+            )
+            final_lower = (
+                basic_lower
+                if basic_lower > previous_final_lower or previous_close < previous_final_lower
+                else previous_final_lower
+            )
+
+        if previous_supertrend is None:
+            direction = 1 if close >= hl2 else -1
+        elif previous_final_upper is not None and abs(previous_supertrend - previous_final_upper) <= 1e-10:
+            direction = 1 if close > float(final_upper) else -1
+        else:
+            direction = -1 if close < float(final_lower) else 1
+
+        trend_line = final_lower if direction == 1 else final_upper
+
+        points.append(
+            {
+                "time": candle.get("time") or candle.get("timestamp"),
+                "price": close,
+                "line": trend_line,
+                "direction": direction,
+                "buy": index > 0 and previous_direction == -1 and direction == 1,
+                "sell": index > 0 and previous_direction == 1 and direction == -1,
+                "index": index,
+            }
+        )
+
+        previous_supertrend = trend_line
+        previous_final_upper = final_upper
+        previous_final_lower = final_lower
+
+    active_points = [point for point in points if point.get("direction") in {1, -1} and point.get("line") is not None]
+    if not active_points:
+        return {
+            "mode": "ATR-Based",
+            "preset": "Swing",
+            "direction": "neutral",
+            "directionValue": 0,
+            "trendLineUnified": None,
+            "trendDirUnified": 0,
+            "buyFlip": False,
+            "sellFlip": False,
+            "barsInTrend": 0,
+            "entryPrice": None,
+            "currentPrice": to_float(candles[-1].get("close")) if candles else None,
+            "distanceFromLine": None,
+            "distancePercent": None,
+            "lockedProfit": None,
+            "lockedPercent": None,
+            "flipHistory": [],
+        }
+
+    last_point = active_points[-1]
+    last_direction = int(last_point.get("direction") or 0)
+    current_price = to_float(last_point.get("price"))
+    trend_line = to_float(last_point.get("line"))
+    direction_text = "bullish" if last_direction == 1 else "bearish" if last_direction == -1 else "neutral"
+
+    flip_points = [point for point in points if point.get("buy") or point.get("sell")]
+    latest_flip = flip_points[-1] if flip_points else None
+
+    if latest_flip:
+        entry_index = int(latest_flip.get("index") or 0)
+        entry_price = to_float(candles[entry_index].get("close")) if 0 <= entry_index < len(candles) else current_price
+        bars_in_trend = max(0, len(candles) - 1 - entry_index)
+    else:
+        entry_index = 0
+        for idx in range(len(points) - 1, -1, -1):
+            if int(points[idx].get("direction") or 0) != last_direction:
+                entry_index = min(idx + 1, len(candles) - 1)
+                break
+        entry_price = to_float(candles[entry_index].get("close"))
+        bars_in_trend = max(0, len(candles) - 1 - entry_index)
+
+    distance = abs(current_price - trend_line)
+    distance_percent = (distance / current_price * 100.0) if current_price else 0.0
+    locked_profit = (
+        trend_line - entry_price
+        if last_direction == 1
+        else entry_price - trend_line
+        if last_direction == -1
+        else 0.0
+    )
+    locked_percent = (locked_profit / entry_price * 100.0) if entry_price else 0.0
+
+    flip_history = [
+        {
+            "time": item.get("time"),
+            "index": item.get("index"),
+            "type": "buy" if item.get("buy") else "sell",
+            "price": round(to_float(item.get("price")), 5),
+            "line": round(to_float(item.get("line")), 5),
+        }
+        for item in flip_points[-12:]
+    ]
+
+    return {
+        "mode": "ATR-Based",
+        "preset": "Swing",
+        "direction": direction_text,
+        "directionValue": last_direction,
+        "trendLineUnified": round(trend_line, 5),
+        "trendDirUnified": last_direction,
+        "buyFlip": bool(last_point.get("buy")),
+        "sellFlip": bool(last_point.get("sell")),
+        "barsInTrend": bars_in_trend,
+        "entryPrice": round(entry_price, 5),
+        "currentPrice": round(current_price, 5),
+        "distanceFromLine": round(distance, 5),
+        "distancePercent": round(distance_percent, 4),
+        "lockedProfit": round(locked_profit, 5),
+        "lockedPercent": round(locked_percent, 4),
+        "flipHistory": flip_history,
+    }
+
+
 def normalize_backend_overlay_payload(
     backend_payload: Dict[str, Any],
     ghosts: Optional[List[Dict[str, Any]]] = None,
@@ -1895,6 +2137,10 @@ def normalize_backend_overlay_payload(
     order_blocks = backend_payload.get("orderBlocks", []) if isinstance(backend_payload.get("orderBlocks"), list) else []
     liquidity_events = backend_payload.get("liquidityEvents", []) if isinstance(backend_payload.get("liquidityEvents"), list) else []
     dlm_levels = backend_payload.get("dlmLevels", []) if isinstance(backend_payload.get("dlmLevels"), list) else []
+    scorecards = backend_payload.get("scorecards", {}) if isinstance(backend_payload.get("scorecards"), dict) else {}
+    ml_features = backend_payload.get("mlFeatures", {}) if isinstance(backend_payload.get("mlFeatures"), dict) else {}
+    ml_feature_context = backend_payload.get("mlFeatureContext", {}) if isinstance(backend_payload.get("mlFeatureContext"), dict) else {}
+    calculation_context = backend_payload.get("calculationContext", {}) if isinstance(backend_payload.get("calculationContext"), dict) else {}
 
     normalized_ghosts = backend_payload.get("ghostCandles", []) if isinstance(backend_payload.get("ghostCandles"), list) else []
     if ghosts:
@@ -1910,6 +2156,12 @@ def normalize_backend_overlay_payload(
         "liquidityProfileBins": profile_bins,
         "dlmLevels": dlm_levels,
         "ghostCandles": normalized_ghosts,
+
+        # ML-ready scorecard layer.
+        "scorecards": scorecards,
+        "mlFeatures": ml_features,
+        "mlFeatureContext": ml_feature_context,
+        "calculationContext": calculation_context,
 
         # Backwards-compatible names still used by existing chart/panels.
         "dlmConfluenceMarkers": [],
@@ -1950,6 +2202,7 @@ def build_python_chart_overlays(candles: List[Dict[str, Any]], ghosts: Optional[
     if build_backend_overlay_payload is not None:
         try:
             try:
+                nrtr_context = build_nrtr_scorecard_context(candles)
                 backend_payload = build_backend_overlay_payload(
                     candles,
                     internal_pivot_length=5,
@@ -1958,6 +2211,7 @@ def build_python_chart_overlays(candles: List[Dict[str, Any]], ghosts: Optional[
                     swing_order_blocks=5,
                     dlm_lookback=300,
                     dlm_bins=50,
+                    nrtr_context=nrtr_context,
                     ghost_candles=ghosts or [],
                 )
             except TypeError:
@@ -2006,6 +2260,34 @@ def build_python_chart_overlays(candles: List[Dict[str, Any]], ghosts: Optional[
         "alphaProfileBins": dlm.get("profileBins", []),
         "alphaProfileMeta": meta,
         "ghostCandles": ghosts or [],
+        "scorecards": {
+            "version": "legacy-scorecards-v1",
+            "overall": {
+                "direction": direction,
+                "netBias": round(bull_pressure - bear_pressure, 2),
+                "confirmationScore": round(score, 2),
+                "conflictScore": 0,
+                "bullScore": round(bull_pressure, 2),
+                "bearScore": round(bear_pressure, 2),
+                "contextScore": round(score / 10, 2),
+            },
+            "smc": {"qualityScore": 5, "bullishEvents": 0, "bearishEvents": 0},
+            "orderBlocks": {"qualityScore": 5, "bullishZones": 0, "bearishZones": 0},
+            "pdZones": {"qualityScore": 5},
+            "liquidityProfile": {"qualityScore": round(score / 10, 2), "profileBinCount": len(dlm.get("profileBins", [])), "strongBins": 0},
+            "nrtr": build_nrtr_scorecard_context(candles),
+            "ghost": {"direction": direction, "confidence": score, "count": len(ghosts or [])},
+            "hiddenContext": {"qualityScore": 0, "eqhEqlCount": 0, "fvgCount": 0, "sweepCount": 0, "displacementCount": 0, "inducementCount": 0},
+            "activeFactors": {"smcEvents": len(smc_events), "orderBlocks": len(zones), "profileBins": len(dlm.get("profileBins", [])), "ghostCandles": len(ghosts or [])},
+        },
+        "mlFeatures": {
+            "overallDirection": 1 if direction == "bullish" else -1,
+            "overallConfirmationScore": round(score, 2),
+            "bullScore": round(bull_pressure, 2),
+            "bearScore": round(bear_pressure, 2),
+        },
+        "mlFeatureContext": {},
+        "calculationContext": {},
         "source": "python_legacy_overlay_fallback",
     }
 
@@ -4832,6 +5114,10 @@ def build_candle_route_payload(
         "smcEvents": overlay_payload.get("smcEvents", []),
         "orderBlocks": overlay_payload.get("orderBlocks", []),
         "ghostCandles": overlay_payload.get("ghostCandles", ghosts or []),
+        "scorecards": overlay_payload.get("scorecards", {}),
+        "mlFeatures": overlay_payload.get("mlFeatures", {}),
+        "mlFeatureContext": overlay_payload.get("mlFeatureContext", {}),
+        "calculationContext": overlay_payload.get("calculationContext", {}),
         "source": route_source,
         "provider": provider,
         "cache": cache_label,
