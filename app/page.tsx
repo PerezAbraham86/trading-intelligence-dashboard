@@ -5,6 +5,7 @@ import SignalCard from '@/components/SignalCard'
 import LightweightCandlestickChart, { ChartMode, DashboardCandle } from '@/components/LightweightCandlestickChart'
 import { GhostCandle } from '@/components/GhostCandleOverlay'
 import ChartOverlayStatusPanel from '@/components/ChartOverlayStatusPanel'
+import ScorecardsPanel from '@/components/ScorecardsPanel'
 import { buildChartOverlayPayload } from '@/lib/chartOverlayPrep'
 import PressureGauges from '@/components/PressureGauges'
 import FactorConfirmationTable from '@/components/FactorConfirmationTable'
@@ -48,6 +49,10 @@ type PythonEngineState = {
   liquidityEvents?: unknown[]
   liquidityProfileBins?: unknown[]
   dlmLevels?: unknown[]
+  scorecards?: unknown
+  mlFeatures?: unknown
+  mlFeatureContext?: unknown
+  calculationContext?: unknown
   ghostCandles?: PythonGhostCandle[]
   ghostProjections?: PythonGhostCandle[]
   projections?: PythonGhostCandle[]
@@ -619,6 +624,54 @@ function getGhostCandlesFromUnifiedOverlay(overlayPayload: any | null | undefine
   return []
 }
 
+function getScorecardsFromOverlayPayload(...sources: unknown[]) {
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue
+
+    const raw = source as any
+    const candidates = [
+      raw.scorecards,
+      raw.overlayPayload?.scorecards,
+      raw.chartOverlays?.scorecards,
+      raw.latestSignal?.scorecards,
+      raw.latestSignal?.overlayPayload?.scorecards,
+    ]
+
+    for (const candidate of candidates) {
+      if (candidate && typeof candidate === 'object') {
+        return candidate
+      }
+    }
+  }
+
+  return null
+}
+
+function getMlFeaturesFromOverlayPayload(...sources: unknown[]) {
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue
+
+    const raw = source as any
+    const candidates = [
+      raw.mlFeatures,
+      raw.overlayPayload?.mlFeatures,
+      raw.chartOverlays?.mlFeatures,
+      raw.latestSignal?.mlFeatures,
+      raw.latestSignal?.overlayPayload?.mlFeatures,
+      raw.mlFeatureContext,
+      raw.overlayPayload?.mlFeatureContext,
+    ]
+
+    for (const candidate of candidates) {
+      if (candidate && typeof candidate === 'object') {
+        return candidate
+      }
+    }
+  }
+
+  return null
+}
+
 
 function timeToUnixSeconds(time: DashboardCandle['time'] | undefined): number | null {
   if (typeof time === 'number') return time
@@ -1156,6 +1209,22 @@ function LightweightChartPanel({
     return mergeStableOverlayPayloads(fallbackPayload, backendOverlayPayload)
   }, [candles, compact, engineState, showOverlayLines, unifiedOverlayPayload])
 
+  const scorecards = useMemo(() => {
+    return getScorecardsFromOverlayPayload(
+      overlayPayload,
+      unifiedOverlayPayload,
+      engineState
+    )
+  }, [engineState, overlayPayload, unifiedOverlayPayload])
+
+  const mlFeatures = useMemo(() => {
+    return getMlFeaturesFromOverlayPayload(
+      overlayPayload,
+      unifiedOverlayPayload,
+      engineState
+    )
+  }, [engineState, overlayPayload, unifiedOverlayPayload])
+
   return (
     <div className="rounded-xl border border-dark-700 bg-dark-800/80 p-4 shadow-xl">
       <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -1254,12 +1323,19 @@ function LightweightChartPanel({
       />
 
       {showOverlayStatus && (
-        <div className="mt-4">
+        <div className="mt-4 space-y-4">
           <ChartOverlayStatusPanel
             candles={dashboardCandlesToOverlayCandles(candles)}
             title="Unified Python SMC + AlphaX Overlay"
             compact
           />
+
+          {!compact && (
+            <ScorecardsPanel
+              scorecards={scorecards as any}
+              mlFeatures={mlFeatures as any}
+            />
+          )}
         </div>
       )}
     </div>
