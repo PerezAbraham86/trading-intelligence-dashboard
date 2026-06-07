@@ -1,5 +1,7 @@
 import React from 'react'
 
+type AnyRecord = Record<string, any>
+
 type ScorecardBundle = {
   version?: string
   asOfTime?: unknown
@@ -56,7 +58,29 @@ type MlFeatures = Record<string, number | string | boolean | null | undefined>
 type ScorecardsPanelProps = {
   scorecards?: ScorecardBundle | null
   mlFeatures?: MlFeatures | null
+  overlayPayload?: AnyRecord | null
   compact?: boolean
+}
+
+function toNumber(value: unknown, fallback = 0) {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : fallback
+}
+
+function hasUsefulScorecards(value: unknown): value is ScorecardBundle {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+
+  const raw = value as AnyRecord
+
+  return Boolean(
+    raw.overall ||
+      raw.smc ||
+      raw.orderBlocks ||
+      raw.pdZones ||
+      raw.liquidityProfile ||
+      raw.hiddenContext ||
+      raw.activeFactors
+  )
 }
 
 function formatNumber(value: unknown, decimals = 0) {
@@ -94,6 +118,302 @@ function meterColor(value: unknown) {
   return 'bg-red-400'
 }
 
+function normalizeDirection(value: unknown): 'bullish' | 'bearish' | 'neutral' {
+  const text = String(value ?? '').toLowerCase()
+
+  if (text.includes('bull') || text === 'buy' || text === 'long' || text === 'up') return 'bullish'
+  if (text.includes('bear') || text === 'sell' || text === 'short' || text === 'down') return 'bearish'
+
+  return 'neutral'
+}
+
+function getDirectionValue(direction: string) {
+  if (direction === 'bullish') return 1
+  if (direction === 'bearish') return -1
+  return 0
+}
+
+function getItemQuality(item: AnyRecord | undefined | null, fallback = 5) {
+  if (!item || typeof item !== 'object') return fallback
+
+  const quality = toNumber(item.qualityScore ?? item.quality_score, NaN)
+
+  if (Number.isFinite(quality) && quality > 0) return Math.max(1, Math.min(10, quality))
+
+  const score = toNumber(item.score ?? item.confidence, NaN)
+
+  if (Number.isFinite(score) && score > 0) {
+    return score > 10 ? Math.max(1, Math.min(10, score / 10)) : Math.max(1, Math.min(10, score))
+  }
+
+  return fallback
+}
+
+function average(values: number[]) {
+  const clean = values.filter((value) => Number.isFinite(value))
+
+  if (!clean.length) return 0
+
+  return clean.reduce((sum, value) => sum + value, 0) / clean.length
+}
+
+function getArray(payload: AnyRecord | null | undefined, ...keys: string[]) {
+  if (!payload || typeof payload !== 'object') return []
+
+  for (const key of keys) {
+    const value = payload[key]
+    if (Array.isArray(value)) return value as AnyRecord[]
+  }
+
+  return []
+}
+
+function getNestedArray(payload: AnyRecord | null | undefined, nestedKey: string, ...keys: string[]) {
+  const nested = payload?.[nestedKey]
+
+  if (!nested || typeof nested !== 'object') return []
+
+  return getArray(nested as AnyRecord, ...keys)
+}
+
+function buildFallbackScorecardsFromOverlayPayload(
+  overlayPayload?: AnyRecord | null,
+  mlFeatures?: MlFeatures | null
+): ScorecardBundle | null {
+  if (!overlayPayload || typeof overlayPayload !== 'object') return null
+
+  const smcEvents = [
+    ...getArray(overlayPayload, 'smcEvents', 'structureEvents'),
+    ...getArray(overlayPayload, 'lines').filter((line) => {
+      const label = String(line.label ?? line.type ?? '').toLowerCase()
+      return label.includes('bos') || label.includes('choch') || label.includes('mss')
+    }),
+  ]
+
+  const orderBlocks = [
+    ...getArray(overlayPayload, 'orderBlocks'),
+    ...getArray(overlayPayload, 'zones').filter((zone) => {
+      const label = String(zone.label ?? zone.kind ?? zone.type ?? '').toLowerCase()
+      return label.includes('ob') || label.includes('order')
+    }),
+  ]
+
+  const pdZones = getArray(overlayPayload, 'zones').filter((zone) => {
+    const label = String(zone.label ?? zone.kind ?? zone.type ?? '').toLowerCase()
+    return label.includes('premium') || label.includes('discount') || label.includes('equilibrium')
+  })
+
+  const profileBins = [
+    ...getArray(overlayPayload, 'liquidityProfileBins', 'alphaProfileBins'),
+    ...getNestedArray(overlayPayload, 'alphaProfile', 'bins'),
+  ]
+
+  const ghostCandles = getArray(overlayPayload, 'ghostCandles', 'ghostProjections', 'projections')
+  const calculationContext = overlayPayload.calculationContext || {}
+  const mlFeatureContext = overlayPayload.mlFeatureContext || {}
+
+  const recentSmc = smcEvents.slice(-10)
+  const recentObs = orderBlocks.slice(-10)
+
+  const smcBull = recentSmc.filter((item) => normalizeDirection(item.direction) === 'bullish').length
+  const smcBear = recentSmc.filter((item) => normalizeDirection(item.direction) === 'bearish').length
+
+  const obBull = recentObs.filter((item) => normalizeDirection(item.direction) === 'bullish').length
+  const obBear = recentObs.filter((item) => normalizeDirection(item.direction) === 'bearish').length
+
+  const smcQuality = average(recentSmc.map((item) => getItemQuality(item, 5)))
+  const obQuality = average(recentObs.map((item) => getItemQuality(item, 5)))
+  const pdQuality = average(pdZones.map((item) => getItemQuality(item, 4)))
+  const profileQuality = Math.min(
+    10,
+    average(
+      profileBins.map((bin) => {
+        const liquidityScore = toNumber(bin.liquidityScore, NaN)
+        if (Number.isFinite(liquidityScore)) return liquidityScore * 2
+
+        const width = toNumber(bin.widthPct ?? bin.volumePct, 0)
+        return Math.min(10, width / 10)
+      })
+    )
+  )
+
+  const sweepCount = toNumber(
+    mlFeatureContext.sweepCount ??
+      calculationContext?.sweeps?.count ??
+      getArray(overlayPayload, 'liquidityEvents').length,
+    0
+  )
+  const fvgCount = toNumber(
+    mlFeatureContext.fairValueGapCount ??
+      calculationContext?.fairValueGaps?.count ??
+      calculationContext?.fvgCount,
+    0
+  )
+  const eqhEqlCount = toNumber(
+    mlFeatureContext.equalHighLowCount ??
+      calculationContext?.equalHighLow?.count,
+    0
+  )
+  const displacementCount = toNumber(
+    mlFeatureContext.displacementCount ??
+      calculationContext?.displacement?.count,
+    0
+  )
+  const inducementCount = toNumber(
+    mlFeatureContext.inducementCount ??
+      calculationContext?.inducement?.count,
+    0
+  )
+
+  const hiddenQuality = Math.min(
+    10,
+    sweepCount * 1.2 +
+      displacementCount * 1 +
+      inducementCount * 0.7 +
+      fvgCount * 0.6 +
+      eqhEqlCount * 0.5
+  )
+
+  const ghost = ghostCandles[0] || {}
+  const ghostDirection = normalizeDirection(ghost.direction ?? ghost.bias)
+  let ghostConfidence = toNumber(ghost.confidence ?? ghost.probability ?? ghost.score, 0)
+  if (ghostConfidence > 0 && ghostConfidence <= 1) ghostConfidence *= 100
+
+  const nrtrContext = overlayPayload.nrtrContext || overlayPayload.nrtr || mlFeatures?.nrtrContext || {}
+  const nrtrDirection = normalizeDirection((nrtrContext as AnyRecord).direction ?? mlFeatures?.nrtrDirection)
+
+  let bullScore = 0
+  let bearScore = 0
+
+  bullScore += smcBull * 1.5 + obBull * 1.2
+  bearScore += smcBear * 1.5 + obBear * 1.2
+
+  if (nrtrDirection === 'bullish') bullScore += 2
+  if (nrtrDirection === 'bearish') bearScore += 2
+
+  if (ghostDirection === 'bullish') bullScore += Math.min(3, ghostConfidence / 35)
+  if (ghostDirection === 'bearish') bearScore += Math.min(3, ghostConfidence / 35)
+
+  const netBias = bullScore - bearScore
+  const direction = netBias >= 3 ? 'bullish' : netBias <= -3 ? 'bearish' : 'neutral'
+  const contextScore =
+    smcQuality * 0.28 +
+    obQuality * 0.24 +
+    pdQuality * 0.18 +
+    profileQuality * 0.15 +
+    hiddenQuality * 0.15
+
+  let conflictScore = 0
+
+  if (nrtrDirection !== 'neutral' && direction !== 'neutral' && nrtrDirection !== direction) {
+    conflictScore += 30
+  }
+
+  if (ghostDirection !== 'neutral' && direction !== 'neutral' && ghostDirection !== direction) {
+    conflictScore += 25
+  }
+
+  if (smcBull > 0 && smcBear > 0) {
+    conflictScore += Math.min(25, Math.abs(smcBull - smcBear) * 4)
+  }
+
+  const activeFactors = {
+    smcEvents: recentSmc.length,
+    orderBlocks: recentObs.length,
+    pdZones: pdZones.length,
+    profileBins: profileBins.length,
+    ghostCandles: ghostCandles.length,
+    eqhEql: eqhEqlCount,
+    fvg: fvgCount,
+    sweeps: sweepCount,
+    displacement: displacementCount,
+    inducement: inducementCount,
+    nrtr: nrtrDirection !== 'neutral' ? 1 : 0,
+  }
+
+  return {
+    version: 'frontend-overlay-scorecards-v1',
+    asOfTime: overlayPayload.asOfTime ?? overlayPayload.createdAt,
+    overall: {
+      direction,
+      netBias: Number(netBias.toFixed(2)),
+      confirmationScore: Math.max(0, Math.min(100, Number((contextScore * 10).toFixed(2)))),
+      conflictScore: Math.max(0, Math.min(100, Number(conflictScore.toFixed(2)))),
+      bullScore: Number(bullScore.toFixed(2)),
+      bearScore: Number(bearScore.toFixed(2)),
+      contextScore: Number(contextScore.toFixed(2)),
+    },
+    smc: {
+      qualityScore: Number(smcQuality.toFixed(2)),
+      bullishEvents: smcBull,
+      bearishEvents: smcBear,
+    },
+    orderBlocks: {
+      qualityScore: Number(obQuality.toFixed(2)),
+      bullishZones: obBull,
+      bearishZones: obBear,
+    },
+    pdZones: {
+      qualityScore: Number(pdQuality.toFixed(2)),
+    },
+    liquidityProfile: {
+      qualityScore: Number(profileQuality.toFixed(2)),
+      profileBinCount: profileBins.length,
+      strongBins: profileBins.filter((bin) => toNumber(bin.liquidityScore, 0) >= 3).length,
+    },
+    nrtr: {
+      direction: nrtrDirection,
+      agreesWithSmc:
+        nrtrDirection === 'neutral'
+          ? false
+          : (nrtrDirection === 'bullish' && smcBull >= smcBear) ||
+            (nrtrDirection === 'bearish' && smcBear >= smcBull),
+    },
+    ghost: {
+      direction: ghostDirection,
+      confidence: Number(ghostConfidence.toFixed(2)),
+      count: ghostCandles.length,
+    },
+    hiddenContext: {
+      qualityScore: Number(hiddenQuality.toFixed(2)),
+      eqhEqlCount,
+      fvgCount,
+      sweepCount,
+      displacementCount,
+      inducementCount,
+    },
+    activeFactors,
+  }
+}
+
+function buildFallbackMlFeatures(scorecards: ScorecardBundle | null, existingFeatures?: MlFeatures | null): MlFeatures | null {
+  if (existingFeatures && Object.keys(existingFeatures).length > 0) return existingFeatures
+  if (!scorecards) return null
+
+  return {
+    overallDirection: getDirectionValue(scorecards.overall?.direction ?? 'neutral'),
+    overallNetBias: scorecards.overall?.netBias,
+    overallConfirmationScore: scorecards.overall?.confirmationScore,
+    overallConflictScore: scorecards.overall?.conflictScore,
+    smcQualityScore: scorecards.smc?.qualityScore,
+    orderBlockQualityScore: scorecards.orderBlocks?.qualityScore,
+    pdQualityScore: scorecards.pdZones?.qualityScore,
+    liquidityProfileQualityScore: scorecards.liquidityProfile?.qualityScore,
+    hiddenContextQualityScore: scorecards.hiddenContext?.qualityScore,
+    nrtrDirection: getDirectionValue(scorecards.nrtr?.direction ?? 'neutral'),
+    nrtrAgreesWithSmc: scorecards.nrtr?.agreesWithSmc ? 1 : 0,
+    ghostDirection: getDirectionValue(scorecards.ghost?.direction ?? 'neutral'),
+    ghostConfidence: scorecards.ghost?.confidence,
+    eqhEqlCount: scorecards.hiddenContext?.eqhEqlCount,
+    fairValueGapCount: scorecards.hiddenContext?.fvgCount,
+    sweepCount: scorecards.hiddenContext?.sweepCount,
+    displacementCount: scorecards.hiddenContext?.displacementCount,
+    inducementCount: scorecards.hiddenContext?.inducementCount,
+    bullScore: scorecards.overall?.bullScore,
+    bearScore: scorecards.overall?.bearScore,
+  }
+}
+
 function ScoreRow({
   label,
   value,
@@ -125,9 +445,14 @@ function ScoreRow({
 export default function ScorecardsPanel({
   scorecards,
   mlFeatures,
+  overlayPayload,
   compact = false,
 }: ScorecardsPanelProps) {
-  if (!scorecards) {
+  const fallbackScorecards = buildFallbackScorecardsFromOverlayPayload(overlayPayload, mlFeatures)
+  const activeScorecards = hasUsefulScorecards(scorecards) ? scorecards : fallbackScorecards
+  const activeMlFeatures = buildFallbackMlFeatures(activeScorecards, mlFeatures)
+
+  if (!activeScorecards) {
     return (
       <div className="rounded-xl border border-slate-800 bg-[#0b1020] p-4">
         <div className="text-sm font-semibold text-slate-100">ML Scorecards</div>
@@ -136,9 +461,10 @@ export default function ScorecardsPanel({
     )
   }
 
-  const overall = scorecards.overall ?? {}
-  const hidden = scorecards.hiddenContext ?? {}
-  const activeFactors = scorecards.activeFactors ?? {}
+  const overall = activeScorecards.overall ?? {}
+  const hidden = activeScorecards.hiddenContext ?? {}
+  const activeFactors = activeScorecards.activeFactors ?? {}
+  const activeFeatureCount = activeMlFeatures ? Object.keys(activeMlFeatures).length : 0
 
   return (
     <div className="rounded-xl border border-slate-800 bg-[#0b1020] p-4 shadow-lg">
@@ -163,30 +489,30 @@ export default function ScorecardsPanel({
       <div className={`mt-4 grid gap-3 ${compact ? 'grid-cols-1' : 'grid-cols-2 xl:grid-cols-3'}`}>
         <ScoreRow label="Overall Confirmation" value={overall.confirmationScore} suffix="%" />
         <ScoreRow label="Conflict Risk" value={overall.conflictScore} suffix="%" />
-        <ScoreRow label="SMC Quality" value={(scorecards.smc?.qualityScore ?? 0) * 10} suffix="%" />
-        <ScoreRow label="Order Block Quality" value={(scorecards.orderBlocks?.qualityScore ?? 0) * 10} suffix="%" />
-        <ScoreRow label="PD Zone Quality" value={(scorecards.pdZones?.qualityScore ?? 0) * 10} suffix="%" />
-        <ScoreRow label="Liquidity Profile Quality" value={(scorecards.liquidityProfile?.qualityScore ?? 0) * 10} suffix="%" />
+        <ScoreRow label="SMC Quality" value={(activeScorecards.smc?.qualityScore ?? 0) * 10} suffix="%" />
+        <ScoreRow label="Order Block Quality" value={(activeScorecards.orderBlocks?.qualityScore ?? 0) * 10} suffix="%" />
+        <ScoreRow label="PD Zone Quality" value={(activeScorecards.pdZones?.qualityScore ?? 0) * 10} suffix="%" />
+        <ScoreRow label="Liquidity Profile Quality" value={(activeScorecards.liquidityProfile?.qualityScore ?? 0) * 10} suffix="%" />
       </div>
 
       <div className="mt-4 grid grid-cols-2 gap-3 text-[11px] text-slate-300 md:grid-cols-4">
         <div className="rounded-lg border border-slate-800 bg-black/20 p-3">
           <div className="text-slate-500">NRTR</div>
-          <div className={`mt-1 font-semibold ${directionColor(scorecards.nrtr?.direction)}`}>
-            {scorecards.nrtr?.direction ?? 'neutral'}
+          <div className={`mt-1 font-semibold ${directionColor(activeScorecards.nrtr?.direction)}`}>
+            {activeScorecards.nrtr?.direction ?? 'neutral'}
           </div>
           <div className="mt-1 text-slate-500">
-            SMC agree: {scorecards.nrtr?.agreesWithSmc ? 'Yes' : 'No'}
+            SMC agree: {activeScorecards.nrtr?.agreesWithSmc ? 'Yes' : 'No'}
           </div>
         </div>
 
         <div className="rounded-lg border border-slate-800 bg-black/20 p-3">
           <div className="text-slate-500">Ghost</div>
-          <div className={`mt-1 font-semibold ${directionColor(scorecards.ghost?.direction)}`}>
-            {scorecards.ghost?.direction ?? 'neutral'}
+          <div className={`mt-1 font-semibold ${directionColor(activeScorecards.ghost?.direction)}`}>
+            {activeScorecards.ghost?.direction ?? 'neutral'}
           </div>
           <div className="mt-1 text-slate-500">
-            Conf {formatNumber(scorecards.ghost?.confidence, 0)}%
+            Conf {formatNumber(activeScorecards.ghost?.confidence, 0)}%
           </div>
         </div>
 
@@ -203,7 +529,7 @@ export default function ScorecardsPanel({
         <div className="rounded-lg border border-slate-800 bg-black/20 p-3">
           <div className="text-slate-500">ML Features</div>
           <div className="mt-1 font-semibold text-slate-100">
-            {mlFeatures ? Object.keys(mlFeatures).length : 0}
+            {activeFeatureCount}
           </div>
           <div className="mt-1 text-slate-500">
             Factors {Object.values(activeFactors).reduce((sum, value) => sum + Number(value || 0), 0)}
