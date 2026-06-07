@@ -786,3 +786,4 @@ try:
     initialize_ml_feature_store()
 except Exception as error:
     print(f"[ml_feature_store] initialization skipped: {error}")
+
