@@ -20,6 +20,28 @@ from pydantic import BaseModel, Field
 from api.ghost_ml import evaluate_ghost_ml_records, ghost_ml_summary_from_candles, record_ghost_ml_projection
 
 try:
+    from api.ml_feature_store import (
+        get_ml_feature_store_summary,
+        get_recent_ml_feature_snapshots,
+        record_ml_feature_snapshot,
+        update_ml_feature_outcomes,
+    )
+except Exception:
+    try:
+        from ml_feature_store import (
+            get_ml_feature_store_summary,
+            get_recent_ml_feature_snapshots,
+            record_ml_feature_snapshot,
+            update_ml_feature_outcomes,
+        )
+    except Exception:
+        get_ml_feature_store_summary = None
+        get_recent_ml_feature_snapshots = None
+        record_ml_feature_snapshot = None
+        update_ml_feature_outcomes = None
+
+
+try:
     from api.overlay_engine import build_overlay_payload as build_backend_overlay_payload
 except Exception:
     try:
@@ -5097,9 +5119,10 @@ def build_candle_route_payload(
     cache_label: str,
     ghosts: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Build one unified candle response with overlays attached."""
+    """Build one unified candle response with overlays attached and ML feature capture."""
     overlay_payload = build_python_chart_overlays(candles, ghosts or []) if candles else empty_overlay_payload()
-    return {
+
+    payload = {
         "symbol": symbol,
         "timeframe": timeframe,
         "count": len(candles),
@@ -5124,6 +5147,93 @@ def build_candle_route_payload(
         "overlayVersion": OVERLAY_PAYLOAD_VERSION,
         "createdAt": now_iso(),
     }
+
+    ml_feature_store_status: Dict[str, Any] = {
+        "enabled": bool(record_ml_feature_snapshot and update_ml_feature_outcomes),
+        "recorded": False,
+        "outcomes": {
+            "checked": 0,
+            "resolved": 0,
+        },
+    }
+
+    if candles and record_ml_feature_snapshot and update_ml_feature_outcomes:
+        try:
+            ml_feature_store_status["outcomes"] = update_ml_feature_outcomes(
+                symbol,
+                timeframe,
+                candles,
+            )
+            record_result = record_ml_feature_snapshot(payload)
+            ml_feature_store_status.update(record_result)
+        except Exception as error:
+            ml_feature_store_status.update(
+                {
+                    "recorded": False,
+                    "error": str(error)[:300],
+                }
+            )
+
+    payload["mlFeatureStore"] = ml_feature_store_status
+
+    return payload
+
+
+@app.get("/api/ml-feature-store/status")
+def ml_feature_store_status(symbol: Optional[str] = None, timeframe: Optional[str] = None) -> Dict[str, Any]:
+    if not get_ml_feature_store_summary:
+        return {
+            "enabled": False,
+            "error": "ml_feature_store module unavailable",
+            "createdAt": now_iso(),
+        }
+
+    try:
+        return {
+            "enabled": True,
+            **get_ml_feature_store_summary(symbol=symbol, timeframe=timeframe),
+        }
+    except Exception as error:
+        return {
+            "enabled": False,
+            "error": str(error),
+            "createdAt": now_iso(),
+        }
+
+
+@app.get("/api/ml-feature-store/recent")
+def ml_feature_store_recent(
+    symbol: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    limit: int = 50,
+) -> Dict[str, Any]:
+    if not get_recent_ml_feature_snapshots:
+        return {
+            "enabled": False,
+            "count": 0,
+            "rows": [],
+            "error": "ml_feature_store module unavailable",
+            "createdAt": now_iso(),
+        }
+
+    try:
+        return {
+            "enabled": True,
+            **get_recent_ml_feature_snapshots(
+                symbol=symbol,
+                timeframe=timeframe,
+                limit=limit,
+            ),
+        }
+    except Exception as error:
+        return {
+            "enabled": False,
+            "count": 0,
+            "rows": [],
+            "error": str(error),
+            "createdAt": now_iso(),
+        }
+
 
 @app.get("/api/recent-signals")
 def recent_signals(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 50) -> Dict[str, Any]:
