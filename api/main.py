@@ -49,6 +49,16 @@ except Exception:
     except Exception:
         build_backend_overlay_payload = None
 
+try:
+    from api.external_data_engine import build_external_data_context, build_external_data_status
+except Exception:
+    try:
+        from external_data_engine import build_external_data_context, build_external_data_status
+    except Exception:
+        build_external_data_context = None
+        build_external_data_status = None
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4131,6 +4141,9 @@ def build_python_dashboard_signal(symbol: str = "BTCUSD", timeframe: str = "1m",
     scorecards = analyze_python_core_scorecards(candles, sentiment, ghosts, overlays)
     fred_macro = build_fred_macro_context()
     options_pressure = build_options_pressure_context(normalized_symbol)
+    external_data = build_external_data_context(normalized_symbol, normalized_timeframe) if build_external_data_context else {}
+    external_fields = external_data.get("signalFields", {}) if isinstance(external_data, dict) else {}
+    external_scalars = external_data.get("scalars", {}) if isinstance(external_data, dict) else {}
     price = to_float(candles[-1].get("close")) if candles else 0
 
     status = "Live Snapshot" if candles else "Waiting"
@@ -4168,31 +4181,32 @@ def build_python_dashboard_signal(symbol: str = "BTCUSD", timeframe: str = "1m",
         "technicalSentiment": sentiment,
         "chartOverlays": overlays,
         "ghostCandles": ghosts,
-        "openInterest": "Inactive",
-        "footprint": "Inactive",
+        "openInterest": external_fields.get("openInterest", "Open Interest Unavailable"),
+        "footprint": external_fields.get("footprint", "Footprint Delta Unavailable"),
         "session": "Neutral Session",
-        "fredMacro": fred_macro.get("label", "Active FRED Macro"),
-        "fredMacroStrength": fred_macro.get("strength", 45),
-        "fredMacroDirection": fred_macro.get("direction", "active"),
-        "fredMacroRisk": fred_macro.get("risk", 35),
-        "macroRisk": fred_macro.get("risk", 35),
+        "fredMacro": fred_macro.get("label", external_fields.get("fredMacro", "Active FRED Macro")),
+        "fredMacroStrength": fred_macro.get("strength", external_scalars.get("fredMacroStrength", 45)),
+        "fredMacroDirection": fred_macro.get("direction", external_scalars.get("fredMacroDirection", "active")),
+        "fredMacroRisk": fred_macro.get("risk", external_scalars.get("fredMacroRisk", 35)),
+        "macroRisk": fred_macro.get("risk", external_scalars.get("fredMacroRisk", 35)),
         "fredMacroNotes": fred_macro.get("notes", []),
         "fredMacroData": fred_macro,
-        "optionsFlow": options_pressure.get("label", "Options Flow Inactive"),
-        "optionsFlowStrength": options_pressure.get("strength", 0),
-        "optionsFlowDirection": options_pressure.get("direction", "inactive"),
-        "optionsPressure": options_pressure,
-        "optionsBullPressure": options_pressure.get("bullPressure", 0),
-        "optionsBearPressure": options_pressure.get("bearPressure", 0),
-        "putCallRatio": options_pressure.get("putCallRatio"),
-        "putCallBias": options_pressure.get("label", "Options Flow Inactive"),
-        "unusualOptionsVolume": options_pressure.get("unusualVolume", 0),
-        "gammaRisk": options_pressure.get("gammaRisk", 0),
-        "dealerPinZone": options_pressure.get("dealerPinZone"),
+        "optionsFlow": external_fields.get("optionsFlow", options_pressure.get("label", "Options Flow Inactive")),
+        "optionsFlowStrength": external_scalars.get("optionsFlowStrength", options_pressure.get("strength", 0)),
+        "optionsFlowDirection": external_scalars.get("optionsFlowDirection", options_pressure.get("direction", "inactive")),
+        "optionsPressure": external_data.get("optionsFlow", options_pressure) if isinstance(external_data, dict) else options_pressure,
+        "optionsBullPressure": external_scalars.get("optionsBullPressure", options_pressure.get("bullPressure", 0)),
+        "optionsBearPressure": external_scalars.get("optionsBearPressure", options_pressure.get("bearPressure", 0)),
+        "putCallRatio": external_scalars.get("putCallRatio", options_pressure.get("putCallRatio")),
+        "putCallBias": external_fields.get("optionsFlow", options_pressure.get("label", "Options Flow Inactive")),
+        "unusualOptionsVolume": external_scalars.get("unusualOptionsVolume", options_pressure.get("unusualVolume", 0)),
+        "gammaRisk": external_scalars.get("gammaRisk", options_pressure.get("gammaRisk", 0)),
+        "dealerPinZone": external_scalars.get("dealerPinZone", options_pressure.get("dealerPinZone")),
         "optionsConflictRisk": options_pressure.get("conflictRisk", 0),
         "optionsReversalRisk": options_pressure.get("reversalRisk", 0),
-        "finraShortVolume": "Inactive",
-        "cot": "Inactive",
+        "finraShortVolume": external_fields.get("finraShortVolume", "FINRA Short Volume Unavailable"),
+        "cot": external_fields.get("cot", "COT Unavailable"),
+        "externalData": external_data,
         "warnings": [],
         "createdAt": created_at,
         "source": "python_only_no_webhook",
@@ -5049,6 +5063,37 @@ def options_pressure(symbol: str = "SPY", underlying: str = "") -> Dict[str, Any
 def fred_macro() -> Dict[str, Any]:
     return build_fred_macro_context()
 
+@app.get("/api/external-data/status")
+def external_data_status(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]:
+    if not build_external_data_status:
+        return {
+            "eventType": "EXTERNAL_DATA_STATUS",
+            "status": "Unavailable",
+            "symbol": normalize_symbol(symbol),
+            "timeframe": normalize_timeframe(timeframe),
+            "massiveKeyPresent": bool(os.getenv("MASSIVE_API_KEY", "")),
+            "error": "external_data_engine module unavailable",
+            "createdAt": now_iso(),
+        }
+
+    return build_external_data_status(symbol, timeframe)
+
+
+@app.get("/api/external-data/context")
+def external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]:
+    if not build_external_data_context:
+        return {
+            "eventType": "EXTERNAL_DATA_CONTEXT",
+            "status": "Unavailable",
+            "symbol": normalize_symbol(symbol),
+            "timeframe": normalize_timeframe(timeframe),
+            "error": "external_data_engine module unavailable",
+            "createdAt": now_iso(),
+        }
+
+    return build_external_data_context(symbol, timeframe)
+
+
 @app.get("/api/ticker-news")
 def ticker_news(symbol: str = "SPY", limit: int = 10, force: bool = False) -> Dict[str, Any]:
     return build_ticker_news_payload(symbol, limit, force_refresh=force)
@@ -5081,6 +5126,8 @@ def root() -> Dict[str, Any]:
             "/api/ghost-ml-status",
             "/api/ghost-evaluate",
             "/api/latest-sentiment",
+            "/api/external-data/status",
+            "/api/external-data/context",
             "/webhook/tradingview",
         ],
     }
@@ -5134,6 +5181,19 @@ def build_candle_route_payload(
 ) -> Dict[str, Any]:
     """Build one unified candle response with overlays attached and ML feature capture."""
     overlay_payload = build_python_chart_overlays(candles, ghosts or []) if candles else empty_overlay_payload()
+    external_data = (
+        build_external_data_context(symbol, timeframe)
+        if build_external_data_context
+        else {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "providerStatus": {"massive": {"configured": False}},
+            "signalFields": {},
+            "scalars": {},
+            "source": "external_data_engine_unavailable",
+            "createdAt": now_iso(),
+        }
+    )
 
     payload = {
         "symbol": symbol,
@@ -5154,6 +5214,13 @@ def build_candle_route_payload(
         "mlFeatures": overlay_payload.get("mlFeatures", {}),
         "mlFeatureContext": overlay_payload.get("mlFeatureContext", {}),
         "calculationContext": overlay_payload.get("calculationContext", {}),
+        "externalData": external_data,
+        "optionsFlow": external_data.get("signalFields", {}).get("optionsFlow"),
+        "openInterest": external_data.get("signalFields", {}).get("openInterest"),
+        "footprint": external_data.get("signalFields", {}).get("footprint"),
+        "fredMacro": external_data.get("signalFields", {}).get("fredMacro"),
+        "finraShortVolume": external_data.get("signalFields", {}).get("finraShortVolume"),
+        "cot": external_data.get("signalFields", {}).get("cot"),
         "source": route_source,
         "provider": provider,
         "cache": cache_label,
