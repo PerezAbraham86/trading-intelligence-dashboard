@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -13,12 +13,12 @@ from urllib.request import Request, urlopen
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DATA ENGINE
 #
-# v5 update:
+# v6 update:
 # - Keeps Massive options-chain probe for equities.
 # - Keeps OKX public SWAP data for BTCUSD/ETHUSD open interest + footprint.
 # - Keeps Binance Futures as secondary crypto fallback.
-# - Adds FRED macro using FRED series observations:
-#   DGS10, T10Y2Y, DFF, VIXCLS.
+# - Keeps FRED macro using DGS10, T10Y2Y, DFF, VIXCLS.
+# - Adds FINRA daily CNMS short-sale volume for equities/ETFs.
 #
 # This file intentionally does NOT fake unavailable data.
 # If a source cannot provide a real value, it returns not_applicable/unavailable.
@@ -39,6 +39,10 @@ FRED_API_KEY = os.getenv("FRED_API_KEY", "").strip()
 FRED_BASE_URL = os.getenv("FRED_BASE_URL", "https://api.stlouisfed.org").rstrip("/")
 FRED_TIMEOUT_SECONDS = float(os.getenv("FRED_TIMEOUT_SECONDS", "12"))
 FRED_CACHE_TTL_SECONDS = int(os.getenv("FRED_CACHE_TTL_SECONDS", "1800"))
+
+FINRA_BASE_URL = os.getenv("FINRA_BASE_URL", "https://cdn.finra.org").rstrip("/")
+FINRA_TIMEOUT_SECONDS = float(os.getenv("FINRA_TIMEOUT_SECONDS", "12"))
+FINRA_CACHE_TTL_SECONDS = int(os.getenv("FINRA_CACHE_TTL_SECONDS", "21600"))
 
 _EXTERNAL_DATA_CACHE: Dict[str, Dict[str, Any]] = {}
 
@@ -309,6 +313,68 @@ def http_json_request(
         }
 
 
+def http_text_request(
+    url: str,
+    *,
+    timeout: float,
+    headers: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    request = Request(
+        url,
+        headers=headers
+        or {
+            "Accept": "text/plain,*/*",
+            "User-Agent": "trading-intelligence-dashboard/1.0",
+        },
+        method="GET",
+    )
+
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8", errors="replace")
+
+            return {
+                "ok": True,
+                "status": int(getattr(response, "status", 200)),
+                "url": redact_key_from_text(url),
+                "text": body,
+                "createdAt": utc_now_iso(),
+            }
+
+    except HTTPError as error:
+        try:
+            body = error.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+
+        return {
+            "ok": False,
+            "status": int(getattr(error, "code", 0) or 0),
+            "url": redact_key_from_text(url),
+            "error": str(error),
+            "body": redact_key_from_text(body[:1200]),
+            "createdAt": utc_now_iso(),
+        }
+
+    except URLError as error:
+        return {
+            "ok": False,
+            "status": 0,
+            "url": redact_key_from_text(url),
+            "error": str(error),
+            "createdAt": utc_now_iso(),
+        }
+
+    except Exception as error:
+        return {
+            "ok": False,
+            "status": 0,
+            "url": redact_key_from_text(url),
+            "error": str(error),
+            "createdAt": utc_now_iso(),
+        }
+
+
 def massive_request(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not MASSIVE_API_KEY:
         return {
@@ -405,6 +471,17 @@ def fred_request(series_id: str, limit: int = 8) -> Dict[str, Any]:
     result = http_json_request(url, timeout=FRED_TIMEOUT_SECONDS)
     result["path"] = "/fred/series/observations"
     result["seriesId"] = series_id
+    return result
+
+
+def finra_daily_file_request(date_value: datetime) -> Dict[str, Any]:
+    date_token = date_value.strftime("%Y%m%d")
+    path = f"/equity/regsho/daily/CNMSshvol{date_token}.txt"
+    url = f"{FINRA_BASE_URL}{path}"
+
+    result = http_text_request(url, timeout=FINRA_TIMEOUT_SECONDS)
+    result["path"] = path
+    result["fileDate"] = date_value.strftime("%Y-%m-%d")
     return result
 
 
@@ -1259,6 +1336,166 @@ def build_fred_macro_context(symbol: str, timeframe: str = "1m") -> Dict[str, An
     return cache_set(cache_key, payload)
 
 
+
+def parse_finra_short_volume_file(text: str, target_symbol: str) -> Optional[Dict[str, Any]]:
+    target = normalize_symbol(target_symbol).replace("!", "")
+
+    for line in str(text or "").splitlines():
+        clean_line = line.strip()
+
+        if not clean_line or clean_line.lower().startswith("symbol|"):
+            continue
+
+        parts = clean_line.split("|")
+
+        if len(parts) < 5:
+            continue
+
+        symbol = parts[0].strip().upper()
+
+        if symbol != target:
+            continue
+
+        short_volume = to_float(parts[1], 0)
+        short_exempt_volume = to_float(parts[2], 0)
+        total_volume = to_float(parts[3], 0)
+        market = parts[4].strip() if len(parts) >= 5 else "FINRA"
+
+        short_pct = short_volume / max(total_volume, 1) * 100
+        short_exempt_pct = short_exempt_volume / max(total_volume, 1) * 100
+
+        return {
+            "symbol": symbol,
+            "shortVolume": short_volume,
+            "shortExemptVolume": short_exempt_volume,
+            "totalVolume": total_volume,
+            "shortPct": short_pct,
+            "shortExemptPct": short_exempt_pct,
+            "market": market,
+        }
+
+    return None
+
+
+def recent_market_dates(max_days: int = 10) -> List[datetime]:
+    now_et = datetime.now(timezone.utc)
+    dates: List[datetime] = []
+
+    for offset in range(0, max_days):
+        candidate = now_et - timedelta(days=offset)
+
+        # FINRA files are daily and business-day based.
+        if candidate.weekday() >= 5:
+            continue
+
+        dates.append(candidate)
+
+    return dates
+
+
+def build_finra_short_volume_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
+    normalized = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    if not is_equity_symbol(normalized):
+        return inactive_factor(
+            symbol=normalized,
+            timeframe=normalized_timeframe,
+            name="FINRA Short Volume Not Applicable",
+            source="finra_regsho_daily_short_volume",
+            status="not_applicable",
+            reason=f"FINRA short volume is equity/ETF data and is not applicable for {normalized}.",
+        )
+
+    cache_key = f"finra:short-volume:{normalized}:{normalized_timeframe}"
+    cached = cache_get(cache_key)
+
+    if cached:
+        return cached
+
+    probes: List[Dict[str, Any]] = []
+    matched_row: Optional[Dict[str, Any]] = None
+    matched_file_date: Optional[str] = None
+
+    for candidate in recent_market_dates(12):
+        response = finra_daily_file_request(candidate)
+        probes.append(
+            {
+                "ok": response.get("ok"),
+                "status": response.get("status"),
+                "path": response.get("path"),
+                "fileDate": response.get("fileDate"),
+                "error": response.get("error"),
+                "body": response.get("body"),
+            }
+        )
+
+        if not response.get("ok"):
+            continue
+
+        row = parse_finra_short_volume_file(response.get("text", ""), normalized)
+
+        if row:
+            matched_row = row
+            matched_file_date = response.get("fileDate")
+            break
+
+    if not matched_row:
+        payload = {
+            "status": "unavailable",
+            "label": "FINRA Short Volume Unavailable",
+            "source": "finra_regsho_daily_short_volume",
+            "symbol": normalized,
+            "timeframe": normalized_timeframe,
+            "direction": "neutral",
+            "strength": 0,
+            "reason": "No matching FINRA CNMS short-volume row found in recent daily files.",
+            "probes": probes[:8],
+            "createdAt": utc_now_iso(),
+        }
+        return cache_set(cache_key, payload)
+
+    short_pct = to_float(matched_row.get("shortPct"), 0)
+
+    if short_pct >= 55:
+        direction = "bearish"
+        label = "Bearish FINRA Short Volume"
+        strength = clamp(50 + (short_pct - 50) * 2)
+        reason = "elevated_short_volume_share"
+    elif short_pct <= 35:
+        direction = "bullish"
+        label = "Bullish FINRA Short Volume"
+        strength = clamp(50 + (50 - short_pct))
+        reason = "low_short_volume_share"
+    else:
+        direction = "active"
+        label = "Neutral FINRA Short Volume"
+        strength = clamp(45 + abs(short_pct - 50))
+        reason = "balanced_short_volume_share"
+
+    payload = {
+        "status": "active",
+        "label": label,
+        "source": "finra_regsho_daily_short_volume",
+        "symbol": normalized,
+        "timeframe": normalized_timeframe,
+        "direction": direction,
+        "strength": strength,
+        "fileDate": matched_file_date,
+        "shortVolume": matched_row.get("shortVolume"),
+        "shortExemptVolume": matched_row.get("shortExemptVolume"),
+        "totalVolume": matched_row.get("totalVolume"),
+        "shortPct": round(short_pct, 2),
+        "shortExemptPct": round(to_float(matched_row.get("shortExemptPct"), 0), 4),
+        "market": matched_row.get("market"),
+        "reason": reason,
+        "probes": probes[:4],
+        "createdAt": utc_now_iso(),
+    }
+
+    return cache_set(cache_key, payload)
+
+
 def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]:
     normalized = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
@@ -1281,14 +1518,7 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
 
     fred_macro = build_fred_macro_context(normalized, normalized_timeframe)
 
-    finra_short_volume = inactive_factor(
-        symbol=normalized,
-        timeframe=normalized_timeframe,
-        name="FINRA Short Volume Pending",
-        source="finra_pending",
-        status="not_wired_in_this_step",
-        reason="FINRA short volume will be wired in the next backend step.",
-    )
+    finra_short_volume = build_finra_short_volume_context(normalized, normalized_timeframe)
 
     cot = inactive_factor(
         symbol=normalized,
@@ -1320,6 +1550,7 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
         "footprintStrength": factor_strength(footprint),
         "fredMacroStrength": factor_strength(fred_macro),
         "finraShortVolumeStrength": factor_strength(finra_short_volume),
+        "finraShortVolumePct": to_float(finra_short_volume.get("shortPct"), 0) if isinstance(finra_short_volume, dict) else 0,
         "cotStrength": factor_strength(cot),
         "optionsBullPressure": to_float(options_chain.get("callShare"), 0) if isinstance(options_chain, dict) else 0,
         "optionsBearPressure": to_float(options_chain.get("putShare"), 0) if isinstance(options_chain, dict) else 0,
@@ -1347,6 +1578,13 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
                 "cacheTtlSeconds": FRED_CACHE_TTL_SECONDS,
                 "series": ["DGS10", "T10Y2Y", "DFF", "VIXCLS"],
             },
+            "finra": {
+                "configured": True,
+                "enabled": True,
+                "baseUrl": FINRA_BASE_URL,
+                "cacheTtlSeconds": FINRA_CACHE_TTL_SECONDS,
+                "usedFor": ["SPY short volume", "QQQ short volume", "IWM short volume", "equity/ETF short volume"],
+            },
             "okx": {
                 "configured": True,
                 "enabled": True,
@@ -1363,7 +1601,7 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
         "factors": factors,
         "signalFields": signal_fields,
         "scalars": scalars,
-        "source": "external_data_engine_v5_fred_macro",
+        "source": "external_data_engine_v6_finra_short_volume",
         "createdAt": utc_now_iso(),
     }
 
@@ -1376,7 +1614,7 @@ def build_external_data_status(symbol: str = "BTCUSD", timeframe: str = "1m") ->
     return {
         "eventType": "EXTERNAL_DATA_STATUS",
         "status": context.get("status", "unknown"),
-        "source": "external_data_engine_v5_fred_macro",
+        "source": "external_data_engine_v6_finra_short_volume",
         "symbol": normalized,
         "timeframe": normalized_timeframe,
         "massiveKeyPresent": bool(MASSIVE_API_KEY),
