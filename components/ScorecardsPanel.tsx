@@ -59,6 +59,7 @@ type ScorecardsPanelProps = {
   scorecards?: ScorecardBundle | null
   mlFeatures?: MlFeatures | null
   overlayPayload?: AnyRecord | null
+  overlaySources?: Array<AnyRecord | null | undefined>
   compact?: boolean
 }
 
@@ -200,30 +201,123 @@ function getNestedArray(payload: AnyRecord | null | undefined, nestedKey: string
   return getArray(nested as AnyRecord, ...keys)
 }
 
+function uniqueByStableKey(items: AnyRecord[]) {
+  const seen = new Set<string>()
+  const unique: AnyRecord[] = []
+
+  for (const item of items) {
+    const key = JSON.stringify({
+      id: item.id,
+      type: item.type,
+      kind: item.kind,
+      label: item.label,
+      time: item.time,
+      index: item.index,
+      price: item.price,
+      high: item.high ?? item.top,
+      low: item.low ?? item.bottom,
+      start: item.startTime ?? item.start,
+      end: item.endTime ?? item.end,
+    })
+
+    if (seen.has(key)) continue
+
+    seen.add(key)
+    unique.push(item)
+  }
+
+  return unique
+}
+
+function normalizePayloadSources(...sources: Array<AnyRecord | null | undefined>) {
+  const flattened: AnyRecord[] = []
+
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue
+
+    flattened.push(source)
+
+    const candidateKeys = [
+      'overlayPayload',
+      'chartOverlays',
+      'chart_overlays',
+      'overlays',
+      'latestSignal',
+      'signal',
+      'engineState',
+      'data',
+    ]
+
+    for (const key of candidateKeys) {
+      const candidate = source[key]
+      if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+        flattened.push(candidate as AnyRecord)
+      }
+    }
+
+    const latestOverlay = source.latestSignal?.overlayPayload
+    if (latestOverlay && typeof latestOverlay === 'object') {
+      flattened.push(latestOverlay as AnyRecord)
+    }
+  }
+
+  return flattened
+}
+
+function getArrayFromSources(sources: AnyRecord[], ...keys: string[]) {
+  return uniqueByStableKey(
+    sources.flatMap((source) => getArray(source, ...keys))
+  )
+}
+
+function getNestedArrayFromSources(sources: AnyRecord[], nestedKey: string, ...keys: string[]) {
+  return uniqueByStableKey(
+    sources.flatMap((source) => getNestedArray(source, nestedKey, ...keys))
+  )
+}
+
+function getObjectFromSources(sources: AnyRecord[], ...keys: string[]) {
+  for (const source of sources) {
+    for (const key of keys) {
+      const value = source[key]
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        return value as AnyRecord
+      }
+    }
+  }
+
+  return {}
+}
+
 function buildFallbackScorecardsFromOverlayPayload(
   overlayPayload?: AnyRecord | null,
-  mlFeatures?: MlFeatures | null
+  mlFeatures?: MlFeatures | null,
+  overlaySources?: Array<AnyRecord | null | undefined>
 ): ScorecardBundle | null {
-  if (!overlayPayload || typeof overlayPayload !== 'object') return null
+  const sources = normalizePayloadSources(overlayPayload, ...(overlaySources ?? []))
+
+  if (sources.length === 0) return null
 
   const smcEvents = [
-    ...getArray(overlayPayload, 'smcEvents', 'structureEvents'),
-    ...getArray(overlayPayload, 'lines').filter((line) => {
+    ...getArrayFromSources(sources, 'smcEvents', 'structureEvents'),
+    ...getArrayFromSources(sources, 'lines').filter((line) => {
       const label = String(line.label ?? line.type ?? '').toLowerCase()
       return label.includes('bos') || label.includes('choch') || label.includes('mss')
     }),
   ]
 
-  const allZones = [
-    ...getArray(overlayPayload, 'zones'),
-    ...getArray(overlayPayload, 'overlayZones'),
-    ...getArray(overlayPayload, 'chartZones'),
-    ...getArray(overlayPayload, 'pdZones'),
-    ...getArray(overlayPayload, 'orderBlockZones'),
-  ]
+  const allZones = uniqueByStableKey([
+    ...getArrayFromSources(sources, 'zones'),
+    ...getArrayFromSources(sources, 'overlayZones'),
+    ...getArrayFromSources(sources, 'chartZones'),
+    ...getArrayFromSources(sources, 'pdZones'),
+    ...getArrayFromSources(sources, 'premiumDiscountZones'),
+    ...getArrayFromSources(sources, 'pdLevels'),
+    ...getArrayFromSources(sources, 'orderBlockZones'),
+  ])
 
   const orderBlocks = [
-    ...getArray(overlayPayload, 'orderBlocks'),
+    ...getArrayFromSources(sources, 'orderBlocks'),
     ...allZones.filter((zone) => {
       const label = String(zone.label ?? zone.kind ?? zone.type ?? '').toLowerCase()
       return label.includes('ob') || label.includes('order')
@@ -235,14 +329,16 @@ function buildFallbackScorecardsFromOverlayPayload(
     return label.includes('premium') || label.includes('discount') || label.includes('equilibrium')
   })
 
-  const profileBins = [
-    ...getArray(overlayPayload, 'liquidityProfileBins', 'alphaProfileBins'),
-    ...getNestedArray(overlayPayload, 'alphaProfile', 'bins'),
-  ]
+  const profileBins = uniqueByStableKey([
+    ...getArrayFromSources(sources, 'liquidityProfileBins', 'alphaProfileBins', 'profileBins', 'dlmProfileBins'),
+    ...getNestedArrayFromSources(sources, 'alphaProfile', 'bins'),
+    ...getNestedArrayFromSources(sources, 'liquidityProfile', 'bins'),
+    ...getNestedArrayFromSources(sources, 'dlm', 'profileBins', 'bins'),
+  ])
 
-  const ghostCandles = getArray(overlayPayload, 'ghostCandles', 'ghostProjections', 'projections')
-  const calculationContext = overlayPayload.calculationContext || {}
-  const mlFeatureContext = overlayPayload.mlFeatureContext || {}
+  const ghostCandles = getArrayFromSources(sources, 'ghostCandles', 'ghostProjections', 'projections')
+  const calculationContext = getObjectFromSources(sources, 'calculationContext')
+  const mlFeatureContext = getObjectFromSources(sources, 'mlFeatureContext')
 
   const recentSmc = smcEvents.slice(-10)
   const recentObs = orderBlocks.slice(-10)
@@ -255,19 +351,26 @@ function buildFallbackScorecardsFromOverlayPayload(
 
   const smcQuality = average(recentSmc.map((item) => getItemQuality(item, 5)))
   const obQuality = average(recentObs.map((item) => getItemQuality(item, 5)))
-  const pdQuality = average(pdZones.map((item) => getItemQuality(item, 4)))
-  const profileQuality = Math.min(
-    10,
-    average(
-      profileBins.map((bin) => {
+  const pdQuality = pdZones.length > 0
+    ? Math.max(4.5, average(pdZones.map((item) => getItemQuality(item, 4))))
+    : 0
+  const profileQuality = profileBins.length > 0
+    ? Math.min(
+        10,
+        Math.max(
+          4.5,
+          average(
+            profileBins.map((bin) => {
         const liquidityScore = toNumber(bin.liquidityScore, NaN)
         if (Number.isFinite(liquidityScore)) return liquidityScore * 2
 
         const width = toNumber(bin.widthPct ?? bin.volumePct, 0)
-        return Math.min(10, width / 10)
-      })
-    )
-  )
+              return Math.min(10, width / 10)
+            })
+          )
+        )
+      )
+    : 0
 
   const sweepCount = toNumber(
     mlFeatureContext.sweepCount ??
@@ -311,7 +414,7 @@ function buildFallbackScorecardsFromOverlayPayload(
   let ghostConfidence = toNumber(ghost.confidence ?? ghost.probability ?? ghost.score, 0)
   if (ghostConfidence > 0 && ghostConfidence <= 1) ghostConfidence *= 100
 
-  const nrtrContext = overlayPayload.nrtrContext || overlayPayload.nrtr || mlFeatures?.nrtrContext || {}
+  const nrtrContext = getObjectFromSources(sources, 'nrtrContext', 'nrtr') || mlFeatures?.nrtrContext || {}
   const nrtrDirection = normalizeDirection((nrtrContext as AnyRecord).direction ?? mlFeatures?.nrtrDirection)
 
   let bullScore = 0
@@ -365,7 +468,7 @@ function buildFallbackScorecardsFromOverlayPayload(
 
   return {
     version: 'frontend-overlay-scorecards-v1',
-    asOfTime: overlayPayload.asOfTime ?? overlayPayload.createdAt,
+    asOfTime: sources[0]?.asOfTime ?? sources[0]?.createdAt,
     overall: {
       direction,
       netBias: Number(netBias.toFixed(2)),
@@ -478,14 +581,15 @@ export default function ScorecardsPanel({
   scorecards,
   mlFeatures,
   overlayPayload,
+  overlaySources = [],
   compact = false,
 }: ScorecardsPanelProps) {
   const lastUsefulScorecardsRef = useRef<ScorecardBundle | null>(null)
   const lastUsefulMlFeaturesRef = useRef<MlFeatures | null>(null)
 
   const fallbackScorecards = useMemo(() => {
-    return buildFallbackScorecardsFromOverlayPayload(overlayPayload, mlFeatures)
-  }, [mlFeatures, overlayPayload])
+    return buildFallbackScorecardsFromOverlayPayload(overlayPayload, mlFeatures, overlaySources)
+  }, [mlFeatures, overlayPayload, overlaySources])
 
   const liveScorecards = hasUsefulScorecards(scorecards) ? scorecards : fallbackScorecards
   const liveMlFeatures = buildFallbackMlFeatures(liveScorecards, mlFeatures)
