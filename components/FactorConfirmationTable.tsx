@@ -335,7 +335,7 @@ function getExternalStrength(factor?: ExternalFactorPayload, scalar?: unknown, f
 function getExternalDetails(factor?: ExternalFactorPayload) {
   if (!factor) return undefined
 
-  const source = String(factor.source ?? '').replaceAll('_', ' ')
+  const source = String(factor.source ?? '').replace(/_/g, ' ')
   const parts: string[] = []
 
   if (source) parts.push(source)
