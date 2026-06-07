@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useMemo, useRef } from 'react'
 
 type AnyRecord = Record<string, any>
 
@@ -81,6 +81,30 @@ function hasUsefulScorecards(value: unknown): value is ScorecardBundle {
       raw.hiddenContext ||
       raw.activeFactors
   )
+}
+
+function getActiveFactorTotal(scorecards: ScorecardBundle | null | undefined) {
+  const factors = scorecards?.activeFactors ?? {}
+
+  return Object.values(factors).reduce((sum, value) => sum + Number(value || 0), 0)
+}
+
+function getUsefulScorecardStrength(scorecards: ScorecardBundle | null | undefined) {
+  if (!scorecards) return 0
+
+  const confirmation = toNumber(scorecards.overall?.confirmationScore, 0)
+  const smc = toNumber(scorecards.smc?.qualityScore, 0)
+  const orderBlocks = toNumber(scorecards.orderBlocks?.qualityScore, 0)
+  const pd = toNumber(scorecards.pdZones?.qualityScore, 0)
+  const profile = toNumber(scorecards.liquidityProfile?.qualityScore, 0)
+  const hidden = toNumber(scorecards.hiddenContext?.qualityScore, 0)
+  const factors = getActiveFactorTotal(scorecards)
+
+  return confirmation + smc + orderBlocks + pd + profile + hidden + factors
+}
+
+function isUsefulScorecardForDisplay(scorecards: ScorecardBundle | null | undefined) {
+  return getUsefulScorecardStrength(scorecards) > 0
 }
 
 function formatNumber(value: unknown, decimals = 0) {
@@ -190,15 +214,23 @@ function buildFallbackScorecardsFromOverlayPayload(
     }),
   ]
 
+  const allZones = [
+    ...getArray(overlayPayload, 'zones'),
+    ...getArray(overlayPayload, 'overlayZones'),
+    ...getArray(overlayPayload, 'chartZones'),
+    ...getArray(overlayPayload, 'pdZones'),
+    ...getArray(overlayPayload, 'orderBlockZones'),
+  ]
+
   const orderBlocks = [
     ...getArray(overlayPayload, 'orderBlocks'),
-    ...getArray(overlayPayload, 'zones').filter((zone) => {
+    ...allZones.filter((zone) => {
       const label = String(zone.label ?? zone.kind ?? zone.type ?? '').toLowerCase()
       return label.includes('ob') || label.includes('order')
     }),
   ]
 
-  const pdZones = getArray(overlayPayload, 'zones').filter((zone) => {
+  const pdZones = allZones.filter((zone) => {
     const label = String(zone.label ?? zone.kind ?? zone.type ?? '').toLowerCase()
     return label.includes('premium') || label.includes('discount') || label.includes('equilibrium')
   })
@@ -448,9 +480,37 @@ export default function ScorecardsPanel({
   overlayPayload,
   compact = false,
 }: ScorecardsPanelProps) {
-  const fallbackScorecards = buildFallbackScorecardsFromOverlayPayload(overlayPayload, mlFeatures)
-  const activeScorecards = hasUsefulScorecards(scorecards) ? scorecards : fallbackScorecards
-  const activeMlFeatures = buildFallbackMlFeatures(activeScorecards, mlFeatures)
+  const lastUsefulScorecardsRef = useRef<ScorecardBundle | null>(null)
+  const lastUsefulMlFeaturesRef = useRef<MlFeatures | null>(null)
+
+  const fallbackScorecards = useMemo(() => {
+    return buildFallbackScorecardsFromOverlayPayload(overlayPayload, mlFeatures)
+  }, [mlFeatures, overlayPayload])
+
+  const liveScorecards = hasUsefulScorecards(scorecards) ? scorecards : fallbackScorecards
+  const liveMlFeatures = buildFallbackMlFeatures(liveScorecards, mlFeatures)
+
+  /**
+   * PD zones/profile can arrive in a later partial overlay update.
+   * Do not let that partial update wipe out the useful SMC/OB scorecard.
+   */
+  if (isUsefulScorecardForDisplay(liveScorecards)) {
+    const liveStrength = getUsefulScorecardStrength(liveScorecards)
+    const previousStrength = getUsefulScorecardStrength(lastUsefulScorecardsRef.current)
+
+    if (!lastUsefulScorecardsRef.current || liveStrength >= previousStrength * 0.35) {
+      lastUsefulScorecardsRef.current = liveScorecards
+      lastUsefulMlFeaturesRef.current = liveMlFeatures
+    }
+  }
+
+  const activeScorecards = isUsefulScorecardForDisplay(liveScorecards)
+    ? liveScorecards
+    : lastUsefulScorecardsRef.current
+
+  const activeMlFeatures = activeScorecards === liveScorecards
+    ? liveMlFeatures
+    : lastUsefulMlFeaturesRef.current
 
   if (!activeScorecards) {
     return (
@@ -532,7 +592,7 @@ export default function ScorecardsPanel({
             {activeFeatureCount}
           </div>
           <div className="mt-1 text-slate-500">
-            Factors {Object.values(activeFactors).reduce((sum, value) => sum + Number(value || 0), 0)}
+            Factors {getActiveFactorTotal(activeScorecards)}
           </div>
         </div>
       </div>
