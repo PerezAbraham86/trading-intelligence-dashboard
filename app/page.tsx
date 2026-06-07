@@ -1904,6 +1904,7 @@ type LightweightChartPanelProps = {
   apiBaseUrl?: string
   isClient: boolean
   onChange: (selection: ChartSelection) => void
+  onScorecardsUpdate?: (scorecards: any, mlFeatures: any) => void
 }
 
 function LightweightChartPanel({
@@ -1920,6 +1921,7 @@ function LightweightChartPanel({
   apiBaseUrl,
   isClient,
   onChange,
+  onScorecardsUpdate,
 }: LightweightChartPanelProps) {
   const normalizedSymbol = normalizeSymbol(symbol)
   const normalizedTimeframe = normalizeTimeframe(timeframe)
@@ -2057,6 +2059,14 @@ function LightweightChartPanel({
     }
   }, [mlFeatures, visualScorecardBundle])
 
+  useEffect(() => {
+    if (compact || !onScorecardsUpdate) return
+
+    if (scorecardsForPanel || mlFeaturesForPanel) {
+      onScorecardsUpdate(scorecardsForPanel, mlFeaturesForPanel)
+    }
+  }, [compact, mlFeaturesForPanel, onScorecardsUpdate, scorecardsForPanel])
+
   return (
     <div className="rounded-xl border border-dark-700 bg-dark-800/80 p-4 shadow-xl">
       <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -2179,6 +2189,99 @@ function LightweightChartPanel({
   )
 }
 
+function getScorecardDirection(value: unknown): 'bullish' | 'bearish' | 'neutral' {
+  const text = String(value ?? '').toLowerCase()
+
+  if (text.includes('bull') || text.includes('buy') || text.includes('long')) return 'bullish'
+  if (text.includes('bear') || text.includes('sell') || text.includes('short')) return 'bearish'
+
+  return 'neutral'
+}
+
+function scorecardPct(value: unknown, multiplier = 1) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return 0
+  return Math.max(0, Math.min(100, Math.round(number * multiplier)))
+}
+
+function getScorecardSignalText(direction: string, fallback = 'Neutral') {
+  if (direction === 'bullish') return 'Bullish'
+  if (direction === 'bearish') return 'Bearish'
+  return fallback
+}
+
+function buildScorecardSignalPatch(scorecards: any, mlFeatures: any) {
+  const overallDirection = getScorecardDirection(scorecards?.overall?.direction)
+  const smcDirection = getScorecardDirection(
+    Number(scorecards?.smc?.bullishEvents ?? 0) > Number(scorecards?.smc?.bearishEvents ?? 0)
+      ? 'bullish'
+      : Number(scorecards?.smc?.bearishEvents ?? 0) > Number(scorecards?.smc?.bullishEvents ?? 0)
+        ? 'bearish'
+        : overallDirection
+  )
+  const profileDirection = getScorecardDirection(
+    scorecards?.liquidityProfile?.direction ??
+      scorecards?.pdZones?.direction ??
+      overallDirection
+  )
+  const ghostDirection = getScorecardDirection(scorecards?.ghost?.direction)
+  const nrtrDirection = getScorecardDirection(scorecards?.nrtr?.direction)
+
+  const confirmation = scorecardPct(scorecards?.overall?.confirmationScore)
+  const bullScore = scorecardPct(scorecards?.overall?.bullScore, 10)
+  const bearScore = scorecardPct(scorecards?.overall?.bearScore, 10)
+  const smcStrength = scorecardPct(scorecards?.smc?.qualityScore, 10)
+  const profileStrength = scorecardPct(scorecards?.liquidityProfile?.qualityScore, 10)
+  const pdStrength = scorecardPct(scorecards?.pdZones?.qualityScore, 10)
+  const obStrength = scorecardPct(scorecards?.orderBlocks?.qualityScore, 10)
+  const ghostConfidence = scorecardPct(scorecards?.ghost?.confidence)
+  const hiddenStrength = scorecardPct(scorecards?.hiddenContext?.qualityScore, 10)
+
+  const alphaStrength = Math.max(profileStrength, pdStrength)
+  const coreDirection = overallDirection === 'neutral' ? smcDirection : overallDirection
+
+  return {
+    chartScorecards: scorecards,
+    chartMlFeatures: mlFeatures,
+    scorecardLinked: true,
+
+    confidence: confirmation,
+    bullScore: Math.max(bullScore, coreDirection === 'bullish' ? confirmation : 0),
+    bearScore: Math.max(bearScore, coreDirection === 'bearish' ? confirmation : 0),
+    netBias: Number(scorecards?.overall?.netBias ?? mlFeatures?.overallNetBias ?? 0),
+
+    smc: getScorecardSignalText(smcDirection),
+    smcDirection,
+    smcStrength,
+
+    alphax: getScorecardSignalText(profileDirection),
+    alphaxDirection: profileDirection,
+    alphaxStrength: alphaStrength,
+    alphaxBullPressure: profileDirection === 'bullish' ? alphaStrength : 0,
+    alphaxBearPressure: profileDirection === 'bearish' ? alphaStrength : 0,
+
+    ghost: getScorecardSignalText(ghostDirection, 'Neutral'),
+    ghostDirection,
+    ghostConfidence,
+
+    nrtr: getScorecardSignalText(nrtrDirection, 'Neutral'),
+    nrtrDirection,
+    nrtrStrength: scorecardPct(scorecards?.nrtr?.context?.distancePercent ?? scorecards?.nrtr?.distancePercent, 10),
+
+    orderBlocks: getScorecardSignalText(smcDirection),
+    orderBlockStrength: obStrength,
+    pdZoneStrength: pdStrength,
+    hiddenContextStrength: hiddenStrength,
+
+    chartOverlayToggles: {
+      smc: Number(scorecards?.activeFactors?.smcEvents ?? 0) > 0 || smcStrength > 0,
+      ghost: Number(scorecards?.activeFactors?.ghostCandles ?? 0) > 0 || ghostConfidence > 0,
+      liquidityProfile: Number(scorecards?.activeFactors?.profileBins ?? 0) > 0 || profileStrength > 0,
+      orderBlocks: Number(scorecards?.activeFactors?.orderBlocks ?? 0) > 0 || obStrength > 0,
+    },
+  }
+}
+
 
 export default function Dashboard() {
   const [isClient, setIsClient] = useState(false)
@@ -2193,6 +2296,8 @@ export default function Dashboard() {
   const [factorTechnicalSentiment, setFactorTechnicalSentiment] =
     useState<TechnicalSentiment | null>(null)
   const [activeChartPrice, setActiveChartPrice] = useState<number | null>(null)
+  const [chartScorecards, setChartScorecards] = useState<any | null>(null)
+  const [chartMlFeatures, setChartMlFeatures] = useState<any | null>(null)
 
   const [mainChartSelection, setMainChartSelection] = useState<ChartSelection>({
     symbol: 'BTCUSD',
@@ -2282,6 +2387,8 @@ export default function Dashboard() {
 
   useEffect(() => {
     setFactorTechnicalSentiment(null)
+    setChartScorecards(null)
+    setChartMlFeatures(null)
   }, [selectedSymbol, overallTimeframeLabel])
 
   useEffect(() => {
@@ -2413,8 +2520,13 @@ export default function Dashboard() {
       getOverallGhostText(timeframeEngineStates, dashboardTimeframes) ||
       getPythonGhostText(pythonEngineState)
 
+    const scorecardPatch = chartScorecards
+      ? buildScorecardSignalPatch(chartScorecards, chartMlFeatures)
+      : {}
+
     return {
       ...latestSignal,
+      ...scorecardPatch,
 
       // Overall dashboard logic now uses the active chart as the master context.
       symbol: selectedSymbol,
@@ -2432,10 +2544,14 @@ export default function Dashboard() {
       multiTimeframeMode: true,
 
       // Python ghost score is now blended across main + mini timeframe engine states.
-      confidence: Math.max(Number(latestSignal?.confidence ?? 0), ghostConfidence),
-      ghost: pythonGhostText || latestSignal?.ghost || 'Multi-Timeframe Python Ghost Projection',
-      ghostConfidence,
-      pythonGhostEngine: Boolean(ghostConfidence || pythonGhostText),
+      confidence: Math.max(
+        Number((scorecardPatch as any)?.confidence ?? 0),
+        Number(latestSignal?.confidence ?? 0),
+        ghostConfidence
+      ),
+      ghost: (scorecardPatch as any)?.ghost || pythonGhostText || latestSignal?.ghost || 'Multi-Timeframe Python Ghost Projection',
+      ghostConfidence: Math.max(Number((scorecardPatch as any)?.ghostConfidence ?? 0), ghostConfidence),
+      pythonGhostEngine: Boolean(ghostConfidence || pythonGhostText || (scorecardPatch as any)?.ghostConfidence),
 
       // Shared technical meter now combines main chart + mini chart logic.
       technicalSentiment: sharedTechnicalSentiment ?? undefined,
@@ -2447,12 +2563,15 @@ export default function Dashboard() {
       timeframeEngineStates,
 
       chartCandleMode: mainChartSelection.candleMode,
-      chartOverlayToggles: (latestSignal as any)?.chartOverlayToggles ?? {
+      chartOverlayToggles: (scorecardPatch as any)?.chartOverlayToggles ?? (latestSignal as any)?.chartOverlayToggles ?? {
         smc: true,
         ghost: true,
         liquidityProfile: true,
         orderBlocks: true,
       },
+
+      // Keep scorecard-derived factor fields on top after base signal normalization.
+      ...(scorecardPatch as any),
     }
   }, [
     latestSignal,
@@ -2468,6 +2587,8 @@ export default function Dashboard() {
     overallTimeframeLabel,
     activeChartPrice,
     mainChartSelection.candleMode,
+    chartScorecards,
+    chartMlFeatures,
   ])
 
   if (!isClient) {
@@ -2571,6 +2692,10 @@ export default function Dashboard() {
             engineState={pythonEngineState}
             showOverlayStatus
             showOverlayLines
+            onScorecardsUpdate={(nextScorecards, nextMlFeatures) => {
+              setChartScorecards(nextScorecards ?? null)
+              setChartMlFeatures(nextMlFeatures ?? null)
+            }}
             onChange={(selection) => {
               setMainChartSelection({
                 symbol: normalizeSymbol(selection.symbol),
