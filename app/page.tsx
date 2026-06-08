@@ -3192,6 +3192,28 @@ export default function Dashboard() {
             activeSymbol={selectedSymbol}
             activeTimeframe={selectedTimeframe}
             activePrice={activeChartPrice ?? undefined}
+            chartCards={[
+              {
+                label: 'Main Chart',
+                symbol: selectedSymbol,
+                timeframe: selectedTimeframe,
+                candles: mainChartCandles,
+                latestSignal: augmentedLatestSignal,
+                activePrice: activeChartPrice ?? undefined,
+              },
+              {
+                label: 'Mini Chart 1',
+                symbol: miniOneSymbol,
+                timeframe: miniOneTimeframe,
+                candles: miniChartOneCandles,
+              },
+              {
+                label: 'Mini Chart 2',
+                symbol: miniTwoSymbol,
+                timeframe: miniTwoTimeframe,
+                candles: miniChartTwoCandles,
+              },
+            ]}
           />
 
           <StrategyTesterPanel
