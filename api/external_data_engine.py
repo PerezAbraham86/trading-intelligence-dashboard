@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DATA ENGINE
 #
-# v8 update:
+# v8.1 update:
 # - Keeps Massive options-chain probe for equities.
 # - Keeps OKX public SWAP data for BTCUSD/ETHUSD open interest + footprint.
 # - Keeps Binance Futures as secondary crypto fallback.
@@ -21,6 +21,7 @@ from urllib.request import Request, urlopen
 # - Keeps FINRA daily CNMS short-sale volume for equities/ETFs.
 # - Fixes FINRA parser to support Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market rows.
 # - Adds Databento MBP-1 probe for MES/ES estimated footprint delta.
+# - Fixes missing Databento environment constants so candle routes do not 500.
 #
 # This file intentionally does NOT fake unavailable data.
 # If a source cannot provide a real value, it returns not_applicable/unavailable.
@@ -45,6 +46,15 @@ FRED_CACHE_TTL_SECONDS = int(os.getenv("FRED_CACHE_TTL_SECONDS", "1800"))
 FINRA_BASE_URL = os.getenv("FINRA_BASE_URL", "https://cdn.finra.org").rstrip("/")
 FINRA_TIMEOUT_SECONDS = float(os.getenv("FINRA_TIMEOUT_SECONDS", "12"))
 FINRA_CACHE_TTL_SECONDS = int(os.getenv("FINRA_CACHE_TTL_SECONDS", "21600"))
+
+DATABENTO_API_KEY = os.getenv("DATABENTO_API_KEY", "").strip()
+DATABENTO_DATASET = os.getenv("DATABENTO_DATASET", "GLBX.MDP3").strip()
+DATABENTO_SCHEMA = os.getenv("DATABENTO_SCHEMA", "mbp-1").strip().lower()
+DATABENTO_MES_SYMBOL = os.getenv("DATABENTO_MES_SYMBOL", "MES.c.0").strip()
+DATABENTO_ES_SYMBOL = os.getenv("DATABENTO_ES_SYMBOL", "ES.c.0").strip()
+DATABENTO_LOOKBACK_MINUTES = int(os.getenv("DATABENTO_LOOKBACK_MINUTES", "5"))
+DATABENTO_MAX_RECORDS = int(os.getenv("DATABENTO_MAX_RECORDS", "5000"))
+DATABENTO_CACHE_TTL_SECONDS = int(os.getenv("DATABENTO_CACHE_TTL_SECONDS", "60"))
 
 _EXTERNAL_DATA_CACHE: Dict[str, Dict[str, Any]] = {}
 
@@ -1883,7 +1893,7 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
         "factors": factors,
         "signalFields": signal_fields,
         "scalars": scalars,
-        "source": "external_data_engine_v8_databento_mbp1",
+        "source": "external_data_engine_v8_1_databento_mbp1_const_fix",
         "createdAt": utc_now_iso(),
     }
 
@@ -1896,7 +1906,7 @@ def build_external_data_status(symbol: str = "BTCUSD", timeframe: str = "1m") ->
     return {
         "eventType": "EXTERNAL_DATA_STATUS",
         "status": context.get("status", "unknown"),
-        "source": "external_data_engine_v8_databento_mbp1",
+        "source": "external_data_engine_v8_1_databento_mbp1_const_fix",
         "symbol": normalized,
         "timeframe": normalized_timeframe,
         "massiveKeyPresent": bool(MASSIVE_API_KEY),
