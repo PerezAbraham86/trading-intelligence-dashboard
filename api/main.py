@@ -105,6 +105,10 @@ INSIGHTSENTRY_BASE_URL = f"https://{INSIGHTSENTRY_HOST}"
 ALPACA_STOCKS_BASE_URL = "https://data.alpaca.markets/v2"
 ALPACA_CRYPTO_BASE_URL = "https://data.alpaca.markets/v1beta3"
 
+# TradingView alerts/webhooks have been retired. Keep the route available only
+# as a disabled legacy endpoint so old webhook calls cannot affect live state.
+TRADINGVIEW_WEBHOOK_ENABLED = os.getenv("TRADINGVIEW_WEBHOOK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # IN-MEMORY STATE
@@ -1116,17 +1120,17 @@ def get_dashboard_candles(symbol: str, timeframe: str = "1m", limit: int = 500) 
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = max(1, min(int(limit or 500), 5000))
 
+    # TradingView webhook candles were retired. Dashboard candles now come only
+    # from backend providers:
+    # - BTCUSD/ETHUSD -> Alpaca crypto
+    # - SPY           -> Alpaca stock
+    # - MES1!         -> InsightSentry futures OHLCV
     historical = filter_valid_candles_for_symbol(
         fetch_historical_candles(normalized_symbol, normalized_timeframe, safe_limit),
         normalized_symbol,
     )
 
-    live = filter_valid_candles_for_symbol(
-        get_live_recent_candles(normalized_symbol, normalized_timeframe),
-        normalized_symbol,
-    )
-
-    merged = merge_candles_by_time([*historical, *live])[-safe_limit:]
+    merged = merge_candles_by_time(historical)[-safe_limit:]
     return filter_valid_candles_for_symbol(merged, normalized_symbol)
 
 
@@ -5317,38 +5321,61 @@ def ml_feature_store_recent(
 
 @app.get("/api/recent-signals")
 def recent_signals(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 50) -> Dict[str, Any]:
-    safe_limit = max(1, min(int(limit or 50), 200))
+    # TradingView alerts were retired. Recent signals are now generated from the
+    # backend Python engine using the active candle providers.
     live_signal = build_python_dashboard_signal(symbol, timeframe, 500)
 
-    webhook_rows = [
-        item for item in RECENT_SIGNALS[-safe_limit:]
-        if isinstance(item, dict) and str(item.get("eventType") or "").upper() == "TRADE_SIGNAL"
-    ]
-
-    signals = webhook_rows if webhook_rows else [live_signal]
-
     return {
-        "count": len(signals),
-        "signals": signals,
-        "source": "python_smc_alphax_ghost_snapshot" if not webhook_rows else "trade_alerts",
+        "count": 1,
+        "signals": [live_signal],
+        "source": "python_smc_alphax_ghost_snapshot",
+        "webhookMode": "disabled_legacy",
     }
 
 
 @app.get("/api/recent-candles")
-def recent_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 300) -> Dict[str, Any]:
+def recent_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 300, force: bool = False) -> Dict[str, Any]:
+    # TradingView candle alerts were retired. This endpoint now mirrors the
+    # backend candle router so frontend polling does not depend on RECENT_CANDLES.
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = max(1, min(int(limit or 300), 5000))
-    candles = get_live_recent_candles(normalized_symbol, normalized_timeframe)[-safe_limit:]
 
-    return build_candle_route_payload(
-        route_source="recent_candles",
+    if not force:
+        cached = candle_cache_get("recent_backend", normalized_symbol, normalized_timeframe, safe_limit, CANDLE_SITE_CACHE_MAX_AGE_SECONDS)
+        if cached:
+            cached_candles = cached.get("candles")
+            if isinstance(cached_candles, list):
+                rebuilt = build_candle_route_payload(
+                    route_source="recent_backend_candles",
+                    symbol=normalized_symbol,
+                    timeframe=normalized_timeframe,
+                    candles=cached_candles,
+                    provider=cached.get("provider"),
+                    cache_label=str(cached.get("cache") or "site_cached"),
+                )
+                rebuilt["siteCache"] = cached.get("siteCache", True)
+                rebuilt["siteCacheAgeSeconds"] = cached.get("siteCacheAgeSeconds")
+                return rebuilt
+            return cached
+
+    backend_candles = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit)
+    provider = backend_candles[-1].get("provider") if backend_candles else None
+
+    payload = build_candle_route_payload(
+        route_source="recent_backend_candles",
         symbol=normalized_symbol,
         timeframe=normalized_timeframe,
-        candles=candles,
-        provider="tradingview_webhook",
-        cache_label="live",
+        candles=backend_candles,
+        provider=provider,
+        cache_label="refreshed",
     )
+
+    if backend_candles:
+        return candle_cache_set("recent_backend", normalized_symbol, normalized_timeframe, safe_limit, payload)
+
+    stale = candle_cache_stale("recent_backend", normalized_symbol, normalized_timeframe, safe_limit)
+    return stale or payload
 
 
 @app.get("/api/historical-candles")
@@ -5703,6 +5730,18 @@ def provider_debug(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 2
 async def webhook_tradingview(request: FastAPIRequest) -> Dict[str, Any]:
     global LATEST_SIGNAL, RECENT_SIGNALS, RECENT_CANDLES
 
+    if not TRADINGVIEW_WEBHOOK_ENABLED:
+        return {
+            "ok": True,
+            "received": False,
+            "stored": False,
+            "status": "disabled_legacy",
+            "message": "TradingView alerts/webhooks are disabled. Dashboard uses backend candle providers and Python engine signals.",
+            "storedSignals": len(RECENT_SIGNALS),
+            "storedCandles": len(RECENT_CANDLES),
+            "createdAt": now_iso(),
+        }
+
     try:
         raw_payload = await request.json()
     except Exception:
@@ -5738,6 +5777,8 @@ async def webhook_tradingview(request: FastAPIRequest) -> Dict[str, Any]:
     return {
         "ok": True,
         "received": True,
+        "stored": True,
+        "webhookMode": "enabled",
         "symbol": payload.get("symbol"),
         "timeframe": payload.get("timeframe"),
         "storedSignals": len(RECENT_SIGNALS),
