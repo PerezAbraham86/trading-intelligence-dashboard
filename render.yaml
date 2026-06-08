@@ -7,3 +7,35 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
+      - key: SITE_CACHE_DB_FILE
+        value: /tmp/trading_dashboard_site_cache.sqlite3
+      - key: CANDLE_SITE_CACHE_MAX_AGE_SECONDS
+        value: "86400"
+
+  - type: worker
+    name: trading-intelligence-dashboard-cache-worker
+    runtime: python
+    buildCommand: pip install -r api/requirements.txt
+    startCommand: python -m api.cache_worker
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      # IMPORTANT:
+      # Set this to your live Render backend URL after deploy.
+      # Example: https://trading-intelligence-dashboard-backend.onrender.com
+      - key: BACKEND_BASE_URL
+        sync: false
+      - key: CACHE_WORKER_SYMBOLS
+        value: MES1!,BTCUSD,ETHUSD,SPY
+      - key: CACHE_WORKER_TIMEFRAMES
+        value: 1m,5m,15m
+      - key: CACHE_WORKER_LIMIT
+        value: "500"
+      - key: CACHE_WORKER_INTERVAL_SECONDS
+        value: "60"
+      - key: CACHE_WORKER_FORCE_FIRST_RUN
+        value: "true"
+      - key: CACHE_WORKER_FORCE_EACH_RUN
+        value: "false"
+      - key: CACHE_WORKER_TOUCH_CONTEXT
+        value: "true"
