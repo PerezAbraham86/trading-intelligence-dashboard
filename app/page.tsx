@@ -464,6 +464,21 @@ type CandleModeLabel = 'Regular' | 'Heikin Ashi'
 const chartSymbols = ['BTCUSD', 'ETHUSD', 'SPY', 'MES1!']
 const chartTimeframes = ['1m', '3m', '5m', '10m', '15m', '30m', '1h', '2h', '4h', '1d']
 
+function DashboardWaitingCard({
+  title,
+  message,
+}: {
+  title: string
+  message: string
+}) {
+  return (
+    <div className="rounded-2xl border border-dark-700 bg-dark-800/80 p-5 shadow-lg">
+      <div className="text-sm font-semibold text-amber-300">{title}</div>
+      <div className="mt-2 text-xs text-gray-400">{message}</div>
+    </div>
+  )
+}
+
 function candleModeToLightweightMode(mode: CandleModeLabel): ChartMode {
   return mode === 'Heikin Ashi' ? 'heikinAshi' : 'regular'
 }
@@ -538,6 +553,103 @@ function normalizeCandlePayload(payload: any): DashboardCandle[] {
       return left - right
     })
 }
+
+
+type SharedCandleCacheEntry = {
+  candles: DashboardCandle[]
+  overlayPayload: any | null
+  updatedAt: number
+  limit: number
+  provider?: string
+  source?: string
+}
+
+const SHARED_CANDLE_CACHE = new Map<string, SharedCandleCacheEntry>()
+const SHARED_CANDLE_IN_FLIGHT = new Map<string, Promise<SharedCandleCacheEntry>>()
+
+function sharedCandleKey(symbol: string, timeframe: string) {
+  return `${normalizeSymbol(symbol)}::${normalizeTimeframe(timeframe)}`
+}
+
+function readSharedCandleCache(symbol: string, timeframe: string, limit: number) {
+  const cached = SHARED_CANDLE_CACHE.get(sharedCandleKey(symbol, timeframe))
+  if (!cached) return null
+
+  return {
+    ...cached,
+    candles: cached.candles.slice(-Math.max(1, limit)),
+  }
+}
+
+async function fetchSharedCandlePayload(
+  apiBaseUrl: string,
+  symbol: string,
+  timeframe: string,
+  limit: number
+): Promise<SharedCandleCacheEntry> {
+  const normalizedSymbol = normalizeSymbol(symbol)
+  const normalizedTimeframe = normalizeTimeframe(timeframe)
+  const key = sharedCandleKey(normalizedSymbol, normalizedTimeframe)
+  const requestedLimit = Math.max(1, limit)
+
+  const activeRequest = SHARED_CANDLE_IN_FLIGHT.get(key)
+  if (activeRequest) {
+    const activeResult = await activeRequest
+    return {
+      ...activeResult,
+      candles: activeResult.candles.slice(-requestedLimit),
+    }
+  }
+
+  const request = (async () => {
+    const previous = SHARED_CANDLE_CACHE.get(key)
+    const apiLimit = Math.max(requestedLimit, previous?.limit ?? 0)
+
+    const params = new URLSearchParams({
+      symbol: normalizedSymbol,
+      timeframe: normalizedTimeframe,
+      limit: String(apiLimit),
+      force: 'true',
+    })
+
+    const response = await fetch(`${apiBaseUrl}/api/candles?${params.toString()}`, {
+      cache: 'no-store',
+    })
+
+    if (!response.ok) {
+      throw new Error(`Candle API error ${response.status}`)
+    }
+
+    const json = await response.json()
+    const candles = normalizeCandlePayload(json)
+    const overlayPayload = getUnifiedOverlayPayload(json)
+
+    const entry: SharedCandleCacheEntry = {
+      candles,
+      overlayPayload,
+      updatedAt: Date.now(),
+      limit: apiLimit,
+      provider: typeof json?.provider === 'string' ? json.provider : undefined,
+      source: typeof json?.source === 'string' ? json.source : undefined,
+    }
+
+    SHARED_CANDLE_CACHE.set(key, entry)
+    return entry
+  })()
+
+  SHARED_CANDLE_IN_FLIGHT.set(key, request)
+
+  try {
+    const result = await request
+    return {
+      ...result,
+      candles: result.candles.slice(-requestedLimit),
+    }
+  } finally {
+    SHARED_CANDLE_IN_FLIGHT.delete(key)
+  }
+}
+
 
 function dashboardCandlesToOverlayCandles(candles: DashboardCandle[]) {
   return candles.map((candle) => {
@@ -1595,7 +1707,9 @@ function useChartCandles(
   symbol: string,
   timeframe: string,
   limit = 500,
-  pollMs = 5000
+  pollMs = 5000,
+  enabled = true,
+  priority: 'main' | 'mini' = 'main'
 ) {
   const [candles, setCandles] = useState<DashboardCandle[]>([])
   const [overlayPayload, setOverlayPayload] = useState<any | null>(null)
@@ -1608,47 +1722,65 @@ function useChartCandles(
     let cancelled = false
     let intervalId: ReturnType<typeof setInterval> | null = null
 
+    function applyCachedPayload() {
+      const cached = readSharedCandleCache(symbol, timeframe, limit)
+      if (!cached || cancelled) return false
+
+      setCandles(cached.candles)
+      setOverlayPayload(cached.overlayPayload)
+      setErrorText('')
+      return cached.candles.length > 0
+    }
+
     async function fetchCandles() {
+      if (!enabled) {
+        applyCachedPayload()
+        setIsLoading(false)
+        return
+      }
+
       try {
-        setIsLoading(true)
-        setErrorText('')
+        const cachedWasApplied = applyCachedPayload()
 
-        const params = new URLSearchParams({
-          symbol,
-          timeframe,
-          limit: String(limit),
-          // Force rebuild lets the dashboard receive scorecards/mlFeatures
-          // immediately after backend scoring updates instead of reusing
-          // older site-cached overlay payloads.
-          force: 'true',
-        })
-
-        const response = await fetch(`${apiBaseUrl}/api/candles?${params.toString()}`, {
-          cache: 'no-store',
-        })
-
-        if (!response.ok) {
-          throw new Error(`Candle API error ${response.status}`)
+        // Priority rule:
+        // Main chart owns the refresh. Mini charts reuse main/shared cache when
+        // the symbol + timeframe already exist, so identical mini charts do not
+        // start a second /api/candles request.
+        if (priority === 'mini' && cachedWasApplied) {
+          setIsLoading(false)
+          return
         }
 
-        const json = await response.json()
-        const nextCandles = normalizeCandlePayload(json)
-        const nextOverlayPayload = getUnifiedOverlayPayload(json)
+        setIsLoading(!cachedWasApplied)
+        setErrorText('')
+
+        const nextPayload = await fetchSharedCandlePayload(apiBaseUrl, symbol, timeframe, limit)
 
         if (!cancelled) {
-          setCandles(nextCandles)
-          setOverlayPayload(nextOverlayPayload)
+          setCandles(nextPayload.candles)
+          setOverlayPayload(nextPayload.overlayPayload)
         }
       } catch (error) {
         console.error('Lightweight chart candle sync error:', error)
 
         if (!cancelled) {
-          setErrorText(error instanceof Error ? error.message : 'Candle API error')
+          const cachedWasApplied = applyCachedPayload()
+          if (!cachedWasApplied) {
+            setErrorText(error instanceof Error ? error.message : 'Candle API error')
+          }
         }
       } finally {
         if (!cancelled) {
           setIsLoading(false)
         }
+      }
+    }
+
+    if (!enabled) {
+      applyCachedPayload()
+      setIsLoading(false)
+      return () => {
+        cancelled = true
       }
     }
 
@@ -1661,7 +1793,7 @@ function useChartCandles(
       cancelled = true
       if (intervalId) clearInterval(intervalId)
     }
-  }, [apiBaseUrl, isClient, symbol, timeframe, limit, pollMs])
+  }, [apiBaseUrl, isClient, symbol, timeframe, limit, pollMs, enabled, priority])
 
   return {
     candles,
@@ -1903,8 +2035,12 @@ type LightweightChartPanelProps = {
   compact?: boolean
   apiBaseUrl?: string
   isClient: boolean
+  enabled?: boolean
+  priority?: 'main' | 'mini'
   onChange: (selection: ChartSelection) => void
   onScorecardsUpdate?: (scorecards: any, mlFeatures: any) => void
+  onCandlesUpdate?: (candles: DashboardCandle[]) => void
+  onOverlayPayloadUpdate?: (overlayPayload: any | null) => void
 }
 
 function LightweightChartPanel({
@@ -1920,8 +2056,12 @@ function LightweightChartPanel({
   compact = false,
   apiBaseUrl,
   isClient,
+  enabled = true,
+  priority = compact ? 'mini' : 'main',
   onChange,
   onScorecardsUpdate,
+  onCandlesUpdate,
+  onOverlayPayloadUpdate,
 }: LightweightChartPanelProps) {
   const normalizedSymbol = normalizeSymbol(symbol)
   const normalizedTimeframe = normalizeTimeframe(timeframe)
@@ -1931,8 +2071,18 @@ function LightweightChartPanel({
     normalizedSymbol,
     normalizedTimeframe,
     compact ? 300 : 700,
-    compact ? 10000 : 5000
+    compact ? 10000 : 5000,
+    enabled,
+    priority
   )
+
+  useEffect(() => {
+    onCandlesUpdate?.(candles)
+  }, [candles, onCandlesUpdate])
+
+  useEffect(() => {
+    onOverlayPayloadUpdate?.(unifiedOverlayPayload)
+  }, [onOverlayPayloadUpdate, unifiedOverlayPayload])
 
   const chartGhostCandles = useMemo(() => {
     if (ghostCandles.length > 0) return ghostCandles
@@ -2139,6 +2289,12 @@ function LightweightChartPanel({
         </div>
       )}
 
+      {!enabled && candles.length === 0 && (
+        <div className="mb-3 rounded-lg border border-blue-400/20 bg-blue-400/10 px-3 py-2 text-xs text-blue-300">
+          Waiting for main chart candles first...
+        </div>
+      )}
+
       {isLoading && candles.length === 0 && (
         <div className="mb-3 rounded-lg border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-xs text-amber-300">
           Loading candles...
@@ -2298,6 +2454,8 @@ export default function Dashboard() {
   const [activeChartPrice, setActiveChartPrice] = useState<number | null>(null)
   const [chartScorecards, setChartScorecards] = useState<any | null>(null)
   const [chartMlFeatures, setChartMlFeatures] = useState<any | null>(null)
+  const [mainChartCandles, setMainChartCandles] = useState<DashboardCandle[]>([])
+  const [mainChartOverlayPayload, setMainChartOverlayPayload] = useState<any | null>(null)
 
   const [mainChartSelection, setMainChartSelection] = useState<ChartSelection>({
     symbol: 'BTCUSD',
@@ -2344,55 +2502,34 @@ export default function Dashboard() {
   const overallTimeframeLabel = dashboardTimeframes.join(' / ')
   const FactorConfirmationTableLoose = FactorConfirmationTable as any
 
+  const mainCandlesReady = mainChartCandles.length >= 20
+  const mainOverlayReady = mainCandlesReady && Boolean(chartScorecards || chartMlFeatures || mainChartOverlayPayload)
+
   useEffect(() => {
-    if (!isClient || !apiBaseUrl) return
+    const latestCandle = mainChartCandles[mainChartCandles.length - 1]
+    const latestClose = toFiniteNumber(latestCandle?.close, NaN)
 
-    let cancelled = false
-    let intervalId: ReturnType<typeof setInterval> | null = null
-
-    async function fetchActiveChartPrice() {
-      try {
-        const params = new URLSearchParams({
-          symbol: selectedSymbol,
-          timeframe: selectedTimeframe,
-          limit: '5',
-        })
-
-        const response = await fetch(`${apiBaseUrl}/api/candles?${params.toString()}`, {
-          cache: 'no-store',
-        })
-
-        if (!response.ok) return
-
-        const json = await response.json()
-        const latestClose = extractLatestCloseFromCandlePayload(json)
-
-        if (!cancelled && latestClose && Number.isFinite(latestClose)) {
-          setActiveChartPrice(latestClose)
-        }
-      } catch (error) {
-        console.error('Active chart price sync error:', error)
-      }
+    if (Number.isFinite(latestClose) && latestClose > 0) {
+      setActiveChartPrice(latestClose)
+    } else {
+      setActiveChartPrice(null)
     }
+  }, [mainChartCandles])
 
-    setActiveChartPrice(null)
-    fetchActiveChartPrice()
-    intervalId = setInterval(fetchActiveChartPrice, 10000)
-
-    return () => {
-      cancelled = true
-      if (intervalId) clearInterval(intervalId)
-    }
-  }, [apiBaseUrl, isClient, selectedSymbol, selectedTimeframe])
 
   useEffect(() => {
     setFactorTechnicalSentiment(null)
     setChartScorecards(null)
     setChartMlFeatures(null)
+    setPythonEngineState(null)
+    setTimeframeEngineStates({})
+    setSharedTechnicalSentiment(null)
+    setTimeframeTechnicalSentiments({})
+    setMainChartOverlayPayload(null)
   }, [selectedSymbol, overallTimeframeLabel])
 
   useEffect(() => {
-    if (!isClient || !apiBaseUrl) return
+    if (!isClient || !apiBaseUrl || !mainCandlesReady) return
 
     let cancelled = false
     let intervalId: ReturnType<typeof setInterval> | null = null
@@ -2435,10 +2572,10 @@ export default function Dashboard() {
       cancelled = true
       if (intervalId) clearInterval(intervalId)
     }
-  }, [apiBaseUrl, isClient, selectedSymbol, selectedTimeframe, dashboardTimeframes])
+  }, [apiBaseUrl, isClient, selectedSymbol, selectedTimeframe, dashboardTimeframes, mainCandlesReady])
 
   useEffect(() => {
-    if (!isClient || !apiBaseUrl) return
+    if (!isClient || !apiBaseUrl || !mainCandlesReady) return
 
     let cancelled = false
     let intervalId: ReturnType<typeof setInterval> | null = null
@@ -2510,7 +2647,7 @@ export default function Dashboard() {
       cancelled = true
       if (intervalId) clearInterval(intervalId)
     }
-  }, [apiBaseUrl, isClient, selectedSymbol, selectedTimeframe, dashboardTimeframes])
+  }, [apiBaseUrl, isClient, selectedSymbol, selectedTimeframe, dashboardTimeframes, mainCandlesReady])
 
   const augmentedLatestSignal = useMemo(() => {
     const mainGhostConfidence = getAverageGhostConfidence(pythonEngineState)
@@ -2689,9 +2826,13 @@ export default function Dashboard() {
             height={760}
             apiBaseUrl={apiBaseUrl}
             isClient={isClient}
+            enabled
+            priority="main"
             engineState={pythonEngineState}
             showOverlayStatus
             showOverlayLines
+            onCandlesUpdate={setMainChartCandles}
+            onOverlayPayloadUpdate={setMainChartOverlayPayload}
             onScorecardsUpdate={(nextScorecards, nextMlFeatures) => {
               setChartScorecards(nextScorecards ?? null)
               setChartMlFeatures(nextMlFeatures ?? null)
@@ -2716,6 +2857,8 @@ export default function Dashboard() {
               compact
               apiBaseUrl={apiBaseUrl}
               isClient={isClient}
+              enabled={mainCandlesReady}
+              priority="mini"
               onChange={(selection) => {
                 setMiniChartOneSelection({
                   symbol: normalizeSymbol(selection.symbol || miniOneSymbol),
@@ -2734,6 +2877,8 @@ export default function Dashboard() {
               compact
               apiBaseUrl={apiBaseUrl}
               isClient={isClient}
+              enabled={mainCandlesReady}
+              priority="mini"
               onChange={(selection) => {
                 setMiniChartTwoSelection({
                   symbol: normalizeSymbol(selection.symbol || miniTwoSymbol),
@@ -2747,43 +2892,67 @@ export default function Dashboard() {
 
         {/* Right Column */}
         <div className="space-y-6">
-          <MarketSentimentGauge
-            signal={augmentedLatestSignal as any}
-            technicalSentiment={(factorTechnicalSentiment ?? sharedTechnicalSentiment) as any}
-          />
+          {mainOverlayReady ? (
+            <>
+              <MarketSentimentGauge
+                signal={augmentedLatestSignal as any}
+                technicalSentiment={(factorTechnicalSentiment ?? sharedTechnicalSentiment) as any}
+              />
 
-          <PressureGauges signal={augmentedLatestSignal} />
+              <PressureGauges signal={augmentedLatestSignal} />
 
-          <WarningsPanel signal={augmentedLatestSignal} />
+              <WarningsPanel signal={augmentedLatestSignal} />
+            </>
+          ) : (
+            <DashboardWaitingCard
+              title={mainCandlesReady ? 'Waiting for overlay engine...' : 'Waiting for main candles...'}
+              message={
+                mainCandlesReady
+                  ? 'Main candles are loaded. Scorecards, external data, sentiment, and alerts will start after the main overlay payload is ready.'
+                  : 'The dashboard loads the main chart first. Mini charts and all other panels wait so they do not calculate from empty candle data.'
+              }
+            />
+          )}
         </div>
       </div>
 
       {/* Second Row */}
-      <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <FactorConfirmationTableLoose
-          signal={augmentedLatestSignal as any}
-          technicalSentiment={sharedTechnicalSentiment as any}
-          onTechnicalSentimentUpdate={setFactorTechnicalSentiment as any}
-          activeSymbol={selectedSymbol}
-          activeTimeframe={selectedTimeframe}
-          activePrice={activeChartPrice ?? undefined}
-        />
+      {mainOverlayReady ? (
+        <>
+          <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <FactorConfirmationTableLoose
+              signal={augmentedLatestSignal as any}
+              technicalSentiment={sharedTechnicalSentiment as any}
+              onTechnicalSentimentUpdate={setFactorTechnicalSentiment as any}
+              activeSymbol={selectedSymbol}
+              activeTimeframe={selectedTimeframe}
+              activePrice={activeChartPrice ?? undefined}
+            />
 
-        <GhostCandleProjection
-          signal={augmentedLatestSignal}
-          activeSymbol={selectedSymbol}
-          activeTimeframe={selectedTimeframe}
-          activePrice={activeChartPrice ?? undefined}
-        />
-      </div>
+            <GhostCandleProjection
+              signal={augmentedLatestSignal}
+              activeSymbol={selectedSymbol}
+              activeTimeframe={selectedTimeframe}
+              activePrice={activeChartPrice ?? undefined}
+            />
+          </div>
 
-      <RecentSignalsTable
-        signals={visibleRecentSignals}
-        latestSignal={augmentedLatestSignal}
-        activeSymbol={selectedSymbol}
-        activeTimeframe={selectedTimeframe}
-        activePrice={activeChartPrice ?? undefined}
-      />
+          <RecentSignalsTable
+            signals={visibleRecentSignals}
+            latestSignal={augmentedLatestSignal}
+            activeSymbol={selectedSymbol}
+            activeTimeframe={selectedTimeframe}
+            activePrice={activeChartPrice ?? undefined}
+          />
+        </>
+      ) : (
+        <div className="mb-6">
+          <DashboardWaitingCard
+            title="External panels paused"
+            message="Factor confirmation, external data, ghost projections, and recent signals will load after the main candles and overlay payload are ready."
+          />
+        </div>
+      )}
 
       {/* Footer */}
       <motion.div
