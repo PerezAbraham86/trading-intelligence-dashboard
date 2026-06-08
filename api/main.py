@@ -58,6 +58,14 @@ except Exception:
         build_external_data_context = None
         build_external_data_status = None
 
+try:
+    from api.unified_intelligence_engine import build_unified_intelligence_object
+except Exception:
+    try:
+        from unified_intelligence_engine import build_unified_intelligence_object
+    except Exception:
+        build_unified_intelligence_object = None
+
 
 
 
@@ -104,10 +112,6 @@ INSIGHTSENTRY_BASE_URL = f"https://{INSIGHTSENTRY_HOST}"
 
 ALPACA_STOCKS_BASE_URL = "https://data.alpaca.markets/v2"
 ALPACA_CRYPTO_BASE_URL = "https://data.alpaca.markets/v1beta3"
-
-# TradingView alerts/webhooks have been retired. Keep the route available only
-# as a disabled legacy endpoint so old webhook calls cannot affect live state.
-TRADINGVIEW_WEBHOOK_ENABLED = os.getenv("TRADINGVIEW_WEBHOOK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1120,17 +1124,17 @@ def get_dashboard_candles(symbol: str, timeframe: str = "1m", limit: int = 500) 
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = max(1, min(int(limit or 500), 5000))
 
-    # TradingView webhook candles were retired. Dashboard candles now come only
-    # from backend providers:
-    # - BTCUSD/ETHUSD -> Alpaca crypto
-    # - SPY           -> Alpaca stock
-    # - MES1!         -> InsightSentry futures OHLCV
     historical = filter_valid_candles_for_symbol(
         fetch_historical_candles(normalized_symbol, normalized_timeframe, safe_limit),
         normalized_symbol,
     )
 
-    merged = merge_candles_by_time(historical)[-safe_limit:]
+    live = filter_valid_candles_for_symbol(
+        get_live_recent_candles(normalized_symbol, normalized_timeframe),
+        normalized_symbol,
+    )
+
+    merged = merge_candles_by_time([*historical, *live])[-safe_limit:]
     return filter_valid_candles_for_symbol(merged, normalized_symbol)
 
 
@@ -5098,6 +5102,66 @@ def external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict
     return build_external_data_context(symbol, timeframe)
 
 
+
+
+@app.get("/api/unified-intelligence")
+def unified_intelligence(symbol: str = "MES1!", timeframe: str = "1m", limit: int = 500, force: bool = False) -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    safe_limit = max(50, min(int(limit or 500), 5000))
+    candles = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit)
+    ghosts: List[Dict[str, Any]] = []
+
+    overlay_payload = build_python_chart_overlays(candles, ghosts) if candles else empty_overlay_payload()
+    external_data = (
+        build_external_data_context(normalized_symbol, normalized_timeframe)
+        if build_external_data_context
+        else {
+            "symbol": normalized_symbol,
+            "timeframe": normalized_timeframe,
+            "providerStatus": {"massive": {"configured": False}},
+            "signalFields": {},
+            "scalars": {},
+            "source": "external_data_engine_unavailable",
+            "createdAt": now_iso(),
+        }
+    )
+
+    ml_feature_store_status_payload: Dict[str, Any] = {
+        "enabled": bool(get_ml_feature_store_summary),
+        "recorded": False,
+        "outcomes": {"checked": 0, "resolved": 0},
+    }
+
+    if get_ml_feature_store_summary:
+        try:
+            ml_feature_store_status_payload.update(
+                get_ml_feature_store_summary(symbol=normalized_symbol, timeframe=normalized_timeframe)
+            )
+        except Exception as error:
+            ml_feature_store_status_payload["error"] = str(error)[:300]
+
+    if not build_unified_intelligence_object:
+        return {
+            "eventType": "UNIFIED_INTELLIGENCE",
+            "status": "Unavailable",
+            "symbol": normalized_symbol,
+            "timeframe": normalized_timeframe,
+            "error": "unified_intelligence_engine module unavailable",
+            "createdAt": now_iso(),
+        }
+
+    payload = build_unified_intelligence_object(
+        symbol=normalized_symbol,
+        timeframe=normalized_timeframe,
+        candles=candles,
+        overlay_payload=overlay_payload,
+        external_data=external_data,
+        ml_feature_store_status=ml_feature_store_status_payload,
+    )
+    payload["force"] = bool(force)
+    return payload
+
 @app.get("/api/ticker-news")
 def ticker_news(symbol: str = "SPY", limit: int = 10, force: bool = False) -> Dict[str, Any]:
     return build_ticker_news_payload(symbol, limit, force_refresh=force)
@@ -5132,6 +5196,7 @@ def root() -> Dict[str, Any]:
             "/api/latest-sentiment",
             "/api/external-data/status",
             "/api/external-data/context",
+            "/api/unified-intelligence",
             "/webhook/tradingview",
         ],
     }
@@ -5154,8 +5219,9 @@ def health() -> Dict[str, Any]:
 @app.get("/api/backend-version")
 def backend_version() -> Dict[str, Any]:
     return {
-        "backendVersion": "ml-feature-store-v1",
+        "backendVersion": "unified-intelligence-v1",
         "hasMlFeatureStoreRoutes": True,
+        "hasUnifiedIntelligenceRoute": True,
         "module": __name__,
         "file": __file__,
         "createdAt": now_iso(),
@@ -5260,6 +5326,44 @@ def build_candle_route_payload(
 
     payload["mlFeatureStore"] = ml_feature_store_status
 
+    if build_unified_intelligence_object:
+        try:
+            unified_payload = build_unified_intelligence_object(
+                symbol=symbol,
+                timeframe=timeframe,
+                candles=candles,
+                overlay_payload=overlay_payload,
+                external_data=external_data,
+                ml_feature_store_status=ml_feature_store_status,
+            )
+            payload["unifiedIntelligence"] = unified_payload
+            payload["unifiedIntelligenceSummary"] = {
+                "status": unified_payload.get("status"),
+                "direction": (unified_payload.get("marketSentiment") or {}).get("direction"),
+                "strength": (unified_payload.get("marketSentiment") or {}).get("strength"),
+                "aiAction": (unified_payload.get("aiTrader") or {}).get("action"),
+                "entrySignal": (unified_payload.get("aiTrader") or {}).get("entrySignal"),
+                "exitSignal": (unified_payload.get("aiTrader") or {}).get("exitSignal"),
+            }
+        except Exception as error:
+            payload["unifiedIntelligence"] = {
+                "eventType": "UNIFIED_INTELLIGENCE",
+                "status": "Error",
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "error": str(error)[:300],
+                "createdAt": now_iso(),
+            }
+    else:
+        payload["unifiedIntelligence"] = {
+            "eventType": "UNIFIED_INTELLIGENCE",
+            "status": "Unavailable",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "error": "unified_intelligence_engine module unavailable",
+            "createdAt": now_iso(),
+        }
+
     return payload
 
 
@@ -5321,61 +5425,38 @@ def ml_feature_store_recent(
 
 @app.get("/api/recent-signals")
 def recent_signals(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 50) -> Dict[str, Any]:
-    # TradingView alerts were retired. Recent signals are now generated from the
-    # backend Python engine using the active candle providers.
+    safe_limit = max(1, min(int(limit or 50), 200))
     live_signal = build_python_dashboard_signal(symbol, timeframe, 500)
 
+    webhook_rows = [
+        item for item in RECENT_SIGNALS[-safe_limit:]
+        if isinstance(item, dict) and str(item.get("eventType") or "").upper() == "TRADE_SIGNAL"
+    ]
+
+    signals = webhook_rows if webhook_rows else [live_signal]
+
     return {
-        "count": 1,
-        "signals": [live_signal],
-        "source": "python_smc_alphax_ghost_snapshot",
-        "webhookMode": "disabled_legacy",
+        "count": len(signals),
+        "signals": signals,
+        "source": "python_smc_alphax_ghost_snapshot" if not webhook_rows else "trade_alerts",
     }
 
 
 @app.get("/api/recent-candles")
-def recent_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 300, force: bool = False) -> Dict[str, Any]:
-    # TradingView candle alerts were retired. This endpoint now mirrors the
-    # backend candle router so frontend polling does not depend on RECENT_CANDLES.
+def recent_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 300) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = max(1, min(int(limit or 300), 5000))
+    candles = get_live_recent_candles(normalized_symbol, normalized_timeframe)[-safe_limit:]
 
-    if not force:
-        cached = candle_cache_get("recent_backend", normalized_symbol, normalized_timeframe, safe_limit, CANDLE_SITE_CACHE_MAX_AGE_SECONDS)
-        if cached:
-            cached_candles = cached.get("candles")
-            if isinstance(cached_candles, list):
-                rebuilt = build_candle_route_payload(
-                    route_source="recent_backend_candles",
-                    symbol=normalized_symbol,
-                    timeframe=normalized_timeframe,
-                    candles=cached_candles,
-                    provider=cached.get("provider"),
-                    cache_label=str(cached.get("cache") or "site_cached"),
-                )
-                rebuilt["siteCache"] = cached.get("siteCache", True)
-                rebuilt["siteCacheAgeSeconds"] = cached.get("siteCacheAgeSeconds")
-                return rebuilt
-            return cached
-
-    backend_candles = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit)
-    provider = backend_candles[-1].get("provider") if backend_candles else None
-
-    payload = build_candle_route_payload(
-        route_source="recent_backend_candles",
+    return build_candle_route_payload(
+        route_source="recent_candles",
         symbol=normalized_symbol,
         timeframe=normalized_timeframe,
-        candles=backend_candles,
-        provider=provider,
-        cache_label="refreshed",
+        candles=candles,
+        provider="tradingview_webhook",
+        cache_label="live",
     )
-
-    if backend_candles:
-        return candle_cache_set("recent_backend", normalized_symbol, normalized_timeframe, safe_limit, payload)
-
-    stale = candle_cache_stale("recent_backend", normalized_symbol, normalized_timeframe, safe_limit)
-    return stale or payload
 
 
 @app.get("/api/historical-candles")
@@ -5730,18 +5811,6 @@ def provider_debug(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 2
 async def webhook_tradingview(request: FastAPIRequest) -> Dict[str, Any]:
     global LATEST_SIGNAL, RECENT_SIGNALS, RECENT_CANDLES
 
-    if not TRADINGVIEW_WEBHOOK_ENABLED:
-        return {
-            "ok": True,
-            "received": False,
-            "stored": False,
-            "status": "disabled_legacy",
-            "message": "TradingView alerts/webhooks are disabled. Dashboard uses backend candle providers and Python engine signals.",
-            "storedSignals": len(RECENT_SIGNALS),
-            "storedCandles": len(RECENT_CANDLES),
-            "createdAt": now_iso(),
-        }
-
     try:
         raw_payload = await request.json()
     except Exception:
@@ -5777,8 +5846,6 @@ async def webhook_tradingview(request: FastAPIRequest) -> Dict[str, Any]:
     return {
         "ok": True,
         "received": True,
-        "stored": True,
-        "webhookMode": "enabled",
         "symbol": payload.get("symbol"),
         "timeframe": payload.get("timeframe"),
         "storedSignals": len(RECENT_SIGNALS),
