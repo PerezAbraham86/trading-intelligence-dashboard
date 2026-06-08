@@ -16,6 +16,13 @@ api/cache_worker.py
 
 Background cache warmer for the Trading Intelligence Dashboard.
 
+Rate-limit-safe defaults:
+- MES1! only
+- 1m + 5m only
+- every 5 minutes
+- force=true every run, but only for MES1! 1m/5m every 5 minutes
+- no latest-signal touch calls by default
+
 Important design:
 - This worker DOES NOT write directly to SQLite.
 - It calls the Render backend API endpoints.
@@ -26,10 +33,10 @@ Render worker command:
     python -m api.cache_worker
 """
 
-DEFAULT_SYMBOLS = "MES1!,BTCUSD,ETHUSD,SPY"
-DEFAULT_TIMEFRAMES = "1m,5m,15m"
+DEFAULT_SYMBOLS = "MES1!"
+DEFAULT_TIMEFRAMES = "1m,5m"
 DEFAULT_LIMIT = 500
-DEFAULT_INTERVAL_SECONDS = 60
+DEFAULT_INTERVAL_SECONDS = 300
 
 _STOP = False
 
@@ -141,9 +148,9 @@ def worker_loop() -> None:
     timeframes = split_csv(os.getenv("CACHE_WORKER_TIMEFRAMES", DEFAULT_TIMEFRAMES), DEFAULT_TIMEFRAMES)
     limit = env_int("CACHE_WORKER_LIMIT", DEFAULT_LIMIT, 50, 5000)
     interval_seconds = env_int("CACHE_WORKER_INTERVAL_SECONDS", DEFAULT_INTERVAL_SECONDS, 15, 3600)
-    force_first = env_bool("CACHE_WORKER_FORCE_FIRST_RUN", True)
-    force_each = env_bool("CACHE_WORKER_FORCE_EACH_RUN", False)
-    touch_context = env_bool("CACHE_WORKER_TOUCH_CONTEXT", True)
+    force_first = env_bool("CACHE_WORKER_FORCE_FIRST_RUN", False)
+    force_each = env_bool("CACHE_WORKER_FORCE_EACH_RUN", True)
+    touch_context = env_bool("CACHE_WORKER_TOUCH_CONTEXT", False)
 
     log("started", {
         "baseUrl": base_url,
