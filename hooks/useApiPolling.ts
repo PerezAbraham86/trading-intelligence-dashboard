@@ -108,11 +108,18 @@ export type RecentSignal = {
   percent?: number
 }
 
+type UseApiPollingOptions = {
+  symbol?: string
+  timeframe?: string
+  enabled?: boolean
+  pollMs?: number
+}
+
 const fallbackSignal: TradingSignal = {
   eventType: 'WAITING',
   status: 'Waiting',
-  symbol: 'WAITING',
-  timeframe: 'Waiting',
+  symbol: 'MES1!',
+  timeframe: '1m',
   signal: 'NEUTRAL',
   confidence: 0,
   bullScore: 50,
@@ -160,6 +167,40 @@ const fallbackSignal: TradingSignal = {
   macroRisk: 0,
 }
 
+function normalizeSymbol(value: unknown): string {
+  const raw = String(value ?? 'MES1!').trim().toUpperCase()
+
+  if (raw.includes('MES')) return 'MES1!'
+  if (raw.includes('BTC')) return 'BTCUSD'
+  if (raw.includes('ETH')) return 'ETHUSD'
+  if (raw.includes('SPY')) return 'SPY'
+
+  return raw || 'MES1!'
+}
+
+function normalizeTimeframe(value: unknown): string {
+  const raw = String(value ?? '1m').trim().toLowerCase()
+  const map: Record<string, string> = {
+    '1': '1m',
+    '1m': '1m',
+    '3': '3m',
+    '3m': '3m',
+    '5': '5m',
+    '5m': '5m',
+    '10': '10m',
+    '10m': '10m',
+    '15': '15m',
+    '15m': '15m',
+    '30': '30m',
+    '30m': '30m',
+    '60': '1h',
+    '1h': '1h',
+    '1d': '1d',
+  }
+
+  return map[raw] ?? raw ?? '1m'
+}
+
 function toNumber(value: unknown, fallback = 0): number {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : fallback
@@ -201,7 +242,6 @@ function unwrapObjectPayload(raw: unknown, keys: string[]): unknown {
 
 function unwrapArrayPayload(raw: unknown, keys: string[]): unknown[] {
   if (Array.isArray(raw)) return raw
-
   if (!isObject(raw)) return []
 
   for (const key of keys) {
@@ -227,46 +267,38 @@ function normalizeSignal(rawInput: Partial<TradingSignal> | any): TradingSignal 
   const bullScore = toNumber(raw.bullScore, fallbackSignal.bullScore)
   const bearScore = toNumber(raw.bearScore, fallbackSignal.bearScore)
   const confidence = toNumber(raw.confidence, fallbackSignal.confidence)
-
   const close =
     toOptionalNumber(raw.close) ??
     toOptionalNumber(raw.current) ??
     toOptionalNumber(raw.price) ??
     fallbackSignal.close ??
     0
-
   const price = toNumber(raw.price ?? close, fallbackSignal.price)
 
   return {
     ...fallbackSignal,
     ...raw,
-
     eventType: raw.eventType ?? fallbackSignal.eventType,
     status: raw.status ?? fallbackSignal.status,
-    symbol: raw.symbol ?? fallbackSignal.symbol,
-    timeframe: raw.timeframe ?? fallbackSignal.timeframe,
+    symbol: normalizeSymbol(raw.symbol ?? fallbackSignal.symbol),
+    timeframe: normalizeTimeframe(raw.timeframe ?? fallbackSignal.timeframe),
     signal: raw.signal ?? fallbackSignal.signal,
-
     confidence,
     bullScore,
     bearScore,
     netBias: toNumber(raw.netBias, bullScore - bearScore),
     price,
-
     time: raw.time ?? raw.timestamp ?? raw.createdAt ?? fallbackSignal.time,
     timestamp: raw.timestamp ?? raw.time ?? raw.createdAt ?? fallbackSignal.timestamp,
-
     open: toNumber(raw.open, price),
     high: toNumber(raw.high, price),
     low: toNumber(raw.low, price),
     close: toNumber(close, price),
     volume: toNumber(raw.volume, 0),
-
     entry: toNumber(raw.entry, price),
     current: toNumber(raw.current ?? close, price),
     pnl: toNumber(raw.pnl, 0),
     percent: toNumber(raw.percent, 0),
-
     smc: raw.smc ?? fallbackSignal.smc,
     alphax: raw.alphax ?? fallbackSignal.alphax,
     ghost: raw.ghost ?? fallbackSignal.ghost,
@@ -274,16 +306,13 @@ function normalizeSignal(rawInput: Partial<TradingSignal> | any): TradingSignal 
     chartOverlayToggles:
       normalizeChartOverlayToggles(raw.chartOverlayToggles) ??
       fallbackSignal.chartOverlayToggles,
-
     openInterest: raw.openInterest ?? fallbackSignal.openInterest,
     footprint: raw.footprint ?? fallbackSignal.footprint,
     session: raw.session ?? fallbackSignal.session,
     fredMacro: raw.fredMacro ?? fallbackSignal.fredMacro,
     finraShortVolume: raw.finraShortVolume ?? fallbackSignal.finraShortVolume,
     cot: raw.cot ?? fallbackSignal.cot,
-
     warnings: Array.isArray(raw.warnings) ? raw.warnings : fallbackSignal.warnings,
-
     bullPressure: toNumber(raw.bullPressure, bullScore),
     bearPressure: toNumber(raw.bearPressure, bearScore),
     ghostConfidence: toNumber(raw.ghostConfidence, confidence),
@@ -304,31 +333,26 @@ function normalizeRecentSignals(rawInput: unknown): RecentSignal[] {
 
   return raw.map((item: any, index: number) => {
     const signal = item.signal ?? item.type ?? 'NEUTRAL'
-
     const close =
       toOptionalNumber(item.close) ??
       toOptionalNumber(item.current) ??
       toOptionalNumber(item.price) ??
       0
-
     const price = toNumber(item.price ?? close, 0)
 
     return {
       eventType: item.eventType,
       status: item.status ?? (index === 0 ? 'Live' : 'Live'),
-      symbol: item.symbol ?? 'WAITING',
-      timeframe: item.timeframe ?? '1',
+      symbol: normalizeSymbol(item.symbol ?? 'MES1!'),
+      timeframe: normalizeTimeframe(item.timeframe ?? '1m'),
       signal,
       type: signal,
-
       confidence: toNumber(item.confidence, 0),
       bullScore: toNumber(item.bullScore, 50),
       bearScore: toNumber(item.bearScore, 50),
       netBias: toNumber(item.netBias, 0),
       price,
-
       createdAt: item.createdAt ?? new Date().toISOString(),
-
       time: item.time ?? item.timestamp ?? item.createdAt ?? new Date().toISOString(),
       timestamp: item.timestamp ?? item.time ?? item.createdAt ?? new Date().toISOString(),
       open: toOptionalNumber(item.open),
@@ -336,13 +360,11 @@ function normalizeRecentSignals(rawInput: unknown): RecentSignal[] {
       low: toOptionalNumber(item.low),
       close: toOptionalNumber(close),
       volume: toOptionalNumber(item.volume),
-
       smc: item.smc,
       alphax: item.alphax,
       ghost: item.ghost,
       chartOverlays: item.chartOverlays,
       chartOverlayToggles: normalizeChartOverlayToggles(item.chartOverlayToggles),
-
       entry: toNumber(item.entry ?? price, price),
       current: toNumber(item.current ?? close ?? price, price),
       pnl: toNumber(item.pnl, 0),
@@ -385,15 +407,20 @@ function normalizeRecentCandles(rawInput: unknown): CandleData[] {
         low,
         close,
         volume: toNumber(item.volume, 0),
-        symbol: item.symbol ?? 'UNKNOWN',
-        timeframe: item.timeframe ?? '1',
+        symbol: normalizeSymbol(item.symbol ?? 'MES1!'),
+        timeframe: normalizeTimeframe(item.timeframe ?? '1m'),
         createdAt: item.createdAt ?? new Date().toISOString(),
       }
     })
     .filter((item): item is CandleData => item !== null)
 }
 
-export function useApiPolling() {
+export function useApiPolling(options: UseApiPollingOptions = {}) {
+  const normalizedSymbol = normalizeSymbol(options.symbol ?? 'MES1!')
+  const normalizedTimeframe = normalizeTimeframe(options.timeframe ?? '1m')
+  const enabled = options.enabled ?? true
+  const pollMs = Math.max(5000, Number(options.pollMs ?? 10000) || 10000)
+
   const [latestSignal, setLatestSignal] = useState<TradingSignal>(fallbackSignal)
   const [recentSignals, setRecentSignals] = useState<RecentSignal[]>([])
   const [recentCandles, setRecentCandles] = useState<CandleData[]>([])
@@ -402,15 +429,26 @@ export function useApiPolling() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   const fetchDashboardData = useCallback(async () => {
+    if (!enabled) {
+      setConnectionStatus('Waiting')
+      return
+    }
+
+    const params = new URLSearchParams({
+      symbol: normalizedSymbol,
+      timeframe: normalizedTimeframe,
+      limit: '50',
+    })
+
     try {
       const [latestRes, recentRes, candlesRes] = await Promise.all([
-        fetch(`${API_BASE_URL}/api/latest-signal`, {
+        fetch(`${API_BASE_URL}/api/latest-signal?${params.toString()}`, {
           cache: 'no-store',
         }),
-        fetch(`${API_BASE_URL}/api/recent-signals`, {
+        fetch(`${API_BASE_URL}/api/recent-signals?${params.toString()}`, {
           cache: 'no-store',
         }),
-        fetch(`${API_BASE_URL}/api/recent-candles`, {
+        fetch(`${API_BASE_URL}/api/recent-candles?${params.toString()}`, {
           cache: 'no-store',
         }),
       ])
@@ -449,26 +487,29 @@ export function useApiPolling() {
       setErrorMessage(null)
     } catch (error) {
       console.error('API polling error:', error)
-
       setConnectionStatus('Error')
       setErrorMessage(error instanceof Error ? error.message : 'Unknown API polling error')
       setLatestSignal((prev) => prev ?? fallbackSignal)
     }
-  }, [])
+  }, [enabled, normalizedSymbol, normalizedTimeframe])
 
   useEffect(() => {
-    setConnectionStatus('Waiting')
+    if (!enabled) {
+      setConnectionStatus('Waiting')
+      return
+    }
 
+    setConnectionStatus('Waiting')
     fetchDashboardData()
 
     const interval = window.setInterval(() => {
       fetchDashboardData()
-    }, 3000)
+    }, pollMs)
 
     return () => {
       window.clearInterval(interval)
     }
-  }, [fetchDashboardData])
+  }, [enabled, fetchDashboardData, pollMs])
 
   return {
     latestSignal,
