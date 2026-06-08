@@ -3000,7 +3000,7 @@ export default function Dashboard() {
                 technicalSentiment={(factorTechnicalSentiment ?? sharedTechnicalSentiment) as any}
               />
 
-              <PressureGauges signal={augmentedLatestSignal} />
+              <PressureGauges signal={augmentedLatestSignal} unifiedIntelligence={mainUnifiedIntelligence} />
 
               <WarningsPanel signal={augmentedLatestSignal} />
             </>
