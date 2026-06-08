@@ -27,6 +27,7 @@ type GhostCandleProjectionProps = {
   activePrice?: number
   overlayPayload?: OverlayPayload | null
   scorecards?: any | null
+  unifiedIntelligence?: any | null
 }
 
 type GhostCandle = {
@@ -37,7 +38,7 @@ type GhostCandle = {
   high: number
   low: number
   close: number
-  source?: 'python' | 'chart' | 'scorecard'
+  source?: 'python' | 'chart' | 'scorecard' | 'unified'
   targetReaction?: string
   targetSeverity?: number
   priceScaleWarning?: boolean
@@ -55,6 +56,7 @@ type OverlayPayload = {
   }
   scorecards?: any
   mlFeatures?: any
+  unifiedIntelligence?: any
   overlayFlags?: Record<string, boolean>
   source?: string
   status?: string
@@ -146,6 +148,44 @@ function normalizeDirection(value: any, open: number, close: number): 'UP' | 'DO
   return 'NEUTRAL'
 }
 
+function readUnifiedGhostCandles(unifiedIntelligence: any | null | undefined): any[] {
+  if (!unifiedIntelligence || typeof unifiedIntelligence !== 'object') return []
+
+  const candidates = [
+    unifiedIntelligence.ghostProjection?.candles,
+    unifiedIntelligence.ghostProjection?.ghostCandles,
+    unifiedIntelligence.components?.ghost?.candles,
+    unifiedIntelligence.components?.ghost?.ghostCandles,
+    unifiedIntelligence.ghostCandles,
+    unifiedIntelligence.projections,
+  ]
+
+  for (const value of candidates) {
+    if (Array.isArray(value) && value.length > 0) return value
+  }
+
+  return []
+}
+
+function getUnifiedProjectionScorecards(unifiedIntelligence: any | null | undefined) {
+  if (!unifiedIntelligence || typeof unifiedIntelligence !== 'object') return null
+
+  const ghost = unifiedIntelligence.components?.ghost
+  const market = unifiedIntelligence.marketSentiment
+  const aiTrader = unifiedIntelligence.aiTrader
+
+  return {
+    ghost: {
+      direction: ghost?.direction ?? unifiedIntelligence.ghostProjection?.direction,
+      confidence: ghost?.confidence ?? unifiedIntelligence.ghostProjection?.confidence,
+    },
+    overall: {
+      direction: market?.direction ?? aiTrader?.direction,
+      confirmationScore: market?.strength ?? aiTrader?.confidence,
+    },
+  }
+}
+
 function readRawGhostCandles(payload: OverlayPayload | null): any[] {
   if (!payload || typeof payload !== 'object') return []
 
@@ -205,17 +245,18 @@ function normalizeRawGhostCandles(rawGhosts: any[], sourceText: string): GhostCa
       0
 
     const source = String(ghost.source ?? sourceText ?? '').toLowerCase()
+    const isUnified = source.includes('unified') || sourceText.toLowerCase().includes('unified')
     const isPython = source.includes('python') || sourceText.toLowerCase().includes('python')
 
     candles.push({
-      label: `${isPython ? 'PY' : 'Ghost'} #${index + 1}`,
+      label: ghost.label ? String(ghost.label) : `${isUnified ? 'UI' : isPython ? 'PY' : 'Ghost'} #${index + 1}`,
       direction: normalizeDirection(ghost.direction ?? ghost.dir ?? ghost.signal, open, close),
       confidence: Math.round(clamp(confidenceRaw)),
       open: roundPrice(open),
       high: roundPrice(high),
       low: roundPrice(low),
       close: roundPrice(close),
-      source: isPython ? 'python' : 'chart',
+      source: isUnified ? 'unified' : isPython ? 'python' : 'chart',
       targetReaction: typeof ghost.targetReaction === 'string' ? ghost.targetReaction : undefined,
       targetSeverity: typeof ghost.targetSeverity === 'number' ? ghost.targetSeverity : toNumber(ghost.targetSeverity) ?? undefined,
     })
@@ -299,7 +340,8 @@ function getSyncedGhostCandles(
   activeTimeframe: string,
   activePrice?: number,
   signal?: TradingSignal,
-  scorecards?: any
+  scorecards?: any,
+  unifiedIntelligence?: any | null
 ) {
   const payloadSymbol = normalizeSymbol(payload?.symbol ?? activeSymbol)
   const payloadTimeframe = normalizeTimeframe(payload?.timeframe ?? activeTimeframe)
@@ -307,8 +349,12 @@ function getSyncedGhostCandles(
   if (payload && payloadSymbol !== normalizeSymbol(activeSymbol)) return []
   if (payload && !isSameTimeframe(payloadTimeframe, activeTimeframe)) return []
 
-  const rawGhosts = readRawGhostCandles(payload)
-  const normalized = normalizeRawGhostCandles(rawGhosts, String(payload?.source ?? 'python'))
+  const unifiedGhosts = readUnifiedGhostCandles(unifiedIntelligence ?? (payload as any)?.unifiedIntelligence)
+  const rawGhosts = unifiedGhosts.length > 0 ? unifiedGhosts : readRawGhostCandles(payload)
+  const normalized = normalizeRawGhostCandles(
+    rawGhosts,
+    unifiedGhosts.length > 0 ? 'unified_intelligence' : String(payload?.source ?? 'python')
+  )
 
   if (normalized.length > 0) {
     const priceMatched = normalized.filter((ghost) =>
@@ -323,13 +369,23 @@ function getSyncedGhostCandles(
     }))
   }
 
-  return buildScorecardBackedProjection(signal, scorecards ?? payload?.scorecards, activePrice)
+  return buildScorecardBackedProjection(
+    signal,
+    scorecards ?? getUnifiedProjectionScorecards(unifiedIntelligence ?? (payload as any)?.unifiedIntelligence) ?? payload?.scorecards,
+    activePrice
+  )
 }
 
 function getProjectionText(candles: GhostCandle[], signal?: TradingSignal) {
   const first = candles[0]
 
   if (!first) return 'Waiting for synced chart ghost'
+
+  if (first.source === 'unified') {
+    if (first.direction === 'UP') return 'Unified Bullish Projection'
+    if (first.direction === 'DOWN') return 'Unified Bearish Projection'
+    return 'Unified Neutral Projection'
+  }
 
   if (first.source === 'scorecard') {
     if (first.direction === 'UP') return 'Scorecard Bullish Projection'
@@ -391,6 +447,7 @@ export default function GhostCandleProjection({
   activePrice,
   overlayPayload,
   scorecards,
+  unifiedIntelligence,
 }: GhostCandleProjectionProps) {
   const symbol = normalizeSymbol(activeSymbol ?? signal?.activeSymbol ?? signal?.symbol)
   const timeframe = normalizeTimeframe(activeTimeframe ?? signal?.activeTimeframe ?? signal?.primaryTimeframe ?? signal?.timeframe)
@@ -452,14 +509,22 @@ export default function GhostCandleProjection({
     }
   }, [symbol, timeframe, overlayPayload])
 
-  const activePayload = overlayPayload ?? fetchedOverlayPayload
+  const activePayload = useMemo(() => {
+    const base = overlayPayload ?? fetchedOverlayPayload
+    if (!base || !unifiedIntelligence) return base
+    return {
+      ...base,
+      unifiedIntelligence,
+    }
+  }, [fetchedOverlayPayload, overlayPayload, unifiedIntelligence])
 
   const candles = useMemo(
-    () => getSyncedGhostCandles(activePayload, symbol, timeframe, activePrice, signal, scorecards),
-    [activePayload, symbol, timeframe, activePrice, signal, scorecards]
+    () => getSyncedGhostCandles(activePayload, symbol, timeframe, activePrice, signal, scorecards, unifiedIntelligence),
+    [activePayload, symbol, timeframe, activePrice, signal, scorecards, unifiedIntelligence]
   )
 
   const projectionText = getProjectionText(candles, signal)
+  const isUnifiedPowered = candles.some((candle) => candle.source === 'unified')
   const isPythonPowered = candles.some((candle) => candle.source === 'python')
   const isScorecardBacked = candles.some((candle) => candle.source === 'scorecard')
   const rawGhostCount = readRawGhostCandles(activePayload).length
@@ -475,9 +540,11 @@ export default function GhostCandleProjection({
         <div>
           <h2 className="text-xl font-bold text-white">Ghost Candle Projections</h2>
           <p className="mt-1 text-xs text-gray-500">
-            {isPythonPowered
-              ? `Synced Python engine • ${symbol} • ${timeframe}`
-              : isScorecardBacked
+            {isUnifiedPowered
+              ? `Unified Intelligence • ${symbol} • ${timeframe}`
+              : isPythonPowered
+                ? `Synced Python engine • ${symbol} • ${timeframe}`
+                : isScorecardBacked
                 ? `Scorecard-backed projection • ${symbol} • ${timeframe}`
                 : engineStatus === 'error'
                   ? `No synced ghost data • ${symbol} • ${timeframe}`
@@ -522,6 +589,12 @@ export default function GhostCandleProjection({
                     <span className={`text-xs font-bold ${styles.text}`}>
                       {styles.arrow} {candle.direction}
                     </span>
+
+                    {candle.source === 'unified' && (
+                      <span className={`rounded border px-2 py-0.5 text-[10px] font-bold ${styles.sourceBadge}`}>
+                        UNIFIED AI
+                      </span>
+                    )}
 
                     {candle.source === 'python' && (
                       <span className={`rounded border px-2 py-0.5 text-[10px] font-bold ${styles.sourceBadge}`}>
