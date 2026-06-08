@@ -93,6 +93,26 @@ def init_site_cache_store() -> Dict[str, Any]:
                 ON recent_signal_cache(user_key, symbol, timeframe, created_at DESC)
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scorecard_snapshot_cache (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_key TEXT NOT NULL DEFAULT 'default',
+                    chart_key TEXT NOT NULL DEFAULT 'main',
+                    symbol TEXT,
+                    timeframe TEXT,
+                    scorecard_type TEXT,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_scorecard_snapshot_cache_user_chart
+                ON scorecard_snapshot_cache(user_key, chart_key, symbol, timeframe, created_at DESC)
+                """
+            )
         _INITIALIZED = True
     return {
         "enabled": True,
@@ -312,12 +332,14 @@ def get_site_cache_summary() -> Dict[str, Any]:
             candle_count = int(connection.execute("SELECT COUNT(*) FROM candle_payload_cache").fetchone()[0])
             settings_count = int(connection.execute("SELECT COUNT(*) FROM chart_settings_cache").fetchone()[0])
             signals_count = int(connection.execute("SELECT COUNT(*) FROM recent_signal_cache").fetchone()[0])
+            scorecards_count = int(connection.execute("SELECT COUNT(*) FROM scorecard_snapshot_cache").fetchone()[0])
     return {
         "enabled": True,
         "dbFile": str(DB_PATH),
         "candlePayloads": candle_count,
         "chartSettings": settings_count,
         "recentSignals": signals_count,
+        "scorecards": scorecards_count,
         "createdAt": now_iso(),
     }
 
@@ -360,5 +382,164 @@ def load_chart_settings(user_key: str = "default") -> Dict[str, Any]:
             }
             for row in rows
         },
+        "createdAt": now_iso(),
+    }
+
+
+
+def save_recent_signal(user_key: str, symbol: str, timeframe: str, signal_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    ensure_site_cache_store()
+    safe_user = str(user_key or "default").strip() or "default"
+    timestamp = now_iso()
+    with _LOCK:
+        with _connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO recent_signal_cache (user_key, symbol, timeframe, signal_type, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    safe_user,
+                    str(symbol or ""),
+                    str(timeframe or ""),
+                    str(signal_type or ""),
+                    _safe_json_dumps(payload),
+                    timestamp,
+                ),
+            )
+            row_id = int(cursor.lastrowid or 0)
+    return {"ok": True, "id": row_id, "userKey": safe_user, "createdAt": timestamp}
+
+
+def load_recent_signals(user_key: str = "default", symbol: str = "", timeframe: str = "", limit: int = 50) -> Dict[str, Any]:
+    ensure_site_cache_store()
+    safe_user = str(user_key or "default").strip() or "default"
+    safe_limit = max(1, min(int(limit or 50), 500))
+    clauses = ["user_key = ?"]
+    params: List[Any] = [safe_user]
+    if symbol:
+        clauses.append("symbol = ?")
+        params.append(symbol)
+    if timeframe:
+        clauses.append("timeframe = ?")
+        params.append(timeframe)
+    params.append(safe_limit)
+
+    with _LOCK:
+        with _connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, symbol, timeframe, signal_type, payload_json, created_at
+                FROM recent_signal_cache
+                WHERE {' AND '.join(clauses)}
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+
+    return {
+        "userKey": safe_user,
+        "count": len(rows),
+        "signals": [
+            {
+                "id": row["id"],
+                "symbol": row["symbol"],
+                "timeframe": row["timeframe"],
+                "signalType": row["signal_type"],
+                "payload": _safe_json_loads(str(row["payload_json"]), {}),
+                "createdAt": row["created_at"],
+            }
+            for row in rows
+        ],
+        "createdAt": now_iso(),
+    }
+
+
+def save_scorecard_snapshot(
+    user_key: str,
+    chart_key: str,
+    symbol: str,
+    timeframe: str,
+    scorecard_type: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    ensure_site_cache_store()
+    safe_user = str(user_key or "default").strip() or "default"
+    safe_chart = str(chart_key or "main").strip() or "main"
+    timestamp = now_iso()
+    with _LOCK:
+        with _connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO scorecard_snapshot_cache (
+                    user_key, chart_key, symbol, timeframe, scorecard_type, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    safe_user,
+                    safe_chart,
+                    str(symbol or ""),
+                    str(timeframe or ""),
+                    str(scorecard_type or "scorecard"),
+                    _safe_json_dumps(payload),
+                    timestamp,
+                ),
+            )
+            row_id = int(cursor.lastrowid or 0)
+    return {"ok": True, "id": row_id, "userKey": safe_user, "chartKey": safe_chart, "createdAt": timestamp}
+
+
+def load_scorecard_snapshots(
+    user_key: str = "default",
+    chart_key: str = "",
+    symbol: str = "",
+    timeframe: str = "",
+    limit: int = 50,
+) -> Dict[str, Any]:
+    ensure_site_cache_store()
+    safe_user = str(user_key or "default").strip() or "default"
+    safe_limit = max(1, min(int(limit or 50), 500))
+    clauses = ["user_key = ?"]
+    params: List[Any] = [safe_user]
+    if chart_key:
+        clauses.append("chart_key = ?")
+        params.append(chart_key)
+    if symbol:
+        clauses.append("symbol = ?")
+        params.append(symbol)
+    if timeframe:
+        clauses.append("timeframe = ?")
+        params.append(timeframe)
+    params.append(safe_limit)
+
+    with _LOCK:
+        with _connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, chart_key, symbol, timeframe, scorecard_type, payload_json, created_at
+                FROM scorecard_snapshot_cache
+                WHERE {' AND '.join(clauses)}
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+
+    return {
+        "userKey": safe_user,
+        "count": len(rows),
+        "scorecards": [
+            {
+                "id": row["id"],
+                "chartKey": row["chart_key"],
+                "symbol": row["symbol"],
+                "timeframe": row["timeframe"],
+                "scorecardType": row["scorecard_type"],
+                "payload": _safe_json_loads(str(row["payload_json"]), {}),
+                "createdAt": row["created_at"],
+            }
+            for row in rows
+        ],
         "createdAt": now_iso(),
     }
