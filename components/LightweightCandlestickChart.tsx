@@ -84,6 +84,7 @@ type LightweightCandlestickChartProps = {
   nrtrAtrMultiplier?: number;
   nrtrPercent?: number;
   showNrtrStats?: boolean;
+  nrtrStatsCollapsedOnly?: boolean;
 };
 
 function isValidCandle(candle: DashboardCandle | null | undefined): candle is DashboardCandle {
@@ -914,6 +915,7 @@ export default function LightweightCandlestickChart({
   nrtrAtrMultiplier = 3,
   nrtrPercent = 0.25,
   showNrtrStats = true,
+  nrtrStatsCollapsedOnly = false,
 }: LightweightCandlestickChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -1359,7 +1361,13 @@ export default function LightweightCandlestickChart({
 
 
       {showNrtr && showNrtrStats && nrtrPoints.length > 0 && (
-        <div className="absolute right-3 top-3 z-10 w-[230px] rounded-xl border border-slate-800 bg-black/45 p-3 text-[11px] text-slate-300 shadow-lg backdrop-blur">
+        <div
+          className={
+            nrtrStatsCollapsedOnly
+              ? "absolute right-3 top-3 z-10 w-[170px] rounded-xl border border-slate-800 bg-black/45 p-2 text-[10px] text-slate-300 shadow-lg backdrop-blur"
+              : "absolute right-3 top-3 z-10 w-[230px] rounded-xl border border-slate-800 bg-black/45 p-3 text-[11px] text-slate-300 shadow-lg backdrop-blur"
+          }
+        >
           <div className="mb-2 flex items-center justify-between gap-2">
             <div className="flex min-w-0 flex-col">
               <span className="font-semibold text-slate-100">NRTR+</span>
@@ -1377,17 +1385,19 @@ export default function LightweightCandlestickChart({
               >
                 {nrtrStats.directionText}
               </span>
-              <button
-                type="button"
-                onClick={() => setIsNrtrStatsCollapsed((value) => !value)}
-                className="pointer-events-auto rounded-md border border-slate-700 px-2 py-1 text-[10px] font-semibold text-slate-300 hover:border-amber-400/60 hover:text-amber-300"
-              >
-                {isNrtrStatsCollapsed ? "Expand" : "Collapse"}
-              </button>
+              {!nrtrStatsCollapsedOnly && (
+                <button
+                  type="button"
+                  onClick={() => setIsNrtrStatsCollapsed((value) => !value)}
+                  className="pointer-events-auto rounded-md border border-slate-700 px-2 py-1 text-[10px] font-semibold text-slate-300 hover:border-amber-400/60 hover:text-amber-300"
+                >
+                  {isNrtrStatsCollapsed ? "Expand" : "Collapse"}
+                </button>
+              )}
             </div>
           </div>
 
-          {isNrtrStatsCollapsed ? (
+          {(isNrtrStatsCollapsed || nrtrStatsCollapsedOnly) ? (
             <div className="grid grid-cols-3 gap-2 rounded-lg border border-slate-800 bg-black/30 p-2 text-center">
               <div>
                 <div className="text-slate-500">P/L</div>
