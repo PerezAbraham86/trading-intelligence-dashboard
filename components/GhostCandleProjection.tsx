@@ -16,6 +16,8 @@ type TradingSignal = {
   confidence?: number
   netBias?: number
   ghost?: string
+  ghostDirection?: string
+  ghostConfidence?: number
 }
 
 type GhostCandleProjectionProps = {
@@ -23,6 +25,8 @@ type GhostCandleProjectionProps = {
   activeSymbol?: string
   activeTimeframe?: string
   activePrice?: number
+  overlayPayload?: OverlayPayload | null
+  scorecards?: any | null
 }
 
 type GhostCandle = {
@@ -33,9 +37,10 @@ type GhostCandle = {
   high: number
   low: number
   close: number
-  source?: 'python' | 'chart'
+  source?: 'python' | 'chart' | 'scorecard'
   targetReaction?: string
   targetSeverity?: number
+  priceScaleWarning?: boolean
 }
 
 type OverlayPayload = {
@@ -45,6 +50,11 @@ type OverlayPayload = {
   chartOverlays?: {
     ghostCandles?: any[]
   }
+  overlays?: {
+    ghostCandles?: any[]
+  }
+  scorecards?: any
+  mlFeatures?: any
   overlayFlags?: Record<string, boolean>
   source?: string
   status?: string
@@ -61,6 +71,10 @@ function toNumber(value: any): number | null {
   return Number.isFinite(parsed) ? parsed : null
 }
 
+function clamp(value: number, low = 0, high = 100) {
+  return Math.max(low, Math.min(high, value))
+}
+
 function normalizeSymbol(value: any): string {
   const raw = String(value ?? 'BTCUSD')
     .trim()
@@ -72,6 +86,7 @@ function normalizeSymbol(value: any): string {
     .replace('CME:', '')
 
   if (raw === 'MES1' || raw === 'MES1!' || raw.includes('MES')) return 'MES1!'
+  if (raw === 'ES1' || raw === 'ES1!' || raw.includes('ES')) return 'ES1!'
   if (raw.includes('BTC')) return 'BTCUSD'
   if (raw.includes('ETH')) return 'ETHUSD'
   if (raw.includes('SPY')) return 'SPY'
@@ -101,6 +116,8 @@ function normalizeTimeframe(value: any): string {
 function isSameTimeframe(value: any, activeTimeframe: string) {
   const raw = String(value ?? '').trim()
 
+  if (!raw) return true
+
   if (raw.includes('/')) {
     return raw
       .split('/')
@@ -115,7 +132,7 @@ function isPriceNearActiveScale(price: number, activePrice?: number) {
   if (!Number.isFinite(price) || price <= 0) return false
   if (!activePrice || !Number.isFinite(activePrice) || activePrice <= 0) return true
 
-  return Math.abs(price - activePrice) / activePrice <= 0.2
+  return Math.abs(price - activePrice) / activePrice <= 0.35
 }
 
 function normalizeDirection(value: any, open: number, close: number): 'UP' | 'DOWN' | 'NEUTRAL' {
@@ -129,14 +146,53 @@ function normalizeDirection(value: any, open: number, close: number): 'UP' | 'DO
   return 'NEUTRAL'
 }
 
+function readRawGhostCandles(payload: OverlayPayload | null): any[] {
+  if (!payload || typeof payload !== 'object') return []
+
+  const candidates = [
+    payload.ghostCandles,
+    payload.chartOverlays?.ghostCandles,
+    payload.overlays?.ghostCandles,
+    (payload as any).chartOverlayPayload?.ghostCandles,
+    (payload as any).mlFeatures?.ghostCandles,
+    (payload as any).scorecards?.ghost?.ghostCandles,
+  ]
+
+  for (const value of candidates) {
+    if (Array.isArray(value) && value.length > 0) return value
+  }
+
+  return []
+}
+
 function normalizeRawGhostCandles(rawGhosts: any[], sourceText: string): GhostCandle[] {
   const candles: GhostCandle[] = []
 
   rawGhosts.slice(0, 3).forEach((ghost: any, index: number) => {
-    const open = toNumber(ghost.open) ?? toNumber(ghost.o) ?? toNumber(ghost.ghostOpen) ?? toNumber(ghost.projectedOpen)
-    const high = toNumber(ghost.high) ?? toNumber(ghost.h) ?? toNumber(ghost.ghostHigh) ?? toNumber(ghost.projectedHigh)
-    const low = toNumber(ghost.low) ?? toNumber(ghost.l) ?? toNumber(ghost.ghostLow) ?? toNumber(ghost.projectedLow)
-    const close = toNumber(ghost.close) ?? toNumber(ghost.c) ?? toNumber(ghost.ghostClose) ?? toNumber(ghost.projectedClose)
+    const open =
+      toNumber(ghost.open) ??
+      toNumber(ghost.o) ??
+      toNumber(ghost.ghostOpen) ??
+      toNumber(ghost.projectedOpen) ??
+      toNumber(ghost.haOpen)
+    const high =
+      toNumber(ghost.high) ??
+      toNumber(ghost.h) ??
+      toNumber(ghost.ghostHigh) ??
+      toNumber(ghost.projectedHigh) ??
+      toNumber(ghost.haHigh)
+    const low =
+      toNumber(ghost.low) ??
+      toNumber(ghost.l) ??
+      toNumber(ghost.ghostLow) ??
+      toNumber(ghost.projectedLow) ??
+      toNumber(ghost.haLow)
+    const close =
+      toNumber(ghost.close) ??
+      toNumber(ghost.c) ??
+      toNumber(ghost.ghostClose) ??
+      toNumber(ghost.projectedClose) ??
+      toNumber(ghost.haClose)
 
     if (open === null || high === null || low === null || close === null) return
 
@@ -145,6 +201,7 @@ function normalizeRawGhostCandles(rawGhosts: any[], sourceText: string): GhostCa
       toNumber(ghost.percent) ??
       toNumber(ghost.probability) ??
       toNumber(ghost.score) ??
+      toNumber(ghost.trust) ??
       0
 
     const source = String(ghost.source ?? sourceText ?? '').toLowerCase()
@@ -153,7 +210,7 @@ function normalizeRawGhostCandles(rawGhosts: any[], sourceText: string): GhostCa
     candles.push({
       label: `${isPython ? 'PY' : 'Ghost'} #${index + 1}`,
       direction: normalizeDirection(ghost.direction ?? ghost.dir ?? ghost.signal, open, close),
-      confidence: Math.round(Math.max(0, Math.min(100, confidenceRaw))),
+      confidence: Math.round(clamp(confidenceRaw)),
       open: roundPrice(open),
       high: roundPrice(high),
       low: roundPrice(low),
@@ -167,32 +224,118 @@ function normalizeRawGhostCandles(rawGhosts: any[], sourceText: string): GhostCa
   return candles
 }
 
-function getSyncedGhostCandles(payload: OverlayPayload | null, activeSymbol: string, activeTimeframe: string, activePrice?: number) {
-  if (!payload) return []
+function scorecardDirection(scorecards: any, signal?: TradingSignal): 'UP' | 'DOWN' | 'NEUTRAL' {
+  const text = String(
+    scorecards?.ghost?.direction ??
+      scorecards?.overall?.direction ??
+      signal?.ghostDirection ??
+      signal?.ghost ??
+      signal?.signal ??
+      ''
+  ).toLowerCase()
 
-  const payloadSymbol = normalizeSymbol(payload.symbol)
-  const payloadTimeframe = normalizeTimeframe(payload.timeframe)
+  if (text.includes('bull') || text.includes('buy') || text.includes('up')) return 'UP'
+  if (text.includes('bear') || text.includes('sell') || text.includes('down')) return 'DOWN'
+  return 'NEUTRAL'
+}
 
-  if (payloadSymbol !== normalizeSymbol(activeSymbol)) return []
-  if (!isSameTimeframe(payloadTimeframe, activeTimeframe)) return []
+function buildScorecardBackedProjection(
+  signal: TradingSignal | undefined,
+  scorecards: any,
+  activePrice?: number
+): GhostCandle[] {
+  const base = toNumber(activePrice) ?? toNumber(signal?.current) ?? toNumber(signal?.price) ?? toNumber(signal?.entry)
+  if (!base || base <= 0) return []
 
-  const rawGhosts = Array.isArray(payload.ghostCandles)
-    ? payload.ghostCandles
-    : Array.isArray(payload.chartOverlays?.ghostCandles)
-      ? payload.chartOverlays?.ghostCandles ?? []
-      : []
+  const direction = scorecardDirection(scorecards, signal)
+  if (direction === 'NEUTRAL') return []
 
-  const normalized = normalizeRawGhostCandles(rawGhosts, String(payload.source ?? 'python'))
-
-  return normalized.filter((ghost) =>
-    [ghost.open, ghost.high, ghost.low, ghost.close].every((price) => isPriceNearActiveScale(price, activePrice))
+  const confidence = Math.round(
+    clamp(
+      toNumber(scorecards?.ghost?.confidence) ??
+        toNumber(signal?.ghostConfidence) ??
+        toNumber(signal?.confidence) ??
+        toNumber(scorecards?.overall?.confirmationScore) ??
+        21,
+      5,
+      99
+    )
   )
+
+  const step = Math.max(base * 0.00018, 0.5)
+  const wick = Math.max(base * 0.00012, 0.25)
+  const candles: GhostCandle[] = []
+
+  let previousClose = base
+  for (let index = 0; index < 3; index += 1) {
+    const move = step * (index + 1) * (direction === 'UP' ? 1 : -1)
+    const open = previousClose
+    const close = base + move
+    const high = Math.max(open, close) + wick * (index + 1)
+    const low = Math.min(open, close) - wick * (index + 1)
+
+    candles.push({
+      label: `PY #${index + 1}`,
+      direction,
+      confidence: Math.max(10, confidence - index * 4),
+      open: roundPrice(open),
+      high: roundPrice(high),
+      low: roundPrice(low),
+      close: roundPrice(close),
+      source: 'scorecard',
+      targetReaction: 'scorecard_backed_projection_waiting_for_raw_ghost_candles',
+      targetSeverity: confidence / 100,
+    })
+
+    previousClose = close
+  }
+
+  return candles
+}
+
+function getSyncedGhostCandles(
+  payload: OverlayPayload | null,
+  activeSymbol: string,
+  activeTimeframe: string,
+  activePrice?: number,
+  signal?: TradingSignal,
+  scorecards?: any
+) {
+  const payloadSymbol = normalizeSymbol(payload?.symbol ?? activeSymbol)
+  const payloadTimeframe = normalizeTimeframe(payload?.timeframe ?? activeTimeframe)
+
+  if (payload && payloadSymbol !== normalizeSymbol(activeSymbol)) return []
+  if (payload && !isSameTimeframe(payloadTimeframe, activeTimeframe)) return []
+
+  const rawGhosts = readRawGhostCandles(payload)
+  const normalized = normalizeRawGhostCandles(rawGhosts, String(payload?.source ?? 'python'))
+
+  if (normalized.length > 0) {
+    const priceMatched = normalized.filter((ghost) =>
+      [ghost.open, ghost.high, ghost.low, ghost.close].every((price) => isPriceNearActiveScale(price, activePrice))
+    )
+
+    if (priceMatched.length > 0) return priceMatched
+
+    return normalized.map((ghost) => ({
+      ...ghost,
+      priceScaleWarning: true,
+    }))
+  }
+
+  return buildScorecardBackedProjection(signal, scorecards ?? payload?.scorecards, activePrice)
 }
 
 function getProjectionText(candles: GhostCandle[], signal?: TradingSignal) {
   const first = candles[0]
 
   if (!first) return 'Waiting for synced chart ghost'
+
+  if (first.source === 'scorecard') {
+    if (first.direction === 'UP') return 'Scorecard Bullish Projection'
+    if (first.direction === 'DOWN') return 'Scorecard Bearish Projection'
+    return 'Scorecard Neutral Projection'
+  }
 
   if (first.source === 'python') {
     if (first.direction === 'UP') return 'Python Bullish Projection'
@@ -246,14 +389,21 @@ export default function GhostCandleProjection({
   activeSymbol,
   activeTimeframe,
   activePrice,
+  overlayPayload,
+  scorecards,
 }: GhostCandleProjectionProps) {
   const symbol = normalizeSymbol(activeSymbol ?? signal?.activeSymbol ?? signal?.symbol)
   const timeframe = normalizeTimeframe(activeTimeframe ?? signal?.activeTimeframe ?? signal?.primaryTimeframe ?? signal?.timeframe)
 
-  const [overlayPayload, setOverlayPayload] = useState<OverlayPayload | null>(null)
+  const [fetchedOverlayPayload, setFetchedOverlayPayload] = useState<OverlayPayload | null>(null)
   const [engineStatus, setEngineStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle')
 
   useEffect(() => {
+    if (overlayPayload) {
+      setEngineStatus('loaded')
+      return
+    }
+
     let cancelled = false
     let intervalId: ReturnType<typeof setInterval> | null = null
 
@@ -265,10 +415,10 @@ export default function GhostCandleProjection({
           symbol,
           timeframe,
           limit: '500',
-          smc: 'false',
+          smc: 'true',
           ghost: 'true',
-          profile: 'false',
-          orderBlocks: 'false',
+          profile: 'true',
+          orderBlocks: 'true',
         })
 
         const response = await fetch(`${API_BASE_URL}/api/chart-overlays?${params.toString()}`, {
@@ -283,7 +433,7 @@ export default function GhostCandleProjection({
         const json = await response.json()
 
         if (!cancelled) {
-          setOverlayPayload(json && typeof json === 'object' ? json : null)
+          setFetchedOverlayPayload(json && typeof json === 'object' ? json : null)
           setEngineStatus('loaded')
         }
       } catch (error) {
@@ -300,15 +450,19 @@ export default function GhostCandleProjection({
       cancelled = true
       if (intervalId) clearInterval(intervalId)
     }
-  }, [symbol, timeframe])
+  }, [symbol, timeframe, overlayPayload])
+
+  const activePayload = overlayPayload ?? fetchedOverlayPayload
 
   const candles = useMemo(
-    () => getSyncedGhostCandles(overlayPayload, symbol, timeframe, activePrice),
-    [overlayPayload, symbol, timeframe, activePrice]
+    () => getSyncedGhostCandles(activePayload, symbol, timeframe, activePrice, signal, scorecards),
+    [activePayload, symbol, timeframe, activePrice, signal, scorecards]
   )
 
   const projectionText = getProjectionText(candles, signal)
   const isPythonPowered = candles.some((candle) => candle.source === 'python')
+  const isScorecardBacked = candles.some((candle) => candle.source === 'scorecard')
+  const rawGhostCount = readRawGhostCandles(activePayload).length
 
   return (
     <motion.div
@@ -323,10 +477,17 @@ export default function GhostCandleProjection({
           <p className="mt-1 text-xs text-gray-500">
             {isPythonPowered
               ? `Synced Python engine • ${symbol} • ${timeframe}`
-              : engineStatus === 'error'
-                ? `No synced ghost data • ${symbol} • ${timeframe}`
-                : `Waiting for synced chart ghost • ${symbol} • ${timeframe}`}
+              : isScorecardBacked
+                ? `Scorecard-backed projection • ${symbol} • ${timeframe}`
+                : engineStatus === 'error'
+                  ? `No synced ghost data • ${symbol} • ${timeframe}`
+                  : `Waiting for synced chart ghost • ${symbol} • ${timeframe}`}
           </p>
+          {rawGhostCount > 0 && candles.some((candle) => candle.priceScaleWarning) && (
+            <p className="mt-1 text-[10px] text-yellow-400">
+              Raw ghost candles were found, but their price scale did not perfectly match the active chart. Showing them anyway.
+            </p>
+          )}
         </div>
 
         <span className="text-right text-xs text-gray-500">
@@ -365,6 +526,12 @@ export default function GhostCandleProjection({
                     {candle.source === 'python' && (
                       <span className={`rounded border px-2 py-0.5 text-[10px] font-bold ${styles.sourceBadge}`}>
                         SYNCED PYTHON
+                      </span>
+                    )}
+
+                    {candle.source === 'scorecard' && (
+                      <span className={`rounded border px-2 py-0.5 text-[10px] font-bold ${styles.sourceBadge}`}>
+                        SCORECARD BACKED
                       </span>
                     )}
                   </div>
