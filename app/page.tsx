@@ -2503,7 +2503,8 @@ function LightweightChartPanel({
         nrtrAtrMultiplier={nrtrAtrMultiplier}
         nrtrPercent={nrtrPercent}
         nrtrExitMode={compact ? 'Off' : 'Pivot Pullback'}
-        showNrtrStats={!compact}
+        showNrtrStats
+        nrtrStatsCollapsedOnly={compact}
         mode={candleModeToLightweightMode(candleMode)}
         height={height}
         symbol={normalizedSymbol}
