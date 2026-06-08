@@ -70,6 +70,7 @@ type TradingSignal = {
 
 type PressureGaugesProps = {
   signal?: TradingSignal
+  unifiedIntelligence?: any | null
 }
 
 type GaugeItem = {
@@ -387,6 +388,153 @@ function calculateChopRisk(
   )
 }
 
+
+function asObject(value: unknown): Record<string, any> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, any>)
+    : null
+}
+
+function unifiedNumber(value: unknown, fallback = 0) {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? numeric : fallback
+}
+
+function unifiedPercent(value: unknown, fallback = 0) {
+  const numeric = unifiedNumber(value, fallback)
+
+  if (!Number.isFinite(numeric)) return clamp(fallback)
+
+  const scaled = Math.abs(numeric) <= 1 && Math.abs(numeric) > 0
+    ? Math.abs(numeric) * 100
+    : Math.abs(numeric)
+
+  return clamp(scaled)
+}
+
+function unifiedDirection(value: unknown): 'bullish' | 'bearish' | 'neutral' {
+  const raw = asObject(value)
+  const text = String(
+    raw?.direction ??
+      raw?.signal ??
+      raw?.bias ??
+      raw?.side ??
+      raw?.status ??
+      value ??
+      ''
+  ).toLowerCase()
+
+  if (
+    text.includes('bull') ||
+    text.includes('buy') ||
+    text.includes('long') ||
+    text.includes('up') ||
+    text.includes('demand')
+  ) {
+    return 'bullish'
+  }
+
+  if (
+    text.includes('bear') ||
+    text.includes('sell') ||
+    text.includes('short') ||
+    text.includes('down') ||
+    text.includes('supply')
+  ) {
+    return 'bearish'
+  }
+
+  const directionValue = unifiedNumber(raw?.directionValue ?? raw?.signedScore ?? raw?.signed ?? raw?.value, 0)
+
+  if (directionValue > 0) return 'bullish'
+  if (directionValue < 0) return 'bearish'
+
+  return 'neutral'
+}
+
+function unifiedComponentScore(value: unknown) {
+  const raw = asObject(value)
+
+  return unifiedPercent(
+    raw?.strength ??
+      raw?.score ??
+      raw?.confidence ??
+      raw?.qualityScore ??
+      raw?.netScore ??
+      raw?.value,
+    0
+  )
+}
+
+function unifiedDirectionalScore(value: unknown, side: 'bullish' | 'bearish') {
+  const direction = unifiedDirection(value)
+  if (direction !== side) return 0
+  return unifiedComponentScore(value)
+}
+
+function getUnifiedComponents(unifiedIntelligence: any | null | undefined) {
+  const root = asObject(unifiedIntelligence)
+  const components = asObject(root?.components) ?? {}
+
+  return {
+    root,
+    components,
+    smc: asObject(components.smc),
+    liquidity: asObject(components.liquidity ?? components.alphaX ?? components.alphax),
+    smma: asObject(components.smma),
+    nrtr: asObject(components.nrtr),
+    ghost: asObject(components.ghost),
+    external: asObject(components.external),
+    ml: asObject(components.ml),
+    marketSentiment: asObject(root?.marketSentiment),
+    aiTrader: asObject(root?.aiTrader),
+    ghostProjection: asObject(root?.ghostProjection),
+  }
+}
+
+function getUnifiedGhostContext(unifiedIntelligence: any | null | undefined) {
+  const { ghost, ghostProjection } = getUnifiedComponents(unifiedIntelligence)
+  const candles = Array.isArray(ghostProjection?.candles)
+    ? ghostProjection?.candles
+    : Array.isArray(ghostProjection?.ghostCandles)
+      ? ghostProjection?.ghostCandles
+      : Array.isArray(ghost?.candles)
+        ? ghost?.candles
+        : Array.isArray(ghost?.ghostCandles)
+          ? ghost?.ghostCandles
+          : []
+
+  const first = candles[0] && typeof candles[0] === 'object' ? candles[0] : null
+  const confidence = unifiedPercent(
+    first?.confidence ??
+      ghostProjection?.confidence ??
+      ghostProjection?.strength ??
+      ghost?.confidence ??
+      ghost?.strength ??
+      ghost?.score,
+    0
+  )
+
+  const direction = unifiedDirection(
+    first?.direction ??
+      ghostProjection?.direction ??
+      ghostProjection?.bias ??
+      ghost?.direction ??
+      ghost?.bias
+  )
+
+  return {
+    confidence,
+    direction,
+    source: first?.source ?? ghostProjection?.source ?? ghost?.source ?? '',
+  }
+}
+
+function hasUnifiedIntelligence(value: unknown) {
+  const root = asObject(value)
+  return Boolean(root && Object.keys(root).length > 0)
+}
+
 function calculateMacroRisk(signal?: TradingSignal) {
   const explicitRisk = riskFromOptionalNumber(signal?.macroRisk)
   if (explicitRisk !== null) return explicitRisk
@@ -411,7 +559,7 @@ function calculateMacroRisk(signal?: TradingSignal) {
   return 15
 }
 
-export default function PressureGauges({ signal }: PressureGaugesProps) {
+export default function PressureGauges({ signal, unifiedIntelligence }: PressureGaugesProps) {
   const [fetchedTechnicalSentiment, setFetchedTechnicalSentiment] =
     useState<TechnicalSentiment | null>(null)
 
@@ -471,9 +619,22 @@ export default function PressureGauges({ signal }: PressureGaugesProps) {
     [technicalSentiment]
   )
 
-  const smcStrength = clamp(Number(signal?.smcStrength ?? 0))
-  const alphaxStrength = clamp(Number(signal?.alphaxStrength ?? 0))
-  const linkedGhostConfidence = clamp(Number(signal?.ghostConfidence ?? signal?.confidence ?? 0))
+  const unified = getUnifiedComponents(unifiedIntelligence)
+  const unifiedActive = hasUnifiedIntelligence(unifiedIntelligence)
+  const unifiedGhostContext = getUnifiedGhostContext(unifiedIntelligence)
+
+  const smcStrength = unifiedActive
+    ? unifiedComponentScore(unified.smc)
+    : clamp(Number(signal?.smcStrength ?? 0))
+  const alphaxStrength = unifiedActive
+    ? unifiedComponentScore(unified.liquidity)
+    : clamp(Number(signal?.alphaxStrength ?? 0))
+  const linkedGhostConfidence = unifiedActive && unifiedGhostContext.confidence > 0
+    ? unifiedGhostContext.confidence
+    : clamp(Number(signal?.ghostConfidence ?? signal?.confidence ?? 0))
+  const ghostDirection = unifiedActive && unifiedGhostContext.direction !== 'neutral'
+    ? unifiedGhostContext.direction
+    : String(signal?.ghostDirection ?? '').toLowerCase()
   const alphaxBullPressure = clamp(Number(signal?.alphaxBullPressure ?? 0))
   const alphaxBearPressure = clamp(Number(signal?.alphaxBearPressure ?? 0))
   const optionsBullPressure = clamp(Number(signal?.optionsBullPressure ?? 0))
@@ -484,32 +645,78 @@ export default function PressureGauges({ signal }: PressureGaugesProps) {
   const gammaRisk = clamp(Number(signal?.gammaRisk ?? 0))
   const unusualOptionsVolume = clamp(Number(signal?.unusualOptionsVolume ?? 0))
 
-  const bullPressure = clamp(
+  const unifiedBullPressure = clamp(
+    Math.max(
+      unifiedDirectionalScore(unified.smc, 'bullish'),
+      unifiedDirectionalScore(unified.liquidity, 'bullish'),
+      unifiedDirectionalScore(unified.smma, 'bullish'),
+      unifiedDirectionalScore(unified.nrtr, 'bullish'),
+      unifiedDirectionalScore(unified.ghost, 'bullish'),
+      unifiedDirectionalScore(unified.external, 'bullish'),
+      unifiedDirectionalScore(unified.ml, 'bullish'),
+      unifiedGhostContext.direction === 'bullish' ? unifiedGhostContext.confidence : 0,
+      unifiedPercent(unified.aiTrader?.bullScore ?? unified.marketSentiment?.bullScore, 0)
+    )
+  )
+
+  const unifiedBearPressure = clamp(
+    Math.max(
+      unifiedDirectionalScore(unified.smc, 'bearish'),
+      unifiedDirectionalScore(unified.liquidity, 'bearish'),
+      unifiedDirectionalScore(unified.smma, 'bearish'),
+      unifiedDirectionalScore(unified.nrtr, 'bearish'),
+      unifiedDirectionalScore(unified.ghost, 'bearish'),
+      unifiedDirectionalScore(unified.external, 'bearish'),
+      unifiedDirectionalScore(unified.ml, 'bearish'),
+      unifiedGhostContext.direction === 'bearish' ? unifiedGhostContext.confidence : 0,
+      unifiedPercent(unified.aiTrader?.bearScore ?? unified.marketSentiment?.bearScore, 0)
+    )
+  )
+
+  const legacyBullPressure = clamp(
     Math.max(
       summary.activeCount > 0 ? summary.bullishShare : 0,
       Number(signal?.bullScore ?? 50),
       String(signal?.smcDirection ?? '').toLowerCase().includes('bull') ? smcStrength : 0,
       String(signal?.alphaxDirection ?? '').toLowerCase().includes('bull') ? Math.max(alphaxStrength, alphaxBullPressure) : 0,
-      String(signal?.ghostDirection ?? '').toLowerCase().includes('bull') ? linkedGhostConfidence : 0,
+      String(ghostDirection ?? '').toLowerCase().includes('bull') ? linkedGhostConfidence : 0,
       String(signal?.optionsFlowDirection ?? '').toLowerCase().includes('bull') ? Math.max(optionsStrength, optionsBullPressure) : 0
     )
   )
 
-  const bearPressure = clamp(
+  const legacyBearPressure = clamp(
     Math.max(
       summary.activeCount > 0 ? summary.bearishShare : 0,
       Number(signal?.bearScore ?? 50),
       String(signal?.smcDirection ?? '').toLowerCase().includes('bear') ? smcStrength : 0,
       String(signal?.alphaxDirection ?? '').toLowerCase().includes('bear') ? Math.max(alphaxStrength, alphaxBearPressure) : 0,
-      String(signal?.ghostDirection ?? '').toLowerCase().includes('bear') ? linkedGhostConfidence : 0,
+      String(ghostDirection ?? '').toLowerCase().includes('bear') ? linkedGhostConfidence : 0,
       String(signal?.optionsFlowDirection ?? '').toLowerCase().includes('bear') ? Math.max(optionsStrength, optionsBearPressure) : 0
     )
   )
 
+  const bullPressure = unifiedActive
+    ? clamp(Math.max(summary.activeCount > 0 ? summary.bullishShare : 0, unifiedBullPressure))
+    : legacyBullPressure
+
+  const bearPressure = unifiedActive
+    ? clamp(Math.max(summary.activeCount > 0 ? summary.bearishShare : 0, unifiedBearPressure))
+    : legacyBearPressure
+
   const ghostConfidence = linkedGhostConfidence
-  const netBias = Number.isFinite(Number(signal?.netBias))
-    ? Number(signal?.netBias)
-    : bullPressure - bearPressure
+  const unifiedNetBias = unifiedNumber(
+    unified.aiTrader?.netScore ??
+      unified.aiTrader?.netBias ??
+      unified.marketSentiment?.netScore ??
+      unified.marketSentiment?.netBias ??
+      unified.root?.unifiedNetScore,
+    NaN
+  )
+  const netBias = unifiedActive && Number.isFinite(unifiedNetBias)
+    ? unifiedNetBias
+    : Number.isFinite(Number(signal?.netBias))
+      ? Number(signal?.netBias)
+      : bullPressure - bearPressure
 
   const directionalOptionsConflict =
     (String(signal?.optionsFlowDirection ?? '').toLowerCase().includes('bear') &&
@@ -517,13 +724,20 @@ export default function PressureGauges({ signal }: PressureGaugesProps) {
     (String(signal?.optionsFlowDirection ?? '').toLowerCase().includes('bull') &&
       String(signal?.smcDirection ?? '').toLowerCase().includes('bear')) ||
     (String(signal?.optionsFlowDirection ?? '').toLowerCase().includes('bear') &&
-      String(signal?.ghostDirection ?? '').toLowerCase().includes('bull')) ||
+      String(ghostDirection ?? '').toLowerCase().includes('bull')) ||
     (String(signal?.optionsFlowDirection ?? '').toLowerCase().includes('bull') &&
-      String(signal?.ghostDirection ?? '').toLowerCase().includes('bear'))
+      String(ghostDirection ?? '').toLowerCase().includes('bear'))
 
+  const unifiedConflictRisk = unifiedPercent(
+    unified.aiTrader?.conflictRisk ??
+      unified.marketSentiment?.conflictRisk ??
+      unified.root?.conflictRisk,
+    0
+  )
   const conflictRisk = clamp(
     Math.max(
       optionsConflictRisk,
+      unifiedActive ? unifiedConflictRisk : 0,
       directionalOptionsConflict ? 80 : 0,
       summary.activeCount > 0
         ? Math.abs(Number(signal?.bearScore ?? 50) - summary.bullishShare) >= 25 ||
@@ -536,35 +750,46 @@ export default function PressureGauges({ signal }: PressureGaugesProps) {
     )
   )
 
-  const chopRisk = calculateChopRisk(
-    signal?.chopRisk,
-    summary,
-    netBias,
-    bullPressure,
-    bearPressure,
-    conflictRisk
+  const unifiedChopRisk = unifiedPercent(
+    unified.aiTrader?.chopRisk ??
+      unified.marketSentiment?.chopRisk ??
+      unified.root?.chopRisk,
+    0
   )
+  const chopRisk = unifiedActive && unifiedChopRisk > 0
+    ? unifiedChopRisk
+    : calculateChopRisk(
+        signal?.chopRisk,
+        summary,
+        netBias,
+        bullPressure,
+        bearPressure,
+        conflictRisk
+      )
 
-  const macroRisk = calculateMacroRisk(signal)
+  const unifiedMacroRisk = unifiedDirection(unified.external) === 'bearish'
+    ? unifiedComponentScore(unified.external)
+    : 0
+  const macroRisk = clamp(Math.max(calculateMacroRisk(signal), unifiedMacroRisk))
 
   const gauges: GaugeItem[] = [
     {
       label: 'Bull Pressure',
       value: bullPressure,
       barClass: 'bg-emerald-400',
-      note: `${summary.bullCount} technicals + SMC/AlphaX/Ghost/Options bullish pressure`,
+      note: unifiedActive ? 'Unified SMC + Liquidity + SMMA + NRTR + Ghost + External + ML bullish pressure' : `${summary.bullCount} technicals + SMC/AlphaX/Ghost/Options bullish pressure`,
     },
     {
       label: 'Bear Pressure',
       value: bearPressure,
       barClass: 'bg-red-400',
-      note: `${summary.bearCount} technicals + SMC/AlphaX/Ghost/Options bearish pressure`,
+      note: unifiedActive ? 'Unified SMC + Liquidity + SMMA + NRTR + Ghost + External + ML bearish pressure' : `${summary.bearCount} technicals + SMC/AlphaX/Ghost/Options bearish pressure`,
     },
     {
       label: 'Ghost Confidence',
       value: ghostConfidence,
       barClass: 'bg-blue-400',
-      note: 'Linked from Python HA Ghost projection engine',
+      note: unifiedActive ? 'Linked from unified ghostProjection first candle confidence' : 'Linked from Python HA Ghost projection engine',
     },
     {
       label: 'Technical Conflict Risk',
@@ -619,7 +844,7 @@ export default function PressureGauges({ signal }: PressureGaugesProps) {
         <div>
           <h2 className="text-xl font-bold text-white">Pressure Gauges</h2>
           <p className="mt-1 text-xs text-gray-500">
-            Python technical meter + live dashboard pressure
+            {unifiedActive ? 'Unified intelligence pressure + technical meter' : 'Python technical meter + live dashboard pressure'}
           </p>
         </div>
 
