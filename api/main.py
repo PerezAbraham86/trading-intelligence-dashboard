@@ -966,6 +966,7 @@ try:
         get_candle_payload as db_get_candle_payload,
         set_candle_payload as db_set_candle_payload,
         get_stale_candle_payload as db_get_stale_candle_payload,
+        get_best_candle_payload as db_get_best_candle_payload,
         list_candle_cache_entries as db_list_candle_cache_entries,
         save_chart_settings as db_save_chart_settings,
         load_chart_settings as db_load_chart_settings,
@@ -978,6 +979,7 @@ except Exception:
             get_candle_payload as db_get_candle_payload,
             set_candle_payload as db_set_candle_payload,
             get_stale_candle_payload as db_get_stale_candle_payload,
+            get_best_candle_payload as db_get_best_candle_payload,
             list_candle_cache_entries as db_list_candle_cache_entries,
             save_chart_settings as db_save_chart_settings,
             load_chart_settings as db_load_chart_settings,
@@ -988,6 +990,7 @@ except Exception:
         db_get_candle_payload = None
         db_set_candle_payload = None
         db_get_stale_candle_payload = None
+        db_get_best_candle_payload = None
         db_list_candle_cache_entries = None
         db_save_chart_settings = None
         db_load_chart_settings = None
@@ -1114,6 +1117,43 @@ def candle_cache_stale(route: str, symbol: str, timeframe: str, limit: int) -> O
     return candle_cache_payload(cached, "site_cached_stale")
 
 
+
+
+def candle_cache_best(route: str, symbol: str, timeframe: str, limit: int, max_age_seconds: int = CANDLE_SITE_CACHE_MAX_AGE_SECONDS) -> Optional[Dict[str, Any]]:
+    """Return best matching cached payload for same route/symbol/timeframe, ignoring exact limit."""
+    if db_get_best_candle_payload:
+        try:
+            cached_db = db_get_best_candle_payload(
+                route=route,
+                symbol=normalize_symbol(symbol),
+                timeframe=normalize_timeframe(timeframe),
+                min_limit_value=int(limit or 500),
+                max_age_seconds=max_age_seconds,
+                allow_stale=True,
+            )
+            if cached_db:
+                return cached_db
+        except Exception as error:
+            print(f"[Site DB Cache] best-match get failed: {error}")
+
+    # Memory fallback: same route/symbol/timeframe with any saved limit.
+    prefix = f"{route}::{normalize_symbol(symbol)}::{normalize_timeframe(timeframe)}::"
+    best: Optional[Dict[str, Any]] = None
+    best_count = -1
+    for key, value in CANDLE_RESPONSE_CACHE.items():
+        if not str(key).startswith(prefix) or not isinstance(value, dict):
+            continue
+        candles = value.get("candles")
+        count = len(candles) if isinstance(candles, list) else 0
+        if count > best_count:
+            best = value
+            best_count = count
+
+    if best is not None and best_count > 0:
+        return candle_cache_payload(best, "site_cached_best_match")
+
+    return None
+
 def timeframe_to_1m_fetch_limit(timeframe: str, limit: int) -> int:
     seconds = timeframe_seconds(timeframe)
     mult = max(1, int(seconds / 60))
@@ -1186,10 +1226,28 @@ def get_live_recent_candles(symbol: str, timeframe: str) -> List[Dict[str, Any]]
     return filter_valid_candles_for_symbol(candles, normalized_symbol)
 
 
-def get_dashboard_candles(symbol: str, timeframe: str = "1m", limit: int = 500) -> List[Dict[str, Any]]:
+def get_dashboard_candles(symbol: str, timeframe: str = "1m", limit: int = 500, use_cache: bool = True) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = max(1, min(int(limit or 500), 5000))
+
+    if use_cache:
+        # Critical rate-limit protection:
+        # internal dashboard panels ask for different limits (500, 600, 1000, 4000).
+        # Use the best existing backend cache instead of hitting InsightSentry again.
+        for route_name in ["dashboard", "historical"]:
+            cached = candle_cache_get(route_name, normalized_symbol, normalized_timeframe, safe_limit, CANDLE_SITE_CACHE_MAX_AGE_SECONDS)
+            if not cached:
+                cached = candle_cache_best(route_name, normalized_symbol, normalized_timeframe, safe_limit, CANDLE_SITE_CACHE_MAX_AGE_SECONDS)
+
+            cached_candles = cached.get("candles") if isinstance(cached, dict) else None
+            if isinstance(cached_candles, list) and len(cached_candles) > 0:
+                live = filter_valid_candles_for_symbol(
+                    get_live_recent_candles(normalized_symbol, normalized_timeframe),
+                    normalized_symbol,
+                )
+                merged = merge_candles_by_time([*cached_candles, *live])[-safe_limit:]
+                return filter_valid_candles_for_symbol(merged, normalized_symbol)
 
     historical = filter_valid_candles_for_symbol(
         fetch_historical_candles(normalized_symbol, normalized_timeframe, safe_limit),
@@ -5593,7 +5651,7 @@ def candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500, for
                 return rebuilt
             return cached
 
-    merged = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit)
+    merged = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit, use_cache=not force)
     provider = merged[-1].get("provider") if merged else None
 
     payload = build_candle_route_payload(
