@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import SignalCard from '@/components/SignalCard'
-import LightweightCandlestickChart, { ChartMode, DashboardCandle } from '@/components/LightweightCandlestickChart'
+import LightweightCandlestickChart, { ChartMode, DashboardCandle, NrtrOverlayMode } from '@/components/LightweightCandlestickChart'
 import { GhostCandle } from '@/components/GhostCandleOverlay'
 import ChartOverlayStatusPanel from '@/components/ChartOverlayStatusPanel'
 import ScorecardsPanel from '@/components/ScorecardsPanel'
@@ -2094,6 +2094,11 @@ type LightweightChartPanelProps = {
   onCandlesUpdate?: (candles: DashboardCandle[]) => void
   onOverlayPayloadUpdate?: (overlayPayload: any | null) => void
   onUnifiedIntelligenceUpdate?: (unifiedIntelligence: any | null) => void
+  smmaLength?: number
+  nrtrMode?: NrtrOverlayMode
+  nrtrAtrLength?: number
+  nrtrAtrMultiplier?: number
+  nrtrPercent?: number
 }
 
 function LightweightChartPanel({
@@ -2116,6 +2121,11 @@ function LightweightChartPanel({
   onCandlesUpdate,
   onOverlayPayloadUpdate,
   onUnifiedIntelligenceUpdate,
+  smmaLength = 20,
+  nrtrMode = 'ATR-Based',
+  nrtrAtrLength = 14,
+  nrtrAtrMultiplier = 3,
+  nrtrPercent = 0.25,
 }: LightweightChartPanelProps) {
   const normalizedSymbol = normalizeSymbol(symbol)
   const normalizedTimeframe = normalizeTimeframe(timeframe)
@@ -2387,9 +2397,17 @@ function LightweightChartPanel({
         showOverlayZones={showOverlayLines}
         showOverlayLabels={showOverlayLines}
         showLiquidityProfile={showOverlayLines}
-        // Main chart keeps 20 SMMA + NRTR+. Mini charts hide both.
-        showSmma20={!compact}
-        showNrtr={!compact}
+        // Main and mini charts all show the same user-controlled SMMA + NRTR.
+        // Mini charts use NRTR flip state only; NRTR exit logic/table stays off there.
+        showSmma20
+        smmaLength={smmaLength}
+        showNrtr
+        nrtrMode={nrtrMode}
+        nrtrAtrLength={nrtrAtrLength}
+        nrtrAtrMultiplier={nrtrAtrMultiplier}
+        nrtrPercent={nrtrPercent}
+        nrtrExitMode={compact ? 'Off' : 'Pivot Pullback'}
+        showNrtrStats={!compact}
         mode={candleModeToLightweightMode(candleMode)}
         height={height}
         symbol={normalizedSymbol}
@@ -2544,6 +2562,13 @@ export default function Dashboard() {
   const [mainChartCandles, setMainChartCandles] = useState<DashboardCandle[]>([])
   const [mainChartOverlayPayload, setMainChartOverlayPayload] = useState<any | null>(null)
   const [mainUnifiedIntelligence, setMainUnifiedIntelligence] = useState<any | null>(null)
+  const [chartIndicatorSettings, setChartIndicatorSettings] = useState({
+    smmaLength: 20,
+    nrtrMode: 'ATR-Based' as NrtrOverlayMode,
+    nrtrAtrLength: 14,
+    nrtrAtrMultiplier: 3,
+    nrtrPercent: 0.25,
+  })
 
   const [mainChartSelection, setMainChartSelection] = useState<ChartSelection>({
     symbol: 'BTCUSD',
@@ -2901,6 +2926,111 @@ export default function Dashboard() {
         </div>
       </motion.div>
 
+      <motion.div
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35, delay: 0.05 }}
+        className="mb-6 rounded-xl border border-dark-700 bg-dark-800/80 p-4 shadow-xl"
+      >
+        <div className="mb-3 flex flex-col gap-1">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-300">
+            Chart Strategy Overlays
+          </h2>
+          <p className="text-xs text-gray-500">
+            These settings draw on the main chart and both mini charts. Mini charts use NRTR flip direction only.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+          <label className="flex flex-col gap-1 text-xs text-gray-400">
+            <span>SMMA length</span>
+            <input
+              type="number"
+              min={1}
+              max={500}
+              value={chartIndicatorSettings.smmaLength}
+              onChange={(event) =>
+                setChartIndicatorSettings((current) => ({
+                  ...current,
+                  smmaLength: Math.max(1, Math.floor(Number(event.target.value) || 1)),
+                }))
+              }
+              className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 font-semibold text-gray-200 outline-none focus:border-amber-400"
+            />
+          </label>
+
+          <label className="flex flex-col gap-1 text-xs text-gray-400">
+            <span>NRTR mode</span>
+            <select
+              value={chartIndicatorSettings.nrtrMode}
+              onChange={(event) =>
+                setChartIndicatorSettings((current) => ({
+                  ...current,
+                  nrtrMode: event.target.value as NrtrOverlayMode,
+                }))
+              }
+              className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 font-semibold text-gray-200 outline-none focus:border-amber-400"
+            >
+              <option value="ATR-Based">ATR-Based</option>
+              <option value="Percentage">Percentage</option>
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1 text-xs text-gray-400">
+            <span>ATR length</span>
+            <input
+              type="number"
+              min={1}
+              max={200}
+              value={chartIndicatorSettings.nrtrAtrLength}
+              onChange={(event) =>
+                setChartIndicatorSettings((current) => ({
+                  ...current,
+                  nrtrAtrLength: Math.max(1, Math.floor(Number(event.target.value) || 1)),
+                }))
+              }
+              className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 font-semibold text-gray-200 outline-none focus:border-amber-400"
+            />
+          </label>
+
+          <label className="flex flex-col gap-1 text-xs text-gray-400">
+            <span>ATR multiplier</span>
+            <input
+              type="number"
+              min={0.1}
+              max={20}
+              step={0.05}
+              value={chartIndicatorSettings.nrtrAtrMultiplier}
+              onChange={(event) =>
+                setChartIndicatorSettings((current) => ({
+                  ...current,
+                  nrtrAtrMultiplier: Math.max(0.1, Number(event.target.value) || 0.1),
+                }))
+              }
+              className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 font-semibold text-gray-200 outline-none focus:border-amber-400"
+            />
+          </label>
+
+          <label className="flex flex-col gap-1 text-xs text-gray-400">
+            <span>NRTR percent</span>
+            <input
+              type="number"
+              min={0.01}
+              max={20}
+              step={0.01}
+              value={chartIndicatorSettings.nrtrPercent}
+              onChange={(event) =>
+                setChartIndicatorSettings((current) => ({
+                  ...current,
+                  nrtrPercent: Math.max(0.01, Number(event.target.value) || 0.01),
+                }))
+              }
+              className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 font-semibold text-gray-200 outline-none focus:border-amber-400"
+            />
+          </label>
+        </div>
+      </motion.div>
+
       {/* Main Grid */}
       <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
         {/* Left Column */}
@@ -2924,6 +3054,11 @@ export default function Dashboard() {
             timeframe={selectedTimeframe}
             candleMode={mainChartSelection.candleMode}
             height={760}
+            smmaLength={chartIndicatorSettings.smmaLength}
+            nrtrMode={chartIndicatorSettings.nrtrMode}
+            nrtrAtrLength={chartIndicatorSettings.nrtrAtrLength}
+            nrtrAtrMultiplier={chartIndicatorSettings.nrtrAtrMultiplier}
+            nrtrPercent={chartIndicatorSettings.nrtrPercent}
             apiBaseUrl={apiBaseUrl}
             isClient={isClient}
             enabled
@@ -2956,6 +3091,11 @@ export default function Dashboard() {
               candleMode={miniChartOneSelection.candleMode}
               height={390}
               compact
+              smmaLength={chartIndicatorSettings.smmaLength}
+              nrtrMode={chartIndicatorSettings.nrtrMode}
+              nrtrAtrLength={chartIndicatorSettings.nrtrAtrLength}
+              nrtrAtrMultiplier={chartIndicatorSettings.nrtrAtrMultiplier}
+              nrtrPercent={chartIndicatorSettings.nrtrPercent}
               apiBaseUrl={apiBaseUrl}
               isClient={isClient}
               enabled={mainCandlesReady}
@@ -2976,6 +3116,11 @@ export default function Dashboard() {
               candleMode={miniChartTwoSelection.candleMode}
               height={390}
               compact
+              smmaLength={chartIndicatorSettings.smmaLength}
+              nrtrMode={chartIndicatorSettings.nrtrMode}
+              nrtrAtrLength={chartIndicatorSettings.nrtrAtrLength}
+              nrtrAtrMultiplier={chartIndicatorSettings.nrtrAtrMultiplier}
+              nrtrPercent={chartIndicatorSettings.nrtrPercent}
               apiBaseUrl={apiBaseUrl}
               isClient={isClient}
               enabled={mainCandlesReady}
