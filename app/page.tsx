@@ -1719,6 +1719,7 @@ function useChartCandles(
   useEffect(() => {
     if (!isClient || !apiBaseUrl) return
 
+    const activeApiBaseUrl = apiBaseUrl
     let cancelled = false
     let intervalId: ReturnType<typeof setInterval> | null = null
 
@@ -1754,7 +1755,7 @@ function useChartCandles(
         setIsLoading(!cachedWasApplied)
         setErrorText('')
 
-        const nextPayload = await fetchSharedCandlePayload(apiBaseUrl, symbol, timeframe, limit)
+        const nextPayload = await fetchSharedCandlePayload(activeApiBaseUrl, symbol, timeframe, limit)
 
         if (!cancelled) {
           setCandles(nextPayload.candles)
