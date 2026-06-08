@@ -558,6 +558,7 @@ function normalizeCandlePayload(payload: any): DashboardCandle[] {
 type SharedCandleCacheEntry = {
   candles: DashboardCandle[]
   overlayPayload: any | null
+  unifiedIntelligence: any | null
   updatedAt: number
   limit: number
   provider?: string
@@ -623,10 +624,12 @@ async function fetchSharedCandlePayload(
     const json = await response.json()
     const candles = normalizeCandlePayload(json)
     const overlayPayload = getUnifiedOverlayPayload(json)
+    const unifiedIntelligence = getUnifiedIntelligencePayload(json)
 
     const entry: SharedCandleCacheEntry = {
       candles,
       overlayPayload,
+      unifiedIntelligence,
       updatedAt: Date.now(),
       limit: apiLimit,
       provider: typeof json?.provider === 'string' ? json.provider : undefined,
@@ -761,6 +764,49 @@ function getUnifiedOverlayPayload(...sources: unknown[]) {
   }
 
   return null
+}
+
+function getUnifiedIntelligencePayload(...sources: unknown[]) {
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue
+
+    const raw = source as any
+    const candidates = [
+      raw.unifiedIntelligence,
+      raw.unified_intelligence,
+      raw.overlayPayload?.unifiedIntelligence,
+      raw.chartOverlays?.unifiedIntelligence,
+      raw.latestSignal?.unifiedIntelligence,
+      raw.latestSignal?.overlayPayload?.unifiedIntelligence,
+    ]
+
+    for (const candidate of candidates) {
+      if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+        return candidate
+      }
+    }
+  }
+
+  return null
+}
+
+function getGhostCandlesFromUnifiedIntelligence(unifiedIntelligence: any | null | undefined): PythonGhostCandle[] {
+  if (!unifiedIntelligence || typeof unifiedIntelligence !== 'object') return []
+
+  const candidates = [
+    unifiedIntelligence.ghostProjection?.candles,
+    unifiedIntelligence.ghostProjection?.ghostCandles,
+    unifiedIntelligence.components?.ghost?.candles,
+    unifiedIntelligence.components?.ghost?.ghostCandles,
+    unifiedIntelligence.ghostCandles,
+    unifiedIntelligence.projections,
+  ]
+
+  for (const value of candidates) {
+    if (Array.isArray(value) && value.length > 0) return value as PythonGhostCandle[]
+  }
+
+  return []
 }
 
 function getGhostCandlesFromUnifiedOverlay(overlayPayload: any | null | undefined): PythonGhostCandle[] {
@@ -1713,6 +1759,7 @@ function useChartCandles(
 ) {
   const [candles, setCandles] = useState<DashboardCandle[]>([])
   const [overlayPayload, setOverlayPayload] = useState<any | null>(null)
+  const [unifiedIntelligence, setUnifiedIntelligence] = useState<any | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [errorText, setErrorText] = useState('')
 
@@ -1729,6 +1776,7 @@ function useChartCandles(
 
       setCandles(cached.candles)
       setOverlayPayload(cached.overlayPayload)
+      setUnifiedIntelligence(cached.unifiedIntelligence)
       setErrorText('')
       return cached.candles.length > 0
     }
@@ -1760,6 +1808,7 @@ function useChartCandles(
         if (!cancelled) {
           setCandles(nextPayload.candles)
           setOverlayPayload(nextPayload.overlayPayload)
+          setUnifiedIntelligence(nextPayload.unifiedIntelligence)
         }
       } catch (error) {
         console.error('Lightweight chart candle sync error:', error)
@@ -1787,6 +1836,7 @@ function useChartCandles(
 
     setCandles([])
     setOverlayPayload(null)
+    setUnifiedIntelligence(null)
     fetchCandles()
     intervalId = setInterval(fetchCandles, pollMs)
 
@@ -1799,6 +1849,7 @@ function useChartCandles(
   return {
     candles,
     overlayPayload,
+    unifiedIntelligence,
     isLoading,
     errorText,
   }
@@ -2042,6 +2093,7 @@ type LightweightChartPanelProps = {
   onScorecardsUpdate?: (scorecards: any, mlFeatures: any) => void
   onCandlesUpdate?: (candles: DashboardCandle[]) => void
   onOverlayPayloadUpdate?: (overlayPayload: any | null) => void
+  onUnifiedIntelligenceUpdate?: (unifiedIntelligence: any | null) => void
 }
 
 function LightweightChartPanel({
@@ -2063,10 +2115,11 @@ function LightweightChartPanel({
   onScorecardsUpdate,
   onCandlesUpdate,
   onOverlayPayloadUpdate,
+  onUnifiedIntelligenceUpdate,
 }: LightweightChartPanelProps) {
   const normalizedSymbol = normalizeSymbol(symbol)
   const normalizedTimeframe = normalizeTimeframe(timeframe)
-  const { candles, overlayPayload: unifiedOverlayPayload, isLoading, errorText } = useChartCandles(
+  const { candles, overlayPayload: unifiedOverlayPayload, unifiedIntelligence, isLoading, errorText } = useChartCandles(
     apiBaseUrl,
     isClient,
     normalizedSymbol,
@@ -2085,9 +2138,23 @@ function LightweightChartPanel({
     onOverlayPayloadUpdate?.(unifiedOverlayPayload)
   }, [onOverlayPayloadUpdate, unifiedOverlayPayload])
 
+  useEffect(() => {
+    onUnifiedIntelligenceUpdate?.(unifiedIntelligence)
+  }, [onUnifiedIntelligenceUpdate, unifiedIntelligence])
+
   const chartGhostCandles = useMemo(() => {
     if (ghostCandles.length > 0) return ghostCandles
     if (compact) return []
+
+    const unifiedGhostCandles = getGhostCandlesFromUnifiedIntelligence(unifiedIntelligence)
+
+    if (unifiedGhostCandles.length > 0) {
+      return buildGhostCandlesForChart(
+        { ghostCandles: unifiedGhostCandles },
+        candles,
+        normalizedTimeframe
+      )
+    }
 
     const overlayGhostCandles = getGhostCandlesFromUnifiedOverlay(unifiedOverlayPayload)
 
@@ -2100,7 +2167,7 @@ function LightweightChartPanel({
     }
 
     return buildGhostCandlesForChart(engineState, candles, normalizedTimeframe)
-  }, [candles, compact, engineState, ghostCandles, normalizedTimeframe, unifiedOverlayPayload])
+  }, [candles, compact, engineState, ghostCandles, normalizedTimeframe, unifiedIntelligence, unifiedOverlayPayload])
 
   const overlayPayload = useMemo(() => {
     if (!showOverlayLines || compact) return null
@@ -2476,6 +2543,7 @@ export default function Dashboard() {
   const [chartMlFeatures, setChartMlFeatures] = useState<any | null>(null)
   const [mainChartCandles, setMainChartCandles] = useState<DashboardCandle[]>([])
   const [mainChartOverlayPayload, setMainChartOverlayPayload] = useState<any | null>(null)
+  const [mainUnifiedIntelligence, setMainUnifiedIntelligence] = useState<any | null>(null)
 
   const [mainChartSelection, setMainChartSelection] = useState<ChartSelection>({
     symbol: 'BTCUSD',
@@ -2865,6 +2933,7 @@ export default function Dashboard() {
             showOverlayLines
             onCandlesUpdate={setMainChartCandles}
             onOverlayPayloadUpdate={setMainChartOverlayPayload}
+            onUnifiedIntelligenceUpdate={setMainUnifiedIntelligence}
             onScorecardsUpdate={(nextScorecards, nextMlFeatures) => {
               setChartScorecards(nextScorecards ?? null)
               setChartMlFeatures(nextMlFeatures ?? null)
@@ -2968,6 +3037,7 @@ export default function Dashboard() {
               activePrice={activeChartPrice ?? undefined}
               overlayPayload={mainChartOverlayPayload}
               scorecards={chartScorecards}
+              unifiedIntelligence={mainUnifiedIntelligence}
             />
           </div>
 
