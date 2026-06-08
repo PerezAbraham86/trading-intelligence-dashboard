@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 #   external data context so every dashboard panel can reference the same truth.
 # ─────────────────────────────────────────────────────────────────────────────
 
-ENGINE_VERSION = "unified_intelligence_v1"
+ENGINE_VERSION = "unified_intelligence_v2_ghost_projection"
 
 
 def utc_now_iso() -> str:
@@ -97,6 +97,29 @@ def calc_smma(values: List[float], length: int = 20) -> List[Optional[float]]:
             running = (running * (length - 1) + value) / float(length)
         out[index] = running
     return out
+
+
+def calc_recent_atr(candles: List[Dict[str, Any]], length: int = 14) -> float:
+    if len(candles) < 2:
+        return 0.0
+
+    true_ranges: List[float] = []
+    recent = candles[-max(length + 1, 2):]
+
+    for index in range(1, len(recent)):
+        current = safe_dict(recent[index])
+        previous = safe_dict(recent[index - 1])
+        high = to_float(current.get("high"), 0.0)
+        low = to_float(current.get("low"), high)
+        previous_close = to_float(previous.get("close"), high)
+        if high <= 0 or low <= 0:
+            continue
+        true_ranges.append(max(high - low, abs(high - previous_close), abs(low - previous_close)))
+
+    if not true_ranges:
+        return 0.0
+
+    return sum(true_ranges) / float(len(true_ranges))
 
 
 def build_smma_component(candles: List[Dict[str, Any]], length: int = 20) -> Dict[str, Any]:
@@ -549,6 +572,126 @@ def build_ai_trader_plan(
     }
 
 
+def build_unified_ghost_projection(
+    *,
+    symbol: str,
+    timeframe: str,
+    candles: List[Dict[str, Any]],
+    components: Dict[str, Dict[str, Any]],
+    market_sentiment: Dict[str, Any],
+    ai_trader: Dict[str, Any],
+    count: int = 3,
+) -> Dict[str, Any]:
+    current = to_float(latest_candle(candles).get("close"), 0.0)
+    if current <= 0 or len(candles) < 20:
+        return {
+            "status": "waiting",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "direction": "neutral",
+            "confidence": 0,
+            "candles": [],
+            "reason": "waiting_for_enough_candles",
+        }
+
+    ghost = safe_dict(components.get("ghost"))
+    nrtr = safe_dict(components.get("nrtr"))
+    smma = safe_dict(components.get("smma"))
+    liquidity = safe_dict(components.get("liquidity"))
+    external = safe_dict(components.get("external"))
+    ml = safe_dict(components.get("ml"))
+
+    direction = normalize_direction(market_sentiment.get("direction"))
+    if direction == "neutral":
+        for component in [ghost, nrtr, ml, smma, liquidity, external]:
+            candidate = normalize_direction(component.get("direction"))
+            if candidate != "neutral" and str(component.get("status")) in {"active", "live"}:
+                direction = candidate
+                break
+
+    if direction == "neutral":
+        return {
+            "status": "waiting",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "direction": "neutral",
+            "confidence": 0,
+            "candles": [],
+            "reason": "unified_direction_neutral",
+        }
+
+    component_scores = [
+        to_float(market_sentiment.get("strength"), 0.0),
+        to_float(ghost.get("score"), 0.0),
+        to_float(nrtr.get("score"), 0.0),
+        to_float(ml.get("score"), 0.0),
+        to_float(external.get("score"), 0.0),
+    ]
+    active_scores = [value for value in component_scores if value > 0]
+    confidence = clamp(sum(active_scores) / max(len(active_scores), 1) if active_scores else 21.0)
+
+    atr = calc_recent_atr(candles, 14)
+    if atr <= 0:
+        atr = max(current * 0.0008, 0.5)
+
+    signed = 1.0 if direction == "bullish" else -1.0
+    sentiment_net = abs(to_float(market_sentiment.get("netScore"), 0.0))
+    external_net = abs(to_float(external.get("netScore"), 0.0))
+    ml_score = to_float(ml.get("score"), 0.0)
+    ghost_score = to_float(ghost.get("score"), 0.0)
+
+    pressure_multiplier = clamp(0.85 + sentiment_net / 140.0 + external_net / 200.0 + ml_score / 450.0 + ghost_score / 450.0, 0.75, 1.65)
+    body_base = max(atr * 0.24 * pressure_multiplier, current * 0.00008)
+    wick_base = max(atr * 0.16, current * 0.00005)
+
+    output: List[Dict[str, Any]] = []
+    previous_close = current
+
+    for index in range(max(1, min(count, 5))):
+        decay = max(0.72, 1.0 - index * 0.09)
+        body = body_base * (index + 1) * decay
+        wick = wick_base * (1.0 + index * 0.2)
+        open_price = previous_close
+        close_price = current + signed * body
+        high = max(open_price, close_price) + wick
+        low = min(open_price, close_price) - wick
+        candle_confidence = clamp(confidence - index * 4.0, 5.0, 99.0)
+
+        output.append({
+            "label": f"UI #{index + 1}",
+            "direction": "UP" if direction == "bullish" else "DOWN",
+            "confidence": round(candle_confidence, 2),
+            "open": round(open_price, 5),
+            "high": round(high, 5),
+            "low": round(low, 5),
+            "close": round(close_price, 5),
+            "source": "unified_intelligence",
+            "targetReaction": ai_trader.get("reason") or "unified_projection",
+            "targetSeverity": round(candle_confidence / 100.0, 4),
+            "inputs": {
+                "smc": safe_dict(components.get("smc")).get("direction"),
+                "liquidity": liquidity.get("direction"),
+                "smma": smma.get("direction"),
+                "nrtr": nrtr.get("direction"),
+                "ghost": ghost.get("direction"),
+                "external": external.get("direction"),
+                "ml": ml.get("direction"),
+            },
+        })
+        previous_close = close_price
+
+    return {
+        "status": "active",
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "direction": direction,
+        "confidence": round(confidence, 2),
+        "candles": output,
+        "reason": "unified_smc_liquidity_smma_nrtr_ghost_external_ml_projection",
+        "source": "unified_intelligence_engine_v2",
+    }
+
+
 def build_feature_vector(components: Dict[str, Dict[str, Any]], market_sentiment: Dict[str, Any]) -> Dict[str, float]:
     return {
         "smcScore": round(to_float(components.get("smc", {}).get("score"), 0.0), 4),
@@ -603,6 +746,14 @@ def build_unified_intelligence_object(
         components=components,
         market_sentiment=market_sentiment,
     )
+    ghost_projection = build_unified_ghost_projection(
+        symbol=normalized_symbol,
+        timeframe=normalized_timeframe,
+        candles=candles,
+        components=components,
+        market_sentiment=market_sentiment,
+        ai_trader=ai_trader,
+    )
     feature_vector = build_feature_vector(components, market_sentiment)
 
     return {
@@ -616,6 +767,7 @@ def build_unified_intelligence_object(
         "components": components,
         "marketSentiment": market_sentiment,
         "aiTrader": ai_trader,
+        "ghostProjection": ghost_projection,
         "featureVector": feature_vector,
         "dataFlow": [
             "candles",
