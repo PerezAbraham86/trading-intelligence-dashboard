@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DATA ENGINE
 #
-# v8.2 update:
+# v8.3 update:
 # - Uses InsightSentry futures options chain first for MES/ES options-chain pressure.
 # - Keeps Massive options-chain probe for equities.
 # - Keeps OKX public SWAP data for BTCUSD/ETHUSD open interest + footprint.
@@ -24,6 +24,9 @@ from urllib.request import Request, urlopen
 # - Adds Databento MBP-1 probe for MES/ES estimated footprint delta.
 # - Fixes missing Databento environment constants so candle routes do not 500.
 # - Keeps futures open interest honest: active only if InsightSentry returns an OI field.
+# - Adds InsightSentry Quotes (L1) for live MES/ES price, bid/ask, bid/ask size, spread, and status.
+# - Adds stale-safe last-good cache for InsightSentry futures options so temporary API misses do not flip active flow to inactive.
+# - Uses InsightSentry L1 quote pressure as a light footprint/top-of-book fallback when Databento MBP-1 is unavailable.
 #
 # This file intentionally does NOT fake unavailable data.
 # If a source cannot provide a real value, it returns not_applicable/unavailable.
@@ -63,6 +66,8 @@ INSIGHTSENTRY_HOST = (
 INSIGHTSENTRY_BASE_URL = os.getenv("INSIGHTSENTRY_BASE_URL", f"https://{INSIGHTSENTRY_HOST}").rstrip("/")
 INSIGHTSENTRY_TIMEOUT_SECONDS = float(os.getenv("INSIGHTSENTRY_TIMEOUT_SECONDS", "12"))
 INSIGHTSENTRY_CACHE_TTL_SECONDS = int(os.getenv("INSIGHTSENTRY_CACHE_TTL_SECONDS", "60"))
+INSIGHTSENTRY_L1_QUOTE_CACHE_TTL_SECONDS = int(os.getenv("INSIGHTSENTRY_L1_QUOTE_CACHE_TTL_SECONDS", "10"))
+INSIGHTSENTRY_OPTIONS_LAST_GOOD_TTL_SECONDS = int(os.getenv("INSIGHTSENTRY_OPTIONS_LAST_GOOD_TTL_SECONDS", "1800"))
 INSIGHTSENTRY_MES_UNDERLYING = os.getenv("INSIGHTSENTRY_MES_UNDERLYING", "CME_MINI:MES1!").strip()
 INSIGHTSENTRY_ES_UNDERLYING = os.getenv("INSIGHTSENTRY_ES_UNDERLYING", "CME_MINI:ES1!").strip()
 INSIGHTSENTRY_OPTION_STRIKE_FALLBACK = os.getenv("INSIGHTSENTRY_OPTION_STRIKE_FALLBACK", "").strip()
@@ -240,7 +245,7 @@ def okx_swap_inst_id(symbol: str) -> str:
     return normalized
 
 
-def cache_get(key: str) -> Optional[Dict[str, Any]]:
+def cache_get(key: str, ttl_seconds: Optional[int] = None) -> Optional[Dict[str, Any]]:
     cached = _EXTERNAL_DATA_CACHE.get(key)
 
     if not isinstance(cached, dict):
@@ -253,7 +258,9 @@ def cache_get(key: str) -> Optional[Dict[str, Any]]:
 
     age = time.time() - created_epoch
 
-    if age > MASSIVE_CACHE_TTL_SECONDS:
+    effective_ttl = int(ttl_seconds if ttl_seconds is not None else cached.get("_cacheTtlSeconds", MASSIVE_CACHE_TTL_SECONDS))
+
+    if age > effective_ttl:
         return None
 
     payload = dict(cached)
@@ -264,16 +271,79 @@ def cache_get(key: str) -> Optional[Dict[str, Any]]:
     return payload
 
 
-def cache_set(key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def cache_set(key: str, payload: Dict[str, Any], ttl_seconds: Optional[int] = None) -> Dict[str, Any]:
     stored = dict(payload)
     stored["_cacheEpoch"] = time.time()
+    if ttl_seconds is not None:
+        stored["_cacheTtlSeconds"] = int(ttl_seconds)
     stored["cache"] = "stored"
     _EXTERNAL_DATA_CACHE[key] = stored
 
     public_payload = dict(stored)
     public_payload.pop("_cacheEpoch", None)
+    public_payload.pop("_cacheTtlSeconds", None)
 
     return public_payload
+
+
+
+
+def last_good_key(key: str) -> str:
+    return f"lastgood:{key}"
+
+
+def remember_last_good_factor(key: str, payload: Dict[str, Any], ttl_seconds: Optional[int] = None) -> None:
+    if not isinstance(payload, dict):
+        return
+
+    status = str(payload.get("status") or "").lower()
+    if status not in {"active", "live"}:
+        return
+
+    stored = dict(payload)
+    stored["_cacheEpoch"] = time.time()
+    stored["_cacheTtlSeconds"] = int(ttl_seconds or INSIGHTSENTRY_OPTIONS_LAST_GOOD_TTL_SECONDS)
+    stored["_lastGoodSourceKey"] = key
+    _EXTERNAL_DATA_CACHE[last_good_key(key)] = stored
+
+
+def get_last_good_factor(
+    key: str,
+    *,
+    reason: str,
+    label_suffix: str = "Stale-Safe",
+    ttl_seconds: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    cached = _EXTERNAL_DATA_CACHE.get(last_good_key(key))
+
+    if not isinstance(cached, dict):
+        return None
+
+    created_epoch = to_float(cached.get("_cacheEpoch"), 0)
+    if created_epoch <= 0:
+        return None
+
+    effective_ttl = int(ttl_seconds or cached.get("_cacheTtlSeconds", INSIGHTSENTRY_OPTIONS_LAST_GOOD_TTL_SECONDS))
+    age = time.time() - created_epoch
+
+    if age > effective_ttl:
+        return None
+
+    payload = dict(cached)
+    payload.pop("_cacheEpoch", None)
+    payload.pop("_cacheTtlSeconds", None)
+    payload.pop("_lastGoodSourceKey", None)
+
+    label = str(payload.get("label") or "").strip()
+    if label and label_suffix.lower() not in label.lower():
+        payload["label"] = f"{label} ({label_suffix})"
+
+    payload["status"] = "active"
+    payload["staleSafe"] = True
+    payload["staleAgeSeconds"] = round(age, 2)
+    payload["reason"] = f"last_good_retained_after_temporary_miss: {reason}"
+    payload["createdAt"] = utc_now_iso()
+    return payload
 
 
 def redact_key_from_text(value: str) -> str:
@@ -734,12 +804,268 @@ def fetch_insightsentry_underlying_last_price(symbol: str, timeframe: str = "1m"
     return to_float(found, 0.0) if found is not None else 0.0
 
 
+
+
+def extract_insightsentry_quote_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    data = payload.get("data") if isinstance(payload, dict) else None
+
+    if isinstance(data, list):
+        return [row for row in data if isinstance(row, dict)]
+
+    if isinstance(data, dict):
+        for key in ["data", "rows", "items", "results", "quotes"]:
+            value = data.get(key)
+            if isinstance(value, list):
+                return [row for row in value if isinstance(row, dict)]
+        if any(key in data for key in ["code", "last_price", "bid", "ask", "status"]):
+            return [data]
+
+    if isinstance(payload, dict):
+        for key in ["data", "rows", "items", "results", "quotes"]:
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [row for row in value if isinstance(row, dict)]
+
+    return []
+
+
+def build_insightsentry_l1_quote_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
+    normalized = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    if not is_futures_symbol(normalized):
+        return inactive_factor(
+            symbol=normalized,
+            timeframe=normalized_timeframe,
+            name="InsightSentry L1 Quote Not Applicable",
+            source="insightsentry_quotes_l1",
+            status="not_applicable",
+            reason=f"InsightSentry Quotes L1 is only used for MES/ES futures in this dashboard step, not {normalized}.",
+        )
+
+    underlying = insightsentry_underlying_symbol(normalized)
+    cache_key = f"insightsentry:l1-quote:{normalized}:{normalized_timeframe}"
+    cached = cache_get(cache_key, INSIGHTSENTRY_L1_QUOTE_CACHE_TTL_SECONDS)
+
+    if cached:
+        return cached
+
+    if not INSIGHTSENTRY_API_KEY:
+        payload = inactive_factor(
+            symbol=normalized,
+            timeframe=normalized_timeframe,
+            name="InsightSentry L1 Quote Missing Key",
+            source="insightsentry_quotes_l1",
+            status="missing_key",
+            reason="Add INSIGHTSENTRY_API_KEY, INSIGHTSENTRY_RAPIDAPI_KEY, or RAPIDAPI_KEY to enable live L1 quotes.",
+        )
+        payload["underlying"] = underlying
+        return cache_set(cache_key, payload, INSIGHTSENTRY_L1_QUOTE_CACHE_TTL_SECONDS)
+
+    response = insightsentry_request("/v3/quotes", {"codes": underlying})
+    rows = extract_insightsentry_quote_rows(response.get("data") if isinstance(response.get("data"), dict) else response)
+
+    if not response.get("ok") or not rows:
+        payload = {
+            "status": "unavailable",
+            "label": "InsightSentry L1 Quote Unavailable",
+            "source": "insightsentry_quotes_l1",
+            "symbol": normalized,
+            "timeframe": normalized_timeframe,
+            "underlying": underlying,
+            "direction": "neutral",
+            "strength": 0,
+            "reason": response.get("error") or response.get("body") or "no_l1_quote_rows_returned",
+            "probe": summarize_result("insightsentry_quotes_l1", response),
+            "createdAt": utc_now_iso(),
+        }
+        return cache_set(cache_key, payload, INSIGHTSENTRY_L1_QUOTE_CACHE_TTL_SECONDS)
+
+    row = rows[0]
+    last_price = to_float(row.get("last_price") or row.get("lastPrice") or row.get("last") or row.get("price"), 0.0)
+    bid = to_float(row.get("bid") or row.get("bid_price") or row.get("bidPrice"), 0.0)
+    ask = to_float(row.get("ask") or row.get("ask_price") or row.get("askPrice"), 0.0)
+    bid_size = to_float(row.get("bid_size") or row.get("bidSize") or row.get("bid_sz") or row.get("bidQty"), 0.0)
+    ask_size = to_float(row.get("ask_size") or row.get("askSize") or row.get("ask_sz") or row.get("askQty"), 0.0)
+    volume = to_float(row.get("volume") or row.get("vol"), 0.0)
+    delay_seconds = to_float(row.get("delay_seconds") or row.get("delaySeconds") or row.get("delay"), 0.0)
+    status_text = str(row.get("status") or row.get("market_status") or row.get("marketStatus") or "").upper()
+    change = to_float(row.get("change"), 0.0)
+    change_pct = to_float(row.get("change_percent") or row.get("changePercent") or row.get("change_pct"), 0.0)
+
+    spread = ask - bid if ask > 0 and bid > 0 else 0.0
+    mid = (bid + ask) / 2.0 if ask > 0 and bid > 0 else last_price
+    spread_pct = spread / max(mid, 1.0) * 100.0 if spread > 0 else 0.0
+
+    total_size = bid_size + ask_size
+    imbalance_pct = (bid_size - ask_size) / max(total_size, 1.0) * 100.0
+    pressure_strength = clamp(abs(imbalance_pct))
+
+    if bid <= 0 and ask <= 0 and last_price <= 0:
+        status = "unavailable"
+        direction = "neutral"
+        label = "InsightSentry L1 Quote Empty"
+        strength = 0
+        reason = "quote_missing_bid_ask_and_last"
+    elif delay_seconds > 60:
+        status = "active"
+        direction = "active"
+        label = "InsightSentry L1 Quote Delayed"
+        strength = 40
+        reason = "l1_quote_available_but_delay_seconds_high"
+    elif imbalance_pct > 10:
+        status = "active"
+        direction = "bullish"
+        label = "Bullish L1 Quote Pressure"
+        strength = max(pressure_strength, 45.0)
+        reason = "bid_size_above_ask_size"
+    elif imbalance_pct < -10:
+        status = "active"
+        direction = "bearish"
+        label = "Bearish L1 Quote Pressure"
+        strength = max(pressure_strength, 45.0)
+        reason = "ask_size_above_bid_size"
+    else:
+        status = "active"
+        direction = "active"
+        label = "Balanced L1 Quote Pressure"
+        strength = max(pressure_strength, 35.0)
+        reason = "bid_ask_size_balanced"
+
+    payload = {
+        "status": status,
+        "label": label,
+        "source": "insightsentry_quotes_l1",
+        "symbol": normalized,
+        "timeframe": normalized_timeframe,
+        "underlying": underlying,
+        "direction": direction,
+        "strength": round(strength, 2),
+        "quoteStatus": status_text,
+        "lastPrice": last_price,
+        "bid": bid,
+        "ask": ask,
+        "bidSize": bid_size,
+        "askSize": ask_size,
+        "volume": volume,
+        "delaySeconds": delay_seconds,
+        "change": change,
+        "changePercent": change_pct,
+        "spread": round(spread, 6),
+        "spreadPct": round(spread_pct, 6),
+        "imbalancePct": round(imbalance_pct, 2),
+        "lpTime": row.get("lp_time") or row.get("lastTime") or row.get("timestamp"),
+        "reason": reason,
+        "probe": summarize_result("insightsentry_quotes_l1", response),
+        "createdAt": utc_now_iso(),
+    }
+
+    return cache_set(cache_key, payload, INSIGHTSENTRY_L1_QUOTE_CACHE_TTL_SECONDS)
+
+
+def build_insightsentry_l1_footprint_proxy_context(
+    symbol: str,
+    timeframe: str = "1m",
+    quote_factor: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    normalized = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    if not is_futures_symbol(normalized):
+        return inactive_factor(
+            symbol=normalized,
+            timeframe=normalized_timeframe,
+            name="L1 Footprint Proxy Not Applicable",
+            source="insightsentry_quotes_l1_top_of_book_proxy",
+            status="not_applicable",
+            reason=f"InsightSentry L1 footprint proxy is only used for MES/ES futures, not {normalized}.",
+        )
+
+    quote = quote_factor if isinstance(quote_factor, dict) else build_insightsentry_l1_quote_context(normalized, normalized_timeframe)
+
+    if str(quote.get("status") or "").lower() not in {"active", "live"}:
+        payload = dict(quote)
+        payload.update(
+            {
+                "status": "unavailable",
+                "label": "L1 Footprint Proxy Unavailable",
+                "source": "insightsentry_quotes_l1_top_of_book_proxy",
+                "symbol": normalized,
+                "timeframe": normalized_timeframe,
+                "direction": "neutral",
+                "strength": 0,
+                "deltaPct": 0,
+                "reason": f"quote_not_active: {quote.get('reason')}",
+                "createdAt": utc_now_iso(),
+            }
+        )
+        return payload
+
+    bid_size = to_float(quote.get("bidSize"), 0.0)
+    ask_size = to_float(quote.get("askSize"), 0.0)
+    bid = to_float(quote.get("bid"), 0.0)
+    ask = to_float(quote.get("ask"), 0.0)
+    total_size = bid_size + ask_size
+    delta = bid_size - ask_size
+    delta_pct = delta / max(total_size, 1.0) * 100.0
+    strength = clamp(abs(delta_pct))
+
+    if total_size <= 0:
+        direction = "active"
+        label = "L1 Footprint Proxy Active"
+        reason = "l1_quote_active_without_bid_ask_size"
+        strength = 35.0
+    elif delta_pct > 10:
+        direction = "bullish"
+        label = "Bullish L1 Footprint Proxy"
+        reason = "bid_size_pressure_above_ask_size"
+        strength = max(strength, 45.0)
+    elif delta_pct < -10:
+        direction = "bearish"
+        label = "Bearish L1 Footprint Proxy"
+        reason = "ask_size_pressure_above_bid_size"
+        strength = max(strength, 45.0)
+    else:
+        direction = "active"
+        label = "Balanced L1 Footprint Proxy"
+        reason = "top_of_book_bid_ask_size_balanced"
+        strength = max(strength, 35.0)
+
+    return {
+        "status": "active",
+        "label": label,
+        "source": "insightsentry_quotes_l1_top_of_book_proxy",
+        "symbol": normalized,
+        "timeframe": normalized_timeframe,
+        "underlying": quote.get("underlying"),
+        "direction": direction,
+        "strength": round(strength, 2),
+        "bid": bid,
+        "ask": ask,
+        "bidSize": bid_size,
+        "askSize": ask_size,
+        "delta": round(delta, 6),
+        "deltaPct": round(delta_pct, 2),
+        "spread": quote.get("spread"),
+        "spreadPct": quote.get("spreadPct"),
+        "lastPrice": quote.get("lastPrice"),
+        "delaySeconds": quote.get("delaySeconds"),
+        "quoteStatus": quote.get("quoteStatus"),
+        "reason": reason,
+        "note": "This is a live L1 top-of-book pressure proxy, not true executed footprint delta. Add trades/tick data for true footprint.",
+        "createdAt": utc_now_iso(),
+    }
+
+
 def choose_nearest_insightsentry_option_strike(symbol: str, codes: List[str], timeframe: str = "1m") -> Dict[str, Any]:
     parsed = [parse_insightsentry_option_code(code) for code in codes]
     strikes = sorted({to_float(item.get("strike"), 0.0) for item in parsed if to_float(item.get("strike"), 0.0) > 0})
 
     fallback = to_float(INSIGHTSENTRY_OPTION_STRIKE_FALLBACK, 0.0)
-    underlying_price = fetch_insightsentry_underlying_last_price(symbol, timeframe)
+    quote_factor = build_insightsentry_l1_quote_context(symbol, timeframe)
+    underlying_price = to_float(quote_factor.get("lastPrice"), 0.0)
+    if underlying_price <= 0:
+        underlying_price = fetch_insightsentry_underlying_last_price(symbol, timeframe)
 
     if strikes and underlying_price > 0:
         selected = min(strikes, key=lambda strike: abs(strike - underlying_price))
@@ -792,7 +1118,7 @@ def build_insightsentry_futures_options_context(symbol: str, timeframe: str = "1
 
     underlying = insightsentry_underlying_symbol(normalized)
     cache_key = f"insightsentry:futures-options:{normalized}:{normalized_timeframe}"
-    cached = cache_get(cache_key)
+    cached = cache_get(cache_key, INSIGHTSENTRY_CACHE_TTL_SECONDS)
     if cached:
         return cached
 
@@ -825,7 +1151,16 @@ def build_insightsentry_futures_options_context(symbol: str, timeframe: str = "1
             "probe": summarize_result("insightsentry_options_list", list_response),
             "createdAt": utc_now_iso(),
         }
-        return cache_set(cache_key, payload)
+        stale = get_last_good_factor(
+            cache_key,
+            reason=str(payload.get("reason") or "options_list_unavailable"),
+            label_suffix="Stale-Safe",
+            ttl_seconds=INSIGHTSENTRY_OPTIONS_LAST_GOOD_TTL_SECONDS,
+        )
+        if stale:
+            stale["fallbackProbe"] = payload
+            return stale
+        return cache_set(cache_key, payload, INSIGHTSENTRY_CACHE_TTL_SECONDS)
 
     selected = choose_nearest_insightsentry_option_strike(normalized, option_codes, normalized_timeframe)
     strike = to_float(selected.get("strike"), 0.0)
@@ -845,7 +1180,16 @@ def build_insightsentry_futures_options_context(symbol: str, timeframe: str = "1
             "probe": summarize_result("insightsentry_options_list", list_response),
             "createdAt": utc_now_iso(),
         }
-        return cache_set(cache_key, payload)
+        stale = get_last_good_factor(
+            cache_key,
+            reason=str(payload.get("reason") or "option_strike_selection_failed"),
+            label_suffix="Stale-Safe",
+            ttl_seconds=INSIGHTSENTRY_OPTIONS_LAST_GOOD_TTL_SECONDS,
+        )
+        if stale:
+            stale["fallbackProbe"] = payload
+            return stale
+        return cache_set(cache_key, payload, INSIGHTSENTRY_CACHE_TTL_SECONDS)
 
     strike_response = insightsentry_request(
         "/v3/options/strike",
@@ -873,7 +1217,16 @@ def build_insightsentry_futures_options_context(symbol: str, timeframe: str = "1
             "probe": summarize_result("insightsentry_options_strike", strike_response),
             "createdAt": utc_now_iso(),
         }
-        return cache_set(cache_key, payload)
+        stale = get_last_good_factor(
+            cache_key,
+            reason=str(payload.get("reason") or "options_strike_chain_unavailable"),
+            label_suffix="Stale-Safe",
+            ttl_seconds=INSIGHTSENTRY_OPTIONS_LAST_GOOD_TTL_SECONDS,
+        )
+        if stale:
+            stale["fallbackProbe"] = payload
+            return stale
+        return cache_set(cache_key, payload, INSIGHTSENTRY_CACHE_TTL_SECONDS)
 
     call_rows: List[Dict[str, Any]] = []
     put_rows: List[Dict[str, Any]] = []
@@ -994,7 +1347,10 @@ def build_insightsentry_futures_options_context(symbol: str, timeframe: str = "1
         "createdAt": utc_now_iso(),
     }
 
-    return cache_set(cache_key, payload)
+    if payload.get("status") == "active":
+        remember_last_good_factor(cache_key, payload, INSIGHTSENTRY_OPTIONS_LAST_GOOD_TTL_SECONDS)
+
+    return cache_set(cache_key, payload, INSIGHTSENTRY_CACHE_TTL_SECONDS)
 
 
 def build_insightsentry_futures_open_interest_context(
@@ -2348,7 +2704,10 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
     normalized = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
 
+    l1_quote: Optional[Dict[str, Any]] = None
+
     if is_futures_symbol(normalized):
+        l1_quote = build_insightsentry_l1_quote_context(normalized, normalized_timeframe)
         options_chain = build_insightsentry_futures_options_context(normalized, normalized_timeframe)
     else:
         options_chain = build_massive_options_chain_context(normalized, normalized_timeframe)
@@ -2358,7 +2717,12 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
         footprint = build_crypto_footprint_context(normalized, normalized_timeframe)
     elif is_futures_symbol(normalized):
         open_interest = build_insightsentry_futures_open_interest_context(normalized, normalized_timeframe, options_chain)
-        footprint = build_databento_mbp1_footprint_context(normalized, normalized_timeframe)
+        databento_footprint = build_databento_mbp1_footprint_context(normalized, normalized_timeframe)
+        if databento_footprint.get("status") == "active":
+            footprint = databento_footprint
+        else:
+            footprint = build_insightsentry_l1_footprint_proxy_context(normalized, normalized_timeframe, l1_quote)
+            footprint["databentoFallbackProbe"] = databento_footprint
     else:
         open_interest = options_chain
         footprint = inactive_factor(
@@ -2392,6 +2756,9 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
         "cot": cot,
     }
 
+    if isinstance(l1_quote, dict):
+        factors["liveQuote"] = l1_quote
+
     signal_fields = {
         key: signal_text_from_factor(value)
         for key, value in factors.items()
@@ -2411,6 +2778,14 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
         "footprintDeltaPct": to_float(footprint.get("deltaPct"), 0) if isinstance(footprint, dict) else 0,
         "openInterest": to_float(open_interest.get("openInterest"), 0) if isinstance(open_interest, dict) else 0,
         "openInterestCurrency": to_float(open_interest.get("openInterestCurrency"), 0) if isinstance(open_interest, dict) else 0,
+        "l1QuoteStrength": factor_strength(l1_quote) if isinstance(l1_quote, dict) else 0,
+        "l1LastPrice": to_float(l1_quote.get("lastPrice"), 0) if isinstance(l1_quote, dict) else 0,
+        "l1Bid": to_float(l1_quote.get("bid"), 0) if isinstance(l1_quote, dict) else 0,
+        "l1Ask": to_float(l1_quote.get("ask"), 0) if isinstance(l1_quote, dict) else 0,
+        "l1BidSize": to_float(l1_quote.get("bidSize"), 0) if isinstance(l1_quote, dict) else 0,
+        "l1AskSize": to_float(l1_quote.get("askSize"), 0) if isinstance(l1_quote, dict) else 0,
+        "l1Spread": to_float(l1_quote.get("spread"), 0) if isinstance(l1_quote, dict) else 0,
+        "l1DelaySeconds": to_float(l1_quote.get("delaySeconds"), 0) if isinstance(l1_quote, dict) else 0,
     }
 
     return {
@@ -2445,7 +2820,9 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
                 "baseUrl": INSIGHTSENTRY_BASE_URL,
                 "host": INSIGHTSENTRY_HOST,
                 "cacheTtlSeconds": INSIGHTSENTRY_CACHE_TTL_SECONDS,
-                "usedFor": ["MES1! options chain pressure", "ES1! options chain pressure", "futures OI only if fields exist"],
+                "l1QuoteCacheTtlSeconds": INSIGHTSENTRY_L1_QUOTE_CACHE_TTL_SECONDS,
+                "optionsLastGoodTtlSeconds": INSIGHTSENTRY_OPTIONS_LAST_GOOD_TTL_SECONDS,
+                "usedFor": ["MES1! Quotes L1 live quote", "ES1! Quotes L1 live quote", "MES1! options chain pressure", "ES1! options chain pressure", "futures OI only if fields exist", "L1 top-of-book footprint proxy when Databento unavailable"],
                 "symbols": {"MES1!": INSIGHTSENTRY_MES_UNDERLYING, "ES1!": INSIGHTSENTRY_ES_UNDERLYING},
             },
             "databento": {
@@ -2473,7 +2850,7 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
         "factors": factors,
         "signalFields": signal_fields,
         "scalars": scalars,
-        "source": "external_data_engine_v8_2_insightsentry_futures_options",
+        "source": "external_data_engine_v8_3_insightsentry_l1_quotes_stable_options",
         "createdAt": utc_now_iso(),
     }
 
@@ -2486,7 +2863,7 @@ def build_external_data_status(symbol: str = "BTCUSD", timeframe: str = "1m") ->
     return {
         "eventType": "EXTERNAL_DATA_STATUS",
         "status": context.get("status", "unknown"),
-        "source": "external_data_engine_v8_2_insightsentry_futures_options",
+        "source": "external_data_engine_v8_3_insightsentry_l1_quotes_stable_options",
         "symbol": normalized,
         "timeframe": normalized_timeframe,
         "massiveKeyPresent": bool(MASSIVE_API_KEY),
