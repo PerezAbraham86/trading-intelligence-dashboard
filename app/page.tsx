@@ -2163,11 +2163,15 @@ function LightweightChartPanel({
     )
   }, [candles, engineState, overlayPayload, unifiedOverlayPayload])
 
+  const chartDataReady = candles.length >= 20
+
   const scorecardsForPanel = useMemo(() => {
+    if (!chartDataReady) return null
+
     const visualScorecards = visualScorecardBundle?.scorecards
     const liveScorecards = scorecards as any
 
-    if (!visualScorecards) return liveScorecards
+    if (!visualScorecards) return liveScorecards ?? null
 
     return {
       ...(liveScorecards ?? {}),
@@ -2201,22 +2205,26 @@ function LightweightChartPanel({
         ...visualScorecards.activeFactors,
       },
     }
-  }, [scorecards, visualScorecardBundle])
+  }, [chartDataReady, scorecards, visualScorecardBundle])
 
   const mlFeaturesForPanel = useMemo(() => {
-    return {
+    if (!chartDataReady) return null
+
+    const merged = {
       ...(mlFeatures as any ?? {}),
       ...(visualScorecardBundle?.mlFeatures ?? {}),
     }
-  }, [mlFeatures, visualScorecardBundle])
+
+    return hasUsefulObjectKeys(merged) ? merged : null
+  }, [chartDataReady, mlFeatures, visualScorecardBundle])
 
   useEffect(() => {
-    if (compact || !onScorecardsUpdate) return
+    if (compact || !onScorecardsUpdate || !chartDataReady) return
 
     if (scorecardsForPanel || mlFeaturesForPanel) {
       onScorecardsUpdate(scorecardsForPanel, mlFeaturesForPanel)
     }
-  }, [compact, mlFeaturesForPanel, onScorecardsUpdate, scorecardsForPanel])
+  }, [chartDataReady, compact, mlFeaturesForPanel, onScorecardsUpdate, scorecardsForPanel])
 
   return (
     <div className="rounded-xl border border-dark-700 bg-dark-800/80 p-4 shadow-xl">
@@ -2330,15 +2338,26 @@ function LightweightChartPanel({
           />
 
           {!compact && (
-            <ScorecardsPanel
-              scorecards={scorecardsForPanel as any}
-              mlFeatures={mlFeaturesForPanel as any}
-              overlayPayload={overlayPayload as any}
-              overlaySources={[
-                unifiedOverlayPayload as any,
-                engineState as any,
-              ]}
-            />
+            chartDataReady && (scorecardsForPanel || mlFeaturesForPanel) ? (
+              <ScorecardsPanel
+                scorecards={scorecardsForPanel as any}
+                mlFeatures={mlFeaturesForPanel as any}
+                overlayPayload={overlayPayload as any}
+                overlaySources={[
+                  unifiedOverlayPayload as any,
+                  engineState as any,
+                ]}
+              />
+            ) : (
+              <DashboardWaitingCard
+                title={chartDataReady ? 'Waiting for ML scorecards...' : 'Waiting for main candles...'}
+                message={
+                  chartDataReady
+                    ? 'The main chart has candles. ML scorecards will appear after the overlay engine creates scorecards from those loaded candles.'
+                    : 'ML scorecards are paused until the main chart has at least 20 candles. This prevents fallback bull/bear values from showing before candle data exists.'
+                }
+              />
+            )
           )}
         </div>
       )}
@@ -2504,7 +2523,7 @@ export default function Dashboard() {
   const FactorConfirmationTableLoose = FactorConfirmationTable as any
 
   const mainCandlesReady = mainChartCandles.length >= 20
-  const mainOverlayReady = mainCandlesReady && Boolean(chartScorecards || chartMlFeatures || mainChartOverlayPayload)
+  const mainOverlayReady = mainCandlesReady && Boolean(chartScorecards || chartMlFeatures)
 
   useEffect(() => {
     const latestCandle = mainChartCandles[mainChartCandles.length - 1]
