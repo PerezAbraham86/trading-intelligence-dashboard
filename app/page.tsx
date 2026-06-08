@@ -695,7 +695,7 @@ async function fetchSharedCandlePayload(
       symbol: normalizedSymbol,
       timeframe: normalizedTimeframe,
       limit: String(apiLimit),
-      force: 'true',
+      force: 'false',
     })
 
     const response = await fetch(`${apiBaseUrl}/api/candles?${params.toString()}`, {
