@@ -80,6 +80,10 @@ type LightweightCandlestickChartProps = {
   nrtrMode?: NrtrOverlayMode;
   nrtrPreset?: NrtrPresetMode;
   nrtrExitMode?: NrtrExitMode;
+  nrtrAtrLength?: number;
+  nrtrAtrMultiplier?: number;
+  nrtrPercent?: number;
+  showNrtrStats?: boolean;
 };
 
 function isValidCandle(candle: DashboardCandle | null | undefined): candle is DashboardCandle {
@@ -430,16 +434,28 @@ function calculateNrtrAtrSuperTrend(
 function calculateNrtrOverlay(
   candles: DashboardCandle[],
   mode: NrtrOverlayMode,
-  preset: NrtrPresetMode
+  preset: NrtrPresetMode,
+  atrLength = 14,
+  atrMultiplier?: number,
+  percent?: number
 ): NrtrPoint[] {
   const presetValues = getNrtrPresetValues(preset);
+  const safeAtrLength = Math.max(1, Math.floor(Number.isFinite(atrLength) ? atrLength : 14));
+  const safeAtrMultiplier =
+    Number.isFinite(Number(atrMultiplier)) && Number(atrMultiplier) > 0
+      ? Number(atrMultiplier)
+      : presetValues.atrMultiplier;
+  const safePercent =
+    Number.isFinite(Number(percent)) && Number(percent) > 0
+      ? Number(percent)
+      : presetValues.percent;
 
   if (mode === "ATR-Based") {
-    return calculateNrtrAtrSuperTrend(candles, 14, presetValues.atrMultiplier);
+    return calculateNrtrAtrSuperTrend(candles, safeAtrLength, safeAtrMultiplier);
   }
 
   if (mode === "Percentage") {
-    return calculateNrtrPercentage(candles, presetValues.percent);
+    return calculateNrtrPercentage(candles, safePercent);
   }
 
   return [];
@@ -894,6 +910,10 @@ export default function LightweightCandlestickChart({
   nrtrMode = "ATR-Based",
   nrtrPreset = "Swing",
   nrtrExitMode = "Pivot Pullback",
+  nrtrAtrLength = 14,
+  nrtrAtrMultiplier = 3,
+  nrtrPercent = 0.25,
+  showNrtrStats = true,
 }: LightweightCandlestickChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -907,6 +927,7 @@ export default function LightweightCandlestickChart({
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const hasFitContentRef = useRef(false);
   const [overlaySize, setOverlaySize] = useState({ width: 0, height });
+  const [isNrtrStatsCollapsed, setIsNrtrStatsCollapsed] = useState(false);
 
   /**
    * Cache both versions so the chart toggle is instant.
@@ -936,8 +957,17 @@ export default function LightweightCandlestickChart({
   }, [candles, smmaLength]);
 
   const nrtrPoints = useMemo(() => {
-    return showNrtr ? calculateNrtrOverlay(candles, nrtrMode, nrtrPreset) : [];
-  }, [candles, nrtrMode, nrtrPreset, showNrtr]);
+    return showNrtr
+      ? calculateNrtrOverlay(
+          candles,
+          nrtrMode,
+          nrtrPreset,
+          nrtrAtrLength,
+          nrtrAtrMultiplier,
+          nrtrPercent
+        )
+      : [];
+  }, [candles, nrtrAtrLength, nrtrAtrMultiplier, nrtrMode, nrtrPercent, nrtrPreset, showNrtr]);
 
   const nrtrLongLineData = useMemo(() => {
     return splitNrtrLineData(nrtrPoints, 1);
@@ -974,6 +1004,18 @@ export default function LightweightCandlestickChart({
   const visibleOverlayLines = useMemo(() => {
     return [] as ChartOverlayLine[];
   }, [overlayLines, showOverlayLines]);
+
+  const nrtrSettingsLabel = useMemo(() => {
+    if (nrtrMode === "ATR-Based") {
+      return `NRTR ATR ${Math.max(1, Math.floor(nrtrAtrLength))} x${Number(nrtrAtrMultiplier).toFixed(2)}`;
+    }
+
+    if (nrtrMode === "Percentage") {
+      return `NRTR ${Number(nrtrPercent).toFixed(2)}%`;
+    }
+
+    return "NRTR Off";
+  }, [nrtrAtrLength, nrtrAtrMultiplier, nrtrMode, nrtrPercent]);
 
   useEffect(() => {
     if (!containerRef.current || chartRef.current) return;
@@ -1291,7 +1333,7 @@ export default function LightweightCandlestickChart({
           {showNrtr && nrtrPoints.length > 0 && (
             <>
               <span className="text-slate-500">•</span>
-              <span>NRTR+ {nrtrMode} {nrtrPreset}</span>
+              <span>{nrtrSettingsLabel}</span>
             </>
           )}
           {ghostDisplayData.length > 0 && (
@@ -1316,56 +1358,88 @@ export default function LightweightCandlestickChart({
       )}
 
 
-      {showNrtr && nrtrPoints.length > 0 && (
-        <div className="pointer-events-none absolute right-3 top-3 z-10 w-[230px] rounded-xl border border-slate-800 bg-black/45 p-3 text-[11px] text-slate-300 shadow-lg backdrop-blur">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="font-semibold text-slate-100">NRTR+</span>
-            <span
-              className={
-                nrtrStats.direction === 1
-                  ? "text-emerald-300"
-                  : nrtrStats.direction === -1
-                    ? "text-red-300"
-                    : "text-slate-400"
-              }
-            >
-              {nrtrStats.directionText}
-            </span>
+      {showNrtr && showNrtrStats && nrtrPoints.length > 0 && (
+        <div className="absolute right-3 top-3 z-10 w-[230px] rounded-xl border border-slate-800 bg-black/45 p-3 text-[11px] text-slate-300 shadow-lg backdrop-blur">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="flex min-w-0 flex-col">
+              <span className="font-semibold text-slate-100">NRTR+</span>
+              <span className="truncate text-[10px] text-slate-500">{nrtrSettingsLabel}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span
+                className={
+                  nrtrStats.direction === 1
+                    ? "text-emerald-300"
+                    : nrtrStats.direction === -1
+                      ? "text-red-300"
+                      : "text-slate-400"
+                }
+              >
+                {nrtrStats.directionText}
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsNrtrStatsCollapsed((value) => !value)}
+                className="pointer-events-auto rounded-md border border-slate-700 px-2 py-1 text-[10px] font-semibold text-slate-300 hover:border-amber-400/60 hover:text-amber-300"
+              >
+                {isNrtrStatsCollapsed ? "Expand" : "Collapse"}
+              </button>
+            </div>
           </div>
-          <div className="grid grid-cols-2 gap-x-3 gap-y-1">
-            <span className="text-slate-500">Mode</span>
-            <span className="text-right">{nrtrMode}</span>
-            <span className="text-slate-500">Preset</span>
-            <span className="text-right">{nrtrPreset}</span>
-            <span className="text-slate-500">Entry</span>
-            <span className="text-right">{formatNrtrNumber(nrtrStats.entryPrice)}</span>
-            <span className="text-slate-500">Stop</span>
-            <span className="text-right">{formatNrtrNumber(nrtrStats.trailingStop)}</span>
-            <span className="text-slate-500">P/L pts</span>
-            <span
-              className={
-                Number(nrtrStats.pnlPoints) >= 0
-                  ? "text-right text-emerald-300"
-                  : "text-right text-red-300"
-              }
-            >
-              {formatNrtrSigned(nrtrStats.pnlPoints)}
-            </span>
-            <span className="text-slate-500">Locked</span>
-            <span
-              className={
-                Number(nrtrStats.lockedProfit) >= 0
-                  ? "text-right text-emerald-300"
-                  : "text-right text-red-300"
-              }
-            >
-              {formatNrtrSigned(nrtrStats.lockedProfit)}
-            </span>
-            <span className="text-slate-500">Stretch</span>
-            <span className="text-right">{formatNrtrNumber(nrtrStats.distancePercent, 2)}%</span>
-            <span className="text-slate-500">Bars</span>
-            <span className="text-right">{nrtrStats.barsInTrade}</span>
-          </div>
+
+          {isNrtrStatsCollapsed ? (
+            <div className="grid grid-cols-3 gap-2 rounded-lg border border-slate-800 bg-black/30 p-2 text-center">
+              <div>
+                <div className="text-slate-500">P/L</div>
+                <div className={Number(nrtrStats.pnlPoints) >= 0 ? "text-emerald-300" : "text-red-300"}>
+                  {formatNrtrSigned(nrtrStats.pnlPoints)}
+                </div>
+              </div>
+              <div>
+                <div className="text-slate-500">Stop</div>
+                <div>{formatNrtrNumber(nrtrStats.trailingStop)}</div>
+              </div>
+              <div>
+                <div className="text-slate-500">Bars</div>
+                <div>{nrtrStats.barsInTrade}</div>
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+              <span className="text-slate-500">Mode</span>
+              <span className="text-right">{nrtrMode}</span>
+              <span className="text-slate-500">Settings</span>
+              <span className="text-right">{nrtrMode === "ATR-Based" ? `${Math.max(1, Math.floor(nrtrAtrLength))} / ${Number(nrtrAtrMultiplier).toFixed(2)}` : `${Number(nrtrPercent).toFixed(2)}%`}</span>
+              <span className="text-slate-500">Entry</span>
+              <span className="text-right">{formatNrtrNumber(nrtrStats.entryPrice)}</span>
+              <span className="text-slate-500">Stop</span>
+              <span className="text-right">{formatNrtrNumber(nrtrStats.trailingStop)}</span>
+              <span className="text-slate-500">P/L pts</span>
+              <span
+                className={
+                  Number(nrtrStats.pnlPoints) >= 0
+                    ? "text-right text-emerald-300"
+                    : "text-right text-red-300"
+                }
+              >
+                {formatNrtrSigned(nrtrStats.pnlPoints)}
+              </span>
+              <span className="text-slate-500">Locked</span>
+              <span
+                className={
+                  Number(nrtrStats.lockedProfit) >= 0
+                    ? "text-right text-emerald-300"
+                    : "text-right text-red-300"
+                }
+              >
+                {formatNrtrSigned(nrtrStats.lockedProfit)}
+              </span>
+              <span className="text-slate-500">Stretch</span>
+              <span className="text-right">{formatNrtrNumber(nrtrStats.distancePercent, 2)}%</span>
+              <span className="text-slate-500">Bars</span>
+              <span className="text-right">{nrtrStats.barsInTrade}</span>
+            </div>
+          )}
         </div>
       )}
 
