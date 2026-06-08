@@ -30,6 +30,14 @@ type ChartCardCandle = {
   volume?: number
 }
 
+type ChartCardStrategySettings = {
+  smmaLength?: number
+  nrtrMode?: 'Off' | 'ATR-Based' | 'Percentage'
+  nrtrAtrLength?: number
+  nrtrAtrMultiplier?: number
+  nrtrPercent?: number
+}
+
 type ChartSignalCardInput = {
   label: string
   symbol?: string
@@ -37,6 +45,7 @@ type ChartSignalCardInput = {
   candles?: ChartCardCandle[]
   latestSignal?: RecentSignal
   activePrice?: number
+  settings?: ChartCardStrategySettings
 }
 
 type RecentSignalsTableProps = {
@@ -234,37 +243,278 @@ function calculateAtr(candles?: ChartCardCandle[], length = 14) {
   return trueRanges.reduce((sum, value) => sum + value, 0) / trueRanges.length
 }
 
-function inferChartTrend(candles?: ChartCardCandle[]) {
-  if (!Array.isArray(candles) || candles.length < 3) {
+function getValidCandles(candles?: ChartCardCandle[]) {
+  return Array.isArray(candles)
+    ? candles.filter((candle) =>
+        Number.isFinite(Number(candle.open)) &&
+        Number.isFinite(Number(candle.high)) &&
+        Number.isFinite(Number(candle.low)) &&
+        Number.isFinite(Number(candle.close))
+      )
+    : []
+}
+
+type NrtrPoint = {
+  direction: 1 | -1 | 0
+  value: number | null
+  buy: boolean
+  sell: boolean
+}
+
+function calculateSmma(candles?: ChartCardCandle[], length = 20) {
+  const valid = getValidCandles(candles)
+  const safeLength = Math.max(1, Math.floor(Number(length) || 20))
+  let smma: number | null = null
+  let runningSum = 0
+
+  for (let index = 0; index < valid.length; index += 1) {
+    const close = Number(valid[index].close)
+    runningSum += close
+
+    if (index < safeLength - 1) continue
+
+    if (index === safeLength - 1) {
+      smma = runningSum / safeLength
+    } else if (smma !== null) {
+      smma = (smma * (safeLength - 1) + close) / safeLength
+    }
+  }
+
+  return Number.isFinite(Number(smma)) ? Number(smma) : null
+}
+
+function calculateAtrSeries(candles?: ChartCardCandle[], length = 14): Array<number | null> {
+  const valid = getValidCandles(candles)
+  const safeLength = Math.max(1, Math.floor(Number(length) || 14))
+  const atrValues: Array<number | null> = Array(valid.length).fill(null)
+
+  if (valid.length === 0) return atrValues
+
+  const trueRanges = valid.map((candle, index) => {
+    const previousClose = index > 0 ? Number(valid[index - 1].close) : Number(candle.close)
+    const high = Number(candle.high)
+    const low = Number(candle.low)
+
+    return Math.max(
+      high - low,
+      Math.abs(high - previousClose),
+      Math.abs(low - previousClose)
+    )
+  })
+
+  let seedSum = 0
+
+  for (let index = 0; index < trueRanges.length; index += 1) {
+    if (index < safeLength) {
+      seedSum += trueRanges[index]
+      if (index === safeLength - 1) atrValues[index] = seedSum / safeLength
+      continue
+    }
+
+    const previousAtr = atrValues[index - 1]
+    atrValues[index] = previousAtr === null ? null : (previousAtr * (safeLength - 1) + trueRanges[index]) / safeLength
+  }
+
+  return atrValues
+}
+
+function calculateNrtrAtr(candles?: ChartCardCandle[], atrLength = 14, multiplier = 3): NrtrPoint[] {
+  const valid = getValidCandles(candles)
+  const result: NrtrPoint[] = []
+  const atrValues = calculateAtrSeries(valid, atrLength)
+  const safeMultiplier = Math.max(0.1, Number(multiplier) || 3)
+  let finalUpper: number | null = null
+  let finalLower: number | null = null
+  let previousSuperTrend: number | null = null
+  let previousFinalUpper: number | null = null
+  let previousFinalLower: number | null = null
+  let direction: 1 | -1 | 0 = 0
+
+  for (let index = 0; index < valid.length; index += 1) {
+    const candle = valid[index]
+    const atr = atrValues[index]
+    const previousClose = index > 0 ? Number(valid[index - 1].close) : Number(candle.close)
+    const previousDirection = direction
+
+    if (atr === null || !Number.isFinite(atr)) {
+      result.push({ direction: 0, value: null, buy: false, sell: false })
+      continue
+    }
+
+    const high = Number(candle.high)
+    const low = Number(candle.low)
+    const close = Number(candle.close)
+    const hl2 = (high + low) / 2
+    const basicUpper = hl2 + safeMultiplier * atr
+    const basicLower = hl2 - safeMultiplier * atr
+
+    if (previousFinalUpper === null || previousFinalLower === null) {
+      finalUpper = basicUpper
+      finalLower = basicLower
+    } else {
+      finalUpper = basicUpper < previousFinalUpper || previousClose > previousFinalUpper ? basicUpper : previousFinalUpper
+      finalLower = basicLower > previousFinalLower || previousClose < previousFinalLower ? basicLower : previousFinalLower
+    }
+
+    if (previousSuperTrend === null) {
+      direction = close >= hl2 ? 1 : -1
+    } else if (previousFinalUpper !== null && Math.abs(previousSuperTrend - previousFinalUpper) <= 1e-10) {
+      direction = close > Number(finalUpper) ? 1 : -1
+    } else {
+      direction = close < Number(finalLower) ? -1 : 1
+    }
+
+    const value = direction === 1 ? finalLower : finalUpper
+    result.push({
+      direction,
+      value: Number.isFinite(Number(value)) ? Number(value) : null,
+      buy: index > 0 && previousDirection === -1 && direction === 1,
+      sell: index > 0 && previousDirection === 1 && direction === -1,
+    })
+
+    previousSuperTrend = value
+    previousFinalUpper = finalUpper
+    previousFinalLower = finalLower
+  }
+
+  return result
+}
+
+function calculateNrtrPercentage(candles?: ChartCardCandle[], percent = 0.25): NrtrPoint[] {
+  const valid = getValidCandles(candles)
+  const result: NrtrPoint[] = []
+  if (valid.length === 0) return result
+
+  const coefficient = Math.max(0.01, Math.min(20, Number(percent) || 0.25)) / 100
+  let trend: 1 | -1 = 1
+  let highestPoint = Number(valid[0].high)
+  let lowestPoint = Number(valid[0].low)
+  let nrtr = highestPoint * (1 - coefficient)
+
+  for (let index = 0; index < valid.length; index += 1) {
+    const candle = valid[index]
+    const previousTrend = trend
+    const high = Number(candle.high)
+    const low = Number(candle.low)
+
+    if (trend === 1) {
+      if (high > highestPoint) highestPoint = high
+      nrtr = highestPoint * (1 - coefficient)
+      if (low <= nrtr) {
+        trend = -1
+        lowestPoint = low
+        nrtr = lowestPoint * (1 + coefficient)
+      }
+    } else {
+      if (low < lowestPoint) lowestPoint = low
+      nrtr = lowestPoint * (1 + coefficient)
+      if (high >= nrtr) {
+        trend = 1
+        highestPoint = high
+        nrtr = highestPoint * (1 - coefficient)
+      }
+    }
+
+    result.push({
+      direction: trend,
+      value: Number.isFinite(nrtr) ? nrtr : null,
+      buy: index > 0 && trend === 1 && previousTrend === -1,
+      sell: index > 0 && trend === -1 && previousTrend === 1,
+    })
+  }
+
+  return result
+}
+
+function calculateNrtr(candles?: ChartCardCandle[], settings?: ChartCardStrategySettings) {
+  if (settings?.nrtrMode === 'Percentage') {
+    return calculateNrtrPercentage(candles, settings.nrtrPercent ?? 0.25)
+  }
+
+  return calculateNrtrAtr(candles, settings?.nrtrAtrLength ?? 14, settings?.nrtrAtrMultiplier ?? 3)
+}
+
+function inferChartTrend(candles?: ChartCardCandle[], settings?: ChartCardStrategySettings) {
+  const valid = getValidCandles(candles)
+
+  if (valid.length < 3) {
     return {
       type: 'HOLD' as const,
       confidence: 0,
       momentum: 0,
+      source: 'No candle data',
+      targetBasis: 0,
     }
   }
 
-  const latest = getLatestClose(candles)
-  const lookbackIndex = Math.max(0, candles.length - 6)
-  const lookback = Number(candles[lookbackIndex]?.close)
-  const atr = calculateAtr(candles, 14)
+  const latest = getLatestClose(valid)
+  const lookbackIndex = Math.max(0, valid.length - 6)
+  const lookback = Number(valid[lookbackIndex]?.close)
+  const atr = calculateAtr(valid, settings?.nrtrAtrLength ?? 14)
+  const smma = calculateSmma(valid, settings?.smmaLength ?? 20)
+  const nrtrPoints = settings?.nrtrMode === 'Off' ? [] : calculateNrtr(valid, settings)
+  const latestNrtr = [...nrtrPoints].reverse().find((point) => point.direction !== 0 && point.value !== null)
 
   if (!latest || !Number.isFinite(lookback) || lookback <= 0) {
     return {
       type: 'HOLD' as const,
       confidence: 0,
       momentum: 0,
+      source: 'No clean price',
+      targetBasis: atr,
     }
   }
 
   const move = latest - lookback
   const normalizedMove = atr > 0 ? move / atr : move / Math.max(Math.abs(latest) * 0.001, 0.01)
-  const confidence = clampPercent(35 + Math.min(45, Math.abs(normalizedMove) * 16))
+  const smmaDirection = smma === null ? 'neutral' : latest > smma ? 'bullish' : latest < smma ? 'bearish' : 'neutral'
+
+  if (latestNrtr) {
+    const nrtrType = latestNrtr.direction === 1 ? 'BUY' as const : latestNrtr.direction === -1 ? 'SELL' as const : 'HOLD' as const
+    const agreesWithSmma =
+      (nrtrType === 'BUY' && smmaDirection === 'bullish') ||
+      (nrtrType === 'SELL' && smmaDirection === 'bearish')
+    const distance = latestNrtr.value && latest > 0 ? Math.abs(latest - latestNrtr.value) / latest : 0
+    const confidence = clampPercent(48 + Math.min(28, Math.abs(normalizedMove) * 8) + (agreesWithSmma ? 18 : 0) + Math.min(12, distance * 1200))
+
+    return {
+      type: nrtrType,
+      confidence,
+      momentum: normalizedMove,
+      source: agreesWithSmma ? 'NRTR + SMMA agreement' : 'NRTR direction',
+      targetBasis: Math.max(atr, Math.abs(latest - Number(latestNrtr.value ?? latest))),
+    }
+  }
+
+  const confidence = clampPercent(35 + Math.min(45, Math.abs(normalizedMove) * 16) + (smmaDirection !== 'neutral' ? 10 : 0))
+
+  if (smmaDirection === 'bullish') {
+    return {
+      type: 'BUY' as const,
+      confidence,
+      momentum: normalizedMove,
+      source: 'SMMA direction',
+      targetBasis: atr,
+    }
+  }
+
+  if (smmaDirection === 'bearish') {
+    return {
+      type: 'SELL' as const,
+      confidence,
+      momentum: normalizedMove,
+      source: 'SMMA direction',
+      targetBasis: atr,
+    }
+  }
 
   if (normalizedMove >= 0.35) {
     return {
       type: 'BUY' as const,
       confidence,
       momentum: normalizedMove,
+      source: 'Candle momentum',
+      targetBasis: atr,
     }
   }
 
@@ -273,6 +523,8 @@ function inferChartTrend(candles?: ChartCardCandle[]) {
       type: 'SELL' as const,
       confidence,
       momentum: normalizedMove,
+      source: 'Candle momentum',
+      targetBasis: atr,
     }
   }
 
@@ -280,6 +532,8 @@ function inferChartTrend(candles?: ChartCardCandle[]) {
     type: 'HOLD' as const,
     confidence: clampPercent(Math.max(25, confidence - 15)),
     momentum: normalizedMove,
+    source: 'No clean direction',
+    targetBasis: atr,
   }
 }
 
@@ -317,13 +571,14 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
   const timeframe = normalizeTimeframe(input.timeframe ?? fallbackSignal?.primaryTimeframe ?? fallbackSignal?.timeframe)
   const current = Number(input.activePrice ?? getLatestClose(input.candles) ?? fallbackSignal?.current ?? fallbackSignal?.price ?? fallbackSignal?.entry ?? NaN)
   const hasCurrent = Number.isFinite(current) && current > 0
-  const trend = inferChartTrend(input.candles)
+  const trend = inferChartTrend(input.candles, input.settings)
 
   const signalType = normalizeSignalType(input.latestSignal?.signal ?? input.latestSignal?.type ?? fallbackSignal?.signal ?? fallbackSignal?.type)
   const type = input.label.toLowerCase().includes('main') && signalType !== 'HOLD' ? signalType : trend.type
+  const signalConfidence = Number(input.latestSignal?.confidence ?? fallbackSignal?.confidence ?? 0)
   const confidence = clampPercent(
     input.label.toLowerCase().includes('main')
-      ? Number(input.latestSignal?.confidence ?? fallbackSignal?.confidence ?? trend.confidence)
+      ? Math.max(trend.confidence, Number.isFinite(signalConfidence) ? signalConfidence : 0)
       : trend.confidence
   )
   const confidenceLabel = getConfidenceLabel(confidence)
@@ -335,7 +590,7 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
       ? current
       : null
   const explicitTarget = Number(input.latestSignal?.target ?? input.latestSignal?.targetPrice ?? (fallbackSignal as any)?.target ?? (fallbackSignal as any)?.targetPrice ?? NaN)
-  const targetMove = atr > 0 ? atr * 2 : hasCurrent ? current * 0.003 : 0
+  const targetMove = trend.targetBasis > 0 ? trend.targetBasis * 2 : atr > 0 ? atr * 2 : hasCurrent ? current * 0.003 : 0
   const target = Number.isFinite(explicitTarget) && explicitTarget > 0 && hasCurrent && Math.abs(explicitTarget - current) / current <= 0.25
     ? explicitTarget
     : entry && type === 'BUY'
@@ -350,9 +605,13 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
       ? 'Bearish chart signal'
       : 'Hold / no clean signal'
 
+  const settingsText = input.settings
+    ? `Settings: SMMA ${input.settings.smmaLength ?? 20}, ${input.settings.nrtrMode ?? 'ATR-Based'} ${input.settings.nrtrMode === 'Percentage' ? `${input.settings.nrtrPercent ?? 0.25}%` : `${input.settings.nrtrAtrLength ?? 14} x${input.settings.nrtrAtrMultiplier ?? 3}`}.`
+    : ''
+
   const bodyText = input.label.toLowerCase().includes('main')
-    ? 'Main chart signal card. Entry, target, current price, and confidence are tied to the active chart signal context.'
-    : 'Mini chart confirmation card. This chart is used as a directional filter for the main chart strategy.'
+    ? `Main chart signal card. ${trend.source}. ${settingsText}`
+    : `Mini chart confirmation card. ${trend.source}. ${settingsText}`
 
   return {
     id: `${input.label}-${symbol}-${timeframe}`,
