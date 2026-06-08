@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import SignalCard from '@/components/SignalCard'
 import LightweightCandlestickChart, { ChartMode, DashboardCandle, NrtrOverlayMode } from '@/components/LightweightCandlestickChart'
 import { GhostCandle } from '@/components/GhostCandleOverlay'
@@ -465,6 +465,89 @@ type CandleModeLabel = 'Regular' | 'Heikin Ashi'
 
 const chartSymbols = ['BTCUSD', 'ETHUSD', 'SPY', 'MES1!']
 const chartTimeframes = ['1m', '3m', '5m', '10m', '15m', '30m', '1h', '2h', '4h', '1d']
+
+type ChartConfigKey = 'main' | 'mini1' | 'mini2'
+
+type SavedChartConfig = {
+  selection: ChartSelection
+  settings: ChartStrategySettings
+  savedAt: string
+}
+
+const chartConfigStorageKeys: Record<ChartConfigKey, string> = {
+  main: 'marketbos:chart-config:main',
+  mini1: 'marketbos:chart-config:mini1',
+  mini2: 'marketbos:chart-config:mini2',
+}
+
+function normalizeChartSettings(value: unknown): ChartStrategySettings | null {
+  if (!value || typeof value !== 'object') return null
+
+  const raw = value as Partial<ChartStrategySettings>
+
+  return {
+    smmaLength: Math.max(1, Math.floor(Number(raw.smmaLength ?? 20) || 20)),
+    nrtrMode: raw.nrtrMode === 'Percentage' || raw.nrtrMode === 'Off' ? raw.nrtrMode : 'ATR-Based',
+    nrtrAtrLength: Math.max(1, Math.floor(Number(raw.nrtrAtrLength ?? 14) || 14)),
+    nrtrAtrMultiplier: Math.max(0.1, Number(raw.nrtrAtrMultiplier ?? 1) || 1),
+    nrtrPercent: Math.max(0.01, Number(raw.nrtrPercent ?? 0.25) || 0.25),
+  }
+}
+
+function normalizeChartSelectionPayload(value: unknown): ChartSelection | null {
+  if (!value || typeof value !== 'object') return null
+
+  const raw = value as Partial<ChartSelection>
+
+  return {
+    symbol: normalizeSymbol(raw.symbol),
+    timeframe: normalizeTimeframe(raw.timeframe),
+    candleMode: raw.candleMode === 'Regular' ? 'Regular' : 'Heikin Ashi',
+  }
+}
+
+function readSavedChartConfig(key: ChartConfigKey): SavedChartConfig | null {
+  if (typeof window === 'undefined') return null
+
+  try {
+    const raw = window.localStorage.getItem(chartConfigStorageKeys[key])
+    if (!raw) return null
+
+    const parsed = JSON.parse(raw)
+    const selection = normalizeChartSelectionPayload(parsed?.selection)
+    const settings = normalizeChartSettings(parsed?.settings)
+
+    if (!selection || !settings) return null
+
+    return {
+      selection,
+      settings,
+      savedAt: typeof parsed?.savedAt === 'string' ? parsed.savedAt : new Date().toISOString(),
+    }
+  } catch (error) {
+    console.error('Unable to read saved chart config:', error)
+    return null
+  }
+}
+
+function writeSavedChartConfig(key: ChartConfigKey, selection: ChartSelection, settings: ChartStrategySettings) {
+  if (typeof window === 'undefined') return false
+
+  try {
+    window.localStorage.setItem(
+      chartConfigStorageKeys[key],
+      JSON.stringify({
+        selection: normalizeChartSelectionPayload(selection),
+        settings: normalizeChartSettings(settings),
+        savedAt: new Date().toISOString(),
+      })
+    )
+    return true
+  } catch (error) {
+    console.error('Unable to save chart config:', error)
+    return false
+  }
+}
 
 function DashboardWaitingCard({
   title,
@@ -2102,6 +2185,8 @@ type LightweightChartPanelProps = {
   nrtrAtrMultiplier?: number
   nrtrPercent?: number
   onIndicatorSettingsChange?: (settings: ChartStrategySettings) => void
+  onSaveConfig?: () => void
+  saveStatus?: string
 }
 
 function LightweightChartPanel({
@@ -2130,6 +2215,8 @@ function LightweightChartPanel({
   nrtrAtrMultiplier = 3,
   nrtrPercent = 0.25,
   onIndicatorSettingsChange,
+  onSaveConfig,
+  saveStatus,
 }: LightweightChartPanelProps) {
   const normalizedSymbol = normalizeSymbol(symbol)
   const normalizedTimeframe = normalizeTimeframe(timeframe)
@@ -2397,6 +2484,23 @@ function LightweightChartPanel({
                 {compact ? 'Mini chart confirmation uses NRTR flip or SMMA direction only.' : 'Main chart controls entries, exits, and NRTR table.'}
               </div>
             </div>
+
+            {onSaveConfig && (
+              <div className="flex items-center gap-2">
+                {saveStatus && (
+                  <span className="text-[10px] font-semibold text-emerald-300">
+                    {saveStatus}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={onSaveConfig}
+                  className="rounded-lg border border-emerald-400/35 bg-emerald-500/10 px-3 py-2 text-[10px] font-black uppercase tracking-wide text-emerald-300 hover:bg-emerald-500 hover:text-black"
+                >
+                  Save
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
@@ -2671,6 +2775,7 @@ export default function Dashboard() {
   const [mainChartIndicatorSettings, setMainChartIndicatorSettings] = useState<ChartStrategySettings>(defaultChartSettings)
   const [miniChartOneIndicatorSettings, setMiniChartOneIndicatorSettings] = useState<ChartStrategySettings>(defaultChartSettings)
   const [miniChartTwoIndicatorSettings, setMiniChartTwoIndicatorSettings] = useState<ChartStrategySettings>(defaultChartSettings)
+  const [lastSavedChartKey, setLastSavedChartKey] = useState<ChartConfigKey | null>(null)
 
   const [mainChartSelection, setMainChartSelection] = useState<ChartSelection>({
     symbol: 'BTCUSD',
@@ -2689,6 +2794,46 @@ export default function Dashboard() {
     timeframe: '15m',
     candleMode: 'Heikin Ashi',
   })
+
+
+  useEffect(() => {
+    if (!isClient) return
+
+    const savedMain = readSavedChartConfig('main')
+    const savedMiniOne = readSavedChartConfig('mini1')
+    const savedMiniTwo = readSavedChartConfig('mini2')
+
+    if (savedMain) {
+      setMainChartSelection(savedMain.selection)
+      setMainChartIndicatorSettings(savedMain.settings)
+    }
+
+    if (savedMiniOne) {
+      setMiniChartOneSelection(savedMiniOne.selection)
+      setMiniChartOneIndicatorSettings(savedMiniOne.settings)
+    }
+
+    if (savedMiniTwo) {
+      setMiniChartTwoSelection(savedMiniTwo.selection)
+      setMiniChartTwoIndicatorSettings(savedMiniTwo.settings)
+    }
+  }, [isClient])
+
+  const saveChartConfig = useCallback((
+    key: ChartConfigKey,
+    selection: ChartSelection,
+    settings: ChartStrategySettings
+  ) => {
+    if (!isClient) return
+
+    const saved = writeSavedChartConfig(key, selection, settings)
+    if (!saved) return
+
+    setLastSavedChartKey(key)
+    window.setTimeout(() => {
+      setLastSavedChartKey((current) => current === key ? null : current)
+    }, 2200)
+  }, [isClient])
 
   const {
     latestSignal,
@@ -3057,6 +3202,8 @@ export default function Dashboard() {
             nrtrAtrMultiplier={mainChartIndicatorSettings.nrtrAtrMultiplier}
             nrtrPercent={mainChartIndicatorSettings.nrtrPercent}
             onIndicatorSettingsChange={setMainChartIndicatorSettings}
+            onSaveConfig={() => saveChartConfig('main', mainChartSelection, mainChartIndicatorSettings)}
+            saveStatus={lastSavedChartKey === 'main' ? 'Saved' : ''}
             apiBaseUrl={apiBaseUrl}
             isClient={isClient}
             enabled
@@ -3094,6 +3241,8 @@ export default function Dashboard() {
               nrtrAtrMultiplier={miniChartOneIndicatorSettings.nrtrAtrMultiplier}
               nrtrPercent={miniChartOneIndicatorSettings.nrtrPercent}
               onIndicatorSettingsChange={setMiniChartOneIndicatorSettings}
+              onSaveConfig={() => saveChartConfig('mini1', miniChartOneSelection, miniChartOneIndicatorSettings)}
+              saveStatus={lastSavedChartKey === 'mini1' ? 'Saved' : ''}
               apiBaseUrl={apiBaseUrl}
               isClient={isClient}
               enabled={mainCandlesReady}
@@ -3121,6 +3270,8 @@ export default function Dashboard() {
               nrtrAtrMultiplier={miniChartTwoIndicatorSettings.nrtrAtrMultiplier}
               nrtrPercent={miniChartTwoIndicatorSettings.nrtrPercent}
               onIndicatorSettingsChange={setMiniChartTwoIndicatorSettings}
+              onSaveConfig={() => saveChartConfig('mini2', miniChartTwoSelection, miniChartTwoIndicatorSettings)}
+              saveStatus={lastSavedChartKey === 'mini2' ? 'Saved' : ''}
               apiBaseUrl={apiBaseUrl}
               isClient={isClient}
               enabled={mainCandlesReady}
@@ -3205,18 +3356,21 @@ export default function Dashboard() {
                 candles: mainChartCandles,
                 latestSignal: augmentedLatestSignal,
                 activePrice: activeChartPrice ?? undefined,
+                settings: mainChartIndicatorSettings,
               },
               {
                 label: 'Mini Chart 1',
                 symbol: miniOneSymbol,
                 timeframe: miniOneTimeframe,
                 candles: miniChartOneCandles,
+                settings: miniChartOneIndicatorSettings,
               },
               {
                 label: 'Mini Chart 2',
                 symbol: miniTwoSymbol,
                 timeframe: miniTwoTimeframe,
                 candles: miniChartTwoCandles,
+                settings: miniChartTwoIndicatorSettings,
               },
             ]}
           />
