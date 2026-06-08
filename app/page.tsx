@@ -15,6 +15,7 @@ import RecentSignalsTable from '@/components/RecentSignalsTable'
 import StrategyTesterPanel, { ChartStrategySettings } from '@/components/StrategyTesterPanel'
 import ConnectionStatusBadge from '@/components/ConnectionStatusBadge'
 import MarketSentimentGauge from '@/components/MarketSentimentGauge'
+import UnifiedIntelligenceMatrix from '@/components/UnifiedIntelligenceMatrix'
 import { motion } from 'framer-motion'
 import { useApiPolling } from '@/hooks/useApiPolling'
 
@@ -3060,7 +3061,6 @@ export default function Dashboard() {
             enabled
             priority="main"
             engineState={pythonEngineState}
-            showOverlayStatus
             showOverlayLines
             onCandlesUpdate={setMainChartCandles}
             onOverlayPayloadUpdate={setMainChartOverlayPayload}
@@ -3145,7 +3145,6 @@ export default function Dashboard() {
                 technicalSentiment={(factorTechnicalSentiment ?? sharedTechnicalSentiment) as any}
               />
 
-              <PressureGauges signal={augmentedLatestSignal} unifiedIntelligence={mainUnifiedIntelligence} />
 
               <WarningsPanel signal={augmentedLatestSignal} />
             </>
@@ -3165,15 +3164,20 @@ export default function Dashboard() {
       {/* Second Row */}
       {mainOverlayReady ? (
         <>
-          <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-            <FactorConfirmationTableLoose
-              signal={augmentedLatestSignal as any}
-              technicalSentiment={sharedTechnicalSentiment as any}
-              onTechnicalSentimentUpdate={setFactorTechnicalSentiment as any}
-              activeSymbol={selectedSymbol}
-              activeTimeframe={selectedTimeframe}
-              activePrice={activeChartPrice ?? undefined}
-            />
+          <div className="mb-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
+            <div className="xl:col-span-2">
+              <UnifiedIntelligenceMatrix
+                signal={augmentedLatestSignal as any}
+                unifiedIntelligence={mainUnifiedIntelligence}
+                overlayPayload={mainChartOverlayPayload}
+                scorecards={chartScorecards}
+                mlFeatures={chartMlFeatures}
+                technicalSentiment={sharedTechnicalSentiment as any}
+                activeSymbol={selectedSymbol}
+                activeTimeframe={selectedTimeframe}
+                activePrice={activeChartPrice ?? undefined}
+              />
+            </div>
 
             <GhostCandleProjection
               signal={augmentedLatestSignal}
