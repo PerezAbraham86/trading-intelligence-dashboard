@@ -466,12 +466,19 @@ type CandleModeLabel = 'Regular' | 'Heikin Ashi'
 const chartSymbols = ['MES1!', 'BTCUSD', 'ETHUSD', 'SPY']
 const chartTimeframes = ['1m', '3m', '5m', '10m', '15m', '30m', '1h', '2h', '4h', '1d']
 
+const DASHBOARD_API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  'https://trading-intelligence-dashboard.onrender.com'
+
+const CHART_SETTINGS_USER_KEY = 'abraham-marketbos-dashboard'
+
 type ChartConfigKey = 'main' | 'mini1' | 'mini2'
 
 type SavedChartConfig = {
   selection: ChartSelection
   settings: ChartStrategySettings
   savedAt: string
+  source?: 'backend' | 'local'
 }
 
 const chartConfigStorageKeys: Record<ChartConfigKey, string> = {
@@ -506,6 +513,40 @@ function normalizeChartSelectionPayload(value: unknown): ChartSelection | null {
   }
 }
 
+function normalizeSavedChartConfigPayload(value: unknown): SavedChartConfig | null {
+  if (!value || typeof value !== 'object') return null
+
+  const raw = value as any
+  const payload = raw.settings && typeof raw.settings === 'object' && raw.selection
+    ? raw
+    : raw.settings && typeof raw.settings === 'object' && raw.settings.selection
+      ? raw.settings
+      : raw
+
+  const selection = normalizeChartSelectionPayload(payload?.selection)
+  const settings = normalizeChartSettings(payload?.settings)
+
+  if (!selection || !settings) return null
+
+  return {
+    selection,
+    settings,
+    savedAt: typeof payload?.savedAt === 'string'
+      ? payload.savedAt
+      : typeof raw?.updatedAt === 'string'
+        ? raw.updatedAt
+        : new Date().toISOString(),
+  }
+}
+
+function buildChartConfigPayload(selection: ChartSelection, settings: ChartStrategySettings) {
+  return {
+    selection: normalizeChartSelectionPayload(selection) ?? selection,
+    settings: normalizeChartSettings(settings) ?? settings,
+    savedAt: new Date().toISOString(),
+  }
+}
+
 function readSavedChartConfig(key: ChartConfigKey): SavedChartConfig | null {
   if (typeof window === 'undefined') return null
 
@@ -514,15 +555,12 @@ function readSavedChartConfig(key: ChartConfigKey): SavedChartConfig | null {
     if (!raw) return null
 
     const parsed = JSON.parse(raw)
-    const selection = normalizeChartSelectionPayload(parsed?.selection)
-    const settings = normalizeChartSettings(parsed?.settings)
-
-    if (!selection || !settings) return null
+    const normalized = normalizeSavedChartConfigPayload(parsed)
+    if (!normalized) return null
 
     return {
-      selection,
-      settings,
-      savedAt: typeof parsed?.savedAt === 'string' ? parsed.savedAt : new Date().toISOString(),
+      ...normalized,
+      source: 'local',
     }
   } catch (error) {
     console.error('Unable to read saved chart config:', error)
@@ -536,17 +574,66 @@ function writeSavedChartConfig(key: ChartConfigKey, selection: ChartSelection, s
   try {
     window.localStorage.setItem(
       chartConfigStorageKeys[key],
-      JSON.stringify({
-        selection: normalizeChartSelectionPayload(selection),
-        settings: normalizeChartSettings(settings),
-        savedAt: new Date().toISOString(),
-      })
+      JSON.stringify(buildChartConfigPayload(selection, settings))
     )
     return true
   } catch (error) {
     console.error('Unable to save chart config:', error)
     return false
   }
+}
+
+async function fetchBackendChartConfigs(): Promise<Partial<Record<ChartConfigKey, SavedChartConfig>>> {
+  const response = await fetch(
+    `${DASHBOARD_API_BASE_URL}/api/chart-settings?userKey=${encodeURIComponent(CHART_SETTINGS_USER_KEY)}`,
+    { cache: 'no-store' }
+  )
+
+  if (!response.ok) {
+    throw new Error(`Chart settings request failed: ${response.status}`)
+  }
+
+  const payload = await response.json()
+  const charts = payload?.charts && typeof payload.charts === 'object' ? payload.charts : {}
+  const result: Partial<Record<ChartConfigKey, SavedChartConfig>> = {}
+
+  ;(['main', 'mini1', 'mini2'] as ChartConfigKey[]).forEach((key) => {
+    const normalized = normalizeSavedChartConfigPayload(charts[key])
+    if (normalized) {
+      result[key] = {
+        ...normalized,
+        source: 'backend',
+      }
+    }
+  })
+
+  return result
+}
+
+async function saveBackendChartConfig(
+  key: ChartConfigKey,
+  selection: ChartSelection,
+  settings: ChartStrategySettings
+) {
+  const payload = buildChartConfigPayload(selection, settings)
+
+  const response = await fetch(`${DASHBOARD_API_BASE_URL}/api/chart-settings`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      userKey: CHART_SETTINGS_USER_KEY,
+      chartKey: key,
+      settings: payload,
+    }),
+  })
+
+  if (!response.ok) {
+    throw new Error(`Chart settings save failed: ${response.status}`)
+  }
+
+  return response.json()
 }
 
 function DashboardWaitingCard({
@@ -2800,42 +2887,94 @@ export default function Dashboard() {
   useEffect(() => {
     if (!isClient) return
 
-    const savedMain = readSavedChartConfig('main')
-    const savedMiniOne = readSavedChartConfig('mini1')
-    const savedMiniTwo = readSavedChartConfig('mini2')
+    let cancelled = false
 
-    if (savedMain) {
-      setMainChartSelection(savedMain.selection)
-      setMainChartIndicatorSettings(savedMain.settings)
+    const applyConfig = (key: ChartConfigKey, config: SavedChartConfig | null) => {
+      if (!config) return
+
+      if (key === 'main') {
+        setMainChartSelection(config.selection)
+        setMainChartIndicatorSettings(config.settings)
+      }
+
+      if (key === 'mini1') {
+        setMiniChartOneSelection(config.selection)
+        setMiniChartOneIndicatorSettings(config.settings)
+      }
+
+      if (key === 'mini2') {
+        setMiniChartTwoSelection(config.selection)
+        setMiniChartTwoIndicatorSettings(config.settings)
+      }
     }
 
-    if (savedMiniOne) {
-      setMiniChartOneSelection(savedMiniOne.selection)
-      setMiniChartOneIndicatorSettings(savedMiniOne.settings)
+    async function hydrateChartConfigs() {
+      const localConfigs: Partial<Record<ChartConfigKey, SavedChartConfig | null>> = {
+        main: readSavedChartConfig('main'),
+        mini1: readSavedChartConfig('mini1'),
+        mini2: readSavedChartConfig('mini2'),
+      }
+
+      try {
+        const backendConfigs = await fetchBackendChartConfigs()
+        if (cancelled) return
+
+        ;(['main', 'mini1', 'mini2'] as ChartConfigKey[]).forEach((key) => {
+          const config = backendConfigs[key] ?? localConfigs[key] ?? null
+          applyConfig(key, config)
+
+          // Keep browser localStorage in sync so refresh still has an instant fallback.
+          if (config) {
+            writeSavedChartConfig(key, config.selection, config.settings)
+          }
+        })
+      } catch (error) {
+        console.error('Backend chart settings unavailable, using local chart settings:', error)
+        if (cancelled) return
+
+        applyConfig('main', localConfigs.main ?? null)
+        applyConfig('mini1', localConfigs.mini1 ?? null)
+        applyConfig('mini2', localConfigs.mini2 ?? null)
+      } finally {
+        if (!cancelled) {
+          setChartConfigsHydrated(true)
+        }
+      }
     }
 
-    if (savedMiniTwo) {
-      setMiniChartTwoSelection(savedMiniTwo.selection)
-      setMiniChartTwoIndicatorSettings(savedMiniTwo.settings)
-    }
+    hydrateChartConfigs()
 
-    setChartConfigsHydrated(true)
+    return () => {
+      cancelled = true
+    }
   }, [isClient])
 
-  const saveChartConfig = useCallback((
+  const saveChartConfig = useCallback(async (
     key: ChartConfigKey,
     selection: ChartSelection,
     settings: ChartStrategySettings
   ) => {
     if (!isClient) return
 
-    const saved = writeSavedChartConfig(key, selection, settings)
-    if (!saved) return
+    // Save locally immediately, then sync to backend database for all computers.
+    const localSaved = writeSavedChartConfig(key, selection, settings)
 
-    setLastSavedChartKey(key)
-    window.setTimeout(() => {
-      setLastSavedChartKey((current) => current === key ? null : current)
-    }, 2200)
+    try {
+      await saveBackendChartConfig(key, selection, settings)
+      setLastSavedChartKey(key)
+      window.setTimeout(() => {
+        setLastSavedChartKey((current) => current === key ? null : current)
+      }, 2200)
+    } catch (error) {
+      console.error('Unable to save chart config to backend database:', error)
+
+      if (localSaved) {
+        setLastSavedChartKey(key)
+        window.setTimeout(() => {
+          setLastSavedChartKey((current) => current === key ? null : current)
+        }, 2200)
+      }
+    }
   }, [isClient])
 
   useEffect(() => {
