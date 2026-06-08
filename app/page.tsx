@@ -2658,7 +2658,7 @@ export default function Dashboard() {
       getOverallGhostText(timeframeEngineStates, dashboardTimeframes) ||
       getPythonGhostText(pythonEngineState)
 
-    const scorecardPatch = chartScorecards
+    const scorecardPatch = mainOverlayReady && chartScorecards
       ? buildScorecardSignalPatch(chartScorecards, chartMlFeatures)
       : {}
 
@@ -2727,6 +2727,7 @@ export default function Dashboard() {
     mainChartSelection.candleMode,
     chartScorecards,
     chartMlFeatures,
+    mainOverlayReady,
   ])
 
   if (!isClient) {
@@ -2817,7 +2818,18 @@ export default function Dashboard() {
       <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
         {/* Left Column */}
         <div className="space-y-6 lg:col-span-2">
-          <SignalCard signal={augmentedLatestSignal} />
+          {mainOverlayReady ? (
+            <SignalCard signal={augmentedLatestSignal} />
+          ) : (
+            <DashboardWaitingCard
+              title={mainCandlesReady ? 'Waiting for overlay scorecards...' : 'Waiting for main candles...'}
+              message={
+                mainCandlesReady
+                  ? 'The dashboard has candles. Bull/bear score, confidence, net bias, and technical meter will appear after the overlay engine creates scorecards from the loaded chart.'
+                  : 'Main chart candles must load first. Bull/bear score, confidence, net bias, and all signal values are paused so they do not calculate from empty candle data.'
+              }
+            />
+          )}
 
           <LightweightChartPanel
             title="Main Chart"
