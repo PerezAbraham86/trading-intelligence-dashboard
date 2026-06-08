@@ -13,12 +13,14 @@ from urllib.request import Request, urlopen
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DATA ENGINE
 #
-# v6 update:
+# v8 update:
 # - Keeps Massive options-chain probe for equities.
 # - Keeps OKX public SWAP data for BTCUSD/ETHUSD open interest + footprint.
 # - Keeps Binance Futures as secondary crypto fallback.
 # - Keeps FRED macro using DGS10, T10Y2Y, DFF, VIXCLS.
-# - Adds FINRA daily CNMS short-sale volume for equities/ETFs.
+# - Keeps FINRA daily CNMS short-sale volume for equities/ETFs.
+# - Fixes FINRA parser to support Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market rows.
+# - Adds Databento MBP-1 probe for MES/ES estimated footprint delta.
 #
 # This file intentionally does NOT fake unavailable data.
 # If a source cannot provide a real value, it returns not_applicable/unavailable.
@@ -245,9 +247,11 @@ def cache_set(key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def redact_key_from_text(value: str) -> str:
-    if MASSIVE_API_KEY:
-        return value.replace(MASSIVE_API_KEY, "***")
-    return value
+    redacted = str(value or "")
+    for secret in [MASSIVE_API_KEY, FRED_API_KEY, DATABENTO_API_KEY]:
+        if secret:
+            redacted = redacted.replace(secret, "***")
+    return redacted
 
 
 def http_json_request(
@@ -1343,29 +1347,46 @@ def parse_finra_short_volume_file(text: str, target_symbol: str) -> Optional[Dic
     for line in str(text or "").splitlines():
         clean_line = line.strip()
 
-        if not clean_line or clean_line.lower().startswith("symbol|"):
+        if not clean_line:
             continue
 
-        parts = clean_line.split("|")
+        lower_line = clean_line.lower()
 
-        if len(parts) < 5:
+        if lower_line.startswith("symbol|") or lower_line.startswith("date|"):
             continue
 
-        symbol = parts[0].strip().upper()
+        parts = [part.strip() for part in clean_line.split("|")]
+
+        # FINRA files can appear as either:
+        # Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market
+        # or:
+        # Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market
+        if len(parts) >= 6 and parts[0].isdigit() and len(parts[0]) == 8:
+            file_date = parts[0]
+            symbol = parts[1].upper()
+            short_volume = to_float(parts[2], 0)
+            short_exempt_volume = to_float(parts[3], 0)
+            total_volume = to_float(parts[4], 0)
+            market = parts[5] if len(parts) >= 6 else "FINRA"
+        elif len(parts) >= 5:
+            file_date = None
+            symbol = parts[0].upper()
+            short_volume = to_float(parts[1], 0)
+            short_exempt_volume = to_float(parts[2], 0)
+            total_volume = to_float(parts[3], 0)
+            market = parts[4] if len(parts) >= 5 else "FINRA"
+        else:
+            continue
 
         if symbol != target:
             continue
-
-        short_volume = to_float(parts[1], 0)
-        short_exempt_volume = to_float(parts[2], 0)
-        total_volume = to_float(parts[3], 0)
-        market = parts[4].strip() if len(parts) >= 5 else "FINRA"
 
         short_pct = short_volume / max(total_volume, 1) * 100
         short_exempt_pct = short_exempt_volume / max(total_volume, 1) * 100
 
         return {
             "symbol": symbol,
+            "fileDateRaw": file_date,
             "shortVolume": short_volume,
             "shortExemptVolume": short_exempt_volume,
             "totalVolume": total_volume,
@@ -1496,6 +1517,248 @@ def build_finra_short_volume_context(symbol: str, timeframe: str = "1m") -> Dict
     return cache_set(cache_key, payload)
 
 
+
+def databento_symbol(symbol: str) -> str:
+    normalized = normalize_symbol(symbol)
+
+    if normalized == "MES1!":
+        return DATABENTO_MES_SYMBOL or "MES.c.0"
+
+    if normalized == "ES1!":
+        return DATABENTO_ES_SYMBOL or "ES.c.0"
+
+    return normalized.replace("!", "")
+
+
+def find_first_column(columns: List[str], candidates: List[str]) -> Optional[str]:
+    lowered = {str(column).lower(): str(column) for column in columns}
+
+    for candidate in candidates:
+        key = str(candidate).lower()
+        if key in lowered:
+            return lowered[key]
+
+    for column in columns:
+        col_lower = str(column).lower()
+        for candidate in candidates:
+            if str(candidate).lower() in col_lower:
+                return str(column)
+
+    return None
+
+
+def build_databento_mbp1_footprint_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
+    normalized = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    if not is_futures_symbol(normalized):
+        return inactive_factor(
+            symbol=normalized,
+            timeframe=normalized_timeframe,
+            name="Databento Footprint Not Applicable",
+            source="databento_mbp1_top_of_book",
+            status="not_applicable",
+            reason=f"Databento MES/ES MBP-1 footprint is only used for futures symbols, not {normalized}.",
+        )
+
+    cache_key = f"databento:mbp1-footprint:{normalized}:{normalized_timeframe}"
+    cached = cache_get(cache_key)
+
+    if cached:
+        return cached
+
+    if not DATABENTO_API_KEY:
+        return cache_set(
+            cache_key,
+            inactive_factor(
+                symbol=normalized,
+                timeframe=normalized_timeframe,
+                name="Databento Missing Key",
+                source="databento_mbp1_top_of_book",
+                status="missing_key",
+                reason="Add DATABENTO_API_KEY in Render Environment Variables to enable MES/ES MBP-1 footprint probe.",
+            ),
+        )
+
+    try:
+        import databento as db  # type: ignore
+    except Exception as error:
+        payload = {
+            "status": "unavailable",
+            "label": "Databento Package Missing",
+            "source": "databento_mbp1_top_of_book",
+            "symbol": normalized,
+            "timeframe": normalized_timeframe,
+            "direction": "neutral",
+            "strength": 0,
+            "reason": "databento_python_package_missing_add_databento_to_api_requirements",
+            "error": str(error),
+            "createdAt": utc_now_iso(),
+        }
+        return cache_set(cache_key, payload)
+
+    dataset = DATABENTO_DATASET or "GLBX.MDP3"
+    schema = DATABENTO_SCHEMA or "mbp-1"
+    db_symbol = databento_symbol(normalized)
+    lookback_minutes = max(1, min(int(DATABENTO_LOOKBACK_MINUTES or 5), 60))
+    end_dt = datetime.now(timezone.utc)
+    start_dt = end_dt - timedelta(minutes=lookback_minutes)
+
+    try:
+        client = db.Historical(DATABENTO_API_KEY)
+        store = client.timeseries.get_range(
+            dataset=dataset,
+            symbols=[db_symbol],
+            schema=schema,
+            start=start_dt.isoformat(),
+            end=end_dt.isoformat(),
+        )
+
+        try:
+            frame = store.to_df()
+        except Exception:
+            frame = None
+
+        if frame is None or getattr(frame, "empty", True):
+            payload = {
+                "status": "unavailable",
+                "label": "Databento MBP-1 Empty",
+                "source": "databento_mbp1_top_of_book",
+                "symbol": normalized,
+                "timeframe": normalized_timeframe,
+                "databentoSymbol": db_symbol,
+                "dataset": dataset,
+                "schema": schema,
+                "direction": "neutral",
+                "strength": 0,
+                "reason": "no_databento_records_returned_for_recent_window",
+                "start": start_dt.isoformat(),
+                "end": end_dt.isoformat(),
+                "createdAt": utc_now_iso(),
+            }
+            return cache_set(cache_key, payload)
+
+        if len(frame) > DATABENTO_MAX_RECORDS:
+            frame = frame.tail(DATABENTO_MAX_RECORDS)
+
+        columns = [str(column) for column in list(frame.columns)]
+        bid_px_col = find_first_column(columns, ["bid_px_00", "bid_px", "bid_price", "bid"])
+        ask_px_col = find_first_column(columns, ["ask_px_00", "ask_px", "ask_price", "ask"])
+        bid_sz_col = find_first_column(columns, ["bid_sz_00", "bid_size_00", "bid_sz", "bid_size", "bid_qty", "bid"])
+        ask_sz_col = find_first_column(columns, ["ask_sz_00", "ask_size_00", "ask_sz", "ask_size", "ask_qty", "ask"])
+
+        if not bid_px_col or not ask_px_col:
+            payload = {
+                "status": "unavailable",
+                "label": "Databento MBP-1 No Bid/Ask",
+                "source": "databento_mbp1_top_of_book",
+                "symbol": normalized,
+                "timeframe": normalized_timeframe,
+                "databentoSymbol": db_symbol,
+                "dataset": dataset,
+                "schema": schema,
+                "direction": "neutral",
+                "strength": 0,
+                "reason": "databento_response_missing_bid_ask_columns",
+                "columns": columns[:40],
+                "records": int(len(frame)),
+                "createdAt": utc_now_iso(),
+            }
+            return cache_set(cache_key, payload)
+
+        bid_px = frame[bid_px_col].apply(lambda value: to_float(value, 0.0))
+        ask_px = frame[ask_px_col].apply(lambda value: to_float(value, 0.0))
+        mid_px = (bid_px + ask_px) / 2.0
+
+        if bid_sz_col and ask_sz_col:
+            bid_sz = frame[bid_sz_col].apply(lambda value: to_float(value, 0.0))
+            ask_sz = frame[ask_sz_col].apply(lambda value: to_float(value, 0.0))
+            bid_size_sum = float(bid_sz.sum())
+            ask_size_sum = float(ask_sz.sum())
+        else:
+            bid_size_sum = 0.0
+            ask_size_sum = 0.0
+
+        size_total = bid_size_sum + ask_size_sum
+        imbalance_pct = (bid_size_sum - ask_size_sum) / max(size_total, 1.0) * 100.0
+
+        first_mid = to_float(mid_px.iloc[0], 0.0) if len(mid_px) else 0.0
+        last_mid = to_float(mid_px.iloc[-1], 0.0) if len(mid_px) else 0.0
+        mid_change = last_mid - first_mid if first_mid and last_mid else 0.0
+
+        # MBP-1 is top-of-book, not true executed trade-side footprint.
+        # Use top-of-book size imbalance + mid-price change as an estimated pressure signal.
+        estimate = imbalance_pct
+        if mid_change > 0:
+            estimate += 10
+        elif mid_change < 0:
+            estimate -= 10
+
+        estimate = max(-100.0, min(100.0, estimate))
+        strength = clamp(abs(estimate))
+
+        if estimate > 8:
+            direction = "bullish"
+            label = "Bullish Estimated MES Footprint"
+            reason = "databento_mbp1_bid_pressure_above_ask_pressure"
+        elif estimate < -8:
+            direction = "bearish"
+            label = "Bearish Estimated MES Footprint"
+            reason = "databento_mbp1_ask_pressure_above_bid_pressure"
+        else:
+            direction = "active"
+            label = "Balanced Estimated MES Footprint"
+            reason = "databento_mbp1_top_of_book_balanced"
+
+        payload = {
+            "status": "active",
+            "label": label,
+            "source": "databento_mbp1_top_of_book",
+            "symbol": normalized,
+            "timeframe": normalized_timeframe,
+            "databentoSymbol": db_symbol,
+            "dataset": dataset,
+            "schema": schema,
+            "direction": direction,
+            "strength": round(strength, 2),
+            "deltaPct": round(estimate, 2),
+            "bookImbalancePct": round(imbalance_pct, 2),
+            "bidSizeSum": round(bid_size_sum, 2),
+            "askSizeSum": round(ask_size_sum, 2),
+            "midFirst": round(first_mid, 4),
+            "midLast": round(last_mid, 4),
+            "midChange": round(mid_change, 4),
+            "records": int(len(frame)),
+            "columns": columns[:40],
+            "start": start_dt.isoformat(),
+            "end": end_dt.isoformat(),
+            "reason": reason,
+            "note": "MBP-1 is top-of-book. This is estimated footprint pressure, not true executed trade aggressor delta.",
+            "createdAt": utc_now_iso(),
+        }
+        return cache_set(cache_key, payload)
+
+    except Exception as error:
+        payload = {
+            "status": "unavailable",
+            "label": "Databento MBP-1 Unavailable",
+            "source": "databento_mbp1_top_of_book",
+            "symbol": normalized,
+            "timeframe": normalized_timeframe,
+            "databentoSymbol": db_symbol,
+            "dataset": dataset,
+            "schema": schema,
+            "direction": "neutral",
+            "strength": 0,
+            "reason": "databento_mbp1_request_failed",
+            "error": redact_key_from_text(str(error)),
+            "start": start_dt.isoformat(),
+            "end": end_dt.isoformat(),
+            "createdAt": utc_now_iso(),
+        }
+        return cache_set(cache_key, payload)
+
+
 def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]:
     normalized = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
@@ -1505,6 +1768,16 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
     if is_crypto_symbol(normalized):
         open_interest = build_crypto_open_interest_context(normalized, normalized_timeframe)
         footprint = build_crypto_footprint_context(normalized, normalized_timeframe)
+    elif is_futures_symbol(normalized):
+        open_interest = inactive_factor(
+            symbol=normalized,
+            timeframe=normalized_timeframe,
+            name="Futures Open Interest Pending",
+            source="futures_open_interest_pending",
+            status="not_wired_in_this_step",
+            reason="MES/ES open interest will need a futures statistics/open-interest source. Databento MBP-1 does not provide OI.",
+        )
+        footprint = build_databento_mbp1_footprint_context(normalized, normalized_timeframe)
     else:
         open_interest = options_chain
         footprint = inactive_factor(
@@ -1513,7 +1786,7 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
             name="Footprint Delta Pending",
             source="equity_futures_footprint_pending",
             status="not_wired_in_this_step",
-            reason="Equity/futures footprint needs quote/trade classification and will be wired after crypto proof.",
+            reason="Equity footprint needs quote/trade classification. MES/ES uses Databento MBP-1 when DATABENTO_API_KEY is configured.",
         )
 
     fred_macro = build_fred_macro_context(normalized, normalized_timeframe)
@@ -1585,6 +1858,15 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
                 "cacheTtlSeconds": FINRA_CACHE_TTL_SECONDS,
                 "usedFor": ["SPY short volume", "QQQ short volume", "IWM short volume", "equity/ETF short volume"],
             },
+            "databento": {
+                "configured": bool(DATABENTO_API_KEY),
+                "enabled": bool(DATABENTO_API_KEY),
+                "dataset": DATABENTO_DATASET,
+                "schema": DATABENTO_SCHEMA,
+                "cacheTtlSeconds": DATABENTO_CACHE_TTL_SECONDS,
+                "usedFor": ["MES1! estimated footprint", "ES1! estimated footprint"],
+                "symbols": {"MES1!": DATABENTO_MES_SYMBOL, "ES1!": DATABENTO_ES_SYMBOL},
+            },
             "okx": {
                 "configured": True,
                 "enabled": True,
@@ -1601,7 +1883,7 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
         "factors": factors,
         "signalFields": signal_fields,
         "scalars": scalars,
-        "source": "external_data_engine_v6_finra_short_volume",
+        "source": "external_data_engine_v8_databento_mbp1",
         "createdAt": utc_now_iso(),
     }
 
@@ -1614,7 +1896,7 @@ def build_external_data_status(symbol: str = "BTCUSD", timeframe: str = "1m") ->
     return {
         "eventType": "EXTERNAL_DATA_STATUS",
         "status": context.get("status", "unknown"),
-        "source": "external_data_engine_v6_finra_short_volume",
+        "source": "external_data_engine_v8_databento_mbp1",
         "symbol": normalized,
         "timeframe": normalized_timeframe,
         "massiveKeyPresent": bool(MASSIVE_API_KEY),
