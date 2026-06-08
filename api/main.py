@@ -959,27 +959,66 @@ def fetch_alpaca_historical_candles(symbol: str, timeframe: str = "1m", limit: i
     return []
 
 
-def load_persistent_candle_cache() -> None:
-    global CANDLE_RESPONSE_CACHE
+try:
+    from api.site_cache_store import (
+        init_site_cache_store,
+        get_site_cache_summary,
+        get_candle_payload as db_get_candle_payload,
+        set_candle_payload as db_set_candle_payload,
+        get_stale_candle_payload as db_get_stale_candle_payload,
+        list_candle_cache_entries as db_list_candle_cache_entries,
+        save_chart_settings as db_save_chart_settings,
+        load_chart_settings as db_load_chart_settings,
+    )
+except Exception:
+    try:
+        from site_cache_store import (
+            init_site_cache_store,
+            get_site_cache_summary,
+            get_candle_payload as db_get_candle_payload,
+            set_candle_payload as db_set_candle_payload,
+            get_stale_candle_payload as db_get_stale_candle_payload,
+            list_candle_cache_entries as db_list_candle_cache_entries,
+            save_chart_settings as db_save_chart_settings,
+            load_chart_settings as db_load_chart_settings,
+        )
+    except Exception:
+        init_site_cache_store = None
+        get_site_cache_summary = None
+        db_get_candle_payload = None
+        db_set_candle_payload = None
+        db_get_stale_candle_payload = None
+        db_list_candle_cache_entries = None
+        db_save_chart_settings = None
+        db_load_chart_settings = None
 
+
+def load_persistent_candle_cache() -> None:
+    if init_site_cache_store:
+        try:
+            summary = init_site_cache_store()
+            print(f"[Site DB Cache] ready: {summary}")
+            return
+        except Exception as error:
+            print(f"[Site DB Cache] startup failed, using memory/json fallback: {error}")
+
+    global CANDLE_RESPONSE_CACHE
     try:
         if not CANDLE_CACHE_FILE.exists():
             return
-
         with CANDLE_CACHE_FILE.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
-
         if isinstance(data, dict):
-            CANDLE_RESPONSE_CACHE.update({
-                str(key): value for key, value in data.items()
-                if isinstance(value, dict)
-            })
+            CANDLE_RESPONSE_CACHE.update({str(key): value for key, value in data.items() if isinstance(value, dict)})
             print(f"[Candle Cache] loaded {len(CANDLE_RESPONSE_CACHE)} site-level candle payloads")
     except Exception as error:
         print(f"[Candle Cache] load failed: {error}")
 
 
 def save_persistent_candle_cache() -> None:
+    # SQLite writes happen immediately in candle_cache_set(). Keep JSON fallback for safety.
+    if init_site_cache_store:
+        return
     try:
         CANDLE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with CANDLE_CACHE_FILE.open("w", encoding="utf-8") as handle:
@@ -1010,13 +1049,19 @@ def candle_cache_key(route: str, symbol: str, timeframe: str, limit: int) -> str
 
 def candle_cache_get(route: str, symbol: str, timeframe: str, limit: int, max_age_seconds: int = CANDLE_SITE_CACHE_MAX_AGE_SECONDS) -> Optional[Dict[str, Any]]:
     key = candle_cache_key(route, symbol, timeframe, limit)
+
+    if db_get_candle_payload:
+        try:
+            cached_db = db_get_candle_payload(key, max_age_seconds=max_age_seconds)
+            if cached_db:
+                return cached_db
+        except Exception as error:
+            print(f"[Site DB Cache] get failed: {error}")
+
     cached = CANDLE_RESPONSE_CACHE.get(key)
     if not isinstance(cached, dict):
         return None
 
-    # Site-level cache behavior:
-    # A loaded candle set should be reused across browser reloads and other computers.
-    # The provider should only be hit again when force=true, cache missing, or cache has no candles.
     candles = cached.get("candles")
     if isinstance(candles, list) and len(candles) > 0:
         age = candle_cache_age_seconds(cached)
@@ -1029,6 +1074,20 @@ def candle_cache_get(route: str, symbol: str, timeframe: str, limit: int, max_ag
 
 def candle_cache_set(route: str, symbol: str, timeframe: str, limit: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     key = candle_cache_key(route, symbol, timeframe, limit)
+
+    if db_set_candle_payload:
+        try:
+            return db_set_candle_payload(
+                cache_key=key,
+                route=route,
+                symbol=normalize_symbol(symbol),
+                timeframe=normalize_timeframe(timeframe),
+                limit_value=int(limit or 500),
+                payload=payload,
+            )
+        except Exception as error:
+            print(f"[Site DB Cache] set failed, using memory/json fallback: {error}")
+
     stored = dict(payload)
     stored["createdAt"] = now_iso()
     stored["cache"] = "stored"
@@ -1040,10 +1099,18 @@ def candle_cache_set(route: str, symbol: str, timeframe: str, limit: int, payloa
 
 def candle_cache_stale(route: str, symbol: str, timeframe: str, limit: int) -> Optional[Dict[str, Any]]:
     key = candle_cache_key(route, symbol, timeframe, limit)
+
+    if db_get_stale_candle_payload:
+        try:
+            cached_db = db_get_stale_candle_payload(key)
+            if cached_db:
+                return cached_db
+        except Exception as error:
+            print(f"[Site DB Cache] stale get failed: {error}")
+
     cached = CANDLE_RESPONSE_CACHE.get(key)
     if not isinstance(cached, dict):
         return None
-
     return candle_cache_payload(cached, "site_cached_stale")
 
 
@@ -5603,6 +5670,71 @@ def candle_cache_status() -> Dict[str, Any]:
         "count": len(entries),
         "entries": entries,
         "createdAt": now_iso(),
+    }
+
+
+@app.get("/api/site-cache/status")
+def site_cache_status() -> Dict[str, Any]:
+    if get_site_cache_summary:
+        try:
+            summary = get_site_cache_summary()
+            entries = db_list_candle_cache_entries(300) if db_list_candle_cache_entries else []
+            return {
+                "eventType": "SITE_CACHE_STATUS",
+                "status": "Live",
+                "siteCacheDb": True,
+                **summary,
+                "entries": entries,
+            }
+        except Exception as error:
+            return {
+                "eventType": "SITE_CACHE_STATUS",
+                "status": "Error",
+                "siteCacheDb": False,
+                "error": str(error),
+                "createdAt": now_iso(),
+            }
+
+    return candle_cache_status()
+
+
+@app.get("/api/chart-settings")
+def get_chart_settings(userKey: str = "default") -> Dict[str, Any]:
+    if not db_load_chart_settings:
+        return {
+            "eventType": "CHART_SETTINGS",
+            "status": "Unavailable",
+            "userKey": userKey,
+            "charts": {},
+            "error": "site_cache_store module unavailable",
+            "createdAt": now_iso(),
+        }
+    return {
+        "eventType": "CHART_SETTINGS",
+        "status": "Live",
+        **db_load_chart_settings(userKey),
+    }
+
+
+@app.post("/api/chart-settings")
+async def save_chart_settings(request: FastAPIRequest) -> Dict[str, Any]:
+    if not db_save_chart_settings:
+        return {
+            "eventType": "CHART_SETTINGS_SAVE",
+            "status": "Unavailable",
+            "error": "site_cache_store module unavailable",
+            "createdAt": now_iso(),
+        }
+
+    body = await request.json()
+    user_key = str(body.get("userKey") or "default")
+    chart_key = str(body.get("chartKey") or "main")
+    settings = body.get("settings") if isinstance(body.get("settings"), dict) else {}
+
+    return {
+        "eventType": "CHART_SETTINGS_SAVE",
+        "status": "Saved",
+        **db_save_chart_settings(user_key, chart_key, settings),
     }
 
 
