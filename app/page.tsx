@@ -158,7 +158,7 @@ function normalizeSharedTechnicalSentimentPayload(value: unknown): TechnicalSent
 }
 
 function normalizeSymbol(value: unknown) {
-  const raw = String(value ?? 'BTCUSD')
+  const raw = String(value ?? 'MES1!')
     .trim()
     .toUpperCase()
     .replace('BINANCE:', '')
@@ -173,7 +173,7 @@ function normalizeSymbol(value: unknown) {
   if (raw.includes('ETH')) return 'ETHUSD'
   if (raw.includes('SPY')) return 'SPY'
 
-  return raw || 'BTCUSD'
+  return raw || 'MES1!'
 }
 
 function normalizeTimeframe(value: unknown) {
@@ -463,7 +463,7 @@ function getOverallGhostText(engineStates: Record<string, PythonEngineState | nu
 
 type CandleModeLabel = 'Regular' | 'Heikin Ashi'
 
-const chartSymbols = ['BTCUSD', 'ETHUSD', 'SPY', 'MES1!']
+const chartSymbols = ['MES1!', 'BTCUSD', 'ETHUSD', 'SPY']
 const chartTimeframes = ['1m', '3m', '5m', '10m', '15m', '30m', '1h', '2h', '4h', '1d']
 
 type ChartConfigKey = 'main' | 'mini1' | 'mini2'
@@ -2776,21 +2776,22 @@ export default function Dashboard() {
   const [miniChartOneIndicatorSettings, setMiniChartOneIndicatorSettings] = useState<ChartStrategySettings>(defaultChartSettings)
   const [miniChartTwoIndicatorSettings, setMiniChartTwoIndicatorSettings] = useState<ChartStrategySettings>(defaultChartSettings)
   const [lastSavedChartKey, setLastSavedChartKey] = useState<ChartConfigKey | null>(null)
+  const [chartConfigsHydrated, setChartConfigsHydrated] = useState(false)
 
   const [mainChartSelection, setMainChartSelection] = useState<ChartSelection>({
-    symbol: 'BTCUSD',
+    symbol: 'MES1!',
     timeframe: '1m',
     candleMode: 'Heikin Ashi',
   })
 
   const [miniChartOneSelection, setMiniChartOneSelection] = useState<ChartSelection>({
-    symbol: 'BTCUSD',
+    symbol: 'MES1!',
     timeframe: '5m',
     candleMode: 'Heikin Ashi',
   })
 
   const [miniChartTwoSelection, setMiniChartTwoSelection] = useState<ChartSelection>({
-    symbol: 'BTCUSD',
+    symbol: 'MES1!',
     timeframe: '15m',
     candleMode: 'Heikin Ashi',
   })
@@ -2817,6 +2818,8 @@ export default function Dashboard() {
       setMiniChartTwoSelection(savedMiniTwo.selection)
       setMiniChartTwoIndicatorSettings(savedMiniTwo.settings)
     }
+
+    setChartConfigsHydrated(true)
   }, [isClient])
 
   const saveChartConfig = useCallback((
@@ -2835,24 +2838,29 @@ export default function Dashboard() {
     }, 2200)
   }, [isClient])
 
+  useEffect(() => {
+    setIsClient(true)
+  }, [])
+
+  const selectedSymbol = normalizeSymbol(mainChartSelection.symbol || 'MES1!')
+  const selectedTimeframe = normalizeTimeframe(mainChartSelection.timeframe || '1m')
+  const miniOneSymbol = normalizeSymbol(miniChartOneSelection.symbol || 'MES1!')
+  const miniTwoSymbol = normalizeSymbol(miniChartTwoSelection.symbol || 'MES1!')
+  const miniOneTimeframe = normalizeTimeframe(miniChartOneSelection.timeframe || '5m')
+  const miniTwoTimeframe = normalizeTimeframe(miniChartTwoSelection.timeframe || '15m')
+
   const {
     latestSignal,
     recentSignals,
     connectionStatus,
     lastUpdateTime,
     apiBaseUrl,
-  } = useApiPolling()
-
-  useEffect(() => {
-    setIsClient(true)
-  }, [])
-
-  const selectedSymbol = normalizeSymbol(mainChartSelection.symbol || latestSignal?.symbol)
-  const selectedTimeframe = normalizeTimeframe(mainChartSelection.timeframe || latestSignal?.timeframe)
-  const miniOneSymbol = normalizeSymbol(miniChartOneSelection.symbol || 'BTCUSD')
-  const miniTwoSymbol = normalizeSymbol(miniChartTwoSelection.symbol || 'BTCUSD')
-  const miniOneTimeframe = normalizeTimeframe(miniChartOneSelection.timeframe || '5m')
-  const miniTwoTimeframe = normalizeTimeframe(miniChartTwoSelection.timeframe || '15m')
+  } = useApiPolling({
+    symbol: selectedSymbol,
+    timeframe: selectedTimeframe,
+    enabled: chartConfigsHydrated,
+    pollMs: 10000,
+  })
 
   const dashboardTimeframes = useMemo(
     () => Array.from(new Set([selectedTimeframe, miniOneTimeframe, miniTwoTimeframe])),
@@ -3206,7 +3214,7 @@ export default function Dashboard() {
             saveStatus={lastSavedChartKey === 'main' ? 'Saved' : ''}
             apiBaseUrl={apiBaseUrl}
             isClient={isClient}
-            enabled
+            enabled={chartConfigsHydrated}
             priority="main"
             engineState={pythonEngineState}
             showOverlayLines
@@ -3245,7 +3253,7 @@ export default function Dashboard() {
               saveStatus={lastSavedChartKey === 'mini1' ? 'Saved' : ''}
               apiBaseUrl={apiBaseUrl}
               isClient={isClient}
-              enabled={mainCandlesReady}
+              enabled={chartConfigsHydrated && mainCandlesReady}
               priority="mini"
               onCandlesUpdate={setMiniChartOneCandles}
               onChange={(selection) => {
@@ -3274,7 +3282,7 @@ export default function Dashboard() {
               saveStatus={lastSavedChartKey === 'mini2' ? 'Saved' : ''}
               apiBaseUrl={apiBaseUrl}
               isClient={isClient}
-              enabled={mainCandlesReady}
+              enabled={chartConfigsHydrated && mainCandlesReady}
               priority="mini"
               onCandlesUpdate={setMiniChartTwoCandles}
               onChange={(selection) => {
