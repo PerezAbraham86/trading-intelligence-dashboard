@@ -2966,6 +2966,8 @@ export default function Dashboard() {
               activeSymbol={selectedSymbol}
               activeTimeframe={selectedTimeframe}
               activePrice={activeChartPrice ?? undefined}
+              overlayPayload={mainChartOverlayPayload}
+              scorecards={chartScorecards}
             />
           </div>
 
