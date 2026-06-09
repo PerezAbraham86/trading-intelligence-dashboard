@@ -875,7 +875,7 @@ export default function StrategyTesterPanel({
                           {formatDateTime(trade.entryTime)}
                         </td>
                         <td className="px-3 py-3">
-                          {trade.isLive ? `${formatDateTime(trade.exitTime)} (current)` : formatDateTime(trade.exitTime)}
+                          {trade.isLive ? "LIVE — waiting for exit" : formatDateTime(trade.exitTime)}
                         </td>
                         <td className="px-3 py-3 text-right">
                           {trade.entryPrice.toFixed(2)}
