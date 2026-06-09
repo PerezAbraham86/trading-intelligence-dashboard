@@ -1,8 +1,8 @@
 import React, { useMemo, useState } from 'react';
 
 export type CandleLike = {
-  time?: string | number;
-  timestamp?: string | number;
+  time?: unknown;
+  timestamp?: unknown;
   open: number;
   high: number;
   low: number;
@@ -46,8 +46,8 @@ type Direction = 1 | -1 | 0;
 
 type TradeResult = {
   side: 'LONG' | 'SHORT';
-  entryTime: string | number | undefined;
-  exitTime: string | number | undefined;
+  entryTime: unknown;
+  exitTime: unknown;
   entry: number;
   exit: number;
   pnl: number;
