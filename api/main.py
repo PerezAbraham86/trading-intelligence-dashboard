@@ -17,7 +17,16 @@ from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from api.ghost_ml import evaluate_ghost_ml_records, ghost_ml_summary_from_candles, record_ghost_ml_projection
+from api.ghost_ml import (
+    apply_ghost_ml_confidence,
+    evaluate_ghost_ml_records,
+    get_ghost_ml_confidence_adjustment,
+    get_ghost_ml_projection_multiplier,
+    ghost_ml_export,
+    ghost_ml_summary_from_candles,
+    record_ghost_ml_projection,
+    reset_ghost_ml_memory,
+)
 
 try:
     from api.ml_feature_store import (
@@ -67,6 +76,11 @@ except Exception:
         build_unified_intelligence_object = None
 
 
+
+try:
+    from optimizer import run_optimizer as run_ghost_optimizer
+except Exception:
+    run_ghost_optimizer = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1670,21 +1684,258 @@ def candle_momentum(candles: List[Dict[str, Any]], lookback: int = 8) -> float:
     return weighted / max(weights, 1.0)
 
 
-def build_python_ghost_candles(candles: List[Dict[str, Any]], count: int = 3) -> List[Dict[str, Any]]:
+def _ghost_ml_direction_from_text(value: Any, fallback: str = "neutral") -> str:
+    text = str(value or "").lower()
+
+    if (
+        "bull" in text
+        or "buy" in text
+        or "long" in text
+        or "up" in text
+        or "demand" in text
+        or "discount" in text
+        or "sell-side" in text
+        or "sell side" in text
+    ):
+        return "bullish"
+
+    if (
+        "bear" in text
+        or "sell" in text
+        or "short" in text
+        or "down" in text
+        or "supply" in text
+        or "premium" in text
+        or "buy-side" in text
+        or "buy side" in text
+    ):
+        return "bearish"
+
+    return fallback
+
+
+def _ghost_ml_collect_overlay_items(overlays: Dict[str, Any], *keys: str) -> List[Dict[str, Any]]:
+    if not isinstance(overlays, dict):
+        return []
+
+    items: List[Dict[str, Any]] = []
+
+    for key in keys:
+        value = overlays.get(key)
+        if isinstance(value, list):
+            items.extend([item for item in value if isinstance(item, dict)])
+
+    return items
+
+
+def calculate_ghost_ml_overlay_bias(overlays: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Build ghost projection bias from SMC + AlphaX/DLM + OrderBlocks + FVG + sweeps only.
+
+    Explicit exclusions:
+    - NRTR is not used.
+    - SMMA is not used.
+    - Editable chart settings are not used.
+    """
+    if not isinstance(overlays, dict):
+        return {
+            "bias": 0.0,
+            "direction": "neutral",
+            "bullScore": 0.0,
+            "bearScore": 0.0,
+            "source": "no_overlay_context",
+            "mlHierarchy": "SMC_ALPHA_DLM_ORDERBLOCKS_GHOST_ONLY",
+            "nrtrUsedForMl": 0,
+            "smmaUsedForMl": 0,
+        }
+
+    bull_score = 0.0
+    bear_score = 0.0
+
+    smc_items = _ghost_ml_collect_overlay_items(overlays, "smcEvents", "liquidityEvents")
+    zone_items = _ghost_ml_collect_overlay_items(overlays, "zones", "orderBlocks")
+    dlm_items = _ghost_ml_collect_overlay_items(overlays, "dlmLevels")
+    profile_items = _ghost_ml_collect_overlay_items(overlays, "liquidityProfileBins", "alphaProfileBins")
+
+    for item in smc_items[-16:]:
+        direction = _ghost_ml_direction_from_text(
+            item.get("direction")
+            or item.get("bias")
+            or item.get("side")
+            or item.get("label")
+            or item.get("kind")
+            or item.get("type")
+        )
+        weight = 1.35 if "choch" in str(item.get("tag") or item.get("label") or "").lower() else 1.15
+
+        if direction == "bullish":
+            bull_score += weight
+        elif direction == "bearish":
+            bear_score += weight
+
+    for item in zone_items[-16:]:
+        text = str(
+            item.get("kind")
+            or item.get("type")
+            or item.get("label")
+            or item.get("name")
+            or ""
+        ).lower()
+        direction = _ghost_ml_direction_from_text(
+            item.get("direction")
+            or item.get("bias")
+            or item.get("side")
+            or text
+        )
+
+        weight = 1.40 if "order" in text or "ob" in text else 1.15 if "fvg" in text or "imbalance" in text else 0.85
+
+        if "discount" in text:
+            direction = "bullish"
+            weight = max(weight, 1.10)
+        elif "premium" in text:
+            direction = "bearish"
+            weight = max(weight, 1.10)
+
+        if direction == "bullish":
+            bull_score += weight
+        elif direction == "bearish":
+            bear_score += weight
+
+    for item in dlm_items[-18:]:
+        direction = _ghost_ml_direction_from_text(
+            item.get("direction")
+            or item.get("bias")
+            or item.get("side")
+            or item.get("label")
+        )
+
+        if direction == "bullish":
+            bull_score += 1.15
+        elif direction == "bearish":
+            bear_score += 1.15
+
+    strong_profile = [
+        item for item in profile_items[-50:]
+        if to_float(item.get("widthPct", item.get("volumePct")), 0) >= 35
+        or to_float(item.get("buyPressurePct", item.get("buyPct")), 0) >= 55
+        or to_float(item.get("sellPressurePct", item.get("sellPct")), 0) >= 55
+    ]
+
+    for item in strong_profile[-20:]:
+        buy_pct = to_float(item.get("buyPressurePct", item.get("buyPct")), 0)
+        sell_pct = to_float(item.get("sellPressurePct", item.get("sellPct")), 0)
+        direction = _ghost_ml_direction_from_text(item.get("direction") or item.get("bias"))
+
+        if buy_pct > sell_pct and buy_pct >= 45:
+            direction = "bullish"
+        elif sell_pct > buy_pct and sell_pct >= 45:
+            direction = "bearish"
+
+        if direction == "bullish":
+            bull_score += 0.55
+        elif direction == "bearish":
+            bear_score += 0.55
+
+    alpha_meta = overlays.get("alphaProfileMeta", {})
+    if isinstance(alpha_meta, dict):
+        bull_pressure = to_float(alpha_meta.get("bullPressurePct"), 50)
+        bear_pressure = to_float(alpha_meta.get("bearPressurePct"), 50)
+        pressure_edge = clamp((bull_pressure - bear_pressure) / 100.0, -0.35, 0.35)
+
+        if pressure_edge > 0:
+            bull_score += abs(pressure_edge) * 4.0
+        elif pressure_edge < 0:
+            bear_score += abs(pressure_edge) * 4.0
+
+    net = bull_score - bear_score
+    total = max(bull_score + bear_score, 1.0)
+    bias = clamp(net / total, -0.55, 0.55)
+    direction = "bullish" if bias > 0.05 else "bearish" if bias < -0.05 else "neutral"
+
+    return {
+        "bias": round(bias, 5),
+        "direction": direction,
+        "bullScore": round(bull_score, 4),
+        "bearScore": round(bear_score, 4),
+        "source": "SMC_ALPHA_DLM_ORDERBLOCKS_FVG_SWEEPS_ONLY",
+        "mlHierarchy": "SMC_ALPHA_DLM_ORDERBLOCKS_GHOST_ONLY",
+        "nrtrUsedForMl": 0,
+        "smmaUsedForMl": 0,
+    }
+
+
+def build_python_ghost_candles(
+    candles: List[Dict[str, Any]],
+    count: int = 3,
+    overlays: Optional[Dict[str, Any]] = None,
+    symbol: Optional[str] = None,
+    timeframe: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     if len(candles) < 10:
         return []
+
+    normalized_symbol = normalize_symbol(str(symbol or candles[-1].get("symbol") or ""))
+    normalized_timeframe = normalize_timeframe(str(timeframe or candles[-1].get("timeframe") or "1m"))
 
     ha = build_heikin_ashi_candles(candles)
     atr = average_true_range(candles, 14)
     last = ha[-1]
     last_real = candles[-1]
+
     if atr <= 0:
-        atr = max(to_float(last_real.get("high")) - to_float(last_real.get("low")), to_float(last_real.get("close")) * 0.001, 0.01)
+        atr = max(
+            to_float(last_real.get("high")) - to_float(last_real.get("low")),
+            to_float(last_real.get("close")) * 0.001,
+            0.01,
+        )
 
     momentum = candle_momentum(ha, 8)
-    bull_score = to_float(LATEST_SIGNAL.get("bullScore"), 50)
-    bear_score = to_float(LATEST_SIGNAL.get("bearScore"), 50)
-    pressure_bias = clamp((bull_score - bear_score) / 100.0, -0.50, 0.50)
+    overlay_bias = calculate_ghost_ml_overlay_bias(overlays)
+    structure_bias = to_float(overlay_bias.get("bias"), 0.0)
+
+    # Base direction is chosen from HA momentum + SMC/AlphaX/DLM/OB/FVG/sweep context.
+    # NRTR and SMMA are intentionally excluded.
+    projected_bias_delta = momentum + structure_bias * atr
+    projected_direction = (
+        "bullish" if projected_bias_delta > 0
+        else "bearish" if projected_bias_delta < 0
+        else "neutral"
+    )
+
+    try:
+        projection_multiplier = get_ghost_ml_projection_multiplier(
+            normalized_symbol,
+            normalized_timeframe,
+            overlays or {},
+            projected_direction,
+        )
+    except Exception as error:
+        print(f"[Ghost ML] projection multiplier unavailable: {error}")
+        projection_multiplier = 1.0
+
+    try:
+        ml_adjustment = get_ghost_ml_confidence_adjustment(
+            normalized_symbol,
+            normalized_timeframe,
+            overlays or {},
+            projected_direction,
+        )
+    except Exception as error:
+        print(f"[Ghost ML] confidence adjustment unavailable: {error}")
+        ml_adjustment = {
+            "ready": False,
+            "confidenceMultiplier": 1.0,
+            "confidenceBonus": 0,
+            "projectionMultiplier": projection_multiplier,
+            "reason": "adjustment_unavailable",
+            "error": str(error),
+            "mlHierarchy": "SMC_ALPHA_DLM_ORDERBLOCKS_GHOST_ONLY",
+            "nrtrUsedForMl": 0,
+            "smmaUsedForMl": 0,
+        }
+
+    projection_multiplier = clamp(to_float(projection_multiplier, 1.0), 0.70, 1.22)
 
     prev_open = to_float(last.get("open"))
     prev_close = to_float(last.get("close"))
@@ -1693,32 +1944,68 @@ def build_python_ghost_candles(candles: List[Dict[str, Any]], count: int = 3) ->
     for index in range(count):
         decay = 0.82 ** index
         ghost_open = (prev_open + prev_close) / 2.0
-        raw_delta = momentum * decay + pressure_bias * atr * (0.7 ** index)
+
+        raw_delta = (
+            momentum * decay
+            + structure_bias * atr * (0.82 ** index)
+        ) * projection_multiplier
+
         if abs(raw_delta) < atr * 0.08:
             raw_delta = (atr * 0.08) * (1 if raw_delta >= 0 else -1)
+
         ghost_close = ghost_open + raw_delta
         top = max(ghost_open, ghost_close)
         bottom = min(ghost_open, ghost_close)
-        ghost_high = top + atr * (0.25 + index * 0.05)
-        ghost_low = bottom - atr * (0.25 + index * 0.05)
+
+        wick_multiplier = 0.25 + index * 0.05
+        ghost_high = top + atr * wick_multiplier * projection_multiplier
+        ghost_low = bottom - atr * wick_multiplier * projection_multiplier
+
         direction = "bullish" if ghost_close > ghost_open else "bearish" if ghost_close < ghost_open else "neutral"
-        confidence = round(clamp(18 + abs(raw_delta) / max(atr, 1e-9) * 35 - index * 4, 2, 88))
+        base_confidence = round(clamp(18 + abs(raw_delta) / max(atr, 1e-9) * 35 - index * 4, 2, 88))
+
+        try:
+            confidence = apply_ghost_ml_confidence(
+                base_confidence,
+                normalized_symbol,
+                normalized_timeframe,
+                overlays or {},
+                direction,
+            )
+        except Exception as error:
+            print(f"[Ghost ML] confidence apply failed: {error}")
+            confidence = base_confidence
 
         ghosts.append({
-            "label": f"PY #{index + 1}",
+            "label": f"ML PY #{index + 1}",
             "open": round(ghost_open, 5),
             "high": round(ghost_high, 5),
             "low": round(ghost_low, 5),
             "close": round(ghost_close, 5),
-            "confidence": confidence,
+            "confidence": round(clamp(to_float(confidence, base_confidence), 2, 96)),
+            "baseConfidence": base_confidence,
             "direction": direction,
-            "source": "python",
+            "source": "python_ghost_ml_auto_learning",
+            "mlAdjusted": True,
+            "mlReady": bool(ml_adjustment.get("ready")),
+            "mlReason": ml_adjustment.get("reason"),
+            "mlConfidenceMultiplier": ml_adjustment.get("confidenceMultiplier", 1.0),
+            "mlConfidenceBonus": ml_adjustment.get("confidenceBonus", 0),
+            "mlProjectionMultiplier": projection_multiplier,
+            "mlHierarchy": "SMC_ALPHA_DLM_ORDERBLOCKS_GHOST_ONLY",
+            "nrtrUsedForMl": 0,
+            "smmaUsedForMl": 0,
+            "structureBias": overlay_bias,
         })
 
         prev_open = ghost_open
         prev_close = ghost_close
 
-    return [ghost for ghost in ghosts if is_candle_valid_for_symbol({**ghost, "symbol": normalize_symbol(str(candles[-1].get("symbol") or ""))}, str(candles[-1].get("symbol") or ""))]
+    return [
+        ghost for ghost in ghosts
+        if is_candle_valid_for_symbol({**ghost, "symbol": normalized_symbol}, normalized_symbol)
+    ]
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4269,7 +4556,16 @@ def build_python_dashboard_signal(symbol: str = "BTCUSD", timeframe: str = "1m",
     candles, sentiment_debug = get_sentiment_candles(normalized_symbol, normalized_timeframe, max(500, min(int(limit or 500), 5000)))
     sentiment = calculate_latest_sentiment(candles)
     sentiment["debug"] = sentiment_debug
-    ghosts = build_python_ghost_candles(candles, 3)
+
+    # Build SMC/AlphaX/DLM/OB context first, then let Ghost ML use that context.
+    preliminary_overlays = build_python_chart_overlays(candles, [])
+    ghosts = build_python_ghost_candles(
+        candles,
+        3,
+        preliminary_overlays,
+        normalized_symbol,
+        normalized_timeframe,
+    )
     overlays = build_python_chart_overlays(candles, ghosts)
     scorecards = analyze_python_core_scorecards(candles, sentiment, ghosts, overlays)
     fred_macro = build_fred_macro_context()
@@ -4852,7 +5148,16 @@ def get_or_build_raw_chart_overlays(
 
     try:
         candles = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit)
-        ghosts = build_python_ghost_candles(candles, 3)
+
+        # Build SMC/AlphaX/DLM/OB context first, then generate ML-adjusted ghosts.
+        preliminary_overlays = build_python_chart_overlays(candles, [])
+        ghosts = build_python_ghost_candles(
+            candles,
+            3,
+            preliminary_overlays,
+            normalized_symbol,
+            normalized_timeframe,
+        )
         raw_overlays = build_python_chart_overlays(candles, ghosts)
 
         payload = {
@@ -5094,6 +5399,7 @@ def build_fast_chart_overlay_payload(
             "candlesCount": int(to_float(raw_payload.get("candlesCount"), 0)),
             "chartOverlays": overlays,
             "ghostCandles": overlays.get("ghostCandles", []),
+            "ghostMl": ghost_ml_summary_from_candles(normalized_symbol, normalized_timeframe, ml_candles) if ghost else None,
             "alphaProfileMeta": overlays.get("alphaProfileMeta", {}),
             "liquidityProfileBins": overlays.get("liquidityProfileBins", overlays.get("alphaProfileBins", [])),
             "cache": "filtered_from_raw_cache",
@@ -5186,6 +5492,29 @@ def ghost_ml_status(symbol: str = "MES1!", timeframe: str = "1m", limit: int = 5
 def ghost_evaluate(symbol: str = "MES1!", timeframe: str = "1m", limit: int = 500) -> Dict[str, Any]:
     candles = get_dashboard_candles(symbol, timeframe, limit)
     return ghost_ml_summary_from_candles(symbol, timeframe, candles)
+
+
+@app.get("/api/ghost-ml-export")
+def ghost_ml_export_route() -> Dict[str, Any]:
+    return ghost_ml_export()
+
+
+@app.post("/api/ghost-ml-reset")
+def ghost_ml_reset_route(symbol: Optional[str] = None, timeframe: Optional[str] = None) -> Dict[str, Any]:
+    return reset_ghost_ml_memory(symbol=symbol, timeframe=timeframe)
+
+
+@app.post("/api/ghost-optimizer")
+def ghost_optimizer_route(symbol: str = "", timeframe: str = "") -> Dict[str, Any]:
+    if run_ghost_optimizer is None:
+        return {
+            "eventType": "GHOST_ML_OPTIMIZER",
+            "status": "Unavailable",
+            "error": "optimizer.py is not available on the Python path",
+            "createdAt": now_iso(),
+        }
+
+    return run_ghost_optimizer(symbol=symbol, timeframe=timeframe)
 
 
 @app.get("/api/options-pressure")
@@ -5910,7 +6239,16 @@ def engine_state(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500
     candles, sentiment_debug = get_sentiment_candles(normalized_symbol, normalized_timeframe, max(500, min(int(limit or 500), 5000)))
     sentiment = calculate_latest_sentiment(candles)
     sentiment["debug"] = sentiment_debug
-    ghosts = build_python_ghost_candles(candles, 3)
+
+    # Build SMC/AlphaX/DLM/OB context first, then generate ML-adjusted ghosts.
+    preliminary_overlays = build_python_chart_overlays(candles, [])
+    ghosts = build_python_ghost_candles(
+        candles,
+        3,
+        preliminary_overlays,
+        normalized_symbol,
+        normalized_timeframe,
+    )
 
     overlays = build_python_chart_overlays(candles, ghosts)
     scorecards = analyze_python_core_scorecards(candles, sentiment, ghosts, overlays)
