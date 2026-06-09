@@ -12,12 +12,21 @@ import FactorConfirmationTable from '@/components/FactorConfirmationTable'
 import GhostCandleProjection from '@/components/GhostCandleProjection'
 import WarningsPanel from '@/components/WarningsPanel'
 import RecentSignalsTable from '@/components/RecentSignalsTable'
-import StrategyTesterPanel, { ChartStrategySettings } from '@/components/StrategyTesterPanel'
+import StrategyTesterPanel from '@/components/StrategyTesterPanel'
 import ConnectionStatusBadge from '@/components/ConnectionStatusBadge'
 import MarketSentimentGauge from '@/components/MarketSentimentGauge'
 import UnifiedIntelligenceMatrix from '@/components/UnifiedIntelligenceMatrix'
 import { motion } from 'framer-motion'
 import { useApiPolling } from '@/hooks/useApiPolling'
+
+type ChartStrategySettings = {
+  smmaLength: number
+  nrtrMode: 'ATR-Based' | 'Percentage' | 'Off'
+  nrtrAtrLength: number
+  nrtrAtrMultiplier: number
+  nrtrPercent: number
+  showNrtrExitLabels: boolean
+}
 
 type PythonGhostCandle = {
   time?: unknown
