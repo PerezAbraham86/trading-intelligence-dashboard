@@ -164,9 +164,11 @@ function isPlaceholderSignal(signal?: RecentSignal) {
 }
 
 function formatPrice(value?: number | null) {
+  if (value === null || value === undefined) return '—'
+
   const numeric = Number(value)
 
-  if (!Number.isFinite(numeric)) return '—'
+  if (!Number.isFinite(numeric) || numeric <= 0) return '—'
   if (Math.abs(numeric) >= 1000) return numeric.toLocaleString(undefined, { maximumFractionDigits: 2 })
   if (Math.abs(numeric) >= 100) return numeric.toFixed(2)
   if (Math.abs(numeric) >= 10) return numeric.toFixed(3)
