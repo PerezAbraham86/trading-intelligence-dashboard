@@ -85,7 +85,7 @@ function clamp(value: number) {
 }
 
 function normalizeSymbol(value: unknown) {
-  return String(value ?? 'BTCUSD')
+  const raw = String(value ?? 'MES1!')
     .trim()
     .toUpperCase()
     .split('BINANCE:')
@@ -98,6 +98,23 @@ function normalizeSymbol(value: unknown) {
     .join('')
     .split('CME:')
     .join('')
+
+  if (raw === 'MES1' || raw === 'MES1!') return 'MES1!'
+  if (raw.includes('MES')) return 'MES1!'
+  if (raw.includes('BTC')) return 'BTCUSD'
+  if (raw.includes('ETH')) return 'ETHUSD'
+  if (raw.includes('SPY')) return 'SPY'
+
+  return raw || 'MES1!'
+}
+
+function normalizeNewsSymbol(value: unknown) {
+  const symbol = normalizeSymbol(value)
+
+  // MES tracks the S&P 500. Use SPY for stock/news APIs that do not support futures symbols.
+  if (symbol === 'MES1!' || symbol.includes('MES')) return 'SPY'
+
+  return symbol
 }
 
 function normalizeTimeframe(value: unknown) {
@@ -425,76 +442,13 @@ function buildWarnings(signal: TradingSignal | undefined, data: TechnicalSentime
   return items.sort((a, b) => b.score - a.score).slice(0, 5)
 }
 
-
-const MAIN_CANDLES_READY_KEY = 'marketbos:main-candles-ready:v1'
-
-function readMainCandleGate(symbol?: string) {
-  if (typeof window === 'undefined') {
-    return {
-      ready: false,
-      count: 0,
-      symbol: '',
-      timeframe: '',
-      status: 'server',
-    }
-  }
-
-  try {
-    const raw = window.localStorage.getItem(MAIN_CANDLES_READY_KEY)
-    if (!raw) {
-      return {
-        ready: false,
-        count: 0,
-        symbol: '',
-        timeframe: '',
-        status: 'missing',
-      }
-    }
-
-    const parsed = JSON.parse(raw)
-    const ready = Boolean(parsed?.ready) && Number(parsed?.count ?? 0) > 0
-    const storedSymbol = String(parsed?.symbol ?? '').toUpperCase()
-    const requestedSymbol = String(symbol ?? '').toUpperCase()
-
-    return {
-      ready: ready && (!requestedSymbol || storedSymbol === requestedSymbol),
-      count: Number(parsed?.count ?? 0),
-      symbol: storedSymbol,
-      timeframe: String(parsed?.timeframe ?? ''),
-      status: String(parsed?.status ?? ''),
-    }
-  } catch {
-    return {
-      ready: false,
-      count: 0,
-      symbol: '',
-      timeframe: '',
-      status: 'parse-error',
-    }
-  }
-}
-
-
 export default function WarningsPanel({ signal }: WarningsPanelProps) {
   const [technicalSentiment, setTechnicalSentiment] =
     useState<TechnicalSentiment | null>(null)
 
   const symbol = normalizeSymbol(signal?.symbol)
+  const newsSymbol = normalizeNewsSymbol(signal?.symbol)
   const timeframe = normalizeTimeframe(signal?.timeframe)
-  const [mainCandleGate, setMainCandleGate] = useState(() => readMainCandleGate(symbol))
-
-  useEffect(() => {
-    const updateGate = () => setMainCandleGate(readMainCandleGate(symbol))
-
-    updateGate()
-    window.addEventListener('marketbos:candle-gate', updateGate)
-    window.addEventListener('storage', updateGate)
-
-    return () => {
-      window.removeEventListener('marketbos:candle-gate', updateGate)
-      window.removeEventListener('storage', updateGate)
-    }
-  }, [symbol])
 
   useEffect(() => {
     let cancelled = false
@@ -585,28 +539,9 @@ export default function WarningsPanel({ signal }: WarningsPanelProps) {
         </div>
       </motion.div>
 
-      {mainCandleGate.ready ? (
-        <>
-          <SP500Heatmap />
+      <SP500Heatmap />
 
-          <TickerNewsFeed symbol={symbol} limit={8} />
-        </>
-      ) : (
-        <motion.div
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.25 }}
-          className="rounded-xl border border-dark-700 bg-dark-800/70 p-4 shadow-lg"
-        >
-          <h2 className="text-lg font-bold text-white">Market Data Waiting</h2>
-          <p className="mt-1 text-sm text-gray-400">
-            S&P 500 heatmap and ticker news are paused until the main chart candles load.
-          </p>
-          <div className="mt-3 rounded-lg border border-yellow-400/20 bg-yellow-400/10 px-3 py-2 text-xs font-semibold text-yellow-300">
-            Candle gate: {mainCandleGate.status || 'waiting'} • {mainCandleGate.symbol || symbol}
-          </div>
-        </motion.div>
-      )}
+      <TickerNewsFeed symbol={newsSymbol} limit={8} />
     </>
   )
 }
