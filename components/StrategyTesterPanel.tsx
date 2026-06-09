@@ -23,26 +23,26 @@ export type StrategyTesterPanelProps = {
   symbol?: string;
   timeframe?: string;
 
-  // Existing app/page.tsx dashboard props.
   mainCandles?: CandleLike[];
   miniOneCandles?: CandleLike[];
   miniTwoCandles?: CandleLike[];
+
   mainSettings?: ChartStrategySettings;
   miniOneSettings?: ChartStrategySettings;
   miniTwoSettings?: ChartStrategySettings;
 
-  // Optional callbacks if/when app/page.tsx wires Apply Best into live settings.
   onMainSettingsChange?: (settings: ChartStrategySettings) => void;
   onMiniOneSettingsChange?: (settings: ChartStrategySettings) => void;
   onMiniTwoSettingsChange?: (settings: ChartStrategySettings) => void;
 
-  // Backwards-compatible simple props.
+  // backwards compatibility
   candles?: CandleLike[];
   settings?: ChartStrategySettings;
   onSettingsChange?: (settings: ChartStrategySettings) => void;
 };
 
 type Direction = 1 | -1 | 0;
+type ChartSlot = 'main' | 'miniOne' | 'miniTwo';
 
 type TradeResult = {
   side: 'LONG' | 'SHORT';
@@ -80,13 +80,11 @@ type NrtrOptimizationRow = {
   stats: StrategyStats;
 };
 
-type ChartSlot = 'main' | 'miniOne' | 'miniTwo';
-
 const DEFAULT_SETTINGS: ChartStrategySettings = {
   smmaLength: 20,
   nrtrMode: 'ATR-Based',
   nrtrAtrLength: 14,
-  nrtrAtrMultiplier: 3,
+  nrtrAtrMultiplier: 1,
   nrtrPercent: 0.25,
   showNrtrExitLabels: true,
 };
@@ -212,8 +210,15 @@ function calculateNrtrDirections(
       finalUpper = basicUpper;
       finalLower = basicLower;
     } else {
-      finalUpper = basicUpper < previousFinalUpper || previousClose > previousFinalUpper ? basicUpper : previousFinalUpper;
-      finalLower = basicLower > previousFinalLower || previousClose < previousFinalLower ? basicLower : previousFinalLower;
+      finalUpper =
+        basicUpper < previousFinalUpper || previousClose > previousFinalUpper
+          ? basicUpper
+          : previousFinalUpper;
+
+      finalLower =
+        basicLower > previousFinalLower || previousClose < previousFinalLower
+          ? basicLower
+          : previousFinalLower;
     }
 
     if (previousTrendLine === null) {
@@ -323,8 +328,8 @@ function optimizerScore(stats: StrategyStats): number {
 }
 
 function runNrtrOptimization(candles: CandleLike[]): NrtrOptimizationRow[] {
-  const atrLengths = [7, 10, 14, 21, 34];
-  const atrMultipliers = [1, 1.25, 1.5, 2, 2.5, 3, 3.5, 4];
+  const atrLengths = [5, 7, 10, 14, 21, 34];
+  const atrMultipliers = [0.75, 1, 1.25, 1.5, 2, 2.5, 3, 3.5, 4];
   const percentages = [0.1, 0.15, 0.2, 0.25, 0.35, 0.5, 0.75, 1];
 
   const rows: NrtrOptimizationRow[] = [];
@@ -345,13 +350,13 @@ function runNrtrOptimization(candles: CandleLike[]): NrtrOptimizationRow[] {
   }
 
   for (const percent of percentages) {
-    const stats = runNrtrBacktest(candles, 'Percentage', 14, 3, percent);
+    const stats = runNrtrBacktest(candles, 'Percentage', 14, 1, percent);
     rows.push({
       rank: 0,
       score: optimizerScore(stats),
       mode: 'Percentage',
       atrLength: 14,
-      atrMultiplier: 3,
+      atrMultiplier: 1,
       percent,
       stats,
     });
@@ -370,6 +375,20 @@ function settingsLabel(settings: ChartStrategySettings): string {
   }
 
   return `ATR-Based · ATR ${settings.nrtrAtrLength} · x${formatNumber(settings.nrtrAtrMultiplier, 2)}`;
+}
+
+function getStatsForSettings(candles: CandleLike[], settings: ChartStrategySettings): StrategyStats {
+  if (candles.length < 30 || settings.nrtrMode === 'Off') {
+    return emptyStats();
+  }
+
+  return runNrtrBacktest(
+    candles,
+    settings.nrtrMode === 'Percentage' ? 'Percentage' : 'ATR-Based',
+    settings.nrtrAtrLength,
+    settings.nrtrAtrMultiplier,
+    settings.nrtrPercent
+  );
 }
 
 export default function StrategyTesterPanel({
@@ -397,19 +416,22 @@ export default function StrategyTesterPanel({
 
     return {
       main: {
-        label: 'Main Chart',
+        label: 'Main',
+        fullLabel: 'Main Chart',
         candles: validCandles(mainCandles ?? simpleCandles),
         settings: { ...DEFAULT_SETTINGS, ...(mainSettings ?? simpleSettings) },
         onApply: onMainSettingsChange ?? onSettingsChange,
       },
       miniOne: {
-        label: 'Mini Chart 1',
+        label: 'Mini 1',
+        fullLabel: 'Mini Chart 1',
         candles: validCandles(miniOneCandles),
         settings: { ...DEFAULT_SETTINGS, ...(miniOneSettings ?? mainSettings ?? simpleSettings) },
         onApply: onMiniOneSettingsChange,
       },
       miniTwo: {
-        label: 'Mini Chart 2',
+        label: 'Mini 2',
+        fullLabel: 'Mini Chart 2',
         candles: validCandles(miniTwoCandles),
         settings: { ...DEFAULT_SETTINGS, ...(miniTwoSettings ?? mainSettings ?? simpleSettings) },
         onApply: onMiniTwoSettingsChange,
@@ -430,21 +452,12 @@ export default function StrategyTesterPanel({
     settings,
   ]);
 
+  const mainStats = useMemo(() => getStatsForSettings(slots.main.candles, slots.main.settings), [slots.main.candles, slots.main.settings]);
+  const miniOneStats = useMemo(() => getStatsForSettings(slots.miniOne.candles, slots.miniOne.settings), [slots.miniOne.candles, slots.miniOne.settings]);
+  const miniTwoStats = useMemo(() => getStatsForSettings(slots.miniTwo.candles, slots.miniTwo.settings), [slots.miniTwo.candles, slots.miniTwo.settings]);
+
   const active = slots[activeSlot];
-
-  const currentStats = useMemo(() => {
-    if (active.candles.length < 30 || active.settings.nrtrMode === 'Off') {
-      return emptyStats();
-    }
-
-    return runNrtrBacktest(
-      active.candles,
-      active.settings.nrtrMode === 'Percentage' ? 'Percentage' : 'ATR-Based',
-      active.settings.nrtrAtrLength,
-      active.settings.nrtrAtrMultiplier,
-      active.settings.nrtrPercent
-    );
-  }, [active.candles, active.settings]);
+  const activeStats = activeSlot === 'main' ? mainStats : activeSlot === 'miniOne' ? miniOneStats : miniTwoStats;
 
   const optimizationRows = useMemo(() => {
     if (!showOptimizer || active.candles.length < 60) return [];
@@ -466,153 +479,151 @@ export default function StrategyTesterPanel({
   }
 
   return (
-    <div className="rounded-2xl border border-slate-800 bg-slate-950/80 p-4 text-slate-100 shadow-xl">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4 text-slate-100">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div className="text-sm uppercase tracking-[0.25em] text-cyan-300">Strategy Tester</div>
-          <h3 className="text-xl font-semibold">NRTR Entry / Exit Performance</h3>
-          <p className="mt-1 text-sm text-slate-400">
-            {symbol} · {timeframe} · NRTR is strategy-only, not ML hierarchy.
-          </p>
+          <div className="text-xs uppercase tracking-[0.25em] text-cyan-300">Strategy Tester</div>
+          <div className="mt-1 text-lg font-semibold text-white">NRTR Strategy Results</div>
+          <div className="mt-1 text-xs text-slate-400">
+            {symbol} · {timeframe} · NRTR optimizer is strategy-only and excluded from ML.
+          </div>
         </div>
 
         <button
           type="button"
           onClick={() => setShowOptimizer((value) => !value)}
-          className="rounded-xl border border-cyan-400/40 bg-cyan-500/10 px-4 py-2 text-sm font-semibold text-cyan-100 hover:bg-cyan-500/20"
+          className="rounded-xl border border-cyan-400/40 bg-cyan-500/10 px-4 py-2 text-xs font-semibold text-cyan-100 hover:bg-cyan-500/20"
         >
           {showOptimizer ? 'Hide NRTR Optimizer' : 'Run NRTR Optimizer'}
         </button>
       </div>
 
-      <div className="mt-4 flex flex-wrap gap-2">
-        {(['main', 'miniOne', 'miniTwo'] as ChartSlot[]).map((slot) => {
-          const item = slots[slot];
-          const activeButton = activeSlot === slot;
+      <div className="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-3">
+        <CompactResultCard
+          active={activeSlot === 'main'}
+          label="Main Chart"
+          candles={slots.main.candles.length}
+          settings={slots.main.settings}
+          stats={mainStats}
+          onClick={() => setActiveSlot('main')}
+        />
 
-          return (
-            <button
-              key={slot}
-              type="button"
-              onClick={() => setActiveSlot(slot)}
-              className={[
-                'rounded-xl border px-3 py-2 text-sm font-semibold',
-                activeButton
-                  ? 'border-cyan-300 bg-cyan-400/15 text-cyan-100'
-                  : 'border-slate-700 bg-slate-900/60 text-slate-300 hover:border-slate-500',
-              ].join(' ')}
-            >
-              {item.label} · {item.candles.length.toLocaleString()} candles
-            </button>
-          );
-        })}
+        <CompactResultCard
+          active={activeSlot === 'miniOne'}
+          label="Mini Chart 1"
+          candles={slots.miniOne.candles.length}
+          settings={slots.miniOne.settings}
+          stats={miniOneStats}
+          onClick={() => setActiveSlot('miniOne')}
+        />
+
+        <CompactResultCard
+          active={activeSlot === 'miniTwo'}
+          label="Mini Chart 2"
+          candles={slots.miniTwo.candles.length}
+          settings={slots.miniTwo.settings}
+          stats={miniTwoStats}
+          onClick={() => setActiveSlot('miniTwo')}
+        />
       </div>
-
-      <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/50 p-3 text-sm text-slate-300">
-        <span className="text-slate-500">Current settings:</span>{' '}
-        <span className="font-semibold text-slate-100">{settingsLabel(active.settings)}</span>
-      </div>
-
-      <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-6">
-        <MetricCard label="Trades" value={String(currentStats.totalTrades)} />
-        <MetricCard label="Win Rate" value={formatPercent(currentStats.winRate)} />
-        <MetricCard label="Net PnL" value={formatNumber(currentStats.netPnl, 2)} />
-        <MetricCard label="Profit Factor" value={formatNumber(currentStats.profitFactor, 2)} />
-        <MetricCard label="Drawdown" value={formatNumber(currentStats.maxDrawdown, 2)} />
-        <MetricCard label="Avg Trade" value={formatNumber(currentStats.avgTrade, 2)} />
-      </div>
-
-      {best && (
-        <div className="mt-4 rounded-2xl border border-emerald-400/30 bg-emerald-500/10 p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <div className="text-xs uppercase tracking-[0.2em] text-emerald-300">Best NRTR Settings Found</div>
-              <div className="mt-1 text-lg font-semibold">
-                {best.mode} · ATR {best.atrLength} · Multiplier {formatNumber(best.atrMultiplier, 2)}
-                {best.mode === 'Percentage' ? ` · ${formatPercent(best.percent)}` : ''}
-              </div>
-              <div className="mt-1 text-sm text-slate-300">
-                Win Rate {formatPercent(best.stats.winRate)} · Net PnL {formatNumber(best.stats.netPnl, 2)} · PF {formatNumber(best.stats.profitFactor, 2)} · Trades {best.stats.totalTrades}
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => applyBest(best)}
-              className="rounded-xl border border-emerald-300/50 bg-emerald-400/15 px-4 py-2 text-sm font-semibold text-emerald-100 hover:bg-emerald-400/25"
-            >
-              Apply Best Settings
-            </button>
-          </div>
-
-          {!active.onApply && (
-            <div className="mt-3 rounded-xl border border-amber-400/30 bg-amber-400/10 p-3 text-xs text-amber-100">
-              Apply button is ready, but app/page.tsx has not passed a settings update callback yet. You can still copy these best values into your NRTR settings.
-            </div>
-          )}
-        </div>
-      )}
 
       {showOptimizer && (
-        <div className="mt-4 overflow-hidden rounded-2xl border border-slate-800">
-          <div className="border-b border-slate-800 bg-slate-900/80 px-4 py-3">
-            <div className="text-sm font-semibold text-slate-200">NRTR Optimization Results</div>
-            <div className="text-xs text-slate-500">
-              Minimum 10 trades required to rank. Higher score favors win rate, profit factor, PnL, average trade, and lower drawdown.
+        <div className="mt-4 rounded-2xl border border-cyan-400/20 bg-cyan-950/10 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-cyan-100">Current NRTR Optimizer</div>
+              <div className="mt-1 text-xs text-slate-400">
+                Optimizing {active.fullLabel} · {active.candles.length.toLocaleString()} candles · Current {settingsLabel(active.settings)}
+              </div>
+            </div>
+
+            {best && (
+              <button
+                type="button"
+                onClick={() => applyBest(best)}
+                className="rounded-xl border border-emerald-300/50 bg-emerald-400/15 px-4 py-2 text-xs font-semibold text-emerald-100 hover:bg-emerald-400/25"
+              >
+                Apply Best To {active.label}
+              </button>
+            )}
+          </div>
+
+          {best && (
+            <div className="mt-4 rounded-xl border border-emerald-400/20 bg-emerald-500/10 p-3">
+              <div className="text-xs uppercase tracking-[0.2em] text-emerald-300">Best Found</div>
+              <div className="mt-1 text-sm font-semibold text-white">
+                {best.mode} · ATR {best.atrLength} · Multiplier {formatNumber(best.atrMultiplier, 2)}
+                {best.mode === 'Percentage' ? ` · Percent ${formatPercent(best.percent)}` : ''}
+              </div>
+              <div className="mt-1 text-xs text-slate-300">
+                Win Rate {formatPercent(best.stats.winRate)} · Net PnL {formatNumber(best.stats.netPnl, 2)} · PF {formatNumber(best.stats.profitFactor, 2)} · DD {formatNumber(best.stats.maxDrawdown, 2)} · Trades {best.stats.totalTrades}
+              </div>
+
+              {!active.onApply && (
+                <div className="mt-2 text-xs text-amber-200">
+                  Apply callback is not wired yet. You can copy the best values into NRTR settings manually.
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="mt-4 overflow-hidden rounded-xl border border-slate-800">
+            <div className="max-h-[390px] overflow-auto">
+              <table className="w-full min-w-[880px] text-left text-xs">
+                <thead className="sticky top-0 bg-slate-950 text-slate-400">
+                  <tr>
+                    <th className="px-3 py-2">Rank</th>
+                    <th className="px-3 py-2">Mode</th>
+                    <th className="px-3 py-2">ATR</th>
+                    <th className="px-3 py-2">Mult</th>
+                    <th className="px-3 py-2">Percent</th>
+                    <th className="px-3 py-2">Win</th>
+                    <th className="px-3 py-2">PnL</th>
+                    <th className="px-3 py-2">PF</th>
+                    <th className="px-3 py-2">DD</th>
+                    <th className="px-3 py-2">Trades</th>
+                    <th className="px-3 py-2">Apply</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {optimizationRows.map((row) => (
+                    <tr key={`${row.rank}-${row.mode}-${row.atrLength}-${row.atrMultiplier}-${row.percent}`} className="border-t border-slate-800/80">
+                      <td className="px-3 py-2 font-semibold text-cyan-200">#{row.rank}</td>
+                      <td className="px-3 py-2">{row.mode}</td>
+                      <td className="px-3 py-2">{row.atrLength}</td>
+                      <td className="px-3 py-2">{formatNumber(row.atrMultiplier, 2)}</td>
+                      <td className="px-3 py-2">{row.mode === 'Percentage' ? formatPercent(row.percent) : '—'}</td>
+                      <td className="px-3 py-2">{formatPercent(row.stats.winRate)}</td>
+                      <td className="px-3 py-2">{formatNumber(row.stats.netPnl, 2)}</td>
+                      <td className="px-3 py-2">{formatNumber(row.stats.profitFactor, 2)}</td>
+                      <td className="px-3 py-2">{formatNumber(row.stats.maxDrawdown, 2)}</td>
+                      <td className="px-3 py-2">{row.stats.totalTrades}</td>
+                      <td className="px-3 py-2">
+                        <button
+                          type="button"
+                          onClick={() => applyBest(row)}
+                          className="rounded-lg border border-slate-600 px-3 py-1 text-[11px] text-slate-100 hover:border-cyan-300 hover:text-cyan-100"
+                        >
+                          Apply
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+
+                  {optimizationRows.length === 0 && (
+                    <tr>
+                      <td className="px-3 py-8 text-center text-slate-400" colSpan={11}>
+                        Need at least 60 candles to run optimization.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
 
-          <div className="max-h-[420px] overflow-auto">
-            <table className="w-full min-w-[920px] text-left text-sm">
-              <thead className="sticky top-0 bg-slate-900 text-xs uppercase tracking-wide text-slate-400">
-                <tr>
-                  <th className="px-3 py-2">Rank</th>
-                  <th className="px-3 py-2">Mode</th>
-                  <th className="px-3 py-2">ATR Length</th>
-                  <th className="px-3 py-2">Multiplier</th>
-                  <th className="px-3 py-2">Percent</th>
-                  <th className="px-3 py-2">Win Rate</th>
-                  <th className="px-3 py-2">Net PnL</th>
-                  <th className="px-3 py-2">PF</th>
-                  <th className="px-3 py-2">DD</th>
-                  <th className="px-3 py-2">Trades</th>
-                  <th className="px-3 py-2">Apply</th>
-                </tr>
-              </thead>
-              <tbody>
-                {optimizationRows.map((row) => (
-                  <tr key={`${row.rank}-${row.mode}-${row.atrLength}-${row.atrMultiplier}-${row.percent}`} className="border-t border-slate-800/80">
-                    <td className="px-3 py-2 font-semibold text-cyan-200">#{row.rank}</td>
-                    <td className="px-3 py-2">{row.mode}</td>
-                    <td className="px-3 py-2">{row.atrLength}</td>
-                    <td className="px-3 py-2">{formatNumber(row.atrMultiplier, 2)}</td>
-                    <td className="px-3 py-2">{row.mode === 'Percentage' ? formatPercent(row.percent) : '—'}</td>
-                    <td className="px-3 py-2">{formatPercent(row.stats.winRate)}</td>
-                    <td className="px-3 py-2">{formatNumber(row.stats.netPnl, 2)}</td>
-                    <td className="px-3 py-2">{formatNumber(row.stats.profitFactor, 2)}</td>
-                    <td className="px-3 py-2">{formatNumber(row.stats.maxDrawdown, 2)}</td>
-                    <td className="px-3 py-2">{row.stats.totalTrades}</td>
-                    <td className="px-3 py-2">
-                      <button
-                        type="button"
-                        onClick={() => applyBest(row)}
-                        className="rounded-lg border border-slate-600 px-3 py-1 text-xs text-slate-100 hover:border-cyan-300 hover:text-cyan-100"
-                      >
-                        Apply
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-
-                {optimizationRows.length === 0 && (
-                  <tr>
-                    <td className="px-3 py-8 text-center text-slate-400" colSpan={11}>
-                      Need at least 60 candles to run optimization.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+          <div className="mt-3 text-xs text-slate-500">
+            Ranking requires at least 10 trades and favors win rate, profit factor, net PnL, average trade, and lower drawdown.
           </div>
         </div>
       )}
@@ -620,11 +631,59 @@ export default function StrategyTesterPanel({
   );
 }
 
-function MetricCard({ label, value }: { label: string; value: string }) {
+function CompactResultCard({
+  active,
+  label,
+  candles,
+  settings,
+  stats,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  candles: number;
+  settings: ChartStrategySettings;
+  stats: StrategyStats;
+  onClick: () => void;
+}) {
   return (
-    <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
-      <div className="text-xs uppercase tracking-[0.16em] text-slate-500">{label}</div>
-      <div className="mt-1 text-lg font-semibold text-slate-100">{value}</div>
+    <button
+      type="button"
+      onClick={onClick}
+      className={[
+        'rounded-2xl border p-4 text-left transition',
+        active
+          ? 'border-cyan-300/70 bg-cyan-400/10'
+          : 'border-slate-800 bg-slate-900/50 hover:border-slate-600',
+      ].join(' ')}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold text-white">{label}</div>
+          <div className="mt-1 text-xs text-slate-500">{candles.toLocaleString()} candles · {settingsLabel(settings)}</div>
+        </div>
+        <div className={active ? 'text-xs font-semibold text-cyan-200' : 'text-xs text-slate-500'}>
+          {active ? 'Selected' : 'View'}
+        </div>
+      </div>
+
+      <div className="mt-4 grid grid-cols-3 gap-2">
+        <MiniMetric label="Trades" value={String(stats.totalTrades)} />
+        <MiniMetric label="Win" value={formatPercent(stats.winRate)} />
+        <MiniMetric label="PnL" value={formatNumber(stats.netPnl, 2)} />
+        <MiniMetric label="PF" value={formatNumber(stats.profitFactor, 2)} />
+        <MiniMetric label="DD" value={formatNumber(stats.maxDrawdown, 2)} />
+        <MiniMetric label="Avg" value={formatNumber(stats.avgTrade, 2)} />
+      </div>
+    </button>
+  );
+}
+
+function MiniMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl border border-slate-800/80 bg-slate-950/60 p-2">
+      <div className="text-[10px] uppercase tracking-[0.14em] text-slate-500">{label}</div>
+      <div className="mt-1 text-sm font-semibold text-slate-100">{value}</div>
     </div>
   );
 }
