@@ -306,6 +306,229 @@ function getGhostProjection(unifiedIntelligence: any, scorecards: any) {
   return { candle, candles, direction, confidence }
 }
 
+
+function normalizeSmcDirectionValue(value: unknown): 'bullish' | 'bearish' | 'neutral' | null {
+  if (value === undefined || value === null || value === '') return null
+
+  const text = String(value).toLowerCase()
+
+  if (
+    text.includes('bull') ||
+    text.includes('buy') ||
+    text.includes('long') ||
+    text.includes('demand') ||
+    text.includes('higher high') ||
+    text.includes('higher low') ||
+    text.includes('hh') ||
+    text.includes('hl')
+  ) {
+    return 'bullish'
+  }
+
+  if (
+    text.includes('bear') ||
+    text.includes('sell') ||
+    text.includes('short') ||
+    text.includes('supply') ||
+    text.includes('lower high') ||
+    text.includes('lower low') ||
+    text.includes('lh') ||
+    text.includes('ll')
+  ) {
+    return 'bearish'
+  }
+
+  if (text.includes('neutral') || text.includes('mixed') || text.includes('waiting')) {
+    return 'neutral'
+  }
+
+  return null
+}
+
+function getArrayPath(...values: unknown[]): any[] {
+  for (const value of values) {
+    if (Array.isArray(value)) return value
+  }
+
+  return []
+}
+
+function getLatestSmcEvent(unifiedIntelligence: any, overlayPayload: any, scorecards: any, signal: any) {
+  const candidates = getArrayPath(
+    getPath(unifiedIntelligence, 'components.smc.events'),
+    getPath(unifiedIntelligence, 'components.smc.smcEvents'),
+    getPath(unifiedIntelligence, 'smc.events'),
+    getPath(unifiedIntelligence, 'smcEvents'),
+    getPath(unifiedIntelligence, 'chartOverlays.smcEvents'),
+    getPath(unifiedIntelligence, 'overlayPayload.smcEvents'),
+    overlayPayload?.smcEvents,
+    overlayPayload?.lines,
+    scorecards?.smc?.events,
+    signal?.smcEvents
+  )
+
+  const structureEvents = candidates.filter((event) => {
+    const label = String(event?.tag ?? event?.label ?? event?.type ?? event?.structure ?? '').toUpperCase()
+    return label.includes('BOS') || label.includes('CHOCH') || label.includes('MSS')
+  })
+
+  const events = structureEvents.length > 0 ? structureEvents : candidates
+
+  if (events.length === 0) {
+    return firstValue(
+      scorecards?.smc?.latestEvent,
+      getPath(unifiedIntelligence, 'components.smc.latestEvent'),
+      getPath(unifiedIntelligence, 'components.smc.latestStructure'),
+      signal?.latestStructure
+    )
+  }
+
+  return events[events.length - 1]
+}
+
+function getSmcEventDirection(event: any): 'bullish' | 'bearish' | 'neutral' | null {
+  if (!event) return null
+
+  if (typeof event === 'string') return normalizeSmcDirectionValue(event)
+
+  const direct = normalizeSmcDirectionValue(
+    firstValue(
+      event.direction,
+      event.bias,
+      event.side,
+      event.signal,
+      event.status,
+      event.trend,
+      event.context,
+      event.fullLabel,
+      event.reason,
+      event.label,
+      event.tag,
+      event.type
+    )
+  )
+
+  if (direct) return direct
+
+  const directionValue = Number(event.directionValue ?? event.dir ?? event.trendDir ?? event.trendDirection)
+  if (Number.isFinite(directionValue)) {
+    if (directionValue > 0) return 'bullish'
+    if (directionValue < 0) return 'bearish'
+  }
+
+  return null
+}
+
+function inferSmcDirectionFromCounts(scorecards: any, components: any): 'bullish' | 'bearish' | 'neutral' | null {
+  const bullish = Number(
+    firstValue(
+      components?.smc?.bullishEvents,
+      components?.smc?.bullCount,
+      scorecards?.smc?.bullishEvents,
+      scorecards?.activeFactors?.bullishSmcEvents
+    ) ?? NaN
+  )
+  const bearish = Number(
+    firstValue(
+      components?.smc?.bearishEvents,
+      components?.smc?.bearCount,
+      scorecards?.smc?.bearishEvents,
+      scorecards?.activeFactors?.bearishSmcEvents
+    ) ?? NaN
+  )
+
+  if (Number.isFinite(bullish) && Number.isFinite(bearish)) {
+    if (bullish > bearish) return 'bullish'
+    if (bearish > bullish) return 'bearish'
+    if (bullish > 0 || bearish > 0) return 'neutral'
+  }
+
+  return null
+}
+
+function getSmcStructure(unifiedIntelligence: any, overlayPayload: any, scorecards: any, signal: any) {
+  const components = unifiedIntelligence?.components ?? {}
+  const latestEvent = getLatestSmcEvent(unifiedIntelligence, overlayPayload, scorecards, signal)
+  const eventDirection = getSmcEventDirection(latestEvent)
+  const componentDirection = normalizeSmcDirectionValue(
+    firstValue(
+      components.smc?.direction,
+      components.smc?.trend,
+      components.smc?.bias,
+      components.smc?.latestStructure,
+      getPath(unifiedIntelligence, 'smc.direction'),
+      getPath(unifiedIntelligence, 'smc.trend')
+    )
+  )
+  const scorecardDirection = normalizeSmcDirectionValue(
+    firstValue(
+      scorecards?.smc?.direction,
+      scorecards?.smc?.trend,
+      scorecards?.smc?.latestEvent?.direction,
+      signal?.smc
+    )
+  )
+  const countDirection = inferSmcDirectionFromCounts(scorecards, components)
+  const overallDirection = normalizeSmcDirectionValue(scorecards?.overall?.direction)
+  const direction = firstValue(
+    eventDirection,
+    componentDirection,
+    scorecardDirection,
+    countDirection,
+    overallDirection,
+    'neutral'
+  )
+
+  const score = getScore(
+    components.smc?.score,
+    components.smc?.qualityScore,
+    scorecards?.smc?.qualityScore,
+    signal?.smcScore,
+    signal?.smcQuality
+  )
+  const confidence = getScore(
+    components.smc?.confidence,
+    components.smc?.qualityScore,
+    scorecards?.smc?.qualityScore,
+    signal?.smcQuality,
+    score
+  )
+  const eventCount = firstValue(
+    components.smc?.eventCount,
+    components.smc?.events?.length,
+    scorecards?.activeFactors?.smcEvents,
+    scorecards?.smc?.bullishEvents,
+    scorecards?.smc?.bearishEvents,
+    Array.isArray(overlayPayload?.smcEvents) ? overlayPayload.smcEvents.length : undefined,
+    0
+  )
+  const latestLabel = typeof latestEvent === 'string'
+    ? latestEvent
+    : firstValue(
+        latestEvent?.label,
+        latestEvent?.tag,
+        latestEvent?.type,
+        components.smc?.latestStructure,
+        signal?.latestStructure
+      )
+  const isActive = Boolean(
+    latestEvent ||
+      Number(eventCount) > 0 ||
+      Number(score ?? 0) > 0 ||
+      Number(confidence ?? 0) > 0
+  )
+
+  return {
+    direction,
+    score,
+    confidence,
+    status: normalizeStatus(firstValue(components.smc?.status, isActive ? 'active' : 'waiting')),
+    eventCount,
+    latestLabel,
+    reason: components.smc?.reason,
+  }
+}
+
 function extractExternalItems(unifiedIntelligence: any, signal: any, overlayPayload: any): any[] {
   const candidates = [
     getPath(unifiedIntelligence, 'components.external.items'),
@@ -380,18 +603,18 @@ function buildRows({
   const externalItems = extractExternalItems(unifiedIntelligence, signal, overlayPayload)
   const ghost = getGhostProjection(unifiedIntelligence, scorecards)
 
-  const smcDirection = firstValue(components.smc?.direction, scorecards?.overall?.direction, signal?.smc)
+  const smc = getSmcStructure(unifiedIntelligence, overlayPayload, scorecards, signal)
   rows.push({
     key: 'smc',
     source: 'SMC Structure',
-    direction: directionLabel(smcDirection),
-    score: getScore(components.smc?.score, scorecards?.smc?.qualityScore, signal?.smcScore),
-    confidence: getScore(components.smc?.confidence, scorecards?.smc?.qualityScore, signal?.smcQuality),
-    status: normalizeStatus(firstValue(components.smc?.status, 'active')),
+    direction: directionLabel(smc.direction),
+    score: smc.score,
+    confidence: smc.confidence,
+    status: smc.status,
     details: formatDetails([
-      components.smc?.latestStructure ?? signal?.latestStructure,
-      `Events ${firstValue(components.smc?.eventCount, scorecards?.activeFactors?.smcEvents, scorecards?.smc?.bullishEvents) ?? 0}`,
-      components.smc?.reason,
+      smc.latestLabel,
+      `Events ${smc.eventCount ?? 0}`,
+      smc.reason,
     ]),
   })
 
