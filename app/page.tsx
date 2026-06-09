@@ -3135,10 +3135,10 @@ export default function Dashboard() {
 
         if (!cancelled) {
           const nextSentiments = Object.fromEntries(entries) as Record<string, TechnicalSentiment | null>
-          const overall = buildOverallTechnicalSentiment(nextSentiments, dashboardTimeframes, selectedSymbol)
+          const mainOnlySentiment = nextSentiments[selectedTimeframe] ?? null
 
           setTimeframeTechnicalSentiments(nextSentiments)
-          setSharedTechnicalSentiment(overall ?? nextSentiments[selectedTimeframe] ?? null)
+          setSharedTechnicalSentiment(mainOnlySentiment)
         }
       } catch (error) {
         console.error('Dashboard shared multi-timeframe sentiment sync error:', error)
@@ -3197,7 +3197,8 @@ export default function Dashboard() {
       ghostConfidence: Math.max(Number((scorecardPatch as any)?.ghostConfidence ?? 0), ghostConfidence),
       pythonGhostEngine: Boolean(ghostConfidence || pythonGhostText || (scorecardPatch as any)?.ghostConfidence),
 
-      // Shared technical meter now combines main chart + mini chart logic.
+      // Shared technical meter is main-chart only. Mini charts are confirmation filters,
+      // not part of the 12-indicator Market Sentiment gauge.
       technicalSentiment: sharedTechnicalSentiment ?? undefined,
       indicators: sharedTechnicalSentiment?.indicators,
       technicalIndicators: sharedTechnicalSentiment?.technicalIndicators,
@@ -3440,8 +3441,15 @@ export default function Dashboard() {
           {mainOverlayReady ? (
             <>
               <MarketSentimentGauge
-                signal={augmentedLatestSignal as any}
-                technicalSentiment={(factorTechnicalSentiment ?? sharedTechnicalSentiment) as any}
+                signal={{
+                  ...(augmentedLatestSignal as any),
+                  timeframe: selectedTimeframe,
+                  primaryTimeframe: selectedTimeframe,
+                  analysisTimeframes: [selectedTimeframe],
+                  miniTimeframes: [],
+                  multiTimeframeMode: false,
+                }}
+                technicalSentiment={(sharedTechnicalSentiment ?? factorTechnicalSentiment) as any}
               />
 
 
