@@ -106,6 +106,55 @@ function timeToOverlayTime(time: Time): OverlayCandle["time"] {
   return `${time.year}-${String(time.month).padStart(2, "0")}-${String(time.day).padStart(2, "0")}`;
 }
 
+
+function normalizeChartUnixSeconds(value: unknown) {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value <= 0) return 0;
+    return value > 10_000_000_000 ? Math.floor(value / 1000) : value;
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (/^\d+$/.test(trimmed)) return normalizeChartUnixSeconds(Number(trimmed));
+    const parsed = Date.parse(trimmed);
+    return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+  }
+
+  if (value && typeof value === "object") {
+    const item = value as { year?: number; month?: number; day?: number };
+    if (item.year && item.month && item.day) {
+      return Math.floor(Date.UTC(item.year, item.month - 1, item.day) / 1000);
+    }
+  }
+
+  return 0;
+}
+
+function formatChartTime12h(value: unknown) {
+  const seconds = normalizeChartUnixSeconds(value);
+  if (!seconds) return "";
+
+  const date = new Date(seconds * 1000);
+  const now = new Date();
+  const sameDay = date.toDateString() === now.toDateString();
+
+  if (sameDay) {
+    return date.toLocaleTimeString([], {
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+    });
+  }
+
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
 function toOverlayCandles(candles: DashboardCandle[]): OverlayCandle[] {
   return candles.filter(isValidCandle).map((candle) => ({
     time: timeToOverlayTime(candle.time),
@@ -1064,6 +1113,7 @@ export default function LightweightCandlestickChart({
         secondsVisible: false,
         rightOffset: 12,
         barSpacing: 8,
+        tickMarkFormatter: (time: Time) => formatChartTime12h(time),
       },
       crosshair: {
         mode: CrosshairMode.Normal,
@@ -1080,6 +1130,7 @@ export default function LightweightCandlestickChart({
         pinch: true,
       },
       localization: {
+        timeFormatter: (time: Time) => formatChartTime12h(time),
         priceFormatter: (price: number) => {
           if (Math.abs(price) >= 1000) return price.toFixed(2);
           if (Math.abs(price) >= 100) return price.toFixed(2);
