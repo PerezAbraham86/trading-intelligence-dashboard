@@ -290,6 +290,70 @@ def get_stale_candle_payload(cache_key: str) -> Optional[Dict[str, Any]]:
     return payload
 
 
+
+def get_best_candle_payload(
+    *,
+    route: str,
+    symbol: str,
+    timeframe: str,
+    min_limit_value: int = 500,
+    max_age_seconds: int = 86400,
+    allow_stale: bool = True,
+) -> Optional[Dict[str, Any]]:
+    """Return the best cached candle payload for a route/symbol/timeframe even when the exact limit differs.
+
+    This is important because the dashboard may ask for 500, 600, 1000, or 4000 candles from
+    different panels. One good cached 1000-candle payload should be reused instead of forcing
+    the provider to refetch for every exact limit.
+    """
+    ensure_site_cache_store()
+    safe_route = str(route or "dashboard")
+    safe_symbol = str(symbol or "").upper().strip()
+    safe_timeframe = str(timeframe or "1m").lower().strip()
+    safe_min_limit = max(1, int(min_limit_value or 500))
+
+    with _LOCK:
+        with _connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json, count_value, limit_value, updated_at
+                FROM candle_payload_cache
+                WHERE route = ?
+                  AND symbol = ?
+                  AND timeframe = ?
+                  AND count_value > 0
+                ORDER BY
+                  CASE WHEN limit_value >= ? THEN 0 ELSE 1 END,
+                  count_value DESC,
+                  updated_at DESC
+                LIMIT 1
+                """,
+                (safe_route, safe_symbol, safe_timeframe, safe_min_limit),
+            ).fetchone()
+
+    if row is None:
+        return None
+
+    payload = _safe_json_loads(str(row["payload_json"]), {})
+    if not isinstance(payload, dict):
+        return None
+
+    age = site_cache_age_seconds(payload)
+    is_stale = age is not None and age > max_age_seconds
+    if is_stale and not allow_stale:
+        return None
+
+    payload = dict(payload)
+    payload["cache"] = "site_db_cached_best_match_stale" if is_stale else "site_db_cached_best_match"
+    payload["siteCache"] = True
+    payload["siteCacheDb"] = True
+    payload["siteCacheAgeSeconds"] = age
+    payload["siteCacheDbFile"] = str(DB_PATH)
+    payload["siteCacheBestMatch"] = True
+    payload["siteCacheStoredLimit"] = int(row["limit_value"] or 0)
+    payload["siteCacheStoredCount"] = int(row["count_value"] or 0)
+    return payload
+
 def list_candle_cache_entries(limit: int = 200) -> List[Dict[str, Any]]:
     ensure_site_cache_store()
     safe_limit = max(1, min(int(limit or 200), 1000))
