@@ -79,6 +79,17 @@ type BacktestResult = {
   totalTrades: number;
 };
 
+type NrtrOptimizationRow = {
+  rank: number;
+  score: number;
+  mode: "ATR-Based" | "Percentage";
+  atrLength: number;
+  atrMultiplier: number;
+  percent: number;
+  result: BacktestResult;
+};
+
+
 function clampNumber(value: number, fallback = 0) {
   return Number.isFinite(value) ? value : fallback;
 }
@@ -609,6 +620,298 @@ function calculateBacktest(
   };
 }
 
+function optimizerScore(result: BacktestResult) {
+  if (result.totalTrades < 4) return -999999;
+
+  const pnlScore = result.totalPnl;
+  const winRateScore = result.winRate * 0.85;
+  const profitFactorScore = Math.min(result.profitFactor, 5) * 18;
+  const drawdownPenalty = result.maxDrawdownPercent * 18;
+  const tradeCountBonus = Math.min(result.totalTrades, 60) * 0.35;
+
+  return (
+    pnlScore +
+    winRateScore +
+    profitFactorScore +
+    tradeCountBonus -
+    drawdownPenalty
+  );
+}
+
+function buildCandidateSettings(
+  base: ChartStrategySettings,
+  mode: "ATR-Based" | "Percentage",
+  atrLength: number,
+  atrMultiplier: number,
+  percent: number,
+): ChartStrategySettings {
+  return {
+    ...base,
+    nrtrMode: mode,
+    nrtrAtrLength: atrLength,
+    nrtrAtrMultiplier: atrMultiplier,
+    nrtrPercent: percent,
+  };
+}
+
+function calculateNrtrOptimization(
+  symbol: string,
+  mainCandles: DashboardCandle[],
+  miniOneCandles: DashboardCandle[],
+  miniTwoCandles: DashboardCandle[],
+  mainSettings: ChartStrategySettings,
+  miniOneSettings: ChartStrategySettings,
+  miniTwoSettings: ChartStrategySettings,
+) {
+  const atrLengths = [5, 7, 10, 14, 21, 34];
+  const atrMultipliers = [0.75, 1, 1.25, 1.5, 2, 2.5, 3, 3.5, 4];
+  const percentages = [0.1, 0.15, 0.2, 0.25, 0.35, 0.5, 0.75, 1];
+
+  const rows: NrtrOptimizationRow[] = [];
+
+  for (const atrLength of atrLengths) {
+    for (const atrMultiplier of atrMultipliers) {
+      const candidateMain = buildCandidateSettings(
+        mainSettings,
+        "ATR-Based",
+        atrLength,
+        atrMultiplier,
+        mainSettings.nrtrPercent,
+      );
+      const candidateMiniOne = buildCandidateSettings(
+        miniOneSettings,
+        "ATR-Based",
+        atrLength,
+        atrMultiplier,
+        miniOneSettings.nrtrPercent,
+      );
+      const candidateMiniTwo = buildCandidateSettings(
+        miniTwoSettings,
+        "ATR-Based",
+        atrLength,
+        atrMultiplier,
+        miniTwoSettings.nrtrPercent,
+      );
+
+      const result = calculateBacktest(
+        symbol,
+        mainCandles,
+        miniOneCandles,
+        miniTwoCandles,
+        candidateMain,
+        candidateMiniOne,
+        candidateMiniTwo,
+        "NRTR",
+      );
+
+      rows.push({
+        rank: 0,
+        score: optimizerScore(result),
+        mode: "ATR-Based",
+        atrLength,
+        atrMultiplier,
+        percent: mainSettings.nrtrPercent,
+        result,
+      });
+    }
+  }
+
+  for (const percent of percentages) {
+    const candidateMain = buildCandidateSettings(
+      mainSettings,
+      "Percentage",
+      mainSettings.nrtrAtrLength,
+      mainSettings.nrtrAtrMultiplier,
+      percent,
+    );
+    const candidateMiniOne = buildCandidateSettings(
+      miniOneSettings,
+      "Percentage",
+      miniOneSettings.nrtrAtrLength,
+      miniOneSettings.nrtrAtrMultiplier,
+      percent,
+    );
+    const candidateMiniTwo = buildCandidateSettings(
+      miniTwoSettings,
+      "Percentage",
+      miniTwoSettings.nrtrAtrLength,
+      miniTwoSettings.nrtrAtrMultiplier,
+      percent,
+    );
+
+    const result = calculateBacktest(
+      symbol,
+      mainCandles,
+      miniOneCandles,
+      miniTwoCandles,
+      candidateMain,
+      candidateMiniOne,
+      candidateMiniTwo,
+      "NRTR",
+    );
+
+    rows.push({
+      rank: 0,
+      score: optimizerScore(result),
+      mode: "Percentage",
+      atrLength: mainSettings.nrtrAtrLength,
+      atrMultiplier: mainSettings.nrtrAtrMultiplier,
+      percent,
+      result,
+    });
+  }
+
+  return rows
+    .sort((a, b) => b.score - a.score)
+    .map((row, index) => ({ ...row, rank: index + 1 }));
+}
+
+function NrtrOptimizerView({
+  rows,
+}: {
+  rows: NrtrOptimizationRow[];
+}) {
+  const best = rows[0];
+
+  if (!rows.length || !best || best.score <= -999000) {
+    return (
+      <div className="rounded-xl border border-dark-700 bg-black/30 p-8 text-center text-sm text-gray-500">
+        Not enough closed trades to rank NRTR settings yet. Load more candles or
+        use a lower timeframe.
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-5">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
+        <MetricCard
+          label="Best mode"
+          value={best.mode === "ATR-Based" ? "ATR-Based" : "Percentage"}
+          subValue={
+            best.mode === "ATR-Based"
+              ? `ATR ${best.atrLength} • x${best.atrMultiplier.toFixed(2)}`
+              : `${best.percent.toFixed(2)}%`
+          }
+        />
+        <MetricCard
+          label="Best P&L"
+          value={`${formatMoney(best.result.totalPnl)} / ${formatPercent(best.result.totalPnlPercent)}`}
+          positive={best.result.totalPnl >= 0}
+        />
+        <MetricCard
+          label="Best win rate"
+          value={`${best.result.winRate.toFixed(2)}%`}
+          subValue={`${best.result.winners}/${best.result.totalTrades}`}
+          positive={best.result.winRate >= 50}
+        />
+        <MetricCard
+          label="Best profit factor"
+          value={
+            best.result.profitFactor >= 999
+              ? "∞"
+              : best.result.profitFactor.toFixed(3)
+          }
+          positive={best.result.profitFactor >= 1}
+        />
+        <MetricCard
+          label="Best drawdown"
+          value={formatPercent(-best.result.maxDrawdownPercent)}
+          subValue="Percent drawdown"
+          positive={false}
+        />
+      </div>
+
+      <div className="rounded-xl border border-dark-700 bg-black/30 p-4">
+        <div className="mb-3 flex flex-col gap-1">
+          <h3 className="text-sm font-semibold text-gray-200">
+            Current NRTR Optimizer
+          </h3>
+          <p className="text-xs text-gray-500">
+            This replaces the Metrics + Equity Chart + Trades area while the
+            optimizer toggle is on. Ranking favors P&L, win rate, profit
+            factor, trade count, and lower drawdown.
+          </p>
+        </div>
+
+        <div className="overflow-hidden rounded-xl border border-dark-700">
+          <div className="max-h-[520px] overflow-auto">
+            <table className="w-full min-w-[980px] text-left text-xs">
+              <thead className="sticky top-0 bg-dark-900 text-gray-400">
+                <tr>
+                  <th className="px-3 py-3">Rank</th>
+                  <th className="px-3 py-3">Mode</th>
+                  <th className="px-3 py-3 text-right">ATR length</th>
+                  <th className="px-3 py-3 text-right">Multiplier</th>
+                  <th className="px-3 py-3 text-right">Percent</th>
+                  <th className="px-3 py-3 text-right">P&L $</th>
+                  <th className="px-3 py-3 text-right">P&L %</th>
+                  <th className="px-3 py-3 text-right">Win rate</th>
+                  <th className="px-3 py-3 text-right">PF</th>
+                  <th className="px-3 py-3 text-right">DD</th>
+                  <th className="px-3 py-3 text-right">Trades</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-dark-700 bg-dark-800/50 text-gray-300">
+                {rows.slice(0, 30).map((row) => (
+                  <tr
+                    key={`${row.rank}-${row.mode}-${row.atrLength}-${row.atrMultiplier}-${row.percent}`}
+                    className={row.rank === 1 ? "bg-emerald-400/5" : undefined}
+                  >
+                    <td className="px-3 py-3 font-semibold text-cyan-300">
+                      #{row.rank}
+                    </td>
+                    <td className="px-3 py-3 font-semibold">
+                      {row.mode}
+                    </td>
+                    <td className="px-3 py-3 text-right">
+                      {row.mode === "ATR-Based" ? row.atrLength : "—"}
+                    </td>
+                    <td className="px-3 py-3 text-right">
+                      {row.mode === "ATR-Based"
+                        ? row.atrMultiplier.toFixed(2)
+                        : "—"}
+                    </td>
+                    <td className="px-3 py-3 text-right">
+                      {row.mode === "Percentage"
+                        ? `${row.percent.toFixed(2)}%`
+                        : "—"}
+                    </td>
+                    <td
+                      className={`px-3 py-3 text-right font-semibold ${row.result.totalPnl >= 0 ? "text-emerald-300" : "text-red-300"}`}
+                    >
+                      {formatMoney(row.result.totalPnl)}
+                    </td>
+                    <td
+                      className={`px-3 py-3 text-right ${row.result.totalPnlPercent >= 0 ? "text-emerald-300" : "text-red-300"}`}
+                    >
+                      {formatPercent(row.result.totalPnlPercent)}
+                    </td>
+                    <td className="px-3 py-3 text-right">
+                      {row.result.winRate.toFixed(2)}%
+                    </td>
+                    <td className="px-3 py-3 text-right">
+                      {row.result.profitFactor >= 999
+                        ? "∞"
+                        : row.result.profitFactor.toFixed(3)}
+                    </td>
+                    <td className="px-3 py-3 text-right text-red-300">
+                      {formatPercent(-row.result.maxDrawdownPercent)}
+                    </td>
+                    <td className="px-3 py-3 text-right">
+                      {row.result.totalTrades}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function EquityCurve({ equity }: { equity: BacktestResult["equity"] }) {
   if (!equity.length) {
     return (
@@ -726,6 +1029,7 @@ export default function StrategyTesterPanel({
   miniTwoSettings,
 }: StrategyTesterPanelProps) {
   const [strategyMode, setStrategyMode] = useState<StrategyMode>("NRTR");
+  const [showNrtrOptimizer, setShowNrtrOptimizer] = useState(false);
 
   const result = useMemo(
     () =>
@@ -747,6 +1051,31 @@ export default function StrategyTesterPanel({
       miniTwoCandles,
       miniTwoSettings,
       strategyMode,
+      symbol,
+    ],
+  );
+
+  const optimizerRows = useMemo(
+    () =>
+      showNrtrOptimizer
+        ? calculateNrtrOptimization(
+            symbol,
+            mainCandles,
+            miniOneCandles,
+            miniTwoCandles,
+            mainSettings,
+            miniOneSettings,
+            miniTwoSettings,
+          )
+        : [],
+    [
+      mainCandles,
+      mainSettings,
+      miniOneCandles,
+      miniOneSettings,
+      miniTwoCandles,
+      miniTwoSettings,
+      showNrtrOptimizer,
       symbol,
     ],
   );
@@ -786,14 +1115,25 @@ export default function StrategyTesterPanel({
             <option value="SMMA">SMMA cross</option>
           </select>
           <span className="rounded-lg bg-white px-3 py-2 text-xs font-semibold text-dark-900">
-            Metrics
+            {showNrtrOptimizer ? "Optimizer" : "Metrics"}
           </span>
-          <span className="rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-xs font-semibold text-emerald-300">
-            List always visible
-          </span>
+          <button
+            type="button"
+            onClick={() => setShowNrtrOptimizer((value) => !value)}
+            className={`rounded-lg border px-3 py-2 text-xs font-semibold transition ${
+              showNrtrOptimizer
+                ? "border-cyan-300/60 bg-cyan-400/20 text-cyan-100"
+                : "border-cyan-400/30 bg-cyan-400/10 text-cyan-300 hover:bg-cyan-400/20"
+            }`}
+          >
+            {showNrtrOptimizer ? "Show Metrics + Trades" : "Run NRTR Optimizer"}
+          </button>
         </div>
       </div>
 
+      {showNrtrOptimizer ? (
+        <NrtrOptimizerView rows={optimizerRows} />
+      ) : (
       <div className="space-y-5">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
           <MetricCard
@@ -914,6 +1254,8 @@ export default function StrategyTesterPanel({
           </div>
         </div>
       </div>
+      )}
+
     </motion.div>
   );
 }
