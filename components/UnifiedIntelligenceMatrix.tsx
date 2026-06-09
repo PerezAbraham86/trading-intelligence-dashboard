@@ -547,6 +547,126 @@ function extractExternalItems(unifiedIntelligence: any, signal: any, overlayPayl
   return []
 }
 
+
+function normalizeIndicatorSignal(value: unknown, score: unknown): 'bullish' | 'bearish' | 'neutral' {
+  const text = String(value ?? '').toLowerCase()
+  const numericScore = Number(score)
+
+  if (text.includes('bull') || text.includes('buy') || text.includes('long')) return 'bullish'
+  if (text.includes('bear') || text.includes('sell') || text.includes('short')) return 'bearish'
+  if (text.includes('neutral') || text.includes('mixed') || text.includes('wait')) return 'neutral'
+
+  if (Number.isFinite(numericScore)) {
+    if (numericScore >= 60) return 'bullish'
+    if (numericScore <= 40) return 'bearish'
+  }
+
+  return 'neutral'
+}
+
+function extractTechnicalMeterIndicators(technicalSentiment: any, signal: any): any[] {
+  const sources = [
+    technicalSentiment?.indicators,
+    technicalSentiment?.technicalIndicators,
+    technicalSentiment?.technicalMeter,
+    technicalSentiment?.factors,
+    signal?.technicalSentiment?.indicators,
+    signal?.technicalSentiment?.technicalIndicators,
+    signal?.technicalSentiment?.technicalMeter,
+    signal?.technicalSentiment?.factors,
+    signal?.indicators,
+    signal?.technicalIndicators,
+    signal?.technicalMeter,
+    signal?.factors,
+  ]
+
+  const byName = new Map<string, any>()
+
+  for (const source of sources) {
+    if (!Array.isArray(source)) continue
+
+    for (const item of source) {
+      if (!item || typeof item !== 'object') continue
+      const name = String(item.name ?? item.factor ?? item.label ?? item.indicator ?? '').trim()
+      if (!name) continue
+      const key = name.toLowerCase()
+      if (!byName.has(key)) {
+        byName.set(key, {
+          ...item,
+          name,
+          value: clampPercent(item.value ?? item.strength ?? item.score ?? 50, 50),
+          signal: normalizeIndicatorSignal(item.signal ?? item.status ?? item.side, item.value ?? item.strength ?? item.score),
+        })
+      }
+    }
+  }
+
+  return Array.from(byName.values())
+}
+
+function buildTechnicalMeterRow(technicalSentiment: any, signal: any): MatrixRow {
+  const indicators = extractTechnicalMeterIndicators(technicalSentiment, signal)
+  const activeCount = Number(firstValue(
+    technicalSentiment?.activeCount,
+    signal?.technicalSentiment?.activeCount,
+    indicators.length
+  ))
+  const safeActiveCount = Math.max(1, activeCount || indicators.length || 0)
+
+  const bullishCount = Number(firstValue(
+    technicalSentiment?.bullCount,
+    signal?.technicalSentiment?.bullCount,
+    indicators.filter((indicator) => normalizeIndicatorSignal(indicator.signal, indicator.value) === 'bullish').length
+  ))
+  const bearishCount = Number(firstValue(
+    technicalSentiment?.bearCount,
+    signal?.technicalSentiment?.bearCount,
+    indicators.filter((indicator) => normalizeIndicatorSignal(indicator.signal, indicator.value) === 'bearish').length
+  ))
+  const neutralCount = Number(firstValue(
+    technicalSentiment?.neutralCount,
+    signal?.technicalSentiment?.neutralCount,
+    Math.max(0, safeActiveCount - bullishCount - bearishCount)
+  ))
+
+  const averageScore = indicators.length > 0
+    ? indicators.reduce((sum, indicator) => sum + clampPercent(indicator.value ?? 50, 50), 0) / indicators.length
+    : Number(firstValue(technicalSentiment?.sentiment, signal?.technicalSentiment?.sentiment, 50))
+
+  const score = clampPercent(firstValue(technicalSentiment?.sentiment, signal?.technicalSentiment?.sentiment, averageScore), 50)
+  const rawStatus = firstValue(technicalSentiment?.sentimentStatus, signal?.technicalSentiment?.sentimentStatus)
+  const direction = rawStatus
+    ? directionLabel(rawStatus)
+    : bullishCount > bearishCount && bullishCount >= neutralCount
+      ? 'Bullish'
+      : bearishCount > bullishCount && bearishCount >= neutralCount
+        ? 'Bearish'
+        : 'Neutral'
+
+  const status = indicators.length > 0 || activeCount > 0 ? 'Active' : 'Waiting'
+  const topSignals = indicators
+    .slice(0, 12)
+    .map((indicator) => `${indicator.name}: ${directionLabel(indicator.signal)} ${Math.round(Number(indicator.value ?? 0))}%`)
+    .join(' | ')
+
+  return {
+    key: 'market-sentiment-technical-meter',
+    source: 'Market Sentiment Gauge (12 Indicators)',
+    direction,
+    score,
+    confidence: score,
+    status,
+    details: formatDetails([
+      `Main chart only`,
+      `Indicators ${indicators.length || activeCount || 0}`,
+      `Bull ${bullishCount}`,
+      `Neutral ${neutralCount}`,
+      `Bear ${bearishCount}`,
+      topSignals,
+    ]),
+  }
+}
+
 function externalRow(
   key: string,
   label: string,
@@ -726,6 +846,8 @@ function buildRows({
     status: normalizeStatus(firstValue(components.session?.status, 'active')),
     details: formatDetails([components.session?.reason, signal?.sessionDetails]) || 'Session filter active',
   })
+
+  rows.push(buildTechnicalMeterRow(technicalSentiment, signal))
 
   rows.push(externalRow('options', 'Options Flow', ['options', 'option flow'], externalItems, {
     direction: signal?.optionsFlow ?? 'inactive',
