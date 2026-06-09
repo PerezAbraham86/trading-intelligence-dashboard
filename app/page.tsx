@@ -498,6 +498,7 @@ function normalizeChartSettings(value: unknown): ChartStrategySettings | null {
     nrtrAtrLength: Math.max(1, Math.floor(Number(raw.nrtrAtrLength ?? 14) || 14)),
     nrtrAtrMultiplier: Math.max(0.1, Number(raw.nrtrAtrMultiplier ?? 1) || 1),
     nrtrPercent: Math.max(0.01, Number(raw.nrtrPercent ?? 0.25) || 0.25),
+    showNrtrExitLabels: raw.showNrtrExitLabels !== false,
   }
 }
 
@@ -2271,6 +2272,7 @@ type LightweightChartPanelProps = {
   nrtrAtrLength?: number
   nrtrAtrMultiplier?: number
   nrtrPercent?: number
+  showNrtrExitLabels?: boolean
   onIndicatorSettingsChange?: (settings: ChartStrategySettings) => void
   onSaveConfig?: () => void
   saveStatus?: string
@@ -2301,6 +2303,7 @@ function LightweightChartPanel({
   nrtrAtrLength = 14,
   nrtrAtrMultiplier = 3,
   nrtrPercent = 0.25,
+  showNrtrExitLabels = true,
   onIndicatorSettingsChange,
   onSaveConfig,
   saveStatus,
@@ -2327,6 +2330,7 @@ function LightweightChartPanel({
       nrtrAtrLength,
       nrtrAtrMultiplier,
       nrtrPercent,
+      showNrtrExitLabels,
       ...patch,
     })
   }
@@ -2590,7 +2594,7 @@ function LightweightChartPanel({
             )}
           </div>
 
-          <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
+          <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
             <label className="flex flex-col gap-1 text-[10px] text-gray-400">
               <span>SMMA</span>
               <input
@@ -2652,6 +2656,23 @@ function LightweightChartPanel({
                 className="rounded-lg border border-dark-600 bg-dark-900 px-2 py-2 text-xs font-semibold text-gray-200 outline-none focus:border-amber-400"
               />
             </label>
+
+            {!compact && (
+              <label className="flex flex-col gap-1 text-[10px] text-gray-400">
+                <span>Exit labels</span>
+                <button
+                  type="button"
+                  onClick={() => updateIndicatorSettings({ showNrtrExitLabels: !showNrtrExitLabels })}
+                  className={`rounded-lg border px-2 py-2 text-xs font-black uppercase tracking-wide ${
+                    showNrtrExitLabels
+                      ? 'border-amber-400/40 bg-amber-400/15 text-amber-300'
+                      : 'border-dark-600 bg-dark-900 text-gray-400'
+                  }`}
+                >
+                  {showNrtrExitLabels ? 'On' : 'Off'}
+                </button>
+              </label>
+            )}
           </div>
         </div>
       )}
@@ -2693,6 +2714,7 @@ function LightweightChartPanel({
         nrtrAtrLength={nrtrAtrLength}
         nrtrAtrMultiplier={nrtrAtrMultiplier}
         nrtrPercent={nrtrPercent}
+        showNrtrExitLabels={!compact && showNrtrExitLabels}
         nrtrExitMode={compact ? 'Off' : 'Pivot Pullback'}
         showNrtrStats
         nrtrStatsCollapsedOnly={compact}
@@ -2858,6 +2880,7 @@ export default function Dashboard() {
     nrtrAtrLength: 14,
     nrtrAtrMultiplier: 1,
     nrtrPercent: 0.25,
+    showNrtrExitLabels: true,
   }
   const [mainChartIndicatorSettings, setMainChartIndicatorSettings] = useState<ChartStrategySettings>(defaultChartSettings)
   const [miniChartOneIndicatorSettings, setMiniChartOneIndicatorSettings] = useState<ChartStrategySettings>(defaultChartSettings)
@@ -3349,6 +3372,7 @@ export default function Dashboard() {
             nrtrAtrLength={mainChartIndicatorSettings.nrtrAtrLength}
             nrtrAtrMultiplier={mainChartIndicatorSettings.nrtrAtrMultiplier}
             nrtrPercent={mainChartIndicatorSettings.nrtrPercent}
+            showNrtrExitLabels={mainChartIndicatorSettings.showNrtrExitLabels ?? true}
             onIndicatorSettingsChange={setMainChartIndicatorSettings}
             onSaveConfig={() => saveChartConfig('main', mainChartSelection, mainChartIndicatorSettings)}
             saveStatus={lastSavedChartKey === 'main' ? 'Saved' : ''}
