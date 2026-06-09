@@ -651,13 +651,19 @@ function splitNrtrLineData(points: NrtrPoint[], direction: 1 | -1): NrtrLineData
 
 function buildNrtrMarkers(points: NrtrPoint[], exits: NrtrExitPoint[]) {
   /**
-   * Keep NRTR labels usable instead of covering the chart.
-   * TradingView can handle hundreds of labels, but dashboard readability is better
-   * with only the most recent meaningful flips/exits.
+   * NRTR historical signals must stay visible across the loaded candle history.
+   * The previous version sliced signals to only the latest 8, which made Buy/Sell
+   * labels disappear when scrolling back even though the NRTR line was still drawn.
+   *
+   * Keep a generous safety cap for browser performance, but do not limit to only
+   * the latest few flips.
    */
+  const MAX_NRTR_SIGNAL_MARKERS = 500;
+  const MAX_NRTR_EXIT_MARKERS = 250;
+
   const signalMarkers = points
     .filter((point) => point.buy || point.sell)
-    .slice(-8)
+    .slice(-MAX_NRTR_SIGNAL_MARKERS)
     .map((point) => ({
       time: point.time,
       position: point.buy ? "belowBar" : "aboveBar",
@@ -667,7 +673,7 @@ function buildNrtrMarkers(points: NrtrPoint[], exits: NrtrExitPoint[]) {
       size: 1,
     }));
 
-  const exitMarkers = exits.slice(-8).map((exit) => ({
+  const exitMarkers = exits.slice(-MAX_NRTR_EXIT_MARKERS).map((exit) => ({
     time: exit.time,
     position: exit.direction === 1 ? "aboveBar" : "belowBar",
     color: "#f59e0b",
