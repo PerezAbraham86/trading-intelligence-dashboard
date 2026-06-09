@@ -1553,6 +1553,364 @@ function calculateHiddenSmcContextFromCandles(candles: DashboardCandle[]) {
   }
 }
 
+
+type VisualTargetPlan = {
+  entryPrice: number | null
+  targetPrice: number | null
+  stopPrice: number | null
+  riskReward: number | null
+  targetSource: string
+  stopSource: string
+  targetDistance: number | null
+  stopDistance: number | null
+}
+
+function roundVisualPriceToTick(price: number, symbol?: string) {
+  if (!Number.isFinite(price) || price <= 0) return null
+
+  const normalized = normalizeSymbol(symbol ?? 'MES1!')
+  const tickSize =
+    normalized.includes('MES') || normalized.includes('ES')
+      ? 0.25
+      : normalized.includes('BTC')
+        ? 0.5
+        : normalized.includes('ETH')
+          ? 0.05
+          : 0.01
+
+  return Number((Math.round(price / tickSize) * tickSize).toFixed(5))
+}
+
+function getLatestVisualClose(candles: DashboardCandle[]) {
+  for (let index = candles.length - 1; index >= 0; index -= 1) {
+    const close = overlayNumber(candles[index]?.close, NaN)
+    if (Number.isFinite(close) && close > 0) return close
+  }
+
+  return null
+}
+
+function getLatestVisualAtr(candles: DashboardCandle[], length = 14) {
+  const atrValues = calculateVisualAtr(candles, length)
+  const latestAtr = [...atrValues].reverse().find((value) => value !== null && Number.isFinite(value))
+
+  return Number.isFinite(Number(latestAtr)) ? Number(latestAtr) : 0
+}
+
+function getVisualPriceCandidatesFromItem(item: any) {
+  if (!item || typeof item !== 'object') return [] as number[]
+
+  const values = [
+    item.targetPrice,
+    item.target_price,
+    item.takeProfitPrice,
+    item.take_profit_price,
+    item.tp1,
+    item.tp1Price,
+    item.price,
+    item.level,
+    item.value,
+    item.y,
+    item.high,
+    item.top,
+    item.upper,
+    item.max,
+    item.low,
+    item.bottom,
+    item.lower,
+    item.min,
+    item.mid,
+    item.middle,
+    item.equilibrium,
+  ]
+
+  return values
+    .map((value) => overlayNumber(value, NaN))
+    .filter((value) => Number.isFinite(value) && value > 0)
+}
+
+function getVisualCandidateSource(item: any, fallback: string) {
+  const label = String(
+    item?.targetSource ??
+      item?.source ??
+      item?.label ??
+      item?.fullLabel ??
+      item?.type ??
+      item?.kind ??
+      item?.name ??
+      fallback
+  ).trim()
+
+  return label || fallback
+}
+
+function pushVisualTargetCandidate(
+  candidates: Array<{ price: number; source: string; quality: number }>,
+  price: number,
+  source: string,
+  quality = 5
+) {
+  if (!Number.isFinite(price) || price <= 0) return
+
+  candidates.push({
+    price,
+    source,
+    quality: Number.isFinite(quality) ? quality : 5,
+  })
+}
+
+function scanCandleStructureTargets(
+  candles: DashboardCandle[],
+  direction: 'bullish' | 'bearish',
+  currentPrice: number,
+  atr: number
+) {
+  const lookback = candles.slice(-140)
+  const pivotLength = 3
+  const candidates: Array<{ price: number; source: string; quality: number }> = []
+
+  if (lookback.length < pivotLength * 2 + 5) return candidates
+
+  for (let index = pivotLength; index < lookback.length - pivotLength; index += 1) {
+    const candle = lookback[index]
+    const high = overlayNumber(candle.high, NaN)
+    const low = overlayNumber(candle.low, NaN)
+    const left = lookback.slice(index - pivotLength, index)
+    const right = lookback.slice(index + 1, index + 1 + pivotLength)
+
+    if (Number.isFinite(high)) {
+      const isSwingHigh =
+        left.every((item) => high >= overlayNumber(item.high, 0)) &&
+        right.every((item) => high > overlayNumber(item.high, 0))
+
+      if (isSwingHigh && direction === 'bullish' && high > currentPrice) {
+        pushVisualTargetCandidate(
+          candidates,
+          high,
+          'SMC swing-high liquidity target',
+          6
+        )
+      }
+    }
+
+    if (Number.isFinite(low)) {
+      const isSwingLow =
+        left.every((item) => low <= overlayNumber(item.low, Number.POSITIVE_INFINITY)) &&
+        right.every((item) => low < overlayNumber(item.low, Number.POSITIVE_INFINITY))
+
+      if (isSwingLow && direction === 'bearish' && low < currentPrice) {
+        pushVisualTargetCandidate(
+          candidates,
+          low,
+          'SMC swing-low liquidity target',
+          6
+        )
+      }
+    }
+  }
+
+  // Equal high / equal low style liquidity from recent extremes.
+  const tolerance = Math.max(atr * 0.12, currentPrice * 0.00025)
+  const rawLevels = candidates.map((candidate) => candidate.price)
+
+  for (let index = 1; index < rawLevels.length; index += 1) {
+    if (Math.abs(rawLevels[index] - rawLevels[index - 1]) <= tolerance) {
+      pushVisualTargetCandidate(
+        candidates,
+        (rawLevels[index] + rawLevels[index - 1]) / 2,
+        direction === 'bullish'
+          ? 'SMC equal-high liquidity target'
+          : 'SMC equal-low liquidity target',
+        7.5
+      )
+    }
+  }
+
+  return candidates
+}
+
+function buildVisualTargetPlan(
+  candles: DashboardCandle[],
+  direction: 'bullish' | 'bearish' | 'neutral',
+  payloadSources: any[],
+  symbol?: string
+): VisualTargetPlan {
+  const entryPrice = getLatestVisualClose(candles)
+  const atr = getLatestVisualAtr(candles, 14)
+
+  if (!entryPrice || direction === 'neutral') {
+    return {
+      entryPrice,
+      targetPrice: null,
+      stopPrice: null,
+      riskReward: null,
+      targetSource: 'Waiting for ML/SMC directional target',
+      stopSource: 'Waiting for ML/SMC directional stop',
+      targetDistance: null,
+      stopDistance: null,
+    }
+  }
+
+  const targetCandidates: Array<{ price: number; source: string; quality: number }> = []
+  const stopCandidates: Array<{ price: number; source: string; quality: number }> = []
+
+  const overlayCollections = payloadSources.flatMap((payload) => [
+    ...getPayloadArray(payload, 'lines', 'overlayLines', 'structureLines', 'smcEvents', 'liquidityEvents', 'dlmLevels'),
+    ...getPayloadArray(payload, 'zones', 'overlayZones', 'chartZones', 'orderBlocks', 'orderBlockZones'),
+    ...getPayloadArray(payload, 'liquidityProfileBins', 'profileBins', 'alphaProfileBins', 'dlmProfileBins', 'bins', 'levels'),
+    ...getNestedPayloadArray(payload, 'alphaProfile', 'bins', 'profileBins', 'levels'),
+    ...getNestedPayloadArray(payload, 'liquidityProfile', 'bins', 'profileBins', 'levels'),
+    ...getNestedPayloadArray(payload, 'dlm', 'bins', 'profileBins', 'liquidityProfileBins', 'levels'),
+    ...scanOverlayArraysByKey(
+      payload,
+      (key) =>
+        key.includes('liquidity') ||
+        key.includes('profile') ||
+        key.includes('dlm') ||
+        key.includes('orderblock') ||
+        key.includes('zone') ||
+        key.includes('level') ||
+        key.includes('target') ||
+        key.includes('tp')
+    ),
+  ])
+
+  for (const item of uniqueOverlayItems(overlayCollections)) {
+    const sourceText = getVisualCandidateSource(item, 'ML/SMC overlay level')
+    const itemDirection = overlayDirection(item.direction ?? item.bias ?? item.side ?? item.label ?? item.type ?? item.kind)
+    const quality = overlayQuality(item, scoreVisualProfileBin(item) || 5)
+
+    for (const price of getVisualPriceCandidatesFromItem(item)) {
+      if (direction === 'bullish') {
+        if (price > entryPrice) {
+          pushVisualTargetCandidate(
+            targetCandidates,
+            price,
+            sourceText.toLowerCase().includes('profile') || sourceText.toLowerCase().includes('liquidity')
+              ? 'AlphaX/DLM liquidity target'
+              : sourceText,
+            quality
+          )
+        }
+
+        if (price < entryPrice && (itemDirection === 'bullish' || sourceText.toLowerCase().includes('demand') || sourceText.toLowerCase().includes('discount') || sourceText.toLowerCase().includes('ob'))) {
+          pushVisualTargetCandidate(
+            stopCandidates,
+            price,
+            'SMC invalidation below demand/order block',
+            quality
+          )
+        }
+      }
+
+      if (direction === 'bearish') {
+        if (price < entryPrice) {
+          pushVisualTargetCandidate(
+            targetCandidates,
+            price,
+            sourceText.toLowerCase().includes('profile') || sourceText.toLowerCase().includes('liquidity')
+              ? 'AlphaX/DLM liquidity target'
+              : sourceText,
+            quality
+          )
+        }
+
+        if (price > entryPrice && (itemDirection === 'bearish' || sourceText.toLowerCase().includes('supply') || sourceText.toLowerCase().includes('premium') || sourceText.toLowerCase().includes('ob'))) {
+          pushVisualTargetCandidate(
+            stopCandidates,
+            price,
+            'SMC invalidation above supply/order block',
+            quality
+          )
+        }
+      }
+    }
+  }
+
+  for (const candidate of scanCandleStructureTargets(candles, direction, entryPrice, atr)) {
+    pushVisualTargetCandidate(targetCandidates, candidate.price, candidate.source, candidate.quality)
+  }
+
+  // If the overlay has no stop, use the latest SMC/ATR structural invalidation.
+  // This is still SMC risk logic, not a target generator.
+  if (stopCandidates.length === 0 && atr > 0) {
+    const lookback = candles.slice(-30)
+    if (direction === 'bullish') {
+      const recentLow = Math.min(...lookback.map((candle) => overlayNumber(candle.low, entryPrice)))
+      const stop = Math.min(recentLow, entryPrice - atr)
+      pushVisualTargetCandidate(stopCandidates, stop, 'SMC recent low / ATR invalidation', 4.5)
+    } else if (direction === 'bearish') {
+      const recentHigh = Math.max(...lookback.map((candle) => overlayNumber(candle.high, entryPrice)))
+      const stop = Math.max(recentHigh, entryPrice + atr)
+      pushVisualTargetCandidate(stopCandidates, stop, 'SMC recent high / ATR invalidation', 4.5)
+    }
+  }
+
+  const minimumTargetDistance = Math.max(atr * 0.25, entryPrice * 0.0001)
+
+  const directionalTargets = targetCandidates
+    .filter((candidate) =>
+      direction === 'bullish'
+        ? candidate.price > entryPrice + minimumTargetDistance
+        : candidate.price < entryPrice - minimumTargetDistance
+    )
+    .map((candidate) => ({
+      ...candidate,
+      distance: Math.abs(candidate.price - entryPrice),
+    }))
+    .sort((left, right) => {
+      const qualityDiff = right.quality - left.quality
+      if (Math.abs(qualityDiff) >= 2) return qualityDiff
+      return left.distance - right.distance
+    })
+
+  const directionalStops = stopCandidates
+    .filter((candidate) =>
+      direction === 'bullish'
+        ? candidate.price < entryPrice
+        : candidate.price > entryPrice
+    )
+    .map((candidate) => ({
+      ...candidate,
+      distance: Math.abs(candidate.price - entryPrice),
+    }))
+    .sort((left, right) => left.distance - right.distance)
+
+  const target = directionalTargets[0] ?? null
+  const stop = directionalStops[0] ?? null
+
+  const roundedTarget = target ? roundVisualPriceToTick(target.price, symbol) : null
+  const roundedStop = stop ? roundVisualPriceToTick(stop.price, symbol) : null
+  const roundedEntry = roundVisualPriceToTick(entryPrice, symbol) ?? entryPrice
+
+  const targetDistance =
+    roundedTarget && Number.isFinite(roundedTarget)
+      ? Math.abs(roundedTarget - roundedEntry)
+      : null
+
+  const stopDistance =
+    roundedStop && Number.isFinite(roundedStop)
+      ? Math.abs(roundedEntry - roundedStop)
+      : null
+
+  const riskReward =
+    targetDistance && stopDistance && stopDistance > 0
+      ? Number((targetDistance / stopDistance).toFixed(2))
+      : null
+
+  return {
+    entryPrice: roundedEntry,
+    targetPrice: roundedTarget,
+    stopPrice: roundedStop,
+    riskReward,
+    targetSource: target?.source ?? 'Waiting for ML/SMC target level',
+    stopSource: stop?.source ?? 'Waiting for ML/SMC stop level',
+    targetDistance: targetDistance === null ? null : Number(targetDistance.toFixed(5)),
+    stopDistance: stopDistance === null ? null : Number(stopDistance.toFixed(5)),
+  }
+}
+
+
 function buildVisualOverlayScorecards(candles: DashboardCandle[], ...sources: any[]) {
   const payloadSources = sources.filter((source) => source && typeof source === 'object')
   if (!payloadSources.length) return null
@@ -1681,6 +2039,12 @@ function buildVisualOverlayScorecards(candles: DashboardCandle[], ...sources: an
 
   const netBias = bullScore - bearScore
   const direction = netBias >= 3 ? 'bullish' : netBias <= -3 ? 'bearish' : 'neutral'
+  const targetPlan = buildVisualTargetPlan(
+    candles,
+    direction,
+    payloadSources,
+    String(payloadSources[0]?.symbol ?? payloadSources[0]?.ticker ?? 'MES1!')
+  )
   const contextScore =
     smcQuality * 0.24 +
     obQuality * 0.2 +
@@ -1704,6 +2068,14 @@ function buildVisualOverlayScorecards(candles: DashboardCandle[], ...sources: an
       bullScore: Number(bullScore.toFixed(2)),
       bearScore: Number(bearScore.toFixed(2)),
       contextScore: Number(contextScore.toFixed(2)),
+      entryPrice: targetPlan.entryPrice,
+      targetPrice: targetPlan.targetPrice,
+      stopPrice: targetPlan.stopPrice,
+      riskReward: targetPlan.riskReward,
+      targetSource: targetPlan.targetSource,
+      stopSource: targetPlan.stopSource,
+      targetDistance: targetPlan.targetDistance,
+      stopDistance: targetPlan.stopDistance,
     },
     smc: {
       qualityScore: Number(smcQuality.toFixed(2)),
@@ -1777,6 +2149,16 @@ function buildVisualOverlayScorecards(candles: DashboardCandle[], ...sources: an
     sweepCount: hiddenContext.sweepCount,
     displacementCount: hiddenContext.displacementCount,
     inducementCount: hiddenContext.inducementCount,
+    entryPrice: targetPlan.entryPrice,
+    targetPrice: targetPlan.targetPrice,
+    stopPrice: targetPlan.stopPrice,
+    takeProfitPrice: targetPlan.targetPrice,
+    tp1: targetPlan.targetPrice,
+    riskReward: targetPlan.riskReward,
+    targetSource: targetPlan.targetSource,
+    stopSource: targetPlan.stopSource,
+    targetDistance: targetPlan.targetDistance,
+    stopDistance: targetPlan.stopDistance,
   }
 
   return {
@@ -2830,6 +3212,16 @@ function buildScorecardSignalPatch(scorecards: any, mlFeatures: any) {
     bearScore: Math.max(bearScore, coreDirection === 'bearish' ? confirmation : 0),
     netBias: Number(scorecards?.overall?.netBias ?? mlFeatures?.overallNetBias ?? 0),
 
+    entry: Number(scorecards?.overall?.entryPrice ?? mlFeatures?.entryPrice ?? 0) || undefined,
+    targetPrice: Number(scorecards?.overall?.targetPrice ?? mlFeatures?.targetPrice ?? mlFeatures?.takeProfitPrice ?? mlFeatures?.tp1 ?? 0) || undefined,
+    target: Number(scorecards?.overall?.targetPrice ?? mlFeatures?.targetPrice ?? mlFeatures?.takeProfitPrice ?? mlFeatures?.tp1 ?? 0) || undefined,
+    takeProfitPrice: Number(scorecards?.overall?.targetPrice ?? mlFeatures?.targetPrice ?? mlFeatures?.takeProfitPrice ?? mlFeatures?.tp1 ?? 0) || undefined,
+    tp1: Number(scorecards?.overall?.targetPrice ?? mlFeatures?.targetPrice ?? mlFeatures?.takeProfitPrice ?? mlFeatures?.tp1 ?? 0) || undefined,
+    stopPrice: Number(scorecards?.overall?.stopPrice ?? mlFeatures?.stopPrice ?? 0) || undefined,
+    riskReward: Number(scorecards?.overall?.riskReward ?? mlFeatures?.riskReward ?? 0) || undefined,
+    targetSource: scorecards?.overall?.targetSource ?? mlFeatures?.targetSource,
+    stopSource: scorecards?.overall?.stopSource ?? mlFeatures?.stopSource,
+
     smc: getScorecardSignalText(smcDirection),
     smcDirection,
     smcStrength,
@@ -3551,6 +3943,7 @@ export default function Dashboard() {
                 symbol: miniOneSymbol,
                 timeframe: miniOneTimeframe,
                 candles: miniChartOneCandles,
+                latestSignal: augmentedLatestSignal,
                 settings: miniChartOneIndicatorSettings,
               },
               {
@@ -3558,6 +3951,7 @@ export default function Dashboard() {
                 symbol: miniTwoSymbol,
                 timeframe: miniTwoTimeframe,
                 candles: miniChartTwoCandles,
+                latestSignal: augmentedLatestSignal,
                 settings: miniChartTwoIndicatorSettings,
               },
             ]}
