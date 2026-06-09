@@ -323,17 +323,33 @@ function buildRows({
     ]),
   })
 
+  const nrtrDirectionValue = toNumber(mlFeatures?.nrtrDirection, 0)
+  const nrtrDirectionFromFeatures =
+    nrtrDirectionValue > 0 ? 'bullish' : nrtrDirectionValue < 0 ? 'bearish' : undefined
+  const nrtrIsActive = Boolean(
+    scorecards?.nrtr ||
+      nrtrDirectionFromFeatures ||
+      Number.isFinite(Number(scorecards?.nrtr?.barsInTrend)) ||
+      Number.isFinite(Number(scorecards?.nrtr?.distancePercent)) ||
+      Number.isFinite(Number(components.nrtr?.barsInTrend)) ||
+      Number.isFinite(Number(components.nrtr?.distancePercent))
+  )
+
   rows.push({
     key: 'nrtr',
     source: 'NRTR',
-    direction: directionLabel(firstValue(components.nrtr?.direction, scorecards?.nrtr?.direction, mlFeatures?.nrtrDirection)),
-    score: getScore(components.nrtr?.score, scorecards?.nrtr?.distancePercent),
-    confidence: getScore(components.nrtr?.confidence, Math.abs(toNumber(mlFeatures?.nrtrDirection, 0)) * 100),
-    status: normalizeStatus(firstValue(components.nrtr?.status, scorecards?.nrtr ? 'active' : 'active')),
+    direction: directionLabel(firstValue(scorecards?.nrtr?.direction, nrtrDirectionFromFeatures, components.nrtr?.direction)),
+    score: getScore(scorecards?.nrtr?.distancePercent, components.nrtr?.distancePercent, components.nrtr?.score),
+    confidence: getScore(
+      Math.abs(nrtrDirectionValue) * 100 || undefined,
+      components.nrtr?.confidence,
+      scorecards?.nrtr?.distancePercent
+    ),
+    status: normalizeStatus(nrtrIsActive ? 'active' : firstValue(components.nrtr?.status, 'waiting')),
     details: formatDetails([
-      `Bars ${firstValue(components.nrtr?.barsInTrend, scorecards?.nrtr?.barsInTrend, 0)}`,
-      `Distance ${formatNumber(firstValue(components.nrtr?.distancePercent, scorecards?.nrtr?.distancePercent, 0), 2)}%`,
-      `Locked ${formatNumber(firstValue(components.nrtr?.lockedProfit, scorecards?.nrtr?.lockedProfit, 0), 2)}`,
+      `Bars ${firstValue(scorecards?.nrtr?.barsInTrend, components.nrtr?.barsInTrend, 0)}`,
+      `Distance ${formatNumber(firstValue(scorecards?.nrtr?.distancePercent, components.nrtr?.distancePercent, 0), 2)}%`,
+      `Locked ${formatNumber(firstValue(scorecards?.nrtr?.lockedProfit, components.nrtr?.lockedProfit, 0), 2)}`,
     ]),
   })
 
@@ -411,17 +427,32 @@ function buildRows({
       signal?.mlFeatureCount
     ) ?? 0
 
+  const technicalIndicatorCount = firstValue(
+    technicalSentiment?.activeCount,
+    technicalSentiment?.indicators?.length,
+    technicalSentiment?.technicalIndicators?.length,
+    technicalSentiment?.technicalMeter?.length,
+    0
+  )
+  const mlIsActive = Boolean(
+    Number(mlFeatureCount) > 0 ||
+      Number(technicalIndicatorCount) > 0 ||
+      scorecards?.overall ||
+      mlFeatures ||
+      unifiedIntelligence?.aiTrader
+  )
+
   rows.push({
     key: 'ml',
     source: 'ML Features',
-    direction: directionLabel(firstValue(components.ml?.direction, unifiedIntelligence?.aiTrader?.direction, scorecards?.overall?.direction)),
-    score: getScore(components.ml?.score, unifiedIntelligence?.aiTrader?.confidence, scorecards?.overall?.confirmationScore),
-    confidence: getScore(components.ml?.confidence, unifiedIntelligence?.aiTrader?.confidence, scorecards?.overall?.confirmationScore),
-    status: normalizeStatus(firstValue(components.ml?.status, mlFeatureCount ? 'active' : 'waiting')),
+    direction: directionLabel(firstValue(scorecards?.overall?.direction, unifiedIntelligence?.aiTrader?.direction, components.ml?.direction)),
+    score: getScore(scorecards?.overall?.confirmationScore, unifiedIntelligence?.aiTrader?.confidence, components.ml?.score),
+    confidence: getScore(scorecards?.overall?.confirmationScore, unifiedIntelligence?.aiTrader?.confidence, components.ml?.confidence),
+    status: normalizeStatus(mlIsActive ? 'active' : firstValue(components.ml?.status, 'waiting')),
     details: formatDetails([
       `Features ${mlFeatureCount}`,
       `Net ${formatNumber(firstValue(unifiedIntelligence?.aiTrader?.netScore, scorecards?.overall?.netBias, 0), 2)}`,
-      `Technical indicators ${firstValue(technicalSentiment?.activeCount, technicalSentiment?.indicators?.length, 0)}`,
+      `Technical indicators ${technicalIndicatorCount}`,
     ]),
   })
 
