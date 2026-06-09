@@ -55,10 +55,12 @@ type BacktestTrade = {
   barsHeld: number;
   entryReason: string;
   exitReason: string;
+  isLive?: boolean;
 };
 
 type BacktestResult = {
   trades: BacktestTrade[];
+  liveTrade: BacktestTrade | null;
   equity: Array<{
     time: number;
     value: number;
@@ -80,23 +82,31 @@ function clampNumber(value: number, fallback = 0) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function normalizeUnixSeconds(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return value > 10_000_000_000 ? Math.floor(value / 1000) : value;
+}
+
 function candleTimeToNumber(value: DashboardCandle["time"]): number {
-  if (typeof value === "number") return value;
+  if (typeof value === "number") return normalizeUnixSeconds(value);
   if (typeof value === "string") {
-    if (/^\d+$/.test(value)) return Number(value);
-    const parsed = Date.parse(value);
+    const trimmed = value.trim();
+    if (/^\d+$/.test(trimmed)) return normalizeUnixSeconds(Number(trimmed));
+    const parsed = Date.parse(trimmed);
     return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
   }
   return Math.floor(Date.UTC(value.year, value.month - 1, value.day) / 1000);
 }
 
 function formatDateTime(value: number) {
-  if (!value) return "—";
-  return new Date(value * 1000).toLocaleString([], {
+  const seconds = normalizeUnixSeconds(value);
+  if (!seconds) return "—";
+  return new Date(seconds * 1000).toLocaleString([], {
     month: "short",
     day: "numeric",
-    hour: "2-digit",
+    hour: "numeric",
     minute: "2-digit",
+    hour12: true,
   });
 }
 
@@ -406,6 +416,7 @@ function calculateBacktest(
   if (mainCandles.length < 30) {
     return {
       trades: [],
+      liveTrade: null,
       equity: [],
       totalPnl: 0,
       totalPnlPercent: 0,
@@ -514,6 +525,8 @@ function calculateBacktest(
     }
   }
 
+  let liveTrade: BacktestTrade | null = null;
+
   if (openTrade && mainCandles.length > openTrade.entryIndex + 1) {
     const lastIndex = mainCandles.length - 1;
     const candle = mainCandles[lastIndex];
@@ -535,7 +548,7 @@ function calculateBacktest(
         : openTrade.entryPrice -
           Math.max(...tradeCandles.map((item) => item.high));
 
-    trades.push({
+    liveTrade = {
       id: trades.length + 1,
       side: side === 1 ? "Long" : "Short",
       entryTime: openTrade.entryTime,
@@ -548,8 +561,9 @@ function calculateBacktest(
       maePercent: (mae / openTrade.entryPrice) * 100,
       barsHeld: lastIndex - openTrade.entryIndex,
       entryReason: openTrade.reason,
-      exitReason: "Open trade marked at latest close",
-    });
+      exitReason: "LIVE — waiting for exit",
+      isLive: true,
+    };
   }
 
   let cumulative = 0;
@@ -579,6 +593,7 @@ function calculateBacktest(
 
   return {
     trades,
+    liveTrade,
     equity,
     totalPnl,
     totalPnlPercent,
@@ -791,7 +806,11 @@ export default function StrategyTesterPanel({
             subValue="Percent drawdown"
             positive={false}
           />
-          <MetricCard label="Total trades" value={String(result.totalTrades)} />
+          <MetricCard
+            label="Closed trades"
+            value={String(result.totalTrades)}
+            subValue={result.liveTrade ? "1 live trade waiting to exit" : "No live trade"}
+          />
           <MetricCard
             label="Profitable trades"
             value={`${result.winRate.toFixed(2)}%`}
@@ -829,7 +848,7 @@ export default function StrategyTesterPanel({
                 </tr>
               </thead>
               <tbody className="divide-y divide-dark-700 bg-dark-800/50 text-gray-300">
-                {result.trades.length === 0 ? (
+                {result.trades.length === 0 && !result.liveTrade ? (
                   <tr>
                     <td
                       className="px-3 py-8 text-center text-gray-500"
@@ -839,12 +858,14 @@ export default function StrategyTesterPanel({
                     </td>
                   </tr>
                 ) : (
-                  result.trades
-                    .slice()
-                    .reverse()
-                    .map((trade) => (
-                      <tr key={trade.id}>
-                        <td className="px-3 py-3 font-semibold">#{trade.id}</td>
+                  [
+                    ...(result.liveTrade ? [result.liveTrade] : []),
+                    ...result.trades.slice().reverse(),
+                  ].map((trade) => (
+                      <tr key={`${trade.isLive ? "live" : "closed"}-${trade.id}`} className={trade.isLive ? "bg-emerald-400/5" : undefined}>
+                        <td className="px-3 py-3 font-semibold">
+                          {trade.isLive ? "LIVE" : `#${trade.id}`}
+                        </td>
                         <td
                           className={`px-3 py-3 font-semibold ${trade.side === "Long" ? "text-emerald-300" : "text-red-300"}`}
                         >
@@ -854,7 +875,7 @@ export default function StrategyTesterPanel({
                           {formatDateTime(trade.entryTime)}
                         </td>
                         <td className="px-3 py-3">
-                          {formatDateTime(trade.exitTime)}
+                          {trade.isLive ? `${formatDateTime(trade.exitTime)} (current)` : formatDateTime(trade.exitTime)}
                         </td>
                         <td className="px-3 py-3 text-right">
                           {trade.entryPrice.toFixed(2)}
@@ -865,7 +886,7 @@ export default function StrategyTesterPanel({
                         <td
                           className={`px-3 py-3 text-right font-semibold ${trade.pnl >= 0 ? "text-emerald-300" : "text-red-300"}`}
                         >
-                          {trade.pnl.toFixed(2)}
+                          {formatMoney(trade.pnl)}
                         </td>
                         <td
                           className={`px-3 py-3 text-right ${trade.pnlPercent >= 0 ? "text-emerald-300" : "text-red-300"}`}
