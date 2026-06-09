@@ -15,10 +15,18 @@ type RecentSignal = {
   current?: number
   target?: number
   targetPrice?: number
+  takeProfitPrice?: number
+  tp1?: number
   pnl?: number
   percent?: number
   status?: string
   createdAt?: string
+  mlFeatures?: Record<string, unknown>
+  chartMlFeatures?: Record<string, unknown>
+  scorecards?: Record<string, unknown>
+  chartScorecards?: Record<string, unknown>
+  unifiedIntelligence?: Record<string, unknown>
+  overlayPayload?: Record<string, unknown>
 }
 
 type ChartCardCandle = {
@@ -566,6 +574,119 @@ function buildLiveSnapshot(latestSignal?: RecentSignal, activeSymbol = 'BTCUSD',
   }
 }
 
+function getNumberFromPath(source: unknown, path: string[]) {
+  let current: unknown = source
+
+  for (const key of path) {
+    if (!current || typeof current !== 'object') return NaN
+    current = (current as Record<string, unknown>)[key]
+  }
+
+  const number = Number(current)
+  return Number.isFinite(number) ? number : NaN
+}
+
+function getTrueMlSmcTargetPrice(
+  latestSignal?: RecentSignal,
+  fallbackSignal?: RecentSignal,
+  currentPrice?: number,
+  signalType?: 'BUY' | 'SELL' | 'HOLD'
+) {
+  const sources = [latestSignal as unknown, fallbackSignal as unknown].filter(Boolean)
+
+  const targetPaths = [
+    ['mlFeatures', 'targetPrice'],
+    ['mlFeatures', 'target_price'],
+    ['mlFeatures', 'takeProfitPrice'],
+    ['mlFeatures', 'take_profit_price'],
+    ['mlFeatures', 'tp1'],
+    ['mlFeatures', 'tp1Price'],
+
+    ['chartMlFeatures', 'targetPrice'],
+    ['chartMlFeatures', 'target_price'],
+    ['chartMlFeatures', 'takeProfitPrice'],
+    ['chartMlFeatures', 'take_profit_price'],
+    ['chartMlFeatures', 'tp1'],
+    ['chartMlFeatures', 'tp1Price'],
+
+    ['scorecards', 'overall', 'targetPrice'],
+    ['scorecards', 'overall', 'target_price'],
+    ['scorecards', 'overall', 'takeProfitPrice'],
+    ['scorecards', 'overall', 'take_profit_price'],
+    ['scorecards', 'overall', 'tp1'],
+    ['scorecards', 'overall', 'tp1Price'],
+
+    ['chartScorecards', 'overall', 'targetPrice'],
+    ['chartScorecards', 'overall', 'target_price'],
+    ['chartScorecards', 'overall', 'takeProfitPrice'],
+    ['chartScorecards', 'overall', 'take_profit_price'],
+    ['chartScorecards', 'overall', 'tp1'],
+    ['chartScorecards', 'overall', 'tp1Price'],
+
+    ['chartScorecards', 'smc', 'targetPrice'],
+    ['chartScorecards', 'smc', 'target_price'],
+    ['chartScorecards', 'smc', 'takeProfitPrice'],
+    ['chartScorecards', 'smc', 'tp1'],
+
+    ['chartScorecards', 'ghost', 'targetPrice'],
+    ['chartScorecards', 'ghost', 'target_price'],
+    ['chartScorecards', 'ghost', 'takeProfitPrice'],
+    ['chartScorecards', 'ghost', 'tp1'],
+
+    ['unifiedIntelligence', 'targetPrice'],
+    ['unifiedIntelligence', 'target_price'],
+    ['unifiedIntelligence', 'takeProfitPrice'],
+    ['unifiedIntelligence', 'tp1'],
+    ['unifiedIntelligence', 'tradePlan', 'targetPrice'],
+    ['unifiedIntelligence', 'tradePlan', 'target_price'],
+    ['unifiedIntelligence', 'tradePlan', 'takeProfitPrice'],
+    ['unifiedIntelligence', 'tradePlan', 'take_profit_price'],
+    ['unifiedIntelligence', 'tradePlan', 'tp1'],
+    ['unifiedIntelligence', 'tradePlan', 'tp1Price'],
+
+    ['overlayPayload', 'targetPrice'],
+    ['overlayPayload', 'target_price'],
+    ['overlayPayload', 'takeProfitPrice'],
+    ['overlayPayload', 'tp1'],
+    ['overlayPayload', 'tradePlan', 'targetPrice'],
+    ['overlayPayload', 'tradePlan', 'target_price'],
+    ['overlayPayload', 'tradePlan', 'takeProfitPrice'],
+    ['overlayPayload', 'tradePlan', 'take_profit_price'],
+    ['overlayPayload', 'tradePlan', 'tp1'],
+    ['overlayPayload', 'tradePlan', 'tp1Price'],
+
+    ['targetPrice'],
+    ['target'],
+    ['takeProfitPrice'],
+    ['tp1'],
+    ['tp1Price'],
+  ]
+
+  for (const source of sources) {
+    for (const path of targetPaths) {
+      const candidate = getNumberFromPath(source, path)
+
+      if (!Number.isFinite(candidate) || candidate <= 0) continue
+
+      if (currentPrice && Number.isFinite(currentPrice) && currentPrice > 0) {
+        const distance = Math.abs(candidate - currentPrice) / currentPrice
+
+        // Reject obviously wrong scale values.
+        if (distance > 0.35) continue
+
+        // True targets must be directional. A BUY target should be above price,
+        // and a SELL target should be below price.
+        if (signalType === 'BUY' && candidate <= currentPrice) continue
+        if (signalType === 'SELL' && candidate >= currentPrice) continue
+      }
+
+      return candidate
+    }
+  }
+
+  return null
+}
+
 function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: RecentSignal): SignalCardView {
   const symbol = normalizeSymbol(input.symbol ?? fallbackSignal?.symbol)
   const timeframe = normalizeTimeframe(input.timeframe ?? fallbackSignal?.primaryTimeframe ?? fallbackSignal?.timeframe)
@@ -582,22 +703,23 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
       : trend.confidence
   )
   const confidenceLabel = getConfidenceLabel(confidence)
-  const atr = calculateAtr(input.candles, 14)
   const entryFromSignal = Number(input.latestSignal?.entry ?? input.latestSignal?.price ?? fallbackSignal?.entry ?? fallbackSignal?.price ?? NaN)
   const entry = Number.isFinite(entryFromSignal) && entryFromSignal > 0 && hasCurrent && Math.abs(entryFromSignal - current) / current <= 0.2
     ? entryFromSignal
     : hasCurrent
       ? current
       : null
-  const explicitTarget = Number(input.latestSignal?.target ?? input.latestSignal?.targetPrice ?? (fallbackSignal as any)?.target ?? (fallbackSignal as any)?.targetPrice ?? NaN)
-  const targetMove = trend.targetBasis > 0 ? trend.targetBasis * 2 : atr > 0 ? atr * 2 : hasCurrent ? current * 0.003 : 0
-  const target = Number.isFinite(explicitTarget) && explicitTarget > 0 && hasCurrent && Math.abs(explicitTarget - current) / current <= 0.25
-    ? explicitTarget
-    : entry && type === 'BUY'
-      ? entry + targetMove
-      : entry && type === 'SELL'
-        ? entry - targetMove
-        : entry
+
+  // True target rule:
+  // Do NOT generate synthetic targets from ATR/NRTR/SMMA here.
+  // The target must come from the ML/SMC payload. If the backend/system has not
+  // produced a target yet, show "—" instead of inventing one.
+  const target = getTrueMlSmcTargetPrice(
+    input.latestSignal,
+    fallbackSignal,
+    hasCurrent ? current : undefined,
+    type
+  )
 
   const statusText = type === 'BUY'
     ? 'Bullish chart signal'
@@ -609,9 +731,13 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
     ? `Settings: SMMA ${input.settings.smmaLength ?? 20}, ${input.settings.nrtrMode ?? 'ATR-Based'} ${input.settings.nrtrMode === 'Percentage' ? `${input.settings.nrtrPercent ?? 0.25}%` : `${input.settings.nrtrAtrLength ?? 14} x${input.settings.nrtrAtrMultiplier ?? 3}`}.`
     : ''
 
+  const targetText = target === null
+    ? 'Target waiting for ML/SMC.'
+    : 'Target from ML/SMC.'
+
   const bodyText = input.label.toLowerCase().includes('main')
-    ? `Main chart signal card. ${trend.source}. ${settingsText}`
-    : `Mini chart confirmation card. ${trend.source}. ${settingsText}`
+    ? `Main chart signal card. ${trend.source}. ${targetText} ${settingsText}`
+    : `Mini chart confirmation card. ${trend.source}. ${targetText} ${settingsText}`
 
   return {
     id: `${input.label}-${symbol}-${timeframe}`,
