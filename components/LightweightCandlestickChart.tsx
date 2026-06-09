@@ -83,6 +83,7 @@ type LightweightCandlestickChartProps = {
   nrtrAtrLength?: number;
   nrtrAtrMultiplier?: number;
   nrtrPercent?: number;
+  showNrtrExitLabels?: boolean;
   showNrtrStats?: boolean;
   nrtrStatsCollapsedOnly?: boolean;
 };
@@ -698,7 +699,7 @@ function splitNrtrLineData(points: NrtrPoint[], direction: 1 | -1): NrtrLineData
   return lineData;
 }
 
-function buildNrtrMarkers(points: NrtrPoint[], exits: NrtrExitPoint[]) {
+function buildNrtrMarkers(points: NrtrPoint[], exits: NrtrExitPoint[], showExitLabels = true) {
   /**
    * NRTR historical signals must stay visible across the loaded candle history.
    * The previous version sliced signals to only the latest 8, which made Buy/Sell
@@ -722,14 +723,14 @@ function buildNrtrMarkers(points: NrtrPoint[], exits: NrtrExitPoint[]) {
       size: 1,
     }));
 
-  const exitMarkers = exits.slice(-MAX_NRTR_EXIT_MARKERS).map((exit) => ({
+  const exitMarkers = showExitLabels ? exits.slice(-MAX_NRTR_EXIT_MARKERS).map((exit) => ({
     time: exit.time,
     position: exit.direction === 1 ? "aboveBar" : "belowBar",
     color: "#f59e0b",
     shape: "square",
     text: exit.direction === 1 ? "Exit Long" : "Exit Short",
     size: 1,
-  }));
+  })) : [];
 
   return [...signalMarkers, ...exitMarkers].sort((a, b) =>
     String(a.time).localeCompare(String(b.time))
@@ -969,6 +970,7 @@ export default function LightweightCandlestickChart({
   nrtrAtrLength = 14,
   nrtrAtrMultiplier = 3,
   nrtrPercent = 0.25,
+  showNrtrExitLabels = true,
   showNrtrStats = true,
   nrtrStatsCollapsedOnly = false,
 }: LightweightCandlestickChartProps) {
@@ -1039,8 +1041,8 @@ export default function LightweightCandlestickChart({
   }, [candles, nrtrExitMode, nrtrPoints, showNrtr]);
 
   const nrtrMarkers = useMemo(() => {
-    return showNrtr ? buildNrtrMarkers(nrtrPoints, nrtrExitPoints) : [];
-  }, [nrtrExitPoints, nrtrPoints, showNrtr]);
+    return showNrtr ? buildNrtrMarkers(nrtrPoints, nrtrExitPoints, showNrtrExitLabels) : [];
+  }, [nrtrExitPoints, nrtrPoints, showNrtr, showNrtrExitLabels]);
 
   const nrtrStats = useMemo(() => {
     return calculateNrtrTradeStats(candles, nrtrPoints);
