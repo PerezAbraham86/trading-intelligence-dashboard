@@ -2010,30 +2010,21 @@ function buildVisualOverlayScorecards(candles: DashboardCandle[], ...sources: an
   let ghostConfidence = overlayNumber(ghost.confidence ?? ghost.probability ?? ghost.score, 0)
   if (ghostConfidence > 0 && ghostConfidence <= 1) ghostConfidence *= 100
 
-  const nrtrContext = calculateVisualNrtrContext(candles)
   const hiddenContext = calculateHiddenSmcContextFromCandles(candles)
 
-  const nrtrDirection = overlayDirection(nrtrContext.direction)
   const hiddenQuality = overlayNumber(hiddenContext.qualityScore, 0)
 
   const smcDirection =
     smcBull > smcBear ? 'bullish' : smcBear > smcBull ? 'bearish' : 'neutral'
 
-  const nrtrAgreesWithSmc =
-    nrtrDirection !== 'neutral' &&
-    smcDirection !== 'neutral' &&
-    nrtrDirection === smcDirection
-
   const bullScore =
     smcBull * 1.5 +
     obBull * 1.2 +
-    (nrtrDirection === 'bullish' ? 2 : 0) +
     (ghostDirection === 'bullish' ? Math.min(3, ghostConfidence / 35) : 0) +
     (hiddenQuality > 0 && smcDirection === 'bullish' ? Math.min(2, hiddenQuality / 5) : 0)
   const bearScore =
     smcBear * 1.5 +
     obBear * 1.2 +
-    (nrtrDirection === 'bearish' ? 2 : 0) +
     (ghostDirection === 'bearish' ? Math.min(3, ghostConfidence / 35) : 0) +
     (hiddenQuality > 0 && smcDirection === 'bearish' ? Math.min(2, hiddenQuality / 5) : 0)
 
@@ -2051,15 +2042,14 @@ function buildVisualOverlayScorecards(candles: DashboardCandle[], ...sources: an
     pdQuality * 0.16 +
     profileQuality * 0.14 +
     hiddenQuality * 0.16 +
-    (nrtrDirection !== 'neutral' ? 5 : 0) * 0.1
+    (ghostDirection !== 'neutral' ? 5 : 0) * 0.1
 
   let conflictScore = smcBull > 0 && smcBear > 0 ? 16 : 0
-  if (nrtrDirection !== 'neutral' && direction !== 'neutral' && nrtrDirection !== direction) conflictScore += 22
   if (ghostDirection !== 'neutral' && direction !== 'neutral' && ghostDirection !== direction) conflictScore += 18
   conflictScore = Math.max(0, Math.min(100, conflictScore))
 
   const scorecards = {
-    version: 'visual-overlay-scorecards-v2',
+    version: 'smc-alpha-dlm-ob-ghost-scorecards-v3-no-nrtr-no-smma-ml',
     overall: {
       direction,
       netBias: Number(netBias.toFixed(2)),
@@ -2096,11 +2086,6 @@ function buildVisualOverlayScorecards(candles: DashboardCandle[], ...sources: an
       profileBinCount: profileBins.length,
       strongBins: profileBins.filter((bin) => scoreVisualProfileBin(bin) >= 4).length,
     },
-    nrtr: {
-      ...nrtrContext,
-      direction: nrtrDirection,
-      agreesWithSmc: nrtrAgreesWithSmc,
-    },
     ghost: {
       direction: ghostDirection,
       confidence: Number(ghostConfidence.toFixed(2)),
@@ -2118,7 +2103,6 @@ function buildVisualOverlayScorecards(candles: DashboardCandle[], ...sources: an
       sweeps: hiddenContext.sweepCount,
       displacement: hiddenContext.displacementCount,
       inducement: hiddenContext.inducementCount,
-      nrtr: nrtrDirection !== 'neutral' ? 1 : 0,
     },
   }
 
@@ -2139,16 +2123,15 @@ function buildVisualOverlayScorecards(candles: DashboardCandle[], ...sources: an
     visualOrderBlockCount: recentObs.length,
     visualPdZoneCount: pdZones.length,
     visualProfileBinCount: profileBins.length,
-    nrtrDirection: nrtrDirection === 'bullish' ? 1 : nrtrDirection === 'bearish' ? -1 : 0,
-    nrtrAgreesWithSmc: nrtrAgreesWithSmc ? 1 : 0,
-    nrtrDistancePercent: nrtrContext.distancePercent,
-    nrtrLockedProfit: nrtrContext.lockedProfit,
     hiddenContextQualityScore: hiddenContext.qualityScore,
     eqhEqlCount: hiddenContext.eqhEqlCount,
     fairValueGapCount: hiddenContext.fvgCount,
     sweepCount: hiddenContext.sweepCount,
     displacementCount: hiddenContext.displacementCount,
     inducementCount: hiddenContext.inducementCount,
+    mlHierarchy: 'SMC_ALPHA_DLM_ORDERBLOCKS_GHOST_ONLY',
+    nrtrUsedForMl: 0,
+    smmaUsedForMl: 0,
     entryPrice: targetPlan.entryPrice,
     targetPrice: targetPlan.targetPrice,
     stopPrice: targetPlan.stopPrice,
@@ -3187,7 +3170,9 @@ function buildScorecardSignalPatch(scorecards: any, mlFeatures: any) {
       overallDirection
   )
   const ghostDirection = getScorecardDirection(scorecards?.ghost?.direction)
-  const nrtrDirection = getScorecardDirection(scorecards?.nrtr?.direction)
+  // NRTR is intentionally not part of the ML hierarchy.
+  // It remains a chart/strategy entry-exit tool only.
+  const nrtrDirection = 'neutral'
 
   const confirmation = scorecardPct(scorecards?.overall?.confirmationScore)
   const bullScore = scorecardPct(scorecards?.overall?.bullScore, 10)
@@ -3238,7 +3223,7 @@ function buildScorecardSignalPatch(scorecards: any, mlFeatures: any) {
 
     nrtr: getScorecardSignalText(nrtrDirection, 'Neutral'),
     nrtrDirection,
-    nrtrStrength: scorecardPct(scorecards?.nrtr?.context?.distancePercent ?? scorecards?.nrtr?.distancePercent, 10),
+    nrtrStrength: 0,
 
     orderBlocks: getScorecardSignalText(smcDirection),
     orderBlockStrength: obStrength,
