@@ -20,9 +20,25 @@ export type ChartStrategySettings = {
 };
 
 export type StrategyTesterPanelProps = {
-  candles?: CandleLike[];
   symbol?: string;
-  settings: ChartStrategySettings;
+  timeframe?: string;
+
+  // Existing app/page.tsx dashboard props.
+  mainCandles?: CandleLike[];
+  miniOneCandles?: CandleLike[];
+  miniTwoCandles?: CandleLike[];
+  mainSettings?: ChartStrategySettings;
+  miniOneSettings?: ChartStrategySettings;
+  miniTwoSettings?: ChartStrategySettings;
+
+  // Optional callbacks if/when app/page.tsx wires Apply Best into live settings.
+  onMainSettingsChange?: (settings: ChartStrategySettings) => void;
+  onMiniOneSettingsChange?: (settings: ChartStrategySettings) => void;
+  onMiniTwoSettingsChange?: (settings: ChartStrategySettings) => void;
+
+  // Backwards-compatible simple props.
+  candles?: CandleLike[];
+  settings?: ChartStrategySettings;
   onSettingsChange?: (settings: ChartStrategySettings) => void;
 };
 
@@ -63,6 +79,8 @@ type NrtrOptimizationRow = {
   percent: number;
   stats: StrategyStats;
 };
+
+type ChartSlot = 'main' | 'miniOne' | 'miniTwo';
 
 const DEFAULT_SETTINGS: ChartStrategySettings = {
   smmaLength: 20,
@@ -105,6 +123,22 @@ function validCandles(candles?: CandleLike[]): CandleLike[] {
         return o > 0 && h > 0 && l > 0 && close > 0 && h >= l;
       })
     : [];
+}
+
+function emptyStats(): StrategyStats {
+  return {
+    trades: [],
+    totalTrades: 0,
+    wins: 0,
+    losses: 0,
+    winRate: 0,
+    netPnl: 0,
+    grossProfit: 0,
+    grossLoss: 0,
+    profitFactor: 0,
+    maxDrawdown: 0,
+    avgTrade: 0,
+  };
 }
 
 function calculateAtr(candles: CandleLike[], length: number): Array<number | null> {
@@ -206,6 +240,8 @@ function runNrtrBacktest(
   atrMultiplier: number,
   percent: number
 ): StrategyStats {
+  if (!candles.length) return emptyStats();
+
   const directions = calculateNrtrDirections(candles, mode, atrLength, atrMultiplier, percent);
   const trades: TradeResult[] = [];
 
@@ -326,46 +362,107 @@ function runNrtrOptimization(candles: CandleLike[]): NrtrOptimizationRow[] {
     .map((row, index) => ({ ...row, rank: index + 1 }));
 }
 
+function settingsLabel(settings: ChartStrategySettings): string {
+  if (settings.nrtrMode === 'Off') return 'NRTR Off';
+
+  if (settings.nrtrMode === 'Percentage') {
+    return `Percentage · ${formatPercent(settings.nrtrPercent)}`;
+  }
+
+  return `ATR-Based · ATR ${settings.nrtrAtrLength} · x${formatNumber(settings.nrtrAtrMultiplier, 2)}`;
+}
+
 export default function StrategyTesterPanel({
-  candles,
   symbol = 'MES1!',
+  timeframe = '1m',
+  mainCandles,
+  miniOneCandles,
+  miniTwoCandles,
+  mainSettings,
+  miniOneSettings,
+  miniTwoSettings,
+  onMainSettingsChange,
+  onMiniOneSettingsChange,
+  onMiniTwoSettingsChange,
+  candles,
   settings,
   onSettingsChange,
 }: StrategyTesterPanelProps) {
   const [showOptimizer, setShowOptimizer] = useState(false);
+  const [activeSlot, setActiveSlot] = useState<ChartSlot>('main');
 
-  const mergedSettings = { ...DEFAULT_SETTINGS, ...settings };
-  const cleanCandles = useMemo(() => validCandles(candles), [candles]);
+  const slots = useMemo(() => {
+    const simpleCandles = candles;
+    const simpleSettings = settings;
+
+    return {
+      main: {
+        label: 'Main Chart',
+        candles: validCandles(mainCandles ?? simpleCandles),
+        settings: { ...DEFAULT_SETTINGS, ...(mainSettings ?? simpleSettings) },
+        onApply: onMainSettingsChange ?? onSettingsChange,
+      },
+      miniOne: {
+        label: 'Mini Chart 1',
+        candles: validCandles(miniOneCandles),
+        settings: { ...DEFAULT_SETTINGS, ...(miniOneSettings ?? mainSettings ?? simpleSettings) },
+        onApply: onMiniOneSettingsChange,
+      },
+      miniTwo: {
+        label: 'Mini Chart 2',
+        candles: validCandles(miniTwoCandles),
+        settings: { ...DEFAULT_SETTINGS, ...(miniTwoSettings ?? mainSettings ?? simpleSettings) },
+        onApply: onMiniTwoSettingsChange,
+      },
+    };
+  }, [
+    candles,
+    mainCandles,
+    mainSettings,
+    miniOneCandles,
+    miniOneSettings,
+    miniTwoCandles,
+    miniTwoSettings,
+    onMainSettingsChange,
+    onMiniOneSettingsChange,
+    onMiniTwoSettingsChange,
+    onSettingsChange,
+    settings,
+  ]);
+
+  const active = slots[activeSlot];
 
   const currentStats = useMemo(() => {
-    if (cleanCandles.length < 30 || mergedSettings.nrtrMode === 'Off') {
-      return runNrtrBacktest([], 'ATR-Based', 14, 3, 0.25);
+    if (active.candles.length < 30 || active.settings.nrtrMode === 'Off') {
+      return emptyStats();
     }
 
     return runNrtrBacktest(
-      cleanCandles,
-      mergedSettings.nrtrMode === 'Percentage' ? 'Percentage' : 'ATR-Based',
-      mergedSettings.nrtrAtrLength,
-      mergedSettings.nrtrAtrMultiplier,
-      mergedSettings.nrtrPercent
+      active.candles,
+      active.settings.nrtrMode === 'Percentage' ? 'Percentage' : 'ATR-Based',
+      active.settings.nrtrAtrLength,
+      active.settings.nrtrAtrMultiplier,
+      active.settings.nrtrPercent
     );
-  }, [cleanCandles, mergedSettings.nrtrAtrLength, mergedSettings.nrtrAtrMultiplier, mergedSettings.nrtrMode, mergedSettings.nrtrPercent]);
+  }, [active.candles, active.settings]);
 
   const optimizationRows = useMemo(() => {
-    if (!showOptimizer || cleanCandles.length < 60) return [];
-    return runNrtrOptimization(cleanCandles).slice(0, 20);
-  }, [showOptimizer, cleanCandles]);
+    if (!showOptimizer || active.candles.length < 60) return [];
+    return runNrtrOptimization(active.candles).slice(0, 20);
+  }, [showOptimizer, active.candles]);
 
   const best = optimizationRows[0];
 
   function applyBest(row: NrtrOptimizationRow) {
-    onSettingsChange?.({
-      ...mergedSettings,
+    const nextSettings: ChartStrategySettings = {
+      ...active.settings,
       nrtrMode: row.mode,
       nrtrAtrLength: row.atrLength,
       nrtrAtrMultiplier: row.atrMultiplier,
       nrtrPercent: row.percent,
-    });
+    };
+
+    active.onApply?.(nextSettings);
   }
 
   return (
@@ -375,7 +472,7 @@ export default function StrategyTesterPanel({
           <div className="text-sm uppercase tracking-[0.25em] text-cyan-300">Strategy Tester</div>
           <h3 className="text-xl font-semibold">NRTR Entry / Exit Performance</h3>
           <p className="mt-1 text-sm text-slate-400">
-            {symbol} · {cleanCandles.length.toLocaleString()} candles · NRTR is strategy-only, not ML hierarchy.
+            {symbol} · {timeframe} · NRTR is strategy-only, not ML hierarchy.
           </p>
         </div>
 
@@ -386,6 +483,34 @@ export default function StrategyTesterPanel({
         >
           {showOptimizer ? 'Hide NRTR Optimizer' : 'Run NRTR Optimizer'}
         </button>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        {(['main', 'miniOne', 'miniTwo'] as ChartSlot[]).map((slot) => {
+          const item = slots[slot];
+          const activeButton = activeSlot === slot;
+
+          return (
+            <button
+              key={slot}
+              type="button"
+              onClick={() => setActiveSlot(slot)}
+              className={[
+                'rounded-xl border px-3 py-2 text-sm font-semibold',
+                activeButton
+                  ? 'border-cyan-300 bg-cyan-400/15 text-cyan-100'
+                  : 'border-slate-700 bg-slate-900/60 text-slate-300 hover:border-slate-500',
+              ].join(' ')}
+            >
+              {item.label} · {item.candles.length.toLocaleString()} candles
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/50 p-3 text-sm text-slate-300">
+        <span className="text-slate-500">Current settings:</span>{' '}
+        <span className="font-semibold text-slate-100">{settingsLabel(active.settings)}</span>
       </div>
 
       <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-6">
@@ -419,6 +544,12 @@ export default function StrategyTesterPanel({
               Apply Best Settings
             </button>
           </div>
+
+          {!active.onApply && (
+            <div className="mt-3 rounded-xl border border-amber-400/30 bg-amber-400/10 p-3 text-xs text-amber-100">
+              Apply button is ready, but app/page.tsx has not passed a settings update callback yet. You can still copy these best values into your NRTR settings.
+            </div>
+          )}
         </div>
       )}
 
@@ -426,7 +557,9 @@ export default function StrategyTesterPanel({
         <div className="mt-4 overflow-hidden rounded-2xl border border-slate-800">
           <div className="border-b border-slate-800 bg-slate-900/80 px-4 py-3">
             <div className="text-sm font-semibold text-slate-200">NRTR Optimization Results</div>
-            <div className="text-xs text-slate-500">Minimum 10 trades required to rank. Higher score favors win rate, profit factor, PnL, average trade, and lower drawdown.</div>
+            <div className="text-xs text-slate-500">
+              Minimum 10 trades required to rank. Higher score favors win rate, profit factor, PnL, average trade, and lower drawdown.
+            </div>
           </div>
 
           <div className="max-h-[420px] overflow-auto">
