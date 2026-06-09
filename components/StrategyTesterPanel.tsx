@@ -10,6 +10,7 @@ export type ChartStrategySettings = {
   nrtrAtrLength: number;
   nrtrAtrMultiplier: number;
   nrtrPercent: number;
+  showNrtrExitLabels: boolean;
 };
 
 type StrategyMode = "NRTR" | "SMMA";
