@@ -174,22 +174,136 @@ function normalizeStatus(value: unknown) {
   return text.charAt(0).toUpperCase() + text.slice(1)
 }
 
+function getGhostCandles(unifiedIntelligence: any): any[] {
+  const candidates = [
+    getPath(unifiedIntelligence, 'ghostProjection.candles'),
+    getPath(unifiedIntelligence, 'ghostProjection.projections'),
+    getPath(unifiedIntelligence, 'components.ghost.candles'),
+    getPath(unifiedIntelligence, 'components.ghost.projections'),
+    unifiedIntelligence?.ghostCandles,
+    unifiedIntelligence?.ghostProjections,
+    unifiedIntelligence?.projections,
+  ]
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate) && candidate.length > 0) return candidate
+  }
+
+  return []
+}
+
+function normalizeGhostDirectionValue(value: unknown): 'bullish' | 'bearish' | 'neutral' | null {
+  const text = String(value ?? '').toLowerCase()
+
+  if (!text) return null
+
+  if (
+    text.includes('bull') ||
+    text.includes('buy') ||
+    text.includes('long') ||
+    text.includes('up') ||
+    text.includes('demand')
+  ) {
+    return 'bullish'
+  }
+
+  if (
+    text.includes('bear') ||
+    text.includes('sell') ||
+    text.includes('short') ||
+    text.includes('down') ||
+    text.includes('supply')
+  ) {
+    return 'bearish'
+  }
+
+  if (text.includes('neutral') || text.includes('mixed') || text.includes('waiting')) return 'neutral'
+
+  return null
+}
+
+function inferGhostDirectionFromCandles(candles: any[]): 'bullish' | 'bearish' | 'neutral' | null {
+  if (!Array.isArray(candles) || candles.length === 0) return null
+
+  const firstDirectional = candles
+    .map((candle) =>
+      normalizeGhostDirectionValue(
+        firstValue(
+          candle?.direction,
+          candle?.signal,
+          candle?.side,
+          candle?.bias,
+          candle?.label,
+          candle?.targetReaction,
+          candle?.reason
+        )
+      )
+    )
+    .find((direction) => direction === 'bullish' || direction === 'bearish')
+
+  if (firstDirectional) return firstDirectional
+
+  let bullish = 0
+  let bearish = 0
+
+  for (const candle of candles) {
+    const open = Number(candle?.open ?? candle?.o)
+    const close = Number(candle?.close ?? candle?.c)
+
+    if (Number.isFinite(open) && Number.isFinite(close)) {
+      if (close > open) bullish += 1
+      else if (close < open) bearish += 1
+    }
+  }
+
+  if (bullish > bearish) return 'bullish'
+  if (bearish > bullish) return 'bearish'
+
+  return null
+}
+
+function averageGhostConfidence(candles: any[]): number | null {
+  const values = candles
+    .map((candle) => Number(candle?.confidence ?? candle?.score ?? candle?.probability))
+    .filter((value) => Number.isFinite(value) && value > 0)
+
+  if (values.length === 0) return null
+
+  return clampPercent(values.reduce((sum, value) => sum + value, 0) / values.length)
+}
+
 function getGhostProjection(unifiedIntelligence: any, scorecards: any) {
-  const candle = getPath(unifiedIntelligence, 'ghostProjection.candles.0', null)
+  const candles = getGhostCandles(unifiedIntelligence)
+  const candle = getPath(unifiedIntelligence, 'ghostProjection.candles.0', null) ?? candles[0] ?? null
+  const inferredDirection = inferGhostDirectionFromCandles(candles)
+  const projectionDirection = normalizeGhostDirectionValue(
+    firstValue(
+      candle?.direction,
+      candle?.signal,
+      candle?.side,
+      candle?.bias,
+      getPath(unifiedIntelligence, 'ghostProjection.direction'),
+      getPath(unifiedIntelligence, 'ghostProjection.bias'),
+      getPath(unifiedIntelligence, 'components.ghost.direction')
+    )
+  )
+  const scorecardDirection = normalizeGhostDirectionValue(scorecards?.ghost?.direction)
   const direction = firstValue(
-    candle?.direction,
-    getPath(unifiedIntelligence, 'ghostProjection.direction'),
-    getPath(unifiedIntelligence, 'components.ghost.direction'),
-    scorecards?.ghost?.direction
+    projectionDirection && projectionDirection !== 'neutral' ? projectionDirection : undefined,
+    inferredDirection,
+    scorecardDirection,
+    projectionDirection,
+    'neutral'
   )
   const confidence = getScore(
     candle?.confidence,
     getPath(unifiedIntelligence, 'ghostProjection.confidence'),
+    averageGhostConfidence(candles),
     getPath(unifiedIntelligence, 'components.ghost.confidence'),
     scorecards?.ghost?.confidence
   )
 
-  return { candle, direction, confidence }
+  return { candle, candles, direction, confidence }
 }
 
 function extractExternalItems(unifiedIntelligence: any, signal: any, overlayPayload: any): any[] {
@@ -309,17 +423,30 @@ function buildRows({
     ]),
   })
 
+  const ghostCount = firstValue(
+    getPath(unifiedIntelligence, 'ghostProjection.candles.length'),
+    Array.isArray(ghost.candles) ? ghost.candles.length : undefined,
+    scorecards?.ghost?.count,
+    0
+  )
+  const ghostIsActive = Boolean(
+    Number(ghostCount) > 0 ||
+      ghost.confidence ||
+      normalizeGhostDirectionValue(ghost.direction) === 'bullish' ||
+      normalizeGhostDirectionValue(ghost.direction) === 'bearish'
+  )
+
   rows.push({
     key: 'ghost',
     source: 'Python Ghost Candles',
     direction: directionLabel(ghost.direction),
     score: ghost.confidence,
     confidence: ghost.confidence,
-    status: normalizeStatus(firstValue(getPath(unifiedIntelligence, 'ghostProjection.status'), components.ghost?.status, ghost.confidence ? 'active' : 'waiting')),
+    status: normalizeStatus(ghostIsActive ? 'active' : firstValue(getPath(unifiedIntelligence, 'ghostProjection.status'), components.ghost?.status, 'waiting')),
     details: formatDetails([
       getPath(unifiedIntelligence, 'ghostProjection.reason'),
       ghost.candle?.targetReaction,
-      `Projections ${firstValue(getPath(unifiedIntelligence, 'ghostProjection.candles.length'), scorecards?.ghost?.count, 0)}`,
+      `Projections ${ghostCount}`,
     ]),
   })
 
