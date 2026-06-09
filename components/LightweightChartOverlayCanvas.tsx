@@ -705,7 +705,7 @@ function drawRegularZones(
   const regularZones = zones
     .filter((zone) => !isPdZone(zone))
     .filter(isOrderBlockOrFvg)
-    .slice(-24);
+    .slice(-500);
 
   for (const zone of regularZones) {
     const yHigh = priceToCoordinate(mainSeries, getZoneHigh(zone));
@@ -909,7 +909,7 @@ function normalizeStructureLines(
     deduped.push(line);
   }
 
-  return deduped.slice(-40);
+  return deduped.slice(-500);
 }
 
 function getStructureLabelText(line: StructureOverlayLine): string {
@@ -1031,18 +1031,11 @@ function drawStructureLines(
 }
 
 function getCompactMarkerText(marker: ChartOverlayMarker): string {
-  const label = marker.label.toLowerCase();
-
-  if (label.includes("pressure")) return "";
-  if (label.includes("score")) return "";
-  if (marker.type === "Rejection") return "";
-  if (marker.type === "BOS" || marker.type === "CHoCH" || marker.type === "MSS") return "";
-
-  if (marker.type === "Sweep") {
-    return "";
-  }
-
-  return marker.label || marker.type;
+  /**
+   * Historical mode: do not hide SMC / AlphaX DLM / sweep / score labels.
+   * The canvas overlap engine below handles readability by moving labels apart.
+   */
+  return String(marker.label || marker.type || "").trim();
 }
 
 function selectVisibleMarkers(markers: ChartOverlayMarker[]): ChartOverlayMarker[] {
@@ -1061,7 +1054,7 @@ function selectVisibleMarkers(markers: ChartOverlayMarker[]): ChartOverlayMarker
     selected.push(marker);
     seen.add(key);
 
-    if (selected.length >= 12) break;
+    if (selected.length >= 500) break;
   }
 
   return selected.reverse();
@@ -1170,7 +1163,7 @@ function buildFallbackProfileFromCandles(
 ): LiquidityProfileBin[] {
   if (!Array.isArray(candles) || candles.length === 0) return [];
 
-  const recent = candles.slice(-lookback);
+  const recent = candles;
   const high = Math.max(...recent.map((candle) => candle.high));
   const low = Math.min(...recent.map((candle) => candle.low));
 
@@ -1425,7 +1418,7 @@ export default function LightweightChartOverlayCanvas({
   showZones = true,
   showLabels = true,
   showLiquidityProfile = true,
-  profileLookback = 260,
+  profileLookback = 5000,
   className = "",
 }: LightweightChartOverlayCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
