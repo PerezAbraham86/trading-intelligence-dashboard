@@ -164,11 +164,9 @@ function isPlaceholderSignal(signal?: RecentSignal) {
 }
 
 function formatPrice(value?: number | null) {
-  if (value === null || value === undefined) return '—'
-
   const numeric = Number(value)
 
-  if (!Number.isFinite(numeric) || numeric <= 0) return '—'
+  if (!Number.isFinite(numeric)) return '—'
   if (Math.abs(numeric) >= 1000) return numeric.toLocaleString(undefined, { maximumFractionDigits: 2 })
   if (Math.abs(numeric) >= 100) return numeric.toFixed(2)
   if (Math.abs(numeric) >= 10) return numeric.toFixed(3)
@@ -558,8 +556,63 @@ function isSignalLinkedToActiveChart(signal: RecentSignal, activeSymbol: string,
   )
 }
 
+
+function resolveLiveCurrentPrice(
+  activePrice?: number,
+  candles?: ChartCardCandle[],
+  latestSignal?: RecentSignal,
+  fallbackSignal?: RecentSignal
+) {
+  const candidates = [
+    activePrice,
+    getLatestClose(candles),
+    latestSignal?.current,
+    latestSignal?.price,
+    fallbackSignal?.current,
+    fallbackSignal?.price,
+    fallbackSignal?.entry,
+    latestSignal?.entry,
+  ]
+
+  for (const candidate of candidates) {
+    const value = Number(candidate)
+    if (Number.isFinite(value) && value > 0) return value
+  }
+
+  return NaN
+}
+
+function resolveLockedEntryPrice(
+  current: number,
+  latestSignal?: RecentSignal,
+  fallbackSignal?: RecentSignal
+) {
+  const candidates = [
+    latestSignal?.entry,
+    fallbackSignal?.entry,
+    latestSignal?.price,
+    fallbackSignal?.price,
+  ]
+
+  for (const candidate of candidates) {
+    const value = Number(candidate)
+    if (
+      Number.isFinite(value) &&
+      value > 0 &&
+      Number.isFinite(current) &&
+      current > 0 &&
+      Math.abs(value - current) / current <= 0.2
+    ) {
+      return value
+    }
+  }
+
+  return Number.isFinite(current) && current > 0 ? current : null
+}
+
 function buildLiveSnapshot(latestSignal?: RecentSignal, activeSymbol = 'BTCUSD', activeTimeframe = '1m', activePrice?: number): RecentSignal {
-  const price = Number(activePrice ?? latestSignal?.current ?? latestSignal?.price ?? latestSignal?.entry ?? 0)
+  const liveCurrent = Number(activePrice ?? latestSignal?.current ?? latestSignal?.price ?? latestSignal?.entry ?? 0)
+  const lockedEntry = resolveLockedEntryPrice(liveCurrent, latestSignal, latestSignal)
   const type = normalizeSignalType(latestSignal?.signal ?? latestSignal?.type)
 
   return {
@@ -567,8 +620,9 @@ function buildLiveSnapshot(latestSignal?: RecentSignal, activeSymbol = 'BTCUSD',
     timeframe: normalizeTimeframe(activeTimeframe),
     signal: type,
     confidence: Number(latestSignal?.confidence ?? 0),
-    entry: Number(latestSignal?.entry ?? price),
-    current: price,
+    entry: Number(lockedEntry ?? liveCurrent),
+    current: liveCurrent,
+    price: liveCurrent,
     pnl: 0,
     percent: 0,
     status: 'Live Snapshot',
@@ -692,7 +746,9 @@ function getTrueMlSmcTargetPrice(
 function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: RecentSignal): SignalCardView {
   const symbol = normalizeSymbol(input.symbol ?? fallbackSignal?.symbol)
   const timeframe = normalizeTimeframe(input.timeframe ?? fallbackSignal?.primaryTimeframe ?? fallbackSignal?.timeframe)
-  const current = Number(input.activePrice ?? getLatestClose(input.candles) ?? fallbackSignal?.current ?? fallbackSignal?.price ?? fallbackSignal?.entry ?? NaN)
+
+  // Current Price follows live active chart price first.
+  const current = Number(resolveLiveCurrentPrice(input.activePrice, input.candles, input.latestSignal, fallbackSignal))
   const hasCurrent = Number.isFinite(current) && current > 0
   const trend = inferChartTrend(input.candles, input.settings)
 
@@ -705,12 +761,9 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
       : trend.confidence
   )
   const confidenceLabel = getConfidenceLabel(confidence)
-  const entryFromSignal = Number(input.latestSignal?.entry ?? input.latestSignal?.price ?? fallbackSignal?.entry ?? fallbackSignal?.price ?? NaN)
-  const entry = Number.isFinite(entryFromSignal) && entryFromSignal > 0 && hasCurrent && Math.abs(entryFromSignal - current) / current <= 0.2
-    ? entryFromSignal
-    : hasCurrent
-      ? current
-      : null
+
+  // Entry stays locked to the original signal entry and no longer follows live current.
+  const entry = resolveLockedEntryPrice(current, input.latestSignal, fallbackSignal)
 
   // True target rule:
   // Do NOT generate synthetic targets from ATR/NRTR/SMMA here.
@@ -864,7 +917,16 @@ export default function RecentSignalsTable({
 
   const cards = useMemo(() => {
     if (Array.isArray(chartCards) && chartCards.length > 0) {
-      return chartCards.slice(0, 3).map((card) => buildCardFromChart(card, displaySignal))
+      return chartCards.slice(0, 3).map((card) =>
+        buildCardFromChart(
+          {
+            ...card,
+            activePrice: activePrice ?? card.activePrice,
+            latestSignal: card.latestSignal ?? displaySignal,
+          },
+          displaySignal
+        )
+      )
     }
 
     return buildFallbackCards(displaySignal, symbol, timeframe, activePrice)
