@@ -3920,6 +3920,80 @@ export default function Dashboard() {
     mainOverlayReady,
   ])
 
+  const matrixScorecards = useMemo(() => {
+    const mainNrtr = buildNrtrUnifiedStrategyContext(mainChartCandles, mainChartIndicatorSettings)
+    const miniOneNrtr = buildNrtrUnifiedStrategyContext(miniChartOneCandles, miniChartOneIndicatorSettings)
+    const miniTwoNrtr = buildNrtrUnifiedStrategyContext(miniChartTwoCandles, miniChartTwoIndicatorSettings)
+
+    const nrtrCharts = [
+      {
+        ...mainNrtr,
+        key: "nrtr-main",
+        source: "NRTR Main",
+        label: "NRTR Main",
+        chartRole: "main",
+        symbol: selectedSymbol,
+        timeframe: selectedTimeframe,
+        candleCount: mainChartCandles.length,
+      },
+      {
+        ...miniOneNrtr,
+        key: "nrtr-mini-1",
+        source: "NRTR Mini 1",
+        label: "NRTR Mini 1",
+        chartRole: "mini-1",
+        symbol: miniOneSymbol,
+        timeframe: miniOneTimeframe,
+        candleCount: miniChartOneCandles.length,
+      },
+      {
+        ...miniTwoNrtr,
+        key: "nrtr-mini-2",
+        source: "NRTR Mini 2",
+        label: "NRTR Mini 2",
+        chartRole: "mini-2",
+        symbol: miniTwoSymbol,
+        timeframe: miniTwoTimeframe,
+        candleCount: miniChartTwoCandles.length,
+      },
+    ]
+
+    return {
+      ...(chartScorecards ?? {}),
+      nrtr: mainNrtr,
+      nrtrMain: mainNrtr,
+      nrtrMiniOne: miniOneNrtr,
+      nrtrMiniTwo: miniTwoNrtr,
+      nrtrCharts,
+      nrtrStrategyFeeds: nrtrCharts,
+    }
+  }, [
+    chartScorecards,
+    mainChartCandles,
+    miniChartOneCandles,
+    miniChartTwoCandles,
+    mainChartIndicatorSettings,
+    miniChartOneIndicatorSettings,
+    miniChartTwoIndicatorSettings,
+    selectedSymbol,
+    selectedTimeframe,
+    miniOneSymbol,
+    miniOneTimeframe,
+    miniTwoSymbol,
+    miniTwoTimeframe,
+  ])
+
+  const matrixMlFeatures = useMemo(() => {
+    const nrtrCharts = matrixScorecards?.nrtrCharts ?? []
+
+    return {
+      ...(chartMlFeatures ?? {}),
+      nrtrStrategyFeeds: nrtrCharts,
+      nrtrUsedForMl: 0,
+      nrtrPurpose: "strategy_context_only",
+    }
+  }, [chartMlFeatures, matrixScorecards])
+
   if (!isClient) {
     return null
   }
@@ -4161,8 +4235,8 @@ export default function Dashboard() {
                 signal={augmentedLatestSignal as any}
                 unifiedIntelligence={mainUnifiedIntelligence}
                 overlayPayload={mainChartOverlayPayload}
-                scorecards={chartScorecards}
-                mlFeatures={chartMlFeatures}
+                scorecards={matrixScorecards}
+                mlFeatures={matrixMlFeatures}
                 technicalSentiment={sharedTechnicalSentiment as any}
                 activeSymbol={selectedSymbol}
                 activeTimeframe={selectedTimeframe}
