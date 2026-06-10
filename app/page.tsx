@@ -4038,7 +4038,7 @@ export default function Dashboard() {
   }, [chartMlFeatures, matrixScorecards])
 
   const safeDashboardStatus = getSafeDashboardStatus({
-    error: dashboardError,
+    error: null,
     updatedAt: latestSignal?.createdAt ?? lastUpdated,
     signal: latestSignal,
     candlesCount: mainChartCandles.length,
