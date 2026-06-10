@@ -57,6 +57,34 @@ except Exception:
 
 
 try:
+    from api.entry_ml import (
+        close_entry_ml_trade,
+        entry_ml_export,
+        entry_ml_summary,
+        get_entry_ml_confidence,
+        record_entry_ml_trade,
+        reset_entry_ml_memory,
+    )
+except Exception:
+    try:
+        from entry_ml import (
+            close_entry_ml_trade,
+            entry_ml_export,
+            entry_ml_summary,
+            get_entry_ml_confidence,
+            record_entry_ml_trade,
+            reset_entry_ml_memory,
+        )
+    except Exception:
+        close_entry_ml_trade = None
+        entry_ml_export = None
+        entry_ml_summary = None
+        get_entry_ml_confidence = None
+        record_entry_ml_trade = None
+        reset_entry_ml_memory = None
+
+
+try:
     from api.ml_feature_store import (
         get_ml_feature_store_summary,
         get_recent_ml_feature_snapshots,
@@ -219,6 +247,46 @@ class TradingViewPayload(BaseModel):
     cot: Optional[str] = None
     warnings: Optional[List[str]] = Field(default_factory=list)
 
+
+
+
+class EntryMlConfidencePayload(BaseModel):
+    symbol: Optional[str] = "MES1!"
+    timeframe: Optional[str] = "1m"
+    side: Optional[Any] = None
+    mode: Optional[str] = "NRTR"
+
+    entryTime: Optional[Any] = None
+    entryPrice: Optional[float] = None
+    targetPrice: Optional[float] = None
+    stopPrice: Optional[float] = None
+    riskReward: Optional[float] = None
+
+    scorecards: Optional[Dict[str, Any]] = None
+    ghostMl: Optional[Dict[str, Any]] = None
+    targetMl: Optional[Dict[str, Any]] = None
+    context: Optional[Dict[str, Any]] = None
+
+
+class EntryMlRecordPayload(EntryMlConfidencePayload):
+    pass
+
+
+class EntryMlClosePayload(BaseModel):
+    symbol: Optional[str] = "MES1!"
+    timeframe: Optional[str] = "1m"
+    entryTime: Optional[Any] = None
+    side: Optional[Any] = None
+    mode: Optional[str] = "NRTR"
+
+    exitTime: Optional[Any] = None
+    exitPrice: Optional[float] = None
+    pnl: Optional[float] = None
+    pnlPercent: Optional[float] = None
+    mfe: Optional[float] = None
+    mae: Optional[float] = None
+    barsHeld: Optional[int] = None
+    exitReason: Optional[str] = None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BASIC HELPERS
@@ -5897,6 +5965,133 @@ def ghost_optimizer_route(symbol: str = "", timeframe: str = "") -> Dict[str, An
         }
 
     return run_ghost_optimizer(symbol=symbol, timeframe=timeframe)
+
+
+@app.post("/api/entry-ml-confidence")
+def entry_ml_confidence_route(payload: EntryMlConfidencePayload) -> Dict[str, Any]:
+    if get_entry_ml_confidence is None:
+        return {
+            "eventType": "ENTRY_ML_CONFIDENCE",
+            "status": "Unavailable",
+            "error": "api.entry_ml module unavailable",
+            "entryConfidence": 0,
+            "confidence": 0,
+            "confidenceGrade": "F",
+            "aiTraderUsable": False,
+            "createdAt": now_iso(),
+        }
+
+    return get_entry_ml_confidence(
+        symbol=payload.symbol or "MES1!",
+        timeframe=payload.timeframe or "1m",
+        side=payload.side,
+        mode=payload.mode or "NRTR",
+        entry_price=payload.entryPrice,
+        target_price=payload.targetPrice,
+        stop_price=payload.stopPrice,
+        risk_reward=payload.riskReward,
+        scorecards=payload.scorecards if isinstance(payload.scorecards, dict) else {},
+        ghost_ml=payload.ghostMl if isinstance(payload.ghostMl, dict) else {},
+        target_ml=payload.targetMl if isinstance(payload.targetMl, dict) else {},
+        context=payload.context if isinstance(payload.context, dict) else {},
+    )
+
+
+@app.post("/api/entry-ml-record")
+def entry_ml_record_route(payload: EntryMlRecordPayload) -> Dict[str, Any]:
+    if record_entry_ml_trade is None:
+        return {
+            "eventType": "ENTRY_ML_RECORD",
+            "status": "Unavailable",
+            "error": "api.entry_ml module unavailable",
+            "createdAt": now_iso(),
+        }
+
+    return record_entry_ml_trade(
+        symbol=payload.symbol or "MES1!",
+        timeframe=payload.timeframe or "1m",
+        entry_time=payload.entryTime or now_iso(),
+        side=payload.side,
+        mode=payload.mode or "NRTR",
+        entry_price=payload.entryPrice,
+        target_price=payload.targetPrice,
+        stop_price=payload.stopPrice,
+        risk_reward=payload.riskReward,
+        scorecards=payload.scorecards if isinstance(payload.scorecards, dict) else {},
+        ghost_ml=payload.ghostMl if isinstance(payload.ghostMl, dict) else {},
+        target_ml=payload.targetMl if isinstance(payload.targetMl, dict) else {},
+        context=payload.context if isinstance(payload.context, dict) else {},
+    )
+
+
+@app.post("/api/entry-ml-close")
+def entry_ml_close_route(payload: EntryMlClosePayload) -> Dict[str, Any]:
+    if close_entry_ml_trade is None:
+        return {
+            "eventType": "ENTRY_ML_CLOSE",
+            "status": "Unavailable",
+            "error": "api.entry_ml module unavailable",
+            "createdAt": now_iso(),
+        }
+
+    result = close_entry_ml_trade(
+        symbol=payload.symbol or "MES1!",
+        timeframe=payload.timeframe or "1m",
+        entry_time=payload.entryTime,
+        side=payload.side,
+        mode=payload.mode or "NRTR",
+        exit_time=payload.exitTime or now_iso(),
+        exit_price=payload.exitPrice,
+        pnl=payload.pnl,
+        pnl_percent=payload.pnlPercent,
+        mfe=payload.mfe,
+        mae=payload.mae,
+        bars_held=payload.barsHeld,
+        exit_reason=payload.exitReason,
+    )
+
+    return result or {
+        "eventType": "ENTRY_ML_CLOSE",
+        "status": "NotFound",
+        "message": "No matching open entry ML trade was found.",
+        "createdAt": now_iso(),
+    }
+
+
+@app.get("/api/entry-ml-status")
+def entry_ml_status_route(symbol: str = "", timeframe: str = "") -> Dict[str, Any]:
+    if entry_ml_summary is None:
+        return {
+            "eventType": "ENTRY_ML_STATUS",
+            "status": "Unavailable",
+            "error": "api.entry_ml module unavailable",
+            "createdAt": now_iso(),
+        }
+    return entry_ml_summary(symbol=symbol, timeframe=timeframe)
+
+
+@app.get("/api/entry-ml-export")
+def entry_ml_export_route() -> Dict[str, Any]:
+    if entry_ml_export is None:
+        return {
+            "eventType": "ENTRY_ML_EXPORT",
+            "status": "Unavailable",
+            "error": "api.entry_ml module unavailable",
+            "createdAt": now_iso(),
+        }
+    return entry_ml_export()
+
+
+@app.post("/api/entry-ml-reset")
+def entry_ml_reset_route(symbol: Optional[str] = None, timeframe: Optional[str] = None) -> Dict[str, Any]:
+    if reset_entry_ml_memory is None:
+        return {
+            "eventType": "ENTRY_ML_RESET",
+            "status": "Unavailable",
+            "error": "api.entry_ml module unavailable",
+            "createdAt": now_iso(),
+        }
+    return reset_entry_ml_memory(symbol=symbol, timeframe=timeframe)
 
 
 @app.get("/api/target-ml-status")
