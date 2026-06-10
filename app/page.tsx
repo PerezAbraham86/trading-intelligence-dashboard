@@ -2030,7 +2030,42 @@ function buildNrtrUnifiedStrategyContext(
   }
 }
 
-function buildVisualOverlayScorecards(candles: DashboardCandle[], ...sources: any[], mainSettings?: ChartStrategySettings | null) {
+
+function extractNrtrSettingsFromSources(sources: any[]): ChartStrategySettings | null {
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue
+
+    const candidates = [
+      source.mainSettings,
+      source.settings,
+      source.chartSettings,
+      source.strategySettings,
+      source.mainChartSettings,
+      source?.scorecards?.settings,
+      source?.summary?.settings,
+    ]
+
+    for (const candidate of candidates) {
+      if (!candidate || typeof candidate !== "object") continue
+
+      const nrtrMode = candidate.nrtrMode
+      if (nrtrMode === "ATR-Based" || nrtrMode === "Percentage" || nrtrMode === "Off") {
+        return {
+          smmaLength: Number(candidate.smmaLength ?? 20),
+          nrtrMode,
+          nrtrAtrLength: Number(candidate.nrtrAtrLength ?? 5),
+          nrtrAtrMultiplier: Number(candidate.nrtrAtrMultiplier ?? 1.25),
+          nrtrPercent: Number(candidate.nrtrPercent ?? 0.25),
+          showNrtrExitLabels: Boolean(candidate.showNrtrExitLabels),
+        }
+      }
+    }
+  }
+
+  return null
+}
+
+function buildVisualOverlayScorecards(candles: DashboardCandle[], ...sources: any[]) {
   const mainCandles = candles
 
   const payloadSources = sources.filter((source) => source && typeof source === 'object')
@@ -2266,7 +2301,7 @@ function buildVisualOverlayScorecards(candles: DashboardCandle[], ...sources: an
   }
 
   return {
-    nrtr: buildNrtrUnifiedStrategyContext(mainCandles, mainSettings),
+    nrtr: buildNrtrUnifiedStrategyContext(mainCandles, extractNrtrSettingsFromSources(sources)),
     scorecards,
     mlFeatures,
   }
