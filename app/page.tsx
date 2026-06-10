@@ -1932,105 +1932,6 @@ function buildVisualTargetPlan(
 
 
 
-function buildNrtrUnifiedStrategyContext(
-  candles: DashboardCandle[],
-  settings?: ChartStrategySettings | null
-) {
-  const safeSettings = settings ?? {
-    smmaLength: 20,
-    nrtrMode: "ATR-Based" as const,
-    nrtrAtrLength: 5,
-    nrtrAtrMultiplier: 1.25,
-    nrtrPercent: 0.25,
-    showNrtrExitLabels: false,
-  }
-
-  if (!Array.isArray(candles) || candles.length < Math.max(8, safeSettings.nrtrAtrLength + 2)) {
-    return {
-      status: "Waiting",
-      direction: "neutral",
-      score: 0,
-      confidence: 0,
-      label: "NRTR",
-      detail: "Waiting for enough candles",
-      usedForMl: false,
-      purpose: "strategy_context_only",
-    }
-  }
-
-  if (safeSettings.nrtrMode === "Off") {
-    return {
-      status: "Inactive",
-      direction: "neutral",
-      score: 0,
-      confidence: 0,
-      label: "NRTR",
-      detail: "NRTR is off",
-      usedForMl: false,
-      purpose: "strategy_context_only",
-    }
-  }
-
-  const last = candles[candles.length - 1]
-  const prev = candles[candles.length - 2]
-  const close = Number(last.close)
-  const prevClose = Number(prev.close)
-
-  if (!Number.isFinite(close) || !Number.isFinite(prevClose) || close <= 0) {
-    return {
-      status: "Waiting",
-      direction: "neutral",
-      score: 0,
-      confidence: 0,
-      label: "NRTR",
-      detail: "Waiting for valid candle prices",
-      usedForMl: false,
-      purpose: "strategy_context_only",
-    }
-  }
-
-  const rangeSample = candles.slice(-Math.max(6, safeSettings.nrtrAtrLength))
-  const avgRange =
-    rangeSample.reduce((sum, candle) => {
-      const high = Number(candle.high)
-      const low = Number(candle.low)
-      return sum + (Number.isFinite(high) && Number.isFinite(low) ? Math.max(high - low, 0) : 0)
-    }, 0) / Math.max(rangeSample.length, 1)
-
-  const atrDistance =
-    safeSettings.nrtrMode === "ATR-Based"
-      ? avgRange * safeSettings.nrtrAtrMultiplier
-      : close * (safeSettings.nrtrPercent / 100)
-
-  const move = close - prevClose
-  const direction =
-    move > 0 ? "bullish" :
-    move < 0 ? "bearish" :
-    "neutral"
-
-  const score =
-    direction === "neutral"
-      ? 0
-      : Math.max(5, Math.min(100, Math.abs(move) / Math.max(atrDistance, close * 0.0001, 0.000001) * 100))
-
-  const confidence =
-    direction === "neutral"
-      ? 0
-      : Math.max(15, Math.min(100, 45 + score * 0.45))
-
-  return {
-    status: direction === "neutral" ? "Waiting" : "Active",
-    direction,
-    score: Math.round(score),
-    confidence: Math.round(confidence),
-    label: "NRTR",
-    detail: `${safeSettings.nrtrMode} • ATR ${safeSettings.nrtrAtrLength} x${safeSettings.nrtrAtrMultiplier} • strategy context only`,
-    usedForMl: false,
-    purpose: "strategy_context_only",
-  }
-}
-
-
 function extractNrtrSettingsFromSources(sources: any[]): ChartStrategySettings | null {
   for (const source of sources) {
     if (!source || typeof source !== "object") continue
@@ -2065,7 +1966,198 @@ function extractNrtrSettingsFromSources(sources: any[]): ChartStrategySettings |
   return null
 }
 
+function buildNrtrUnifiedStrategyContext(
+  candles: DashboardCandle[],
+  settings?: ChartStrategySettings | null
+) {
+  const safeSettings = settings ?? {
+    smmaLength: 20,
+    nrtrMode: "ATR-Based" as const,
+    nrtrAtrLength: 5,
+    nrtrAtrMultiplier: 1.25,
+    nrtrPercent: 0.25,
+    showNrtrExitLabels: false,
+  }
+
+  if (!Array.isArray(candles) || candles.length < Math.max(8, safeSettings.nrtrAtrLength + 2)) {
+    return {
+      status: "Waiting",
+      state: "Waiting",
+      direction: "neutral",
+      signal: "NEUTRAL",
+      score: 0,
+      confidence: 0,
+      label: "NRTR",
+      name: "NRTR",
+      detail: "Waiting for enough candles",
+      details: "Waiting for enough candles",
+      usedForMl: false,
+      purpose: "strategy_context_only",
+    }
+  }
+
+  if (safeSettings.nrtrMode === "Off") {
+    return {
+      status: "Inactive",
+      state: "Inactive",
+      direction: "neutral",
+      signal: "NEUTRAL",
+      score: 0,
+      confidence: 0,
+      label: "NRTR",
+      name: "NRTR",
+      detail: "NRTR is off",
+      details: "NRTR is off",
+      usedForMl: false,
+      purpose: "strategy_context_only",
+    }
+  }
+
+  const latest = candles[candles.length - 1]
+  const previous = candles[candles.length - 2]
+  const close = Number(latest.close)
+  const previousClose = Number(previous.close)
+
+  if (!Number.isFinite(close) || !Number.isFinite(previousClose) || close <= 0) {
+    return {
+      status: "Waiting",
+      state: "Waiting",
+      direction: "neutral",
+      signal: "NEUTRAL",
+      score: 0,
+      confidence: 0,
+      label: "NRTR",
+      name: "NRTR",
+      detail: "Waiting for valid candle prices",
+      details: "Waiting for valid candle prices",
+      usedForMl: false,
+      purpose: "strategy_context_only",
+    }
+  }
+
+  const atrLength = Math.max(1, Number(safeSettings.nrtrAtrLength || 5))
+  const sample = candles.slice(-Math.max(atrLength + 2, 10))
+  const trueRanges = sample.slice(1).map((candle, index) => {
+    const prev = sample[index]
+    const high = Number(candle.high)
+    const low = Number(candle.low)
+    const prevCloseValue = Number(prev.close)
+
+    if (!Number.isFinite(high) || !Number.isFinite(low) || !Number.isFinite(prevCloseValue)) return 0
+
+    return Math.max(
+      high - low,
+      Math.abs(high - prevCloseValue),
+      Math.abs(low - prevCloseValue),
+    )
+  })
+
+  const atr =
+    trueRanges.reduce((sum, value) => sum + value, 0) /
+    Math.max(trueRanges.length, 1)
+
+  const distance =
+    safeSettings.nrtrMode === "ATR-Based"
+      ? atr * Number(safeSettings.nrtrAtrMultiplier || 1.25)
+      : close * (Number(safeSettings.nrtrPercent || 0.25) / 100)
+
+  const recentHigh = Math.max(...sample.map((candle) => Number(candle.high)).filter(Number.isFinite))
+  const recentLow = Math.min(...sample.map((candle) => Number(candle.low)).filter(Number.isFinite))
+
+  const bullishStop = recentHigh - distance
+  const bearishStop = recentLow + distance
+
+  let direction: "bullish" | "bearish" | "neutral" = "neutral"
+
+  if (close >= bullishStop && close >= previousClose) {
+    direction = "bullish"
+  } else if (close <= bearishStop && close <= previousClose) {
+    direction = "bearish"
+  } else if (close > previousClose) {
+    direction = "bullish"
+  } else if (close < previousClose) {
+    direction = "bearish"
+  }
+
+  const activeStop =
+    direction === "bullish"
+      ? bullishStop
+      : direction === "bearish"
+        ? bearishStop
+        : close
+
+  const distanceFromStop = Math.abs(close - activeStop)
+  const rawScore =
+    direction === "neutral"
+      ? 0
+      : Math.max(5, Math.min(100, (distanceFromStop / Math.max(distance, close * 0.0001, 0.000001)) * 100))
+
+  const confidence =
+    direction === "neutral"
+      ? 0
+      : Math.max(20, Math.min(100, 48 + rawScore * 0.42))
+
+  const signal =
+    direction === "bullish" ? "BULLISH" :
+    direction === "bearish" ? "BEARISH" :
+    "NEUTRAL"
+
+  const status = direction === "neutral" ? "Waiting" : "Active"
+  const detail = `${safeSettings.nrtrMode} • ATR ${safeSettings.nrtrAtrLength} x${safeSettings.nrtrAtrMultiplier} • Stop ${activeStop.toFixed(2)} • strategy context only`
+
+  return {
+    status,
+    state: status,
+    direction,
+    signal,
+    side: direction,
+    score: Math.round(rawScore),
+    confidence: Math.round(confidence),
+    label: "NRTR",
+    name: "NRTR",
+    detail,
+    details: detail,
+    value: Math.round(confidence),
+    usedForMl: false,
+    purpose: "strategy_context_only",
+    nrtrMode: safeSettings.nrtrMode,
+    nrtrStop: Number(activeStop.toFixed(5)),
+    close,
+  }
+}
+
+
+
+function getLiveNrtrMatrixSource(scorecards: any) {
+  const nrtr =
+    scorecards?.nrtrMatrix ??
+    scorecards?.nrtrStrategy ??
+    scorecards?.nrtr ??
+    scorecards?.nrtrStrategyContext
+
+  if (!nrtr || typeof nrtr !== "object") return null
+
+  return {
+    id: "nrtr",
+    name: "NRTR",
+    label: "NRTR",
+    system: "STRATEGY",
+    status: nrtr.status ?? nrtr.state ?? "Active",
+    state: nrtr.state ?? nrtr.status ?? "Active",
+    direction: nrtr.direction ?? "neutral",
+    signal: nrtr.signal ?? "NEUTRAL",
+    score: Number(nrtr.score ?? nrtr.confidence ?? 0),
+    confidence: Number(nrtr.confidence ?? nrtr.score ?? 0),
+    details: nrtr.details ?? nrtr.detail ?? "NRTR strategy context",
+    detail: nrtr.detail ?? nrtr.details ?? "NRTR strategy context",
+    usedForMl: false,
+    purpose: "strategy_context_only",
+  }
+}
+
 function buildVisualOverlayScorecards(candles: DashboardCandle[], ...sources: any[]) {
+  const liveNrtrStrategyContext = buildNrtrUnifiedStrategyContext(candles, extractNrtrSettingsFromSources(sources))
+
   const mainCandles = candles
 
   const payloadSources = sources.filter((source) => source && typeof source === 'object')
@@ -2285,6 +2377,7 @@ function buildVisualOverlayScorecards(candles: DashboardCandle[], ...sources: an
     sweepCount: hiddenContext.sweepCount,
     displacementCount: hiddenContext.displacementCount,
     inducementCount: hiddenContext.inducementCount,
+    nrtrStrategyContext: liveNrtrStrategyContext,
     mlHierarchy: 'SMC_ALPHA_DLM_ORDERBLOCKS_GHOST_ONLY',
     nrtrUsedForMl: 0,
     smmaUsedForMl: 0,
@@ -2301,7 +2394,9 @@ function buildVisualOverlayScorecards(candles: DashboardCandle[], ...sources: an
   }
 
   return {
-    nrtr: buildNrtrUnifiedStrategyContext(mainCandles, extractNrtrSettingsFromSources(sources)),
+    nrtr: liveNrtrStrategyContext,
+    nrtrStrategy: liveNrtrStrategyContext,
+    nrtrMatrix: liveNrtrStrategyContext,
     scorecards,
     mlFeatures,
   }
