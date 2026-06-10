@@ -1931,7 +1931,108 @@ function buildVisualTargetPlan(
 }
 
 
-function buildVisualOverlayScorecards(candles: DashboardCandle[], ...sources: any[]) {
+
+function buildNrtrUnifiedStrategyContext(
+  candles: DashboardCandle[],
+  settings?: ChartStrategySettings | null
+) {
+  const safeSettings = settings ?? {
+    smmaLength: 20,
+    nrtrMode: "ATR-Based" as const,
+    nrtrAtrLength: 5,
+    nrtrAtrMultiplier: 1.25,
+    nrtrPercent: 0.25,
+    showNrtrExitLabels: false,
+  }
+
+  if (!Array.isArray(candles) || candles.length < Math.max(8, safeSettings.nrtrAtrLength + 2)) {
+    return {
+      status: "Waiting",
+      direction: "neutral",
+      score: 0,
+      confidence: 0,
+      label: "NRTR",
+      detail: "Waiting for enough candles",
+      usedForMl: false,
+      purpose: "strategy_context_only",
+    }
+  }
+
+  if (safeSettings.nrtrMode === "Off") {
+    return {
+      status: "Inactive",
+      direction: "neutral",
+      score: 0,
+      confidence: 0,
+      label: "NRTR",
+      detail: "NRTR is off",
+      usedForMl: false,
+      purpose: "strategy_context_only",
+    }
+  }
+
+  const last = candles[candles.length - 1]
+  const prev = candles[candles.length - 2]
+  const close = Number(last.close)
+  const prevClose = Number(prev.close)
+
+  if (!Number.isFinite(close) || !Number.isFinite(prevClose) || close <= 0) {
+    return {
+      status: "Waiting",
+      direction: "neutral",
+      score: 0,
+      confidence: 0,
+      label: "NRTR",
+      detail: "Waiting for valid candle prices",
+      usedForMl: false,
+      purpose: "strategy_context_only",
+    }
+  }
+
+  const rangeSample = candles.slice(-Math.max(6, safeSettings.nrtrAtrLength))
+  const avgRange =
+    rangeSample.reduce((sum, candle) => {
+      const high = Number(candle.high)
+      const low = Number(candle.low)
+      return sum + (Number.isFinite(high) && Number.isFinite(low) ? Math.max(high - low, 0) : 0)
+    }, 0) / Math.max(rangeSample.length, 1)
+
+  const atrDistance =
+    safeSettings.nrtrMode === "ATR-Based"
+      ? avgRange * safeSettings.nrtrAtrMultiplier
+      : close * (safeSettings.nrtrPercent / 100)
+
+  const move = close - prevClose
+  const direction =
+    move > 0 ? "bullish" :
+    move < 0 ? "bearish" :
+    "neutral"
+
+  const score =
+    direction === "neutral"
+      ? 0
+      : Math.max(5, Math.min(100, Math.abs(move) / Math.max(atrDistance, close * 0.0001, 0.000001) * 100))
+
+  const confidence =
+    direction === "neutral"
+      ? 0
+      : Math.max(15, Math.min(100, 45 + score * 0.45))
+
+  return {
+    status: direction === "neutral" ? "Waiting" : "Active",
+    direction,
+    score: Math.round(score),
+    confidence: Math.round(confidence),
+    label: "NRTR",
+    detail: `${safeSettings.nrtrMode} • ATR ${safeSettings.nrtrAtrLength} x${safeSettings.nrtrAtrMultiplier} • strategy context only`,
+    usedForMl: false,
+    purpose: "strategy_context_only",
+  }
+}
+
+function buildVisualOverlayScorecards(candles: DashboardCandle[], ...sources: any[], mainSettings?: ChartStrategySettings | null) {
+  const mainCandles = candles
+
   const payloadSources = sources.filter((source) => source && typeof source === 'object')
   if (!payloadSources.length) return null
 
@@ -2165,6 +2266,7 @@ function buildVisualOverlayScorecards(candles: DashboardCandle[], ...sources: an
   }
 
   return {
+    nrtr: buildNrtrUnifiedStrategyContext(mainCandles, mainSettings),
     scorecards,
     mlFeatures,
   }
