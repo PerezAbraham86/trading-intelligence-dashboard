@@ -972,9 +972,9 @@ function calculateNrtrOptimization(
   miniOneSettings: ChartStrategySettings,
   miniTwoSettings: ChartStrategySettings,
 ) {
-  const atrLengths = [5, 7, 10, 14, 21, 34];
-  const atrMultipliers = [0.75, 1, 1.25, 1.5, 2, 2.5, 3, 3.5, 4];
-  const percentages = [0.1, 0.15, 0.2, 0.25, 0.35, 0.5, 0.75, 1];
+  const atrLengths = Array.from({ length: 21 }, (_, index) => index + 1);
+  const atrMultipliers = Array.from({ length: 12 }, (_, index) => Number(((index + 1) * 0.25).toFixed(2)));
+  const percentages = Array.from({ length: 50 }, (_, index) => Number(((index + 1) * 0.01).toFixed(2)));
 
   const rows: NrtrOptimizationRow[] = [];
 
@@ -1141,6 +1141,7 @@ function NrtrOptimizerView({
             optimizer toggle is on. Ranking favors P&L, win rate, profit
             factor, trade count, and lower drawdown.
           </p>
+          <p className="mt-1 text-xs text-cyan-300">302 total NRTR combinations • Full capped scan: ATR lengths 1-21 • multipliers 0.25-3.00 by 0.25 • percentages 0.01%-0.50% by 0.01%.</p>
         </div>
 
         <div className="overflow-hidden rounded-xl border border-dark-700">
