@@ -2292,6 +2292,8 @@ def align_ghosts_to_target_ml(
         )
 
         next_ghost = dict(ghost)
+        per_ghost_target = round_price(normalized_symbol, new_close)
+
         next_ghost.update({
             "open": round(new_open, 5),
             "high": round(new_high, 5),
@@ -2301,7 +2303,19 @@ def align_ghosts_to_target_ml(
             "direction": direction,
             "source": f"{ghost.get('source', 'ghost')}+target_ml_aligned",
             "targetMlAligned": True,
-            "targetPrice": round(target_price, 5),
+
+            # Per-ghost target: this is what each ghost candle is trying to reach.
+            # The frontend table should show this field per row.
+            "targetPrice": per_ghost_target,
+            "ghostTargetPrice": per_ghost_target,
+            "projectedTargetPrice": per_ghost_target,
+
+            # Final learned Target ML objective remains available separately.
+            "finalTargetPrice": round_price(normalized_symbol, target_price),
+            "overallTargetPrice": round_price(normalized_symbol, target_price),
+
+            "targetStep": index + 1,
+            "targetHorizon": total,
             "targetSource": target_source,
             "targetConfidence": round(target_confidence, 2),
             "targetMlReady": target_ml_ready,
@@ -2340,6 +2354,7 @@ def record_and_evaluate_target_ml_safe(
 
     if record_target_ml_projection is not None and isinstance(target_plan, dict):
         try:
+            # Record the final Target ML objective.
             record_target_ml_projection(
                 normalized_symbol,
                 normalized_timeframe,
@@ -2348,6 +2363,52 @@ def record_and_evaluate_target_ml_safe(
                 overlays if isinstance(overlays, dict) else {},
                 ghosts or [],
             )
+
+            # Record each ghost candle as its own target objective.
+            # This lets Target ML learn:
+            # - Ghost #1 target accuracy
+            # - Ghost #2 target accuracy
+            # - Ghost #3 target accuracy
+            for index, ghost in enumerate(ghosts or []):
+                if not isinstance(ghost, dict):
+                    continue
+
+                ghost_target = to_float(
+                    ghost.get("ghostTargetPrice")
+                    or ghost.get("projectedTargetPrice")
+                    or ghost.get("targetPrice")
+                    or ghost.get("close"),
+                    0,
+                )
+
+                if ghost_target <= 0:
+                    continue
+
+                ghost_target_plan = dict(target_plan)
+                ghost_target_plan.update({
+                    "target": ghost_target,
+                    "targetPrice": ghost_target,
+                    "takeProfitPrice": ghost_target,
+                    "tp1": ghost_target,
+                    "targetSource": f"{target_plan.get('targetSource') or target_plan.get('source') or 'target_ml'}_ghost_{index + 1}",
+                    "source": f"{target_plan.get('targetSource') or target_plan.get('source') or 'target_ml'}_ghost_{index + 1}",
+                    "horizon": index + 1,
+                    "ghostStep": index + 1,
+                    "ghostTargetLearning": True,
+                    "finalTargetPrice": ghost.get("finalTargetPrice") or target_plan.get("targetPrice"),
+                    "mlHierarchy": "SMC_ALPHA_DLM_ORDERBLOCKS_TARGET_GHOST_ONLY",
+                    "nrtrUsedForMl": 0,
+                    "smmaUsedForMl": 0,
+                })
+
+                record_target_ml_projection(
+                    normalized_symbol,
+                    normalized_timeframe,
+                    candles,
+                    ghost_target_plan,
+                    overlays if isinstance(overlays, dict) else {},
+                    ghosts or [],
+                )
         except Exception as error:
             print(f"[Target ML] record failed: {error}")
 
