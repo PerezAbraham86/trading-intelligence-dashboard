@@ -6028,6 +6028,7 @@ def ghost_optimizer_route(symbol: str = "", timeframe: str = "") -> Dict[str, An
     return run_ghost_optimizer(symbol=symbol, timeframe=timeframe)
 
 
+@app.post("/api/entry-ml/confidence")
 @app.post("/api/entry-ml-confidence")
 def entry_ml_confidence_route(payload: EntryMlConfidencePayload) -> Dict[str, Any]:
     if get_entry_ml_confidence is None:
@@ -6058,6 +6059,7 @@ def entry_ml_confidence_route(payload: EntryMlConfidencePayload) -> Dict[str, An
     )
 
 
+@app.post("/api/entry-ml/record")
 @app.post("/api/entry-ml-record")
 def entry_ml_record_route(payload: EntryMlRecordPayload) -> Dict[str, Any]:
     if record_entry_ml_trade is None:
@@ -6085,6 +6087,7 @@ def entry_ml_record_route(payload: EntryMlRecordPayload) -> Dict[str, Any]:
     )
 
 
+@app.post("/api/entry-ml/close")
 @app.post("/api/entry-ml-close")
 def entry_ml_close_route(payload: EntryMlClosePayload) -> Dict[str, Any]:
     if close_entry_ml_trade is None:
@@ -6119,6 +6122,8 @@ def entry_ml_close_route(payload: EntryMlClosePayload) -> Dict[str, Any]:
     }
 
 
+@app.get("/api/entry-ml/summary")
+@app.get("/api/entry-ml/status")
 @app.get("/api/entry-ml-status")
 def entry_ml_status_route(symbol: str = "", timeframe: str = "") -> Dict[str, Any]:
     if entry_ml_summary is None:
@@ -6131,6 +6136,7 @@ def entry_ml_status_route(symbol: str = "", timeframe: str = "") -> Dict[str, An
     return entry_ml_summary(symbol=symbol, timeframe=timeframe)
 
 
+@app.get("/api/entry-ml/export")
 @app.get("/api/entry-ml-export")
 def entry_ml_export_route() -> Dict[str, Any]:
     if entry_ml_export is None:
@@ -6143,6 +6149,7 @@ def entry_ml_export_route() -> Dict[str, Any]:
     return entry_ml_export()
 
 
+@app.post("/api/entry-ml/reset")
 @app.post("/api/entry-ml-reset")
 def entry_ml_reset_route(symbol: Optional[str] = None, timeframe: Optional[str] = None) -> Dict[str, Any]:
     if reset_entry_ml_memory is None:
