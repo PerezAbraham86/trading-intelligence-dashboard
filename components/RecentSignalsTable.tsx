@@ -493,7 +493,7 @@ function inferChartTrend(candles?: ChartCardCandle[], settings?: ChartCardStrate
       type: nrtrType,
       confidence,
       momentum: normalizedMove,
-      source: agreesWithSmma ? 'NRTR + SMMA agreement' : 'NRTR direction',
+      source: agreesWithSmma ? 'NRTR + SMMA agreement' : 'NRTR active trade',
       targetBasis: Math.max(atr, Math.abs(latest - Number(latestNrtr.value ?? latest))),
     }
   }
@@ -689,19 +689,198 @@ function resolveChartNrtrEntryPrice(
   return null
 }
 
+
+function calculateRecentSignalsAtr(candles: ChartCardCandle[], length: number) {
+  if (!Array.isArray(candles) || candles.length < 2) return []
+
+  const trueRanges = candles.map((candle, index) => {
+    if (index === 0) return Number(candle.high) - Number(candle.low)
+
+    const previousClose = Number(candles[index - 1]?.close)
+    const high = Number(candle.high)
+    const low = Number(candle.low)
+
+    return Math.max(
+      high - low,
+      Math.abs(high - previousClose),
+      Math.abs(low - previousClose),
+    )
+  })
+
+  return candles.map((_, index) => {
+    if (index < length) return NaN
+
+    const sample = trueRanges.slice(index - length + 1, index + 1)
+    return sample.reduce((sum, value) => sum + value, 0) / sample.length
+  })
+}
+
+function calculateRecentSignalsNrtrDirection(candles: ChartCardCandle[], settings?: ChartStrategySettings) {
+  if (!Array.isArray(candles) || candles.length < 3 || !settings || settings.nrtrMode === 'Off') {
+    return []
+  }
+
+  const atr = calculateRecentSignalsAtr(candles, Math.max(1, settings.nrtrAtrLength ?? 5))
+  const result: Array<{
+    index: number
+    time?: number | string
+    direction: 1 | -1 | 0
+    stop: number
+    entrySignal: 1 | -1 | 0
+  }> = []
+
+  let direction: 1 | -1 | 0 = 0
+  let trailingStop = Number(candles[0]?.close ?? 0)
+
+  for (let index = 1; index < candles.length; index += 1) {
+    const candle = candles[index]
+    const previous = candles[index - 1]
+    const close = Number(candle.close)
+    const previousClose = Number(previous.close)
+
+    if (!Number.isFinite(close) || close <= 0 || !Number.isFinite(previousClose)) {
+      result.push({
+        index,
+        time: candle.time,
+        direction,
+        stop: trailingStop,
+        entrySignal: 0,
+      })
+      continue
+    }
+
+    const distance =
+      settings.nrtrMode === 'Percentage'
+        ? close * ((settings.nrtrPercent ?? 0.25) / 100)
+        : Number.isFinite(atr[index])
+          ? atr[index] * (settings.nrtrAtrMultiplier ?? 1.25)
+          : Math.max(close * 0.001, 0.25)
+
+    if (!Number.isFinite(distance) || distance <= 0) {
+      result.push({
+        index,
+        time: candle.time,
+        direction,
+        stop: trailingStop,
+        entrySignal: 0,
+      })
+      continue
+    }
+
+    if (direction === 0) {
+      direction = close >= previousClose ? 1 : -1
+      trailingStop = direction === 1 ? close - distance : close + distance
+      result.push({
+        index,
+        time: candle.time,
+        direction,
+        stop: trailingStop,
+        entrySignal: direction,
+      })
+      continue
+    }
+
+    let entrySignal: 1 | -1 | 0 = 0
+
+    if (direction === 1) {
+      const candidateStop = Math.max(trailingStop, close - distance)
+
+      if (close < candidateStop) {
+        direction = -1
+        trailingStop = close + distance
+        entrySignal = -1
+      } else {
+        trailingStop = candidateStop
+      }
+    } else {
+      const candidateStop = Math.min(trailingStop, close + distance)
+
+      if (close > candidateStop) {
+        direction = 1
+        trailingStop = close - distance
+        entrySignal = 1
+      } else {
+        trailingStop = candidateStop
+      }
+    }
+
+    result.push({
+      index,
+      time: candle.time,
+      direction,
+      stop: trailingStop,
+      entrySignal,
+    })
+  }
+
+  return result
+}
+
+function getActiveNrtrTradeFromCandles(candles?: ChartCardCandle[], settings?: ChartStrategySettings) {
+  if (!Array.isArray(candles) || candles.length < 3 || !settings || settings.nrtrMode === 'Off') {
+    return null
+  }
+
+  const nrtr = calculateRecentSignalsNrtrDirection(candles, settings)
+  if (!nrtr.length) return null
+
+  let activeTrade: {
+    side: 'BUY' | 'SELL'
+    entry: number
+    entryIndex: number
+    entryTime?: number | string
+    stop: number
+  } | null = null
+
+  for (const point of nrtr) {
+    if (!point.entrySignal) continue
+
+    const candle = candles[point.index]
+    const entry = Number(candle?.close)
+
+    if (!Number.isFinite(entry) || entry <= 0) continue
+
+    activeTrade = {
+      side: point.entrySignal === 1 ? 'BUY' : 'SELL',
+      entry,
+      entryIndex: point.index,
+      entryTime: candle?.time,
+      stop: point.stop,
+    }
+  }
+
+  if (!activeTrade) return null
+
+  return {
+    ...activeTrade,
+    currentDirection: nrtr[nrtr.length - 1]?.direction ?? 0,
+    currentStop: nrtr[nrtr.length - 1]?.stop ?? activeTrade.stop,
+  }
+}
+
 function resolveChartSignalEntryPrice({
   latestSignal,
   fallbackSignal,
   currentPrice,
   candles,
+  settings,
   signalType,
 }: {
   latestSignal?: RecentSignal
   fallbackSignal?: RecentSignal
   currentPrice?: number
   candles?: ChartCardCandle[]
+  settings?: ChartStrategySettings
   signalType: 'BUY' | 'SELL' | 'HOLD'
 }) {
+  const activeNrtrTrade = getActiveNrtrTradeFromCandles(candles, settings)
+
+  // Highest priority: calculate the chart's active NRTR trade entry directly from
+  // that chart's candles/settings. This keeps Recent Signals aligned with strategy tables.
+  if (activeNrtrTrade && activeNrtrTrade.side === signalType && activeNrtrTrade.entry > 0) {
+    return activeNrtrTrade.entry
+  }
+
   const nrtrEntry = resolveChartNrtrEntryPrice(latestSignal, fallbackSignal, currentPrice)
 
   if (nrtrEntry && nrtrEntry > 0) return nrtrEntry
@@ -712,7 +891,14 @@ function resolveChartSignalEntryPrice({
     fallbackSignal,
   )
 
-  if (lockedSignalEntry && lockedSignalEntry > 0) return lockedSignalEntry
+  if (
+    lockedSignalEntry &&
+    lockedSignalEntry > 0 &&
+    currentPrice &&
+    Math.abs(lockedSignalEntry - currentPrice) / currentPrice > 0.00005
+  ) {
+    return lockedSignalEntry
+  }
 
   // Last resort: use the previous candle close as the latest chart-trigger entry,
   // not the current live price. This prevents Entry and Current from always matching.
@@ -726,7 +912,7 @@ function resolveChartSignalEntryPrice({
     if (Number.isFinite(latestOpen) && latestOpen > 0) return latestOpen
   }
 
-  return currentPrice && signalType !== 'HOLD' ? currentPrice : null
+  return null
 }
 
 function calculateDirectionalPnl({
@@ -952,8 +1138,11 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
   const hasCurrent = Number.isFinite(current) && current > 0
   const trend = inferChartTrend(input.candles, input.settings)
 
+  const activeNrtrTradeForType = getActiveNrtrTradeFromCandles(input.candles, input.settings)
   const signalType = normalizeSignalType(input.latestSignal?.signal ?? input.latestSignal?.type ?? fallbackSignal?.signal ?? fallbackSignal?.type)
-  const type = input.label.toLowerCase().includes('main') && signalType !== 'HOLD' ? signalType : trend.type
+  const type =
+    activeNrtrTradeForType?.side ??
+    (input.label.toLowerCase().includes('main') && signalType !== 'HOLD' ? signalType : trend.type)
   const signalConfidence = Number(input.latestSignal?.confidence ?? fallbackSignal?.confidence ?? 0)
   const confidence = clampPercent(
     input.label.toLowerCase().includes('main')
@@ -968,6 +1157,7 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
     fallbackSignal,
     currentPrice: hasCurrent ? current : undefined,
     candles: input.candles,
+    settings: input.settings,
     signalType: type,
   })
 
