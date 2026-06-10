@@ -715,6 +715,15 @@ function calculateRecentSignalsAtr(candles: ChartCardCandle[], length: number) {
   })
 }
 
+
+function getRecentSignalCandleTime(candle?: ChartCardCandle): string | number | undefined {
+  const value = candle?.time
+
+  if (typeof value === 'string' || typeof value === 'number') return value
+
+  return undefined
+}
+
 function calculateRecentSignalsNrtrDirection(candles: ChartCardCandle[], settings?: ChartCardStrategySettings) {
   if (!Array.isArray(candles) || candles.length < 3 || !settings || settings.nrtrMode === 'Off') {
     return []
@@ -741,7 +750,7 @@ function calculateRecentSignalsNrtrDirection(candles: ChartCardCandle[], setting
     if (!Number.isFinite(close) || close <= 0 || !Number.isFinite(previousClose)) {
       result.push({
         index,
-        time: candle.time,
+        time: getRecentSignalCandleTime(candle),
         direction,
         stop: trailingStop,
         entrySignal: 0,
@@ -759,7 +768,7 @@ function calculateRecentSignalsNrtrDirection(candles: ChartCardCandle[], setting
     if (!Number.isFinite(distance) || distance <= 0) {
       result.push({
         index,
-        time: candle.time,
+        time: getRecentSignalCandleTime(candle),
         direction,
         stop: trailingStop,
         entrySignal: 0,
@@ -772,7 +781,7 @@ function calculateRecentSignalsNrtrDirection(candles: ChartCardCandle[], setting
       trailingStop = direction === 1 ? close - distance : close + distance
       result.push({
         index,
-        time: candle.time,
+        time: getRecentSignalCandleTime(candle),
         direction,
         stop: trailingStop,
         entrySignal: direction,
@@ -806,7 +815,7 @@ function calculateRecentSignalsNrtrDirection(candles: ChartCardCandle[], setting
 
     result.push({
       index,
-      time: candle.time,
+      time: getRecentSignalCandleTime(candle),
       direction,
       stop: trailingStop,
       entrySignal,
@@ -844,7 +853,7 @@ function getActiveNrtrTradeFromCandles(candles?: ChartCardCandle[], settings?: C
       side: point.entrySignal === 1 ? 'BUY' : 'SELL',
       entry,
       entryIndex: point.index,
-      entryTime: candle?.time,
+      entryTime: getRecentSignalCandleTime(candle),
       stop: point.stop,
     }
   }
