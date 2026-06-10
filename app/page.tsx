@@ -4044,6 +4044,12 @@ export default function Dashboard() {
     candlesCount: mainChartCandles.length,
   })
 
+  const coreDashboardDataLoaded =
+    Boolean(latestSignal && typeof latestSignal === "object") ||
+    mainChartCandles.length > 0 ||
+    miniChartOneCandles.length > 0 ||
+    miniChartTwoCandles.length > 0
+
   if (!isClient) {
     return null
   }
@@ -4122,8 +4128,8 @@ export default function Dashboard() {
           </div>
 
           <ConnectionStatusBadge
-            status={connectionStatus}
-            lastUpdateTime={lastUpdateTime}
+            status={coreDashboardDataLoaded ? 'connected' : connectionStatus}
+            lastUpdateTime={coreDashboardDataLoaded ? (lastUpdateTime ?? new Date().toISOString()) : lastUpdateTime}
           />
         </div>
       </motion.div>
