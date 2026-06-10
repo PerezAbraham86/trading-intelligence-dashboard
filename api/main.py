@@ -29,6 +29,34 @@ from api.ghost_ml import (
 )
 
 try:
+    from api.target_ml import (
+        build_target_ml_plan,
+        evaluate_target_ml_records,
+        record_target_ml_projection,
+        reset_target_ml_memory,
+        target_ml_export,
+        target_ml_summary_from_candles,
+    )
+except Exception:
+    try:
+        from target_ml import (
+            build_target_ml_plan,
+            evaluate_target_ml_records,
+            record_target_ml_projection,
+            reset_target_ml_memory,
+            target_ml_export,
+            target_ml_summary_from_candles,
+        )
+    except Exception:
+        build_target_ml_plan = None
+        evaluate_target_ml_records = None
+        record_target_ml_projection = None
+        reset_target_ml_memory = None
+        target_ml_export = None
+        target_ml_summary_from_candles = None
+
+
+try:
     from api.ml_feature_store import (
         get_ml_feature_store_summary,
         get_recent_ml_feature_snapshots,
@@ -2006,6 +2034,273 @@ def build_python_ghost_candles(
         if is_candle_valid_for_symbol({**ghost, "symbol": normalized_symbol}, normalized_symbol)
     ]
 
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TARGET ML → GHOST COINCIDENCE HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_target_ml_plan_safe(
+    symbol: str,
+    timeframe: str,
+    candles: List[Dict[str, Any]],
+    overlays: Dict[str, Any],
+    ghosts: Optional[List[Dict[str, Any]]] = None,
+    signal: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Build learned Target ML plan when api/target_ml.py is available.
+
+    Target ML hierarchy:
+    - SMC
+    - AlphaX / DLM
+    - Order Blocks
+    - FVG
+    - PD zones
+    - liquidity sweeps/profile
+    - ghost projection history
+
+    Explicitly excludes:
+    - NRTR
+    - SMMA
+    - editable chart settings
+    """
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    if build_target_ml_plan is None:
+        return {
+            "eventType": "TARGET_ML_PLAN",
+            "status": "Unavailable",
+            "symbol": normalized_symbol,
+            "timeframe": normalized_timeframe,
+            "reason": "api.target_ml module unavailable",
+            "targetPrice": None,
+            "targetConfidence": 0,
+            "targetMlReady": False,
+            "ghostConfidenceBoost": 0,
+            "mlHierarchy": "SMC_ALPHA_DLM_ORDERBLOCKS_TARGET_GHOST_ONLY",
+            "nrtrUsedForMl": 0,
+            "smmaUsedForMl": 0,
+            "createdAt": now_iso(),
+        }
+
+    try:
+        plan = build_target_ml_plan(
+            normalized_symbol,
+            normalized_timeframe,
+            candles,
+            overlays if isinstance(overlays, dict) else {},
+            ghosts or [],
+            signal or {},
+        )
+
+        if not isinstance(plan, dict):
+            raise ValueError("target_ml returned non-dict plan")
+
+        plan["mlHierarchy"] = "SMC_ALPHA_DLM_ORDERBLOCKS_TARGET_GHOST_ONLY"
+        plan["nrtrUsedForMl"] = 0
+        plan["smmaUsedForMl"] = 0
+        return plan
+    except Exception as error:
+        print(f"[Target ML] plan build failed: {error}")
+        return {
+            "eventType": "TARGET_ML_PLAN",
+            "status": "Error",
+            "symbol": normalized_symbol,
+            "timeframe": normalized_timeframe,
+            "reason": str(error),
+            "targetPrice": None,
+            "targetConfidence": 0,
+            "targetMlReady": False,
+            "ghostConfidenceBoost": 0,
+            "mlHierarchy": "SMC_ALPHA_DLM_ORDERBLOCKS_TARGET_GHOST_ONLY",
+            "nrtrUsedForMl": 0,
+            "smmaUsedForMl": 0,
+            "createdAt": now_iso(),
+        }
+
+
+def align_ghosts_to_target_ml(
+    ghosts: List[Dict[str, Any]],
+    target_plan: Dict[str, Any],
+    symbol: str,
+) -> List[Dict[str, Any]]:
+    """
+    Make ghost candles coincide with the learned Target ML price.
+
+    Behavior:
+    - If Target ML has no valid target, keep ghosts unchanged.
+    - If Target ML has a target, gradually bends each ghost close toward it.
+    - The last ghost close is anchored at the target price.
+    - Confidence receives target ML boost when target history is strong.
+    """
+    if not ghosts or not isinstance(target_plan, dict):
+        return ghosts
+
+    normalized_symbol = normalize_symbol(symbol)
+    target_price = to_float(
+        target_plan.get("targetPrice")
+        or target_plan.get("target")
+        or target_plan.get("takeProfitPrice")
+        or target_plan.get("tp1"),
+        0,
+    )
+    entry_price = to_float(
+        target_plan.get("entryPrice")
+        or target_plan.get("entry")
+        or (ghosts[0].get("open") if ghosts and isinstance(ghosts[0], dict) else 0),
+        0,
+    )
+
+    if target_price <= 0 or entry_price <= 0:
+        return ghosts
+
+    direction = str(target_plan.get("direction") or "").lower()
+    if direction not in {"bullish", "bearish"}:
+        direction = "bullish" if target_price > entry_price else "bearish" if target_price < entry_price else "neutral"
+
+    if direction == "bullish" and target_price <= entry_price:
+        return ghosts
+    if direction == "bearish" and target_price >= entry_price:
+        return ghosts
+
+    boost = clamp(to_float(target_plan.get("ghostConfidenceBoost"), 0), -8, 12)
+    target_confidence = clamp(to_float(target_plan.get("targetConfidence"), 0), 0, 100)
+    target_ml_ready = bool(target_plan.get("targetMlReady"))
+    target_source = str(target_plan.get("targetSource") or target_plan.get("source") or "target_ml")
+
+    aligned: List[Dict[str, Any]] = []
+    total = max(len(ghosts), 1)
+
+    for index, ghost in enumerate(ghosts):
+        if not isinstance(ghost, dict):
+            continue
+
+        progress = (index + 1) / total
+        old_open = to_float(ghost.get("open"), entry_price)
+        old_close = to_float(ghost.get("close"), old_open)
+        old_high = to_float(ghost.get("high"), max(old_open, old_close))
+        old_low = to_float(ghost.get("low"), min(old_open, old_close))
+
+        target_anchor = entry_price + (target_price - entry_price) * progress
+
+        # Early ghosts blend. Final ghost lands exactly on target.
+        if index == total - 1:
+            new_close = target_price
+        else:
+            blend = 0.58 + progress * 0.22
+            new_close = old_close * (1.0 - blend) + target_anchor * blend
+
+        if index == 0:
+            new_open = old_open
+        else:
+            previous = aligned[-1] if aligned else ghost
+            new_open = (to_float(previous.get("open"), old_open) + to_float(previous.get("close"), old_close)) / 2.0
+
+        body_top = max(new_open, new_close)
+        body_bottom = min(new_open, new_close)
+        old_wick = max(old_high - old_low, abs(old_close - old_open), 0.000001)
+        wick = old_wick * (0.34 + progress * 0.08)
+
+        if direction == "bullish":
+            new_high = max(old_high, body_top + wick * 0.45, target_price if index == total - 1 else body_top)
+            new_low = min(old_low, body_bottom - wick * 0.35)
+        elif direction == "bearish":
+            new_high = max(old_high, body_top + wick * 0.35)
+            new_low = min(old_low, body_bottom - wick * 0.45, target_price if index == total - 1 else body_bottom)
+        else:
+            new_high = max(old_high, body_top + wick * 0.35)
+            new_low = min(old_low, body_bottom - wick * 0.35)
+
+        confidence = clamp(
+            to_float(ghost.get("confidence"), 0)
+            + boost
+            + (target_confidence - 50.0) * 0.05,
+            2,
+            96,
+        )
+
+        next_ghost = dict(ghost)
+        next_ghost.update({
+            "open": round(new_open, 5),
+            "high": round(new_high, 5),
+            "low": round(new_low, 5),
+            "close": round(new_close, 5),
+            "confidence": round(confidence),
+            "direction": direction,
+            "source": f"{ghost.get('source', 'ghost')}+target_ml_aligned",
+            "targetMlAligned": True,
+            "targetPrice": round(target_price, 5),
+            "targetSource": target_source,
+            "targetConfidence": round(target_confidence, 2),
+            "targetMlReady": target_ml_ready,
+            "ghostConfidenceBoost": round(boost, 2),
+            "mlHierarchy": "SMC_ALPHA_DLM_ORDERBLOCKS_TARGET_GHOST_ONLY",
+            "nrtrUsedForMl": 0,
+            "smmaUsedForMl": 0,
+        })
+
+        aligned.append(next_ghost)
+
+    return [
+        ghost for ghost in aligned
+        if is_candle_valid_for_symbol({**ghost, "symbol": normalized_symbol}, normalized_symbol)
+    ] or ghosts
+
+
+def record_and_evaluate_target_ml_safe(
+    symbol: str,
+    timeframe: str,
+    candles: List[Dict[str, Any]],
+    target_plan: Dict[str, Any],
+    overlays: Dict[str, Any],
+    ghosts: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    if not candles:
+        return {
+            "status": "Waiting",
+            "reason": "no_candles",
+            "symbol": normalized_symbol,
+            "timeframe": normalized_timeframe,
+        }
+
+    if record_target_ml_projection is not None and isinstance(target_plan, dict):
+        try:
+            record_target_ml_projection(
+                normalized_symbol,
+                normalized_timeframe,
+                candles,
+                target_plan,
+                overlays if isinstance(overlays, dict) else {},
+                ghosts or [],
+            )
+        except Exception as error:
+            print(f"[Target ML] record failed: {error}")
+
+    if target_ml_summary_from_candles is not None:
+        try:
+            return target_ml_summary_from_candles(normalized_symbol, normalized_timeframe, candles)
+        except Exception as error:
+            print(f"[Target ML] summary failed: {error}")
+
+    if evaluate_target_ml_records is not None:
+        try:
+            return evaluate_target_ml_records(normalized_symbol, normalized_timeframe, candles)
+        except Exception as error:
+            print(f"[Target ML] evaluate failed: {error}")
+
+    return {
+        "status": "Unavailable",
+        "reason": "api.target_ml module unavailable",
+        "symbol": normalized_symbol,
+        "timeframe": normalized_timeframe,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4559,14 +4854,42 @@ def build_python_dashboard_signal(symbol: str = "BTCUSD", timeframe: str = "1m",
 
     # Build SMC/AlphaX/DLM/OB context first, then let Ghost ML use that context.
     preliminary_overlays = build_python_chart_overlays(candles, [])
-    ghosts = build_python_ghost_candles(
+    base_ghosts = build_python_ghost_candles(
         candles,
         3,
         preliminary_overlays,
         normalized_symbol,
         normalized_timeframe,
     )
+    base_overlays = build_python_chart_overlays(candles, base_ghosts)
+    base_scorecards = analyze_python_core_scorecards(candles, sentiment, base_ghosts, base_overlays)
+    latest_price_for_target = to_float(candles[-1].get("close")) if candles else 0
+    target_plan = build_target_ml_plan_safe(
+        normalized_symbol,
+        normalized_timeframe,
+        candles,
+        base_overlays,
+        base_ghosts,
+        {
+            "signal": base_scorecards.get("signal"),
+            "direction": base_scorecards.get("signal"),
+            "entry": latest_price_for_target,
+            "price": latest_price_for_target,
+            "current": latest_price_for_target,
+        },
+    )
+    ghosts = align_ghosts_to_target_ml(base_ghosts, target_plan, normalized_symbol)
     overlays = build_python_chart_overlays(candles, ghosts)
+    overlays["targetMl"] = target_plan
+    overlays["targetPlan"] = target_plan
+    target_ml_status = record_and_evaluate_target_ml_safe(
+        normalized_symbol,
+        normalized_timeframe,
+        candles,
+        target_plan,
+        overlays,
+        ghosts,
+    )
     scorecards = analyze_python_core_scorecards(candles, sentiment, ghosts, overlays)
     fred_macro = build_fred_macro_context()
     options_pressure = build_options_pressure_context(normalized_symbol)
@@ -4594,6 +4917,18 @@ def build_python_dashboard_signal(symbol: str = "BTCUSD", timeframe: str = "1m",
         "price": price,
         "entry": price,
         "current": price,
+        "target": target_plan.get("targetPrice") or target_plan.get("target"),
+        "targetPrice": target_plan.get("targetPrice") or target_plan.get("target"),
+        "takeProfitPrice": target_plan.get("takeProfitPrice") or target_plan.get("targetPrice"),
+        "tp1": target_plan.get("tp1") or target_plan.get("targetPrice"),
+        "stop": target_plan.get("stopPrice") or target_plan.get("stop"),
+        "stopPrice": target_plan.get("stopPrice") or target_plan.get("stop"),
+        "riskReward": target_plan.get("riskReward"),
+        "targetSource": target_plan.get("targetSource") or target_plan.get("source"),
+        "targetConfidence": target_plan.get("targetConfidence", 0),
+        "targetMlReady": target_plan.get("targetMlReady", False),
+        "targetMl": target_plan,
+        "targetMlStatus": target_ml_status,
         "pnl": 0,
         "percent": 0,
         "smc": scorecards["smc"],
@@ -5151,14 +5486,40 @@ def get_or_build_raw_chart_overlays(
 
         # Build SMC/AlphaX/DLM/OB context first, then generate ML-adjusted ghosts.
         preliminary_overlays = build_python_chart_overlays(candles, [])
-        ghosts = build_python_ghost_candles(
+        base_ghosts = build_python_ghost_candles(
             candles,
             3,
             preliminary_overlays,
             normalized_symbol,
             normalized_timeframe,
         )
+        base_overlays = build_python_chart_overlays(candles, base_ghosts)
+        latest_price_for_target = to_float(candles[-1].get("close")) if candles else 0
+        target_plan = build_target_ml_plan_safe(
+            normalized_symbol,
+            normalized_timeframe,
+            candles,
+            base_overlays,
+            base_ghosts,
+            {
+                "entry": latest_price_for_target,
+                "price": latest_price_for_target,
+                "current": latest_price_for_target,
+            },
+        )
+        ghosts = align_ghosts_to_target_ml(base_ghosts, target_plan, normalized_symbol)
         raw_overlays = build_python_chart_overlays(candles, ghosts)
+        if isinstance(raw_overlays, dict):
+            raw_overlays["targetMl"] = target_plan
+            raw_overlays["targetPlan"] = target_plan
+        target_ml_status = record_and_evaluate_target_ml_safe(
+            normalized_symbol,
+            normalized_timeframe,
+            candles,
+            target_plan,
+            raw_overlays if isinstance(raw_overlays, dict) else {},
+            ghosts,
+        )
 
         payload = {
             "symbol": normalized_symbol,
@@ -5167,6 +5528,9 @@ def get_or_build_raw_chart_overlays(
             "candlesCount": len(candles),
             "rawOverlays": raw_overlays if isinstance(raw_overlays, dict) else empty_overlay_payload(),
             "ghostCandles": ghosts,
+            "targetMl": target_plan,
+            "targetPlan": target_plan,
+            "targetMlStatus": target_ml_status,
             "cache": "raw_refreshed",
             "source": "python_raw_chart_overlay_cache",
             "createdAt": now_iso(),
@@ -5376,8 +5740,9 @@ def build_fast_chart_overlay_payload(
             order_blocks=order_blocks,
         )
 
+        ml_candles = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit)
+
         if ghost:
-            ml_candles = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit)
             record_ghost_ml_projection(
                 normalized_symbol,
                 normalized_timeframe,
@@ -5391,6 +5756,18 @@ def build_fast_chart_overlay_payload(
                 ml_candles,
             )
 
+        target_plan = raw_payload.get("targetMl") if isinstance(raw_payload.get("targetMl"), dict) else raw_overlays.get("targetMl", {})
+        target_ml_status = raw_payload.get("targetMlStatus")
+        if not isinstance(target_ml_status, dict):
+            target_ml_status = record_and_evaluate_target_ml_safe(
+                normalized_symbol,
+                normalized_timeframe,
+                ml_candles,
+                target_plan if isinstance(target_plan, dict) else {},
+                overlays,
+                overlays.get("ghostCandles", []),
+            )
+
         payload = {
             "eventType": "CHART_OVERLAYS",
             "status": "Live" if to_float(raw_payload.get("candlesCount"), 0) > 0 else "Waiting",
@@ -5400,6 +5777,11 @@ def build_fast_chart_overlay_payload(
             "chartOverlays": overlays,
             "ghostCandles": overlays.get("ghostCandles", []),
             "ghostMl": ghost_ml_summary_from_candles(normalized_symbol, normalized_timeframe, ml_candles) if ghost else None,
+            "targetMl": target_plan if isinstance(target_plan, dict) else None,
+            "targetPlan": target_plan if isinstance(target_plan, dict) else None,
+            "targetMlStatus": target_ml_status,
+            "targetPrice": target_plan.get("targetPrice") if isinstance(target_plan, dict) else None,
+            "targetConfidence": target_plan.get("targetConfidence") if isinstance(target_plan, dict) else 0,
             "alphaProfileMeta": overlays.get("alphaProfileMeta", {}),
             "liquidityProfileBins": overlays.get("liquidityProfileBins", overlays.get("alphaProfileBins", [])),
             "cache": "filtered_from_raw_cache",
@@ -5515,6 +5897,60 @@ def ghost_optimizer_route(symbol: str = "", timeframe: str = "") -> Dict[str, An
         }
 
     return run_ghost_optimizer(symbol=symbol, timeframe=timeframe)
+
+
+@app.get("/api/target-ml-status")
+def target_ml_status(symbol: str = "MES1!", timeframe: str = "1m", limit: int = 500) -> Dict[str, Any]:
+    candles = get_dashboard_candles(symbol, timeframe, limit)
+    if target_ml_summary_from_candles is None:
+        return {
+            "eventType": "TARGET_ML_STATUS",
+            "status": "Unavailable",
+            "symbol": normalize_symbol(symbol),
+            "timeframe": normalize_timeframe(timeframe),
+            "error": "api.target_ml module unavailable",
+            "createdAt": now_iso(),
+        }
+    return target_ml_summary_from_candles(symbol, timeframe, candles)
+
+
+@app.post("/api/target-evaluate")
+def target_evaluate(symbol: str = "MES1!", timeframe: str = "1m", limit: int = 500) -> Dict[str, Any]:
+    candles = get_dashboard_candles(symbol, timeframe, limit)
+    if target_ml_summary_from_candles is None:
+        return {
+            "eventType": "TARGET_ML_STATUS",
+            "status": "Unavailable",
+            "symbol": normalize_symbol(symbol),
+            "timeframe": normalize_timeframe(timeframe),
+            "error": "api.target_ml module unavailable",
+            "createdAt": now_iso(),
+        }
+    return target_ml_summary_from_candles(symbol, timeframe, candles)
+
+
+@app.get("/api/target-ml-export")
+def target_ml_export_route() -> Dict[str, Any]:
+    if target_ml_export is None:
+        return {
+            "eventType": "TARGET_ML_EXPORT",
+            "status": "Unavailable",
+            "error": "api.target_ml module unavailable",
+            "createdAt": now_iso(),
+        }
+    return target_ml_export()
+
+
+@app.post("/api/target-ml-reset")
+def target_ml_reset_route(symbol: Optional[str] = None, timeframe: Optional[str] = None) -> Dict[str, Any]:
+    if reset_target_ml_memory is None:
+        return {
+            "eventType": "TARGET_ML_RESET",
+            "status": "Unavailable",
+            "error": "api.target_ml module unavailable",
+            "createdAt": now_iso(),
+        }
+    return reset_target_ml_memory(symbol=symbol, timeframe=timeframe)
 
 
 @app.get("/api/options-pressure")
