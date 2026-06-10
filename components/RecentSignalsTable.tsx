@@ -715,7 +715,7 @@ function calculateRecentSignalsAtr(candles: ChartCardCandle[], length: number) {
   })
 }
 
-function calculateRecentSignalsNrtrDirection(candles: ChartCardCandle[], settings?: ChartStrategySettings) {
+function calculateRecentSignalsNrtrDirection(candles: ChartCardCandle[], settings?: ChartCardStrategySettings) {
   if (!Array.isArray(candles) || candles.length < 3 || !settings || settings.nrtrMode === 'Off') {
     return []
   }
@@ -816,7 +816,7 @@ function calculateRecentSignalsNrtrDirection(candles: ChartCardCandle[], setting
   return result
 }
 
-function getActiveNrtrTradeFromCandles(candles?: ChartCardCandle[], settings?: ChartStrategySettings) {
+function getActiveNrtrTradeFromCandles(candles?: ChartCardCandle[], settings?: ChartCardStrategySettings) {
   if (!Array.isArray(candles) || candles.length < 3 || !settings || settings.nrtrMode === 'Off') {
     return null
   }
@@ -870,7 +870,7 @@ function resolveChartSignalEntryPrice({
   fallbackSignal?: RecentSignal
   currentPrice?: number
   candles?: ChartCardCandle[]
-  settings?: ChartStrategySettings
+  settings?: ChartCardStrategySettings
   signalType: 'BUY' | 'SELL' | 'HOLD'
 }) {
   const activeNrtrTrade = getActiveNrtrTradeFromCandles(candles, settings)
