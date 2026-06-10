@@ -41,10 +41,30 @@ type PythonGhostCandle = {
   l?: unknown
   c?: unknown
   confidence?: number
+  baseConfidence?: number
   direction?: string
   source?: string
   label?: string
   reason?: string
+
+  // Target ML fields passed from api/main.py + api/target_ml.py.
+  targetMlAligned?: boolean
+  targetPrice?: number
+  targetSource?: string
+  targetConfidence?: number
+  targetMlReady?: boolean
+  ghostConfidenceBoost?: number
+
+  // Ghost ML metadata.
+  mlAdjusted?: boolean
+  mlReady?: boolean
+  mlReason?: string
+  mlConfidenceMultiplier?: number
+  mlConfidenceBonus?: number
+  mlProjectionMultiplier?: number
+  mlHierarchy?: string
+  nrtrUsedForMl?: number
+  smmaUsedForMl?: number
 }
 
 type PythonEngineState = {
@@ -2276,6 +2296,23 @@ function buildGhostCandlesForChart(
         reason: ghost.reason,
       }
 
+      // Preserve Target ML + Ghost ML metadata for projection tables/details.
+      ;(projected as any).targetMlAligned = Boolean(ghost.targetMlAligned)
+      ;(projected as any).targetPrice = toFiniteNumber(ghost.targetPrice, NaN)
+      ;(projected as any).targetSource = ghost.targetSource
+      ;(projected as any).targetConfidence = toFiniteNumber(ghost.targetConfidence, NaN)
+      ;(projected as any).targetMlReady = Boolean(ghost.targetMlReady)
+      ;(projected as any).ghostConfidenceBoost = toFiniteNumber(ghost.ghostConfidenceBoost, NaN)
+      ;(projected as any).mlAdjusted = Boolean(ghost.mlAdjusted)
+      ;(projected as any).mlReady = Boolean(ghost.mlReady)
+      ;(projected as any).mlReason = ghost.mlReason
+      ;(projected as any).mlConfidenceMultiplier = toFiniteNumber(ghost.mlConfidenceMultiplier, NaN)
+      ;(projected as any).mlConfidenceBonus = toFiniteNumber(ghost.mlConfidenceBonus, NaN)
+      ;(projected as any).mlProjectionMultiplier = toFiniteNumber(ghost.mlProjectionMultiplier, NaN)
+      ;(projected as any).mlHierarchy = ghost.mlHierarchy
+      ;(projected as any).nrtrUsedForMl = ghost.nrtrUsedForMl
+      ;(projected as any).smmaUsedForMl = ghost.smmaUsedForMl
+
       previousProjected = projected
       return projected
     }
@@ -2609,6 +2646,11 @@ function mergeStableOverlayPayloads(fallbackPayload: any, backendPayload: any) {
       backendPayload.liquidityProfileBins ?? fallbackPayload.liquidityProfileBins,
     dlmLevels: backendPayload.dlmLevels ?? fallbackPayload.dlmLevels,
     ghostCandles: backendPayload.ghostCandles ?? fallbackPayload.ghostCandles,
+    targetMl: backendPayload.targetMl ?? backendPayload.targetPlan ?? fallbackPayload.targetMl ?? fallbackPayload.targetPlan,
+    targetPlan: backendPayload.targetPlan ?? backendPayload.targetMl ?? fallbackPayload.targetPlan ?? fallbackPayload.targetMl,
+    targetMlStatus: backendPayload.targetMlStatus ?? fallbackPayload.targetMlStatus,
+    targetPrice: backendPayload.targetPrice ?? backendPayload.targetMl?.targetPrice ?? backendPayload.targetPlan?.targetPrice,
+    targetConfidence: backendPayload.targetConfidence ?? backendPayload.targetMl?.targetConfidence ?? backendPayload.targetPlan?.targetConfidence,
 
     summary: {
       ...(fallbackPayload.summary ?? {}),
