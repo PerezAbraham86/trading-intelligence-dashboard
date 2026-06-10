@@ -164,9 +164,11 @@ function isPlaceholderSignal(signal?: RecentSignal) {
 }
 
 function formatPrice(value?: number | null) {
+  if (value === null || value === undefined) return '—'
+
   const numeric = Number(value)
 
-  if (!Number.isFinite(numeric)) return '—'
+  if (!Number.isFinite(numeric) || numeric <= 0) return '—'
   if (Math.abs(numeric) >= 1000) return numeric.toLocaleString(undefined, { maximumFractionDigits: 2 })
   if (Math.abs(numeric) >= 100) return numeric.toFixed(2)
   if (Math.abs(numeric) >= 10) return numeric.toFixed(3)
@@ -651,6 +653,27 @@ function getTrueMlSmcTargetPrice(
   const sources = [latestSignal as unknown, fallbackSignal as unknown].filter(Boolean)
 
   const targetPaths = [
+    // New Target ML payloads.
+    ['targetMl', 'targetPrice'],
+    ['targetMl', 'target'],
+    ['targetMl', 'takeProfitPrice'],
+    ['targetMl', 'tp1'],
+    ['targetMl', 'finalTargetPrice'],
+    ['targetMl', 'overallTargetPrice'],
+
+    ['targetPlan', 'targetPrice'],
+    ['targetPlan', 'target'],
+    ['targetPlan', 'takeProfitPrice'],
+    ['targetPlan', 'tp1'],
+    ['targetPlan', 'finalTargetPrice'],
+    ['targetPlan', 'overallTargetPrice'],
+
+    // New per-ghost target fields.
+    ['ghostTargetPrice'],
+    ['projectedTargetPrice'],
+    ['finalTargetPrice'],
+    ['overallTargetPrice'],
+
     ['mlFeatures', 'targetPrice'],
     ['mlFeatures', 'target_price'],
     ['mlFeatures', 'takeProfitPrice'],
@@ -689,6 +712,13 @@ function getTrueMlSmcTargetPrice(
     ['chartScorecards', 'ghost', 'takeProfitPrice'],
     ['chartScorecards', 'ghost', 'tp1'],
 
+    ['unifiedIntelligence', 'targetMl', 'targetPrice'],
+    ['unifiedIntelligence', 'targetMl', 'target'],
+    ['unifiedIntelligence', 'targetPlan', 'targetPrice'],
+    ['unifiedIntelligence', 'targetPlan', 'target'],
+    ['unifiedIntelligence', 'finalTargetPrice'],
+    ['unifiedIntelligence', 'overallTargetPrice'],
+
     ['unifiedIntelligence', 'targetPrice'],
     ['unifiedIntelligence', 'target_price'],
     ['unifiedIntelligence', 'takeProfitPrice'],
@@ -699,6 +729,17 @@ function getTrueMlSmcTargetPrice(
     ['unifiedIntelligence', 'tradePlan', 'take_profit_price'],
     ['unifiedIntelligence', 'tradePlan', 'tp1'],
     ['unifiedIntelligence', 'tradePlan', 'tp1Price'],
+
+    ['overlayPayload', 'targetMl', 'targetPrice'],
+    ['overlayPayload', 'targetMl', 'target'],
+    ['overlayPayload', 'targetMl', 'takeProfitPrice'],
+    ['overlayPayload', 'targetMl', 'tp1'],
+    ['overlayPayload', 'targetPlan', 'targetPrice'],
+    ['overlayPayload', 'targetPlan', 'target'],
+    ['overlayPayload', 'targetPlan', 'takeProfitPrice'],
+    ['overlayPayload', 'targetPlan', 'tp1'],
+    ['overlayPayload', 'finalTargetPrice'],
+    ['overlayPayload', 'overallTargetPrice'],
 
     ['overlayPayload', 'targetPrice'],
     ['overlayPayload', 'target_price'],
