@@ -16,6 +16,7 @@ import StrategyTesterPanel from '@/components/StrategyTesterPanel'
 import ConnectionStatusBadge from '@/components/ConnectionStatusBadge'
 import MarketSentimentGauge from '@/components/MarketSentimentGauge'
 import UnifiedIntelligenceMatrix from '@/components/UnifiedIntelligenceMatrix'
+import AiTraderPanel from '@/components/AiTraderPanel'
 import { motion } from 'framer-motion'
 import { useApiPolling } from '@/hooks/useApiPolling'
 
@@ -4345,6 +4346,20 @@ export default function Dashboard() {
               },
             ]}
           />
+
+          <div className="rounded-2xl border border-purple-400/30 bg-purple-950/10 p-1">
+            <AiTraderPanel
+              apiBaseUrl={apiBaseUrl}
+              symbol={selectedSymbol}
+              timeframe={selectedTimeframe}
+              activePrice={activeChartPrice ?? undefined}
+              signal={augmentedLatestSignal}
+              scorecards={matrixScorecards}
+              overlayPayload={mainChartOverlayPayload}
+              unifiedIntelligence={mainUnifiedIntelligence}
+              candles={mainChartCandles}
+            />
+          </div>
 
           <StrategyTesterPanel
             symbol={selectedSymbol}
