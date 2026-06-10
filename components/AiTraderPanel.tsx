@@ -122,6 +122,52 @@ function normalizeDecision(value: any): 'BUY' | 'SELL' | 'HOLD' {
   return 'HOLD'
 }
 
+function sanitizeAiTraderPayload(value: any, depth = 0): any {
+  if (depth > 6) return null
+
+  if (value === undefined) return null
+  if (value === null) return null
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null
+  }
+
+  if (typeof value === 'string' || typeof value === 'boolean') {
+    return value
+  }
+
+  if (Array.isArray(value)) {
+    return value.slice(0, 50).map((item) => sanitizeAiTraderPayload(item, depth + 1))
+  }
+
+  if (typeof value === 'object') {
+    const result: Record<string, any> = {}
+
+    Object.entries(value).forEach(([key, entry]) => {
+      if (typeof entry === 'function') return
+      if (typeof entry === 'symbol') return
+      result[key] = sanitizeAiTraderPayload(entry, depth + 1)
+    })
+
+    return result
+  }
+
+  return null
+}
+
+async function readApiError(response: Response) {
+  const text = await response.text().catch(() => '')
+
+  if (!text) return `${response.status}`
+
+  try {
+    const json = JSON.parse(text)
+    return `${response.status}: ${JSON.stringify(json).slice(0, 500)}`
+  } catch {
+    return `${response.status}: ${text.slice(0, 500)}`
+  }
+}
+
 function inferTargetFromSignal(signal: any) {
   return readNumberPath(signal, [
     'targetPrice',
@@ -259,6 +305,8 @@ export default function AiTraderPanel({
     }
   }, [activePrice, signal, scorecards, overlayPayload, unifiedIntelligence, symbol, timeframe])
 
+  const safePayload = useMemo(() => sanitizeAiTraderPayload(payload), [payload])
+
   const fetchDecision = useCallback(async () => {
     if (!apiBaseUrl || !activePrice || activePrice <= 0) return
 
@@ -271,11 +319,11 @@ export default function AiTraderPanel({
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(safePayload),
       })
 
       if (!response.ok) {
-        throw new Error(`AI trader decision failed: ${response.status}`)
+        throw new Error(`AI trader decision failed: ${await readApiError(response)}`)
       }
 
       const json = await response.json()
@@ -285,7 +333,7 @@ export default function AiTraderPanel({
     } finally {
       setIsLoading(false)
     }
-  }, [apiBaseUrl, activePrice, payload])
+  }, [apiBaseUrl, activePrice, safePayload])
 
   const fetchSummary = useCallback(async () => {
     if (!apiBaseUrl) return
@@ -320,16 +368,16 @@ export default function AiTraderPanel({
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
+        body: JSON.stringify(sanitizeAiTraderPayload({
           symbol,
           timeframe,
           currentPrice: activePrice,
           candles: Array.isArray(candles) ? candles.slice(-25) : [],
-        }),
+        })),
       })
 
       if (!response.ok) {
-        throw new Error(`AI trader evaluate failed: ${response.status}`)
+        throw new Error(`AI trader evaluate failed: ${await readApiError(response)}`)
       }
 
       const json = await response.json()
@@ -351,11 +399,11 @@ export default function AiTraderPanel({
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(safePayload),
       })
 
       if (!response.ok) {
-        throw new Error(`AI trader open failed: ${response.status}`)
+        throw new Error(`AI trader open failed: ${await readApiError(response)}`)
       }
 
       const json = await response.json()
@@ -365,7 +413,7 @@ export default function AiTraderPanel({
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : 'Open failed')
     }
-  }, [apiBaseUrl, payload, decision, summary])
+  }, [apiBaseUrl, safePayload, decision, summary])
 
   useEffect(() => {
     fetchDecision()
