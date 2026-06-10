@@ -52,6 +52,7 @@ type GhostCandle = {
   // Target ML fields
   targetMlAligned?: boolean
   targetPrice?: number | null
+  finalTargetPrice?: number | null
   targetSource?: string
   targetConfidence?: number | null
   targetMlReady?: boolean
@@ -341,11 +342,21 @@ function normalizeRawGhostCandles(rawGhosts: any[], sourceText: string, targetPl
     const isUnified = source.includes('unified') || sourceText.toLowerCase().includes('unified')
     const isPython = source.includes('python') || sourceText.toLowerCase().includes('python')
 
+    // Per-row ghost target:
+    // Prefer the ghost candle's own projected target/close.
+    // The final Target ML objective stays available as finalTargetPrice.
     const targetPrice =
+      toNumber(ghost.ghostTargetPrice) ??
+      toNumber(ghost.projectedTargetPrice) ??
       toNumber(ghost.targetPrice) ??
       toNumber(ghost.target) ??
-      toNumber(ghost.takeProfitPrice) ??
-      toNumber(ghost.tp1) ??
+      toNumber(ghost.close) ??
+      toNumber(ghost.c) ??
+      null
+
+    const finalTargetPrice =
+      toNumber(ghost.finalTargetPrice) ??
+      toNumber(ghost.overallTargetPrice) ??
       toNumber(targetPlan?.targetPrice) ??
       toNumber(targetPlan?.target) ??
       null
@@ -400,6 +411,7 @@ function normalizeRawGhostCandles(rawGhosts: any[], sourceText: string, targetPl
       targetSeverity: typeof ghost.targetSeverity === 'number' ? ghost.targetSeverity : toNumber(ghost.targetSeverity) ?? undefined,
       targetMlAligned,
       targetPrice,
+      finalTargetPrice,
       targetSource,
       targetConfidence,
       targetMlReady,
@@ -753,7 +765,7 @@ export default function GhostCandleProjection({
 
       {targetPlan && (
         <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-5">
-          <MiniInfo label="ML Target" value={formatPrice(targetPlan.targetPrice ?? targetPlan.target)} accent />
+          <MiniInfo label="Final ML Target" value={formatPrice(targetPlan.targetPrice ?? targetPlan.target)} accent />
           <MiniInfo label="Source" value={String(targetPlan.targetSource ?? targetPlan.source ?? '—')} />
           <MiniInfo label="Confidence" value={formatPercent(targetPlan.targetConfidence)} accent={Number(targetPlan.targetConfidence) >= 60} />
           <MiniInfo label="Target ML" value={targetPlan.targetMlReady ? 'READY' : 'LEARNING'} />
@@ -849,8 +861,8 @@ export default function GhostCandleProjection({
 
                 {(candle.targetMlAligned || candle.targetPrice || candle.targetConfidence) && (
                   <div className="mt-3 grid grid-cols-2 gap-2 text-xs md:grid-cols-5">
-                    <MiniInfo label="Target" value={formatPrice(candle.targetPrice)} accent />
-                    <MiniInfo label="Target Source" value={candle.targetSource || '—'} />
+                    <MiniInfo label={`${candle.label} Target`} value={formatPrice(candle.targetPrice)} accent />
+                    <MiniInfo label="Final ML Target" value={formatPrice(candle.finalTargetPrice)} />
                     <MiniInfo label="Target Conf" value={formatPercent(candle.targetConfidence)} accent={Number(candle.targetConfidence) >= 60} />
                     <MiniInfo label="Target Ready" value={candle.targetMlReady ? 'YES' : 'LEARNING'} />
                     <MiniInfo label="Ghost Boost" value={formatNumber(candle.ghostConfidenceBoost, 2)} accent={Number(candle.ghostConfidenceBoost) > 0} />
@@ -869,7 +881,7 @@ export default function GhostCandleProjection({
                 {reactionText && (
                   <div className="mt-3 rounded-md border border-dark-600 bg-dark-900/40 px-3 py-2 text-xs text-gray-400">
                     Target reaction:{' '}
-                    <span className="font-bold text-gray-200">{reactionText}</span>
+                    <span className="font-bold text-gray-200">{reactionText}</span>{candle.targetPrice && (<span className="ml-2 text-cyan-300">• {candle.label} target {formatPrice(candle.targetPrice)}</span>)}
                     {typeof candle.targetSeverity === 'number' && (
                       <span className="ml-2 text-gray-500">
                         ({Math.round(candle.targetSeverity * 100)}%)
