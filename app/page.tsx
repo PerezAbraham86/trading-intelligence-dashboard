@@ -4128,7 +4128,7 @@ export default function Dashboard() {
           </div>
 
           <ConnectionStatusBadge
-            status={coreDashboardDataLoaded ? 'connected' : connectionStatus}
+            status={coreDashboardDataLoaded ? 'Connected' : connectionStatus}
             lastUpdateTime={coreDashboardDataLoaded ? (lastUpdateTime ?? new Date().toISOString()) : lastUpdateTime}
           />
         </div>
