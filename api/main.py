@@ -85,6 +85,37 @@ except Exception:
 
 
 try:
+    from api.ai_trader import (
+        ai_trader_export,
+        ai_trader_summary,
+        close_ai_trade,
+        evaluate_ai_trades,
+        get_ai_trader_decision,
+        open_ai_trade,
+        reset_ai_trader_memory,
+    )
+except Exception:
+    try:
+        from ai_trader import (
+            ai_trader_export,
+            ai_trader_summary,
+            close_ai_trade,
+            evaluate_ai_trades,
+            get_ai_trader_decision,
+            open_ai_trade,
+            reset_ai_trader_memory,
+        )
+    except Exception:
+        ai_trader_export = None
+        ai_trader_summary = None
+        close_ai_trade = None
+        evaluate_ai_trades = None
+        get_ai_trader_decision = None
+        open_ai_trade = None
+        reset_ai_trader_memory = None
+
+
+try:
     from api.ml_feature_store import (
         get_ml_feature_store_summary,
         get_recent_ml_feature_snapshots,
@@ -288,12 +319,68 @@ class EntryMlClosePayload(BaseModel):
     barsHeld: Optional[int] = None
     exitReason: Optional[str] = None
 
+
+class AiTraderDecisionPayload(BaseModel):
+    symbol: Optional[str] = "MES1!"
+    timeframe: Optional[str] = "1m"
+
+    currentPrice: Optional[float] = None
+    entryPrice: Optional[float] = None
+    targetPrice: Optional[float] = None
+    stopPrice: Optional[float] = None
+    side: Optional[Any] = None
+    riskReward: Optional[float] = None
+
+    signal: Optional[Dict[str, Any]] = None
+    scorecards: Optional[Dict[str, Any]] = None
+    ghostMl: Optional[Dict[str, Any]] = None
+    targetMl: Optional[Dict[str, Any]] = None
+    entryMl: Optional[Dict[str, Any]] = None
+    nrtrContext: Optional[Dict[str, Any]] = None
+    unifiedIntelligence: Optional[Dict[str, Any]] = None
+    context: Optional[Dict[str, Any]] = None
+
+    minConfidence: Optional[float] = None
+    minRiskReward: Optional[float] = None
+
+
+class AiTraderOpenPayload(AiTraderDecisionPayload):
+    entryTime: Optional[Any] = None
+
+
+class AiTraderClosePayload(BaseModel):
+    tradeId: Optional[str] = None
+    symbol: Optional[str] = "MES1!"
+    timeframe: Optional[str] = "1m"
+    side: Optional[Any] = None
+    exitPrice: Optional[float] = None
+    currentPrice: Optional[float] = None
+    exitTime: Optional[Any] = None
+    exitReason: Optional[str] = "manual_close"
+
+
+class AiTraderEvaluatePayload(BaseModel):
+    symbol: Optional[str] = "MES1!"
+    timeframe: Optional[str] = "1m"
+    currentPrice: Optional[float] = None
+    candles: Optional[List[Dict[str, Any]]] = None
+
 # ─────────────────────────────────────────────────────────────────────────────
 # BASIC HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def model_to_dict(model: Any) -> Dict[str, Any]:
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    if hasattr(model, "dict"):
+        return model.dict()
+    if isinstance(model, dict):
+        return model
+    return {}
 
 
 def to_float(value: Any, fallback: float = 0.0) -> float:
@@ -6160,6 +6247,124 @@ def entry_ml_reset_route(symbol: Optional[str] = None, timeframe: Optional[str] 
             "createdAt": now_iso(),
         }
     return reset_entry_ml_memory(symbol=symbol, timeframe=timeframe)
+
+
+@app.post("/api/ai-trader/decision")
+@app.post("/api/ai-trader-decision")
+def ai_trader_decision_route(payload: AiTraderDecisionPayload) -> Dict[str, Any]:
+    if get_ai_trader_decision is None:
+        return {
+            "eventType": "AI_TRADER_DECISION",
+            "status": "Unavailable",
+            "dashboardOnly": True,
+            "brokerConnected": False,
+            "allowedToTrade": False,
+            "decision": "HOLD",
+            "confidence": 0,
+            "error": "api.ai_trader module unavailable",
+            "createdAt": now_iso(),
+        }
+
+    return get_ai_trader_decision(**model_to_dict(payload))
+
+
+@app.post("/api/ai-trader/open")
+@app.post("/api/ai-trader-open")
+def ai_trader_open_route(payload: AiTraderOpenPayload) -> Dict[str, Any]:
+    if open_ai_trade is None:
+        return {
+            "eventType": "AI_TRADER_OPEN",
+            "status": "Unavailable",
+            "dashboardOnly": True,
+            "brokerConnected": False,
+            "opened": False,
+            "error": "api.ai_trader module unavailable",
+            "createdAt": now_iso(),
+        }
+
+    return open_ai_trade(**model_to_dict(payload))
+
+
+@app.post("/api/ai-trader/close")
+@app.post("/api/ai-trader-close")
+def ai_trader_close_route(payload: AiTraderClosePayload) -> Dict[str, Any]:
+    if close_ai_trade is None:
+        return {
+            "eventType": "AI_TRADER_CLOSE",
+            "status": "Unavailable",
+            "dashboardOnly": True,
+            "brokerConnected": False,
+            "closed": False,
+            "error": "api.ai_trader module unavailable",
+            "createdAt": now_iso(),
+        }
+
+    return close_ai_trade(**model_to_dict(payload))
+
+
+@app.post("/api/ai-trader/evaluate")
+@app.post("/api/ai-trader-evaluate")
+def ai_trader_evaluate_route(payload: AiTraderEvaluatePayload) -> Dict[str, Any]:
+    if evaluate_ai_trades is None:
+        return {
+            "eventType": "AI_TRADER_EVALUATE",
+            "status": "Unavailable",
+            "dashboardOnly": True,
+            "brokerConnected": False,
+            "error": "api.ai_trader module unavailable",
+            "createdAt": now_iso(),
+        }
+
+    return evaluate_ai_trades(**model_to_dict(payload))
+
+
+@app.get("/api/ai-trader/summary")
+@app.get("/api/ai-trader/status")
+@app.get("/api/ai-trader-summary")
+def ai_trader_summary_route(symbol: str = "", timeframe: str = "") -> Dict[str, Any]:
+    if ai_trader_summary is None:
+        return {
+            "eventType": "AI_TRADER_SUMMARY",
+            "status": "Unavailable",
+            "dashboardOnly": True,
+            "brokerConnected": False,
+            "error": "api.ai_trader module unavailable",
+            "createdAt": now_iso(),
+        }
+
+    return ai_trader_summary(symbol=symbol, timeframe=timeframe)
+
+
+@app.get("/api/ai-trader/export")
+@app.get("/api/ai-trader-export")
+def ai_trader_export_route() -> Dict[str, Any]:
+    if ai_trader_export is None:
+        return {
+            "eventType": "AI_TRADER_EXPORT",
+            "status": "Unavailable",
+            "dashboardOnly": True,
+            "brokerConnected": False,
+            "error": "api.ai_trader module unavailable",
+            "createdAt": now_iso(),
+        }
+
+    return ai_trader_export()
+
+
+@app.post("/api/ai-trader/reset")
+@app.post("/api/ai-trader-reset")
+def ai_trader_reset_route(symbol: Optional[str] = None, timeframe: Optional[str] = None) -> Dict[str, Any]:
+    if reset_ai_trader_memory is None:
+        return {
+            "eventType": "AI_TRADER_RESET",
+            "status": "Unavailable",
+            "dashboardOnly": True,
+            "brokerConnected": False,
+            "error": "api.ai_trader module unavailable",
+            "createdAt": now_iso(),
+        }
+
+    return reset_ai_trader_memory(symbol=symbol, timeframe=timeframe)
 
 
 @app.get("/api/target-ml-status")
