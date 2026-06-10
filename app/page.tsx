@@ -186,6 +186,49 @@ function normalizeSharedTechnicalSentimentPayload(value: unknown): TechnicalSent
   return countTechnicalIndicatorsPayload(candidate) > 0 ? candidate : null
 }
 
+
+function getSafeDashboardStatus({
+  error,
+  updatedAt,
+  signal,
+  candlesCount,
+}: {
+  error?: string | null
+  updatedAt?: string | null
+  signal?: any
+  candlesCount?: number
+}) {
+  const hasCoreData =
+    Boolean(signal && typeof signal === "object") ||
+    Boolean(updatedAt) ||
+    Number(candlesCount ?? 0) > 0
+
+  if (hasCoreData) {
+    return {
+      status: "Live",
+      label: updatedAt ? new Date(updatedAt).toLocaleTimeString() : "Updated",
+      hasError: false,
+      error: null,
+    }
+  }
+
+  if (error) {
+    return {
+      status: "Error",
+      label: "No update yet",
+      hasError: true,
+      error,
+    }
+  }
+
+  return {
+    status: "Loading",
+    label: "Waiting",
+    hasError: false,
+    error: null,
+  }
+}
+
 function normalizeSymbol(value: unknown) {
   const raw = String(value ?? 'MES1!')
     .trim()
@@ -3993,6 +4036,13 @@ export default function Dashboard() {
       nrtrPurpose: "strategy_context_only",
     }
   }, [chartMlFeatures, matrixScorecards])
+
+  const safeDashboardStatus = getSafeDashboardStatus({
+    error: dashboardError,
+    updatedAt: latestSignal?.createdAt ?? lastUpdated,
+    signal: latestSignal,
+    candlesCount: mainChartCandles.length,
+  })
 
   if (!isClient) {
     return null
