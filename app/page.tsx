@@ -4039,7 +4039,7 @@ export default function Dashboard() {
 
   const safeDashboardStatus = getSafeDashboardStatus({
     error: null,
-    updatedAt: latestSignal?.createdAt ?? lastUpdated,
+    updatedAt: latestSignal?.createdAt ?? null,
     signal: latestSignal,
     candlesCount: mainChartCandles.length,
   })
