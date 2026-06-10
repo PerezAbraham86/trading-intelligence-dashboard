@@ -331,14 +331,17 @@ class AiTraderDecisionPayload(BaseModel):
     side: Optional[Any] = None
     riskReward: Optional[float] = None
 
-    signal: Optional[Dict[str, Any]] = None
-    scorecards: Optional[Dict[str, Any]] = None
-    ghostMl: Optional[Dict[str, Any]] = None
-    targetMl: Optional[Dict[str, Any]] = None
-    entryMl: Optional[Dict[str, Any]] = None
-    nrtrContext: Optional[Dict[str, Any]] = None
-    unifiedIntelligence: Optional[Dict[str, Any]] = None
-    context: Optional[Dict[str, Any]] = None
+    # Dashboard payloads can be nested objects, arrays, strings, nulls, or mixed
+    # UI snapshots. Keep these loose so the AI trader does not reject valid
+    # dashboard-only data with a FastAPI 422 before ai_trader.py can normalize it.
+    signal: Optional[Any] = None
+    scorecards: Optional[Any] = None
+    ghostMl: Optional[Any] = None
+    targetMl: Optional[Any] = None
+    entryMl: Optional[Any] = None
+    nrtrContext: Optional[Any] = None
+    unifiedIntelligence: Optional[Any] = None
+    context: Optional[Any] = None
 
     minConfidence: Optional[float] = None
     minRiskReward: Optional[float] = None
@@ -363,7 +366,7 @@ class AiTraderEvaluatePayload(BaseModel):
     symbol: Optional[str] = "MES1!"
     timeframe: Optional[str] = "1m"
     currentPrice: Optional[float] = None
-    candles: Optional[List[Dict[str, Any]]] = None
+    candles: Optional[Any] = None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BASIC HELPERS
