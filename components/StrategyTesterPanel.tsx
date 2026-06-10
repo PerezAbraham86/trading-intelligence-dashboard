@@ -56,6 +56,10 @@ type BacktestTrade = {
   barsHeld: number;
   entryReason: string;
   exitReason: string;
+  entryConfidence: number;
+  confidenceReason: string;
+  mlFeatureBucket: string;
+  mlBroadBucket: string;
   isLive?: boolean;
 };
 
@@ -411,6 +415,262 @@ function findDirectionAt<T extends { time: number; direction: 1 | -1 | 0 }>(
   return direction;
 }
 
+function clampConfidence(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, value));
+}
+
+function tradeFeatureBucket({
+  side,
+  strategyMode,
+  mainDirection,
+  miniOneDirection,
+  miniTwoDirection,
+  candle,
+  previousCandle,
+}: {
+  side: 1 | -1;
+  strategyMode: StrategyMode;
+  mainDirection: 1 | -1 | 0;
+  miniOneDirection: 1 | -1 | 0;
+  miniTwoDirection: 1 | -1 | 0;
+  candle: ReturnType<typeof toComparableCandles>[number];
+  previousCandle?: ReturnType<typeof toComparableCandles>[number];
+}) {
+  const miniConfirmations =
+    (miniOneDirection === side ? 1 : 0) +
+    (miniTwoDirection === side ? 1 : 0);
+
+  const allAligned =
+    mainDirection === side &&
+    miniOneDirection === side &&
+    miniTwoDirection === side;
+
+  const body = Math.abs(candle.close - candle.open);
+  const range = Math.max(candle.high - candle.low, 0.000001);
+  const bodyPct = body / range;
+  const candleDirection =
+    candle.close > candle.open ? 1 : candle.close < candle.open ? -1 : 0;
+  const momentumAligned = candleDirection === side;
+
+  const prevMove = previousCandle
+    ? (candle.close - previousCandle.close) * side
+    : 0;
+  const movePct = candle.close ? Math.abs(prevMove / candle.close) * 100 : 0;
+
+  const bodyBucket =
+    bodyPct >= 0.7 ? "body_strong" :
+    bodyPct >= 0.45 ? "body_medium" :
+    bodyPct >= 0.25 ? "body_light" :
+    "body_weak";
+
+  const moveBucket =
+    movePct >= 0.18 ? "move_large" :
+    movePct >= 0.08 ? "move_medium" :
+    movePct >= 0.03 ? "move_small" :
+    "move_flat";
+
+  return [
+    `mode=${strategyMode}`,
+    `side=${side === 1 ? "long" : "short"}`,
+    `mini=${miniConfirmations}`,
+    `aligned=${allAligned ? 1 : 0}`,
+    `momentum=${momentumAligned ? 1 : 0}`,
+    bodyBucket,
+    moveBucket,
+  ].join("|");
+}
+
+function broadTradeFeatureBucket({
+  side,
+  strategyMode,
+  miniOneDirection,
+  miniTwoDirection,
+}: {
+  side: 1 | -1;
+  strategyMode: StrategyMode;
+  miniOneDirection: 1 | -1 | 0;
+  miniTwoDirection: 1 | -1 | 0;
+}) {
+  const miniConfirmations =
+    (miniOneDirection === side ? 1 : 0) +
+    (miniTwoDirection === side ? 1 : 0);
+
+  return [
+    `mode=${strategyMode}`,
+    `side=${side === 1 ? "long" : "short"}`,
+    `mini=${miniConfirmations}`,
+  ].join("|");
+}
+
+function summarizeMlTradeSet(trades: BacktestTrade[]) {
+  const closed = trades.filter((trade) => !trade.isLive);
+
+  if (!closed.length) {
+    return {
+      samples: 0,
+      winRate: 0,
+      avgPnlPercent: 0,
+      profitFactor: 0,
+      quality: 0,
+    };
+  }
+
+  const winners = closed.filter((trade) => trade.pnl > 0);
+  const grossProfit = closed
+    .filter((trade) => trade.pnl > 0)
+    .reduce((sum, trade) => sum + trade.pnl, 0);
+  const grossLoss = Math.abs(
+    closed
+      .filter((trade) => trade.pnl < 0)
+      .reduce((sum, trade) => sum + trade.pnl, 0),
+  );
+
+  const winRate = (winners.length / closed.length) * 100;
+  const avgPnlPercent =
+    closed.reduce((sum, trade) => sum + trade.pnlPercent, 0) / closed.length;
+  const profitFactor =
+    grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? 99 : 0;
+
+  const quality = clampConfidence(
+    winRate * 0.48 +
+    Math.max(0, Math.min(100, (avgPnlPercent + 0.5) * 80)) * 0.27 +
+    Math.max(0, Math.min(100, profitFactor / 3 * 100)) * 0.25,
+  );
+
+  return {
+    samples: closed.length,
+    winRate,
+    avgPnlPercent,
+    profitFactor,
+    quality,
+  };
+}
+
+function confidenceFromMlSummary(summary: ReturnType<typeof summarizeMlTradeSet>, base = 50) {
+  if (!summary.samples) return base;
+
+  const sampleWeight = Math.max(0.15, Math.min(1, summary.samples / 20));
+  const learned =
+    summary.winRate * 0.45 +
+    Math.max(0, Math.min(100, (summary.avgPnlPercent + 0.5) * 80)) * 0.25 +
+    Math.max(0, Math.min(100, summary.profitFactor / 3 * 100)) * 0.18 +
+    summary.quality * 0.12;
+
+  return clampConfidence(base * (1 - sampleWeight) + learned * sampleWeight);
+}
+
+function baseEntryMlPrior({
+  side,
+  mainDirection,
+  miniOneDirection,
+  miniTwoDirection,
+}: {
+  side: 1 | -1;
+  mainDirection: 1 | -1 | 0;
+  miniOneDirection: 1 | -1 | 0;
+  miniTwoDirection: 1 | -1 | 0;
+}) {
+  let prior = 44;
+  if (mainDirection === side) prior += 6;
+  if (miniOneDirection === side) prior += 5;
+  if (miniTwoDirection === side) prior += 5;
+  if (mainDirection === side && miniOneDirection === side && miniTwoDirection === side) prior += 5;
+  return clampConfidence(prior);
+}
+
+function applyEntryMlConfidenceToTrades(trades: BacktestTrade[]) {
+  const closedHistory: BacktestTrade[] = [];
+
+  return trades.map((trade) => {
+    const exactHistory = closedHistory.filter(
+      (item) => item.mlFeatureBucket === trade.mlFeatureBucket,
+    );
+    const broadHistory = closedHistory.filter(
+      (item) => item.mlBroadBucket === trade.mlBroadBucket,
+    );
+
+    let summary = summarizeMlTradeSet([]);
+    let reason = "Entry ML learning — not enough prior samples";
+
+    if (exactHistory.length >= 6) {
+      summary = summarizeMlTradeSet(exactHistory);
+      reason = `Entry ML exact bucket • ${summary.samples} samples • ${summary.winRate.toFixed(1)}% WR`;
+    } else if (broadHistory.length >= 6) {
+      summary = summarizeMlTradeSet(broadHistory);
+      reason = `Entry ML broad bucket • ${summary.samples} samples • ${summary.winRate.toFixed(1)}% WR`;
+    } else if (closedHistory.length >= 20) {
+      summary = summarizeMlTradeSet(closedHistory);
+      reason = `Entry ML overall • ${summary.samples} samples • ${summary.winRate.toFixed(1)}% WR`;
+    }
+
+    const confidence = confidenceFromMlSummary(summary, trade.entryConfidence || 50);
+    const updatedTrade: BacktestTrade = {
+      ...trade,
+      entryConfidence: Math.round(confidence),
+      confidenceReason: reason,
+    };
+
+    if (!updatedTrade.isLive) {
+      closedHistory.push(updatedTrade);
+    }
+
+    return updatedTrade;
+  });
+}
+
+function calculateSignalEntryConfidence({
+  side,
+  mainDirection,
+  miniOneDirection,
+  miniTwoDirection,
+  candle,
+  previousCandle,
+  strategyMode,
+}: {
+  side: 1 | -1;
+  mainDirection: 1 | -1 | 0;
+  miniOneDirection: 1 | -1 | 0;
+  miniTwoDirection: 1 | -1 | 0;
+  mainPoint?: NrtrPoint | SmmaPoint;
+  previousPoint?: NrtrPoint | SmmaPoint;
+  candle: ReturnType<typeof toComparableCandles>[number];
+  previousCandle?: ReturnType<typeof toComparableCandles>[number];
+  strategyMode: StrategyMode;
+}) {
+  const prior = baseEntryMlPrior({
+    side,
+    mainDirection,
+    miniOneDirection,
+    miniTwoDirection,
+  });
+
+  return {
+    confidence: prior,
+    reason: "Entry ML prior — awaiting learned trade outcomes",
+    mlFeatureBucket: tradeFeatureBucket({
+      side,
+      strategyMode,
+      mainDirection,
+      miniOneDirection,
+      miniTwoDirection,
+      candle,
+      previousCandle,
+    }),
+    mlBroadBucket: broadTradeFeatureBucket({
+      side,
+      strategyMode,
+      miniOneDirection,
+      miniTwoDirection,
+    }),
+  };
+}
+
+function calculateLiveTradeConfidence(trade: BacktestTrade | null) {
+  if (!trade) return 0;
+  return clampConfidence(trade.entryConfidence);
+}
+
 function calculateBacktest(
   symbol: string,
   mainCandlesInput: DashboardCandle[],
@@ -463,6 +723,10 @@ function calculateBacktest(
     entryTime: number;
     entryPrice: number;
     reason: string;
+    entryConfidence: number;
+    confidenceReason: string;
+    mlFeatureBucket: string;
+    mlBroadBucket: string;
   } | null = null;
 
   for (let index = 1; index < mainCandles.length; index += 1) {
@@ -514,25 +778,61 @@ function calculateBacktest(
         barsHeld: index - openTrade.entryIndex,
         entryReason: openTrade.reason,
         exitReason: `${strategyMode} opposite flip`,
+        entryConfidence: openTrade.entryConfidence,
+        confidenceReason: openTrade.confidenceReason,
+        mlFeatureBucket: openTrade.mlFeatureBucket,
+        mlBroadBucket: openTrade.mlBroadBucket,
       });
       openTrade = null;
     }
 
     if (!openTrade && longSignal) {
+      const confidence = calculateSignalEntryConfidence({
+        side: 1,
+        mainDirection: point.direction,
+        miniOneDirection,
+        miniTwoDirection,
+        mainPoint: point,
+        previousPoint: mainPoints[index - 1],
+        candle,
+        previousCandle: mainCandles[index - 1],
+        strategyMode,
+      });
+
       openTrade = {
         side: 1,
         entryIndex: index,
         entryTime: candle.numericTime,
         entryPrice: candle.close,
         reason: `${strategyMode} long + both mini charts confirmed`,
+        entryConfidence: confidence.confidence,
+        confidenceReason: confidence.reason,
+        mlFeatureBucket: confidence.mlFeatureBucket,
+        mlBroadBucket: confidence.mlBroadBucket,
       };
     } else if (!openTrade && shortSignal) {
+      const confidence = calculateSignalEntryConfidence({
+        side: -1,
+        mainDirection: point.direction,
+        miniOneDirection,
+        miniTwoDirection,
+        mainPoint: point,
+        previousPoint: mainPoints[index - 1],
+        candle,
+        previousCandle: mainCandles[index - 1],
+        strategyMode,
+      });
+
       openTrade = {
         side: -1,
         entryIndex: index,
         entryTime: candle.numericTime,
         entryPrice: candle.close,
         reason: `${strategyMode} short + both mini charts confirmed`,
+        entryConfidence: confidence.confidence,
+        confidenceReason: confidence.reason,
+        mlFeatureBucket: confidence.mlFeatureBucket,
+        mlBroadBucket: confidence.mlBroadBucket,
       };
     }
   }
@@ -574,14 +874,23 @@ function calculateBacktest(
       barsHeld: lastIndex - openTrade.entryIndex,
       entryReason: openTrade.reason,
       exitReason: "LIVE — waiting for exit",
+      entryConfidence: openTrade.entryConfidence,
+      confidenceReason: openTrade.confidenceReason,
+      mlFeatureBucket: openTrade.mlFeatureBucket,
+      mlBroadBucket: openTrade.mlBroadBucket,
       isLive: true,
     };
   }
 
+  const learnedTrades = applyEntryMlConfidenceToTrades(trades);
+  const learnedLiveTrade = liveTrade
+    ? applyEntryMlConfidenceToTrades([...trades, liveTrade]).at(-1) ?? liveTrade
+    : null;
+
   let cumulative = 0;
   let peak = 0;
   let maxDrawdownPercent = 0;
-  const equity = trades.map((trade) => {
+  const equity = learnedTrades.map((trade) => {
     cumulative += trade.pnlPercent;
     peak = Math.max(peak, cumulative);
     maxDrawdownPercent = Math.max(maxDrawdownPercent, peak - cumulative);
@@ -593,19 +902,19 @@ function calculateBacktest(
     };
   });
 
-  const winners = trades.filter((trade) => trade.pnl > 0);
-  const losers = trades.filter((trade) => trade.pnl < 0);
+  const winners = learnedTrades.filter((trade) => trade.pnl > 0);
+  const losers = learnedTrades.filter((trade) => trade.pnl < 0);
   const grossProfit = winners.reduce((sum, trade) => sum + trade.pnl, 0);
   const grossLoss = Math.abs(losers.reduce((sum, trade) => sum + trade.pnl, 0));
-  const totalPnl = trades.reduce((sum, trade) => sum + trade.pnl, 0);
-  const totalPnlPercent = trades.reduce(
+  const totalPnl = learnedTrades.reduce((sum, trade) => sum + trade.pnl, 0);
+  const totalPnlPercent = learnedTrades.reduce(
     (sum, trade) => sum + trade.pnlPercent,
     0,
   );
 
   return {
-    trades,
-    liveTrade,
+    trades: learnedTrades,
+    liveTrade: learnedLiveTrade,
     equity,
     totalPnl,
     totalPnlPercent,
@@ -784,7 +1093,7 @@ function NrtrOptimizerView({
 
   return (
     <div className="space-y-5">
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-6">
         <MetricCard
           label="Best mode"
           value={best.mode === "ATR-Based" ? "ATR-Based" : "Percentage"}
@@ -1165,6 +1474,12 @@ export default function StrategyTesterPanel({
             }
             positive={result.profitFactor >= 1}
           />
+          <MetricCard
+            label="Live Entry ML Confidence"
+            value={`${calculateLiveTradeConfidence(result.liveTrade).toFixed(0)}%`}
+            subValue={result.liveTrade ? result.liveTrade.confidenceReason : "No live trade"}
+            positive={calculateLiveTradeConfidence(result.liveTrade) >= 70}
+          />
         </div>
 
         <EquityCurve equity={result.equity} />
@@ -1176,6 +1491,7 @@ export default function StrategyTesterPanel({
                 <tr>
                   <th className="px-3 py-3">Trade</th>
                   <th className="px-3 py-3">Side</th>
+                  <th className="px-3 py-3 text-right">Entry ML Confidence</th>
                   <th className="px-3 py-3">Entry time</th>
                   <th className="px-3 py-3">Exit time</th>
                   <th className="px-3 py-3 text-right">Entry</th>
@@ -1193,7 +1509,7 @@ export default function StrategyTesterPanel({
                   <tr>
                     <td
                       className="px-3 py-8 text-center text-gray-500"
-                      colSpan={12}
+                      colSpan={13}
                     >
                       No trades found with the current three-chart settings.
                     </td>
@@ -1211,6 +1527,14 @@ export default function StrategyTesterPanel({
                           className={`px-3 py-3 font-semibold ${trade.side === "Long" ? "text-emerald-300" : "text-red-300"}`}
                         >
                           {trade.side}
+                        </td>
+                        <td className="px-3 py-3 text-right">
+                          <div className="font-bold text-cyan-300">
+                            {trade.entryConfidence.toFixed(0)}%
+                          </div>
+                          <div className="text-[10px] text-gray-500">
+                            {trade.confidenceReason}
+                          </div>
                         </td>
                         <td className="px-3 py-3">
                           {formatDateTime(trade.entryTime)}
