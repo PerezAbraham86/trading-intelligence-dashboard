@@ -76,6 +76,8 @@ type SignalCardView = {
   entry: number | null
   target: number | null
   current: number | null
+  pnl: number | null
+  pnlPercent: number | null
   bodyText: string
   statusText: string
   updatedAt?: string
@@ -612,6 +614,163 @@ function resolveLockedEntryPrice(
   return Number.isFinite(current) && current > 0 ? current : null
 }
 
+
+function readNumberPath(source: unknown, path: string[]) {
+  let current: unknown = source
+
+  for (const key of path) {
+    if (!current || typeof current !== 'object') return NaN
+    current = (current as Record<string, unknown>)[key]
+  }
+
+  const numeric = Number(current)
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : NaN
+}
+
+function resolveChartNrtrEntryPrice(
+  latestSignal?: RecentSignal,
+  fallbackSignal?: RecentSignal,
+  currentPrice?: number
+) {
+  const sources = [latestSignal as unknown, fallbackSignal as unknown].filter(Boolean)
+
+  const paths = [
+    ['nrtrEntry'],
+    ['nrtrEntryPrice'],
+    ['entryPrice'],
+    ['entry'],
+    ['price'],
+
+    ['strategy', 'entry'],
+    ['strategy', 'entryPrice'],
+    ['strategy', 'nrtrEntry'],
+    ['strategy', 'nrtrEntryPrice'],
+
+    ['chartStrategy', 'entry'],
+    ['chartStrategy', 'entryPrice'],
+    ['chartStrategy', 'nrtrEntry'],
+    ['chartStrategy', 'nrtrEntryPrice'],
+
+    ['nrtr', 'entry'],
+    ['nrtr', 'entryPrice'],
+    ['nrtr', 'signalEntry'],
+    ['nrtr', 'triggerPrice'],
+    ['nrtr', 'flipPrice'],
+
+    ['scorecards', 'nrtr', 'entry'],
+    ['scorecards', 'nrtr', 'entryPrice'],
+    ['scorecards', 'nrtrStrategy', 'entry'],
+    ['scorecards', 'nrtrStrategy', 'entryPrice'],
+    ['scorecards', 'nrtrMatrix', 'entry'],
+    ['scorecards', 'nrtrMatrix', 'entryPrice'],
+
+    ['chartScorecards', 'nrtr', 'entry'],
+    ['chartScorecards', 'nrtr', 'entryPrice'],
+    ['chartScorecards', 'nrtrStrategy', 'entry'],
+    ['chartScorecards', 'nrtrStrategy', 'entryPrice'],
+    ['chartScorecards', 'nrtrMatrix', 'entry'],
+    ['chartScorecards', 'nrtrMatrix', 'entryPrice'],
+  ]
+
+  for (const source of sources) {
+    for (const path of paths) {
+      const candidate = readNumberPath(source, path)
+      if (!Number.isFinite(candidate) || candidate <= 0) continue
+
+      if (currentPrice && Number.isFinite(currentPrice) && currentPrice > 0) {
+        const distance = Math.abs(candidate - currentPrice) / currentPrice
+        if (distance > 0.35) continue
+      }
+
+      return candidate
+    }
+  }
+
+  return null
+}
+
+function resolveChartSignalEntryPrice({
+  latestSignal,
+  fallbackSignal,
+  currentPrice,
+  candles,
+  signalType,
+}: {
+  latestSignal?: RecentSignal
+  fallbackSignal?: RecentSignal
+  currentPrice?: number
+  candles?: ChartCardCandle[]
+  signalType: 'BUY' | 'SELL' | 'HOLD'
+}) {
+  const nrtrEntry = resolveChartNrtrEntryPrice(latestSignal, fallbackSignal, currentPrice)
+
+  if (nrtrEntry && nrtrEntry > 0) return nrtrEntry
+
+  const lockedSignalEntry = resolveLockedEntryPrice(
+    Number(currentPrice ?? NaN),
+    latestSignal,
+    fallbackSignal,
+  )
+
+  if (lockedSignalEntry && lockedSignalEntry > 0) return lockedSignalEntry
+
+  // Last resort: use the previous candle close as the latest chart-trigger entry,
+  // not the current live price. This prevents Entry and Current from always matching.
+  if (Array.isArray(candles) && candles.length >= 2) {
+    const previousClose = Number(candles[candles.length - 2]?.close)
+    if (Number.isFinite(previousClose) && previousClose > 0) return previousClose
+  }
+
+  if (Array.isArray(candles) && candles.length >= 1) {
+    const latestOpen = Number(candles[candles.length - 1]?.open)
+    if (Number.isFinite(latestOpen) && latestOpen > 0) return latestOpen
+  }
+
+  return currentPrice && signalType !== 'HOLD' ? currentPrice : null
+}
+
+function calculateDirectionalPnl({
+  entry,
+  current,
+  signalType,
+  symbol,
+}: {
+  entry: number | null
+  current: number | null
+  signalType: 'BUY' | 'SELL' | 'HOLD'
+  symbol: string
+}) {
+  if (!entry || !current || entry <= 0 || current <= 0 || signalType === 'HOLD') {
+    return { pnl: null, pnlPercent: null }
+  }
+
+  const direction = signalType === 'BUY' ? 1 : -1
+  const pointMove = (current - entry) * direction
+  const pointValue =
+    symbol.includes('MES') ? 5 :
+    symbol.includes('ES') ? 50 :
+    1
+
+  return {
+    pnl: pointMove * pointValue,
+    pnlPercent: (pointMove / entry) * 100,
+  }
+}
+
+function formatPnl(value?: number | null) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '—'
+  const numeric = Number(value)
+  const sign = numeric > 0 ? '+' : ''
+  return `${sign}${numeric.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+}
+
+function formatPnlPercent(value?: number | null) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '—'
+  const numeric = Number(value)
+  const sign = numeric > 0 ? '+' : ''
+  return `${sign}${numeric.toFixed(2)}%`
+}
+
 function buildLiveSnapshot(latestSignal?: RecentSignal, activeSymbol = 'BTCUSD', activeTimeframe = '1m', activePrice?: number): RecentSignal {
   const liveCurrent = Number(activePrice ?? latestSignal?.current ?? latestSignal?.price ?? latestSignal?.entry ?? 0)
   const lockedEntry = resolveLockedEntryPrice(liveCurrent, latestSignal, latestSignal)
@@ -803,8 +962,14 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
   )
   const confidenceLabel = getConfidenceLabel(confidence)
 
-  // Entry stays locked to the original signal entry and no longer follows live current.
-  const entry = resolveLockedEntryPrice(current, input.latestSignal, fallbackSignal)
+  // Entry comes from chart strategy/NRTR trigger first, not live current.
+  const entry = resolveChartSignalEntryPrice({
+    latestSignal: input.latestSignal,
+    fallbackSignal,
+    currentPrice: hasCurrent ? current : undefined,
+    candles: input.candles,
+    signalType: type,
+  })
 
   // True target rule:
   // Do NOT generate synthetic targets from ATR/NRTR/SMMA here.
@@ -816,6 +981,13 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
     hasCurrent ? current : undefined,
     type
   )
+
+  const pnlData = calculateDirectionalPnl({
+    entry,
+    current: hasCurrent ? current : null,
+    signalType: type,
+    symbol,
+  })
 
   const statusText = type === 'BUY'
     ? 'Bullish chart signal'
@@ -846,6 +1018,8 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
     entry,
     target,
     current: hasCurrent ? current : null,
+    pnl: pnlData.pnl,
+    pnlPercent: pnlData.pnlPercent,
     bodyText,
     statusText,
     updatedAt: input.latestSignal?.createdAt ?? fallbackSignal?.createdAt,
@@ -902,6 +1076,19 @@ function SignalScoreCard({ card }: { card: SignalCardView }) {
         <div className="flex items-center justify-between gap-3">
           <span className="text-base font-semibold text-gray-400">Current Price</span>
           <span className="text-lg font-black text-white">{formatPrice(card.current)}</span>
+        </div>
+
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-base font-semibold text-gray-400">P&L</span>
+          <span className={`text-lg font-black ${
+            Number(card.pnl ?? 0) > 0
+              ? 'text-emerald-300'
+              : Number(card.pnl ?? 0) < 0
+                ? 'text-red-300'
+                : 'text-white'
+          }`}>
+            {formatPnl(card.pnl)} <span className="text-sm text-gray-400">({formatPnlPercent(card.pnlPercent)})</span>
+          </span>
         </div>
 
         <div className="flex items-center justify-between gap-3 pt-1">
