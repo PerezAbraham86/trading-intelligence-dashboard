@@ -321,19 +321,20 @@ class EntryMlClosePayload(BaseModel):
 
 
 class AiTraderDecisionPayload(BaseModel):
-    symbol: Optional[str] = "MES1!"
-    timeframe: Optional[str] = "1m"
+    # Keep every field loose. The dashboard can send null, undefined-cleaned values,
+    # strings, numbers, arrays, nested UI objects, or partial snapshots. The AI trader
+    # brain normalizes everything in api/ai_trader.py, so FastAPI should not reject
+    # dashboard-only data with 422 before it reaches that normalizer.
+    symbol: Optional[Any] = "MES1!"
+    timeframe: Optional[Any] = "1m"
 
-    currentPrice: Optional[float] = None
-    entryPrice: Optional[float] = None
-    targetPrice: Optional[float] = None
-    stopPrice: Optional[float] = None
+    currentPrice: Optional[Any] = None
+    entryPrice: Optional[Any] = None
+    targetPrice: Optional[Any] = None
+    stopPrice: Optional[Any] = None
     side: Optional[Any] = None
-    riskReward: Optional[float] = None
+    riskReward: Optional[Any] = None
 
-    # Dashboard payloads can be nested objects, arrays, strings, nulls, or mixed
-    # UI snapshots. Keep these loose so the AI trader does not reject valid
-    # dashboard-only data with a FastAPI 422 before ai_trader.py can normalize it.
     signal: Optional[Any] = None
     scorecards: Optional[Any] = None
     ghostMl: Optional[Any] = None
@@ -343,8 +344,8 @@ class AiTraderDecisionPayload(BaseModel):
     unifiedIntelligence: Optional[Any] = None
     context: Optional[Any] = None
 
-    minConfidence: Optional[float] = None
-    minRiskReward: Optional[float] = None
+    minConfidence: Optional[Any] = None
+    minRiskReward: Optional[Any] = None
 
 
 class AiTraderOpenPayload(AiTraderDecisionPayload):
@@ -352,20 +353,20 @@ class AiTraderOpenPayload(AiTraderDecisionPayload):
 
 
 class AiTraderClosePayload(BaseModel):
-    tradeId: Optional[str] = None
-    symbol: Optional[str] = "MES1!"
-    timeframe: Optional[str] = "1m"
+    tradeId: Optional[Any] = None
+    symbol: Optional[Any] = "MES1!"
+    timeframe: Optional[Any] = "1m"
     side: Optional[Any] = None
-    exitPrice: Optional[float] = None
-    currentPrice: Optional[float] = None
+    exitPrice: Optional[Any] = None
+    currentPrice: Optional[Any] = None
     exitTime: Optional[Any] = None
-    exitReason: Optional[str] = "manual_close"
+    exitReason: Optional[Any] = "manual_close"
 
 
 class AiTraderEvaluatePayload(BaseModel):
-    symbol: Optional[str] = "MES1!"
-    timeframe: Optional[str] = "1m"
-    currentPrice: Optional[float] = None
+    symbol: Optional[Any] = "MES1!"
+    timeframe: Optional[Any] = "1m"
+    currentPrice: Optional[Any] = None
     candles: Optional[Any] = None
 
 # ─────────────────────────────────────────────────────────────────────────────
