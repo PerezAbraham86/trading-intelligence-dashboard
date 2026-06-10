@@ -78,6 +78,8 @@ type SignalCardView = {
   current: number | null
   pnl: number | null
   pnlPercent: number | null
+  maxPnl: number | null
+  maxPnlPercent: number | null
   bodyText: string
   statusText: string
   updatedAt?: string
@@ -952,6 +954,34 @@ function calculateDirectionalPnl({
   }
 }
 
+function calculateMaxDirectionalPnl({
+  entry,
+  target,
+  signalType,
+  symbol,
+}: {
+  entry: number | null
+  target: number | null
+  signalType: 'BUY' | 'SELL' | 'HOLD'
+  symbol: string
+}) {
+  if (!entry || !target || entry <= 0 || target <= 0 || signalType === 'HOLD') {
+    return { maxPnl: null, maxPnlPercent: null }
+  }
+
+  const direction = signalType === 'BUY' ? 1 : -1
+  const pointMove = (target - entry) * direction
+  const pointValue =
+    symbol.includes('MES') ? 5 :
+    symbol.includes('ES') ? 50 :
+    1
+
+  return {
+    maxPnl: pointMove * pointValue,
+    maxPnlPercent: (pointMove / entry) * 100,
+  }
+}
+
 function formatPnl(value?: number | null) {
   if (value === null || value === undefined || !Number.isFinite(Number(value))) return '—'
   const numeric = Number(value)
@@ -1188,6 +1218,13 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
     symbol,
   })
 
+  const maxPnlData = calculateMaxDirectionalPnl({
+    entry,
+    target,
+    signalType: type,
+    symbol,
+  })
+
   const statusText = type === 'BUY'
     ? 'Bullish chart signal'
     : type === 'SELL'
@@ -1219,6 +1256,8 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
     current: hasCurrent ? current : null,
     pnl: pnlData.pnl,
     pnlPercent: pnlData.pnlPercent,
+    maxPnl: maxPnlData.maxPnl,
+    maxPnlPercent: maxPnlData.maxPnlPercent,
     bodyText,
     statusText,
     updatedAt: input.latestSignal?.createdAt ?? fallbackSignal?.createdAt,
@@ -1287,6 +1326,19 @@ function SignalScoreCard({ card }: { card: SignalCardView }) {
                 : 'text-white'
           }`}>
             {formatPnl(card.pnl)} <span className="text-sm text-gray-400">({formatPnlPercent(card.pnlPercent)})</span>
+          </span>
+        </div>
+
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-base font-semibold text-gray-400">Max P&L</span>
+          <span className={`text-lg font-black ${
+            Number(card.maxPnl ?? 0) > 0
+              ? 'text-emerald-300'
+              : Number(card.maxPnl ?? 0) < 0
+                ? 'text-red-300'
+                : 'text-white'
+          }`}>
+            {formatPnl(card.maxPnl)} <span className="text-sm text-gray-400">({formatPnlPercent(card.maxPnlPercent)})</span>
           </span>
         </div>
 
