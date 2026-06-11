@@ -436,7 +436,7 @@ function buildOverallTechnicalSentiment(
   const indicators: TechnicalIndicator[] = Array.from(grouped.entries()).map(([name, item]) => {
     const average =
       item.values.length > 0
-        ? item.values.reduce((sum, value) => sum + value, 0) / item.values.length
+        ? item.values.reduce((sum: number, value: number) => sum + value, 0) / item.values.length
         : 50
 
     let signal: 'BULLISH' | 'BEARISH' | 'NEUTRAL' = 'NEUTRAL'
@@ -520,7 +520,7 @@ function getAverageGhostConfidence(engineState: PythonEngineState | null | undef
   if (values.length === 0) return 0
 
   return clampPercent(
-    values.reduce((sum, value) => sum + value, 0) / values.length
+    values.reduce((sum: number, value: number) => sum + value, 0) / values.length
   )
 }
 
@@ -557,7 +557,7 @@ function getOverallGhostConfidence(engineStates: Record<string, PythonEngineStat
 
   if (values.length === 0) return 0
 
-  return clampPercent(values.reduce((sum, value) => sum + value, 0) / values.length)
+  return clampPercent(values.reduce((sum: number, value: number) => sum + value, 0) / values.length)
 }
 
 function getOverallGhostText(engineStates: Record<string, PythonEngineState | null>, timeframes: string[]) {
@@ -1525,7 +1525,7 @@ function overlayAverage(values: number[]) {
 
   if (!clean.length) return 0
 
-  return clean.reduce((sum, value) => sum + value, 0) / clean.length
+  return clean.reduce((sum: number, value: number) => sum + value, 0) / clean.length
 }
 
 function overlayQuality(item: any, fallback = 5) {
@@ -2466,7 +2466,7 @@ function buildNrtrUnifiedStrategyContext(
   })
 
   const atr =
-    trueRanges.reduce((sum, value) => sum + value, 0) /
+    trueRanges.reduce((sum: number, value: number) => sum + value, 0) /
     Math.max(trueRanges.length, 1)
 
   const distance =
