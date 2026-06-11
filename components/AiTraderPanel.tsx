@@ -374,8 +374,7 @@ async function readApiError(response: Response) {
 }
 
 function inferTargetFromSignal(signal: any) {
-  // STRICT REAL TARGET PRICE ML ONLY:
-  // do not use generic target/tp fields, NRTR fallback, or ghost projected close.
+  // Real Target Price ML first, then only chart ghost overlay target fallback.
   return readNumberPath(signal, [
     'finalTargetPrice',
     'overallTargetPrice',
@@ -385,14 +384,19 @@ function inferTargetFromSignal(signal: any) {
     'targetPlan.finalTargetPrice',
     'targetPlan.overallTargetPrice',
     'targetPlan.targetPrice',
+    'activeTargetPrice',
+    'ghostOverlayTargetPrice',
+    'targetMl.activeTargetPrice',
+    'targetMl.ghostOverlayTargetPrice',
+    'targetPlan.activeTargetPrice',
+    'targetPlan.ghostOverlayTargetPrice',
     'overlayPayload.finalTargetPrice',
     'overlayPayload.overallTargetPrice',
     'overlayPayload.targetMl.finalTargetPrice',
     'overlayPayload.targetMl.overallTargetPrice',
     'overlayPayload.targetMl.targetPrice',
-    'overlayPayload.targetPlan.finalTargetPrice',
-    'overlayPayload.targetPlan.overallTargetPrice',
-    'overlayPayload.targetPlan.targetPrice',
+    'overlayPayload.activeTargetPrice',
+    'overlayPayload.ghostOverlayTargetPrice',
   ])
 }
 
@@ -524,8 +528,7 @@ function buildTargetMlSnapshot(signal: any, overlayPayload: any) {
     signalContext.targetMlReady ||
     overlayContext.targetMlReady ||
     targetMlAligned ||
-    targetConfidence > 0 ||
-    Boolean(targetPrice)
+    targetConfidence > 0
   )
 
   return {
@@ -979,7 +982,7 @@ export default function AiTraderPanel({
             detail={
               targetMlConfidence > 0
                 ? `Target ML active. Real Target Price ML target ${formatPrice(decision?.target)} is being used for max P&L and risk/reward.`
-                : 'Waiting for real unified Target Price ML confidence.'
+                : 'Waiting for real Target Price ML; using chart ghost overlay only if ML target is unavailable.'
             }
           />
 
