@@ -374,19 +374,28 @@ async function readApiError(response: Response) {
 }
 
 function inferTargetFromSignal(signal: any) {
+  // STRICT REAL TARGET PRICE ML ONLY:
+  // do not use generic target/tp fields, NRTR fallback, or ghost projected close.
   return readNumberPath(signal, [
-    'targetPrice',
-    'target',
-    'targetMl.targetPrice',
-    'targetPlan.targetPrice',
     'finalTargetPrice',
     'overallTargetPrice',
-    'ghostTargetPrice',
-    'projectedTargetPrice',
-    'takeProfitPrice',
-    'tp1',
+    'targetMl.finalTargetPrice',
+    'targetMl.overallTargetPrice',
+    'targetMl.targetPrice',
+    'targetPlan.finalTargetPrice',
+    'targetPlan.overallTargetPrice',
+    'targetPlan.targetPrice',
+    'overlayPayload.finalTargetPrice',
+    'overlayPayload.overallTargetPrice',
+    'overlayPayload.targetMl.finalTargetPrice',
+    'overlayPayload.targetMl.overallTargetPrice',
+    'overlayPayload.targetMl.targetPrice',
+    'overlayPayload.targetPlan.finalTargetPrice',
+    'overlayPayload.targetPlan.overallTargetPrice',
+    'overlayPayload.targetPlan.targetPrice',
   ])
 }
+
 
 function inferEntryFromSignal(signal: any, activePrice?: number) {
   return readNumberPath(signal, [
@@ -413,8 +422,11 @@ function readGhostTargetMlContext(source: any) {
   let bestTarget = readNumberPath(source, [
     'finalTargetPrice',
     'overallTargetPrice',
-    'targetPrice',
+    'targetMl.finalTargetPrice',
+    'targetMl.overallTargetPrice',
     'targetMl.targetPrice',
+    'targetPlan.finalTargetPrice',
+    'targetPlan.overallTargetPrice',
     'targetPlan.targetPrice',
   ])
   let bestConfidence = toFiniteNumber(
@@ -600,7 +612,7 @@ export default function AiTraderPanel({
 
   const payload = useMemo(() => {
     const targetSnapshot = buildTargetMlSnapshot(signal, overlayPayload)
-    const target = inferTargetFromSignal(signal) ?? targetSnapshot.targetPrice
+    const target = targetSnapshot.targetPrice
     const entry = inferEntryFromSignal(signal, activePrice)
     const side = normalizeDecision(signal?.signal ?? signal?.type ?? signal?.direction)
 
@@ -966,8 +978,8 @@ export default function AiTraderPanel({
             tone={getMlStrengthTone(targetMlConfidence)}
             detail={
               targetMlConfidence > 0
-                ? `Target ML active. Current target ${formatPrice(decision?.target)} is being used for max P&L and risk/reward.`
-                : 'Waiting for final Target ML confidence from unified ghost/target context.'
+                ? `Target ML active. Real Target Price ML target ${formatPrice(decision?.target)} is being used for max P&L and risk/reward.`
+                : 'Waiting for real unified Target Price ML confidence.'
             }
           />
 
