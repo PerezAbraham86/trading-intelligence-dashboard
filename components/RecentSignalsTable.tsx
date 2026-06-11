@@ -1057,34 +1057,22 @@ function getDeepTargetNumber(source: unknown, path: Array<string | number>) {
 function collectFinalMlTargetCandidates(source: unknown): number[] {
   const candidates: number[] = []
 
+  // STRICT TARGET PRICE ML ONLY:
+  // no NRTR fallback, no ghost close fallback, no regular TP, no synthetic target.
   const directPaths: Array<Array<string | number>> = [
     ['finalTargetPrice'],
     ['overallTargetPrice'],
-    ['targetPrice'],
-    ['target'],
-    ['target_price'],
-    ['takeProfitPrice'],
-    ['take_profit_price'],
-    ['tp1'],
-    ['tp1Price'],
 
     ['targetMl', 'finalTargetPrice'],
     ['targetMl', 'overallTargetPrice'],
     ['targetMl', 'targetPrice'],
-    ['targetMl', 'target'],
-    ['targetMl', 'targetConfidence'],
 
     ['targetPlan', 'finalTargetPrice'],
     ['targetPlan', 'overallTargetPrice'],
     ['targetPlan', 'targetPrice'],
-    ['targetPlan', 'target'],
-    ['targetPlan', 'takeProfitPrice'],
-    ['targetPlan', 'tp1'],
 
     ['overlayPayload', 'finalTargetPrice'],
     ['overlayPayload', 'overallTargetPrice'],
-    ['overlayPayload', 'targetPrice'],
-    ['overlayPayload', 'target'],
     ['overlayPayload', 'targetMl', 'finalTargetPrice'],
     ['overlayPayload', 'targetMl', 'overallTargetPrice'],
     ['overlayPayload', 'targetMl', 'targetPrice'],
@@ -1094,7 +1082,6 @@ function collectFinalMlTargetCandidates(source: unknown): number[] {
 
     ['unifiedIntelligence', 'finalTargetPrice'],
     ['unifiedIntelligence', 'overallTargetPrice'],
-    ['unifiedIntelligence', 'targetPrice'],
     ['unifiedIntelligence', 'targetMl', 'finalTargetPrice'],
     ['unifiedIntelligence', 'targetMl', 'overallTargetPrice'],
     ['unifiedIntelligence', 'targetMl', 'targetPrice'],
@@ -1127,11 +1114,12 @@ function collectFinalMlTargetCandidates(source: unknown): number[] {
       const ghostPaths: Array<Array<string | number>> = [
         ['finalTargetPrice'],
         ['overallTargetPrice'],
-        ['ghostTargetPrice'],
-        ['projectedTargetPrice'],
-        ['targetPrice'],
-        ['target'],
-        ['close'],
+        ['targetMl', 'finalTargetPrice'],
+        ['targetMl', 'overallTargetPrice'],
+        ['targetMl', 'targetPrice'],
+        ['targetPlan', 'finalTargetPrice'],
+        ['targetPlan', 'overallTargetPrice'],
+        ['targetPlan', 'targetPrice'],
       ]
 
       ghostPaths.forEach((path) => {
@@ -1143,6 +1131,7 @@ function collectFinalMlTargetCandidates(source: unknown): number[] {
 
   return candidates
 }
+
 
 function getTrueMlSmcTargetPrice(
   latestSignal?: RecentSignal,
@@ -1260,7 +1249,7 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
     signalType: type,
     symbol,
   })
-  const target = trueTarget ?? fallbackTarget
+  const target = trueTarget
   const targetDirectionConflict = Boolean(
     trueTarget &&
     hasCurrent &&
@@ -1294,10 +1283,8 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
   const targetText = targetDirectionConflict
     ? 'Final ML target conflicts with current chart direction.'
     : trueTarget
-      ? 'Target from Final ML/SMC context.'
-      : target
-        ? 'Target from NRTR display projection.'
-        : 'Target unavailable.'
+      ? 'Target from Real Target Price ML context.'
+      : 'Real Target Price ML unavailable.'
 
   const bodyText = input.label.toLowerCase().includes('main')
     ? `Main chart signal card. ${trend.source}. ${targetText} ${settingsText}`
