@@ -1033,10 +1033,38 @@ export default function AiTraderPanel({
           ? 'warn'
           : 'neutral'
 
-  const stats = summary?.stats ?? {}
-  const decisionStats = summary?.decisionStats ?? summary?.memoryStatus?.overallDecisionStats ?? {}
-  const memoryStatus = summary?.memoryStatus ?? decision?.details?.memoryStatus ?? {}
-  const blockers = getBlockerAnalysis(decision, summary, minConfidence, minRiskReward)
+  const activeMemoryStatus =
+    decision?.details?.memoryStatus ??
+    summary?.memoryStatus ??
+    {}
+
+  const activeDecisionStats =
+    activeMemoryStatus?.bucketDecisionStats ??
+    activeMemoryStatus?.overallDecisionStats ??
+    summary?.decisionStats ??
+    {}
+
+  const activeClosedStats =
+    activeMemoryStatus?.bucketClosedStats ??
+    activeMemoryStatus?.overallClosedStats ??
+    summary?.stats ??
+    {}
+
+  const stats = activeClosedStats
+  const decisionStats = activeDecisionStats
+  const memoryStatus = activeMemoryStatus
+  const blockers = getBlockerAnalysis(
+    decision,
+    {
+      ...(summary ?? {}),
+      memoryStatus: activeMemoryStatus,
+      decisionStats: activeDecisionStats,
+      stats: activeClosedStats,
+      closedCount: summary?.closedCount ?? activeClosedStats?.samples ?? 0,
+    },
+    minConfidence,
+    minRiskReward
+  )
 
   const directionalContext = decision?.details?.directionalContext ?? {}
   const ghostMlConfidence = Math.max(
@@ -1300,6 +1328,19 @@ export default function AiTraderPanel({
 
           <div className="mb-3 rounded-lg border border-dark-700 bg-dark-800/70 px-3 py-2 text-xs text-gray-300">
             {String(memoryStatus.message ?? 'AI memory is collecting live decision observations.')}
+          </div>
+
+          <div className="mb-3 grid grid-cols-2 gap-2">
+            <StatBox
+              label="Live Observations"
+              value={formatCount(decisionStats.samples)}
+              tone={toFiniteNumber(decisionStats.samples, 0) >= 10 ? 'bull' : 'warn'}
+            />
+            <StatBox
+              label="Memory Source"
+              value={decision?.details?.memoryStatus ? 'LIVE DECISION' : summary?.memoryStatus ? 'SUMMARY' : 'WAITING'}
+              tone={decision?.details?.memoryStatus ? 'bull' : 'warn'}
+            />
           </div>
 
           <div className="grid grid-cols-2 gap-2">
