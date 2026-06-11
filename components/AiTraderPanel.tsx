@@ -10,6 +10,7 @@ type AiTraderPanelProps = {
   scorecards?: any
   overlayPayload?: any
   unifiedIntelligence?: any
+  projectionEngine?: any
   candles?: any[]
 }
 
@@ -373,9 +374,168 @@ async function readApiError(response: Response) {
   }
 }
 
+function readProjectionEngine(signal: any, overlayPayload: any, unifiedIntelligence: any) {
+  const candidates = [
+    unifiedIntelligence?.projectionEngine,
+    unifiedIntelligence?.unifiedProjectionEngine,
+    unifiedIntelligence?.components?.projectionEngine,
+    unifiedIntelligence?.components?.unifiedProjectionEngine,
+    signal?.projectionEngine,
+    signal?.unifiedProjectionEngine,
+    overlayPayload?.projectionEngine,
+    overlayPayload?.unifiedProjectionEngine,
+    overlayPayload?.unifiedIntelligence?.projectionEngine,
+    overlayPayload?.unifiedIntelligence?.unifiedProjectionEngine,
+    unifiedIntelligence,
+  ]
+
+  for (const candidate of candidates) {
+    if (
+      candidate &&
+      typeof candidate === 'object' &&
+      (
+        candidate.eventType === 'UNIFIED_PROJECTION_ENGINE' ||
+        candidate.ghostPath ||
+        candidate.target ||
+        candidate.alignment ||
+        candidate.activeTargetPrice
+      )
+    ) {
+      return candidate
+    }
+  }
+
+  return null
+}
+
+function readProjectionTarget(projectionEngine: any) {
+  if (!projectionEngine || typeof projectionEngine !== 'object') return undefined
+
+  return readNumberPath(projectionEngine, [
+    'activeTargetPrice',
+    'target.price',
+    'targetPrice',
+    'targetPlan.targetPrice',
+    'targetPlan.finalTargetPrice',
+    'targetMl.targetPrice',
+    'finalTargetPrice',
+    'ghostOverlayTargetPrice',
+    'ghostPath.targetPrice',
+    'ghostPath.endPrice',
+  ])
+}
+
+function readProjectionGhostConfidence(projectionEngine: any) {
+  if (!projectionEngine || typeof projectionEngine !== 'object') return 0
+
+  return Math.max(
+    toFiniteNumber(projectionEngine?.ghostConfidence, 0),
+    toFiniteNumber(projectionEngine?.ghostPath?.confidence, 0),
+    toFiniteNumber(projectionEngine?.alignment?.score, 0),
+  )
+}
+
+function readProjectionTargetConfidence(projectionEngine: any) {
+  if (!projectionEngine || typeof projectionEngine !== 'object') return 0
+
+  const targetType = String(
+    projectionEngine?.activeTargetType ??
+      projectionEngine?.target?.type ??
+      projectionEngine?.targetPlan?.type ??
+      ''
+  )
+
+  const isGhostOverlay = targetType === 'GHOST_OVERLAY_TARGET'
+
+  if (isGhostOverlay) {
+    return 0
+  }
+
+  return Math.max(
+    toFiniteNumber(projectionEngine?.targetConfidence, 0),
+    toFiniteNumber(projectionEngine?.activeTargetConfidence, 0),
+    toFiniteNumber(projectionEngine?.target?.confidence, 0),
+    toFiniteNumber(projectionEngine?.targetPlan?.targetConfidence, 0),
+    toFiniteNumber(projectionEngine?.targetMl?.targetConfidence, 0),
+  )
+}
+
+function readProjectionSide(projectionEngine: any, fallback: any) {
+  const direction = String(
+    projectionEngine?.target?.direction ??
+      projectionEngine?.ghostPath?.direction ??
+      projectionEngine?.marketState?.direction ??
+      projectionEngine?.targetDirection ??
+      ''
+  ).toUpperCase()
+
+  if (direction.includes('BULL') || direction.includes('UP') || direction.includes('BUY')) return 'BUY'
+  if (direction.includes('BEAR') || direction.includes('DOWN') || direction.includes('SELL')) return 'SELL'
+
+  return normalizeDecision(fallback)
+}
+
+function buildProjectionEngineSnapshot(projectionEngine: any) {
+  if (!projectionEngine || typeof projectionEngine !== 'object') {
+    return {
+      available: false,
+      targetPrice: undefined,
+      targetConfidence: 0,
+      ghostConfidence: 0,
+      alignmentScore: 0,
+      alignmentLabel: 'Waiting',
+      projectionMode: 'WAITING',
+      projectionModeLabel: 'Waiting',
+      aiPermission: 'WAIT',
+      conflict: false,
+    }
+  }
+
+  const targetPrice = readProjectionTarget(projectionEngine)
+  const targetConfidence = readProjectionTargetConfidence(projectionEngine)
+  const ghostConfidence = readProjectionGhostConfidence(projectionEngine)
+  const alignmentScore = toFiniteNumber(projectionEngine?.alignment?.score, 0)
+  const conflict = Boolean(projectionEngine?.alignment?.conflict || projectionEngine?.mode?.conflict)
+
+  return {
+    available: Boolean(targetPrice),
+    targetPrice,
+    targetConfidence,
+    ghostConfidence,
+    alignmentScore,
+    alignmentLabel: String(projectionEngine?.alignment?.label ?? 'Waiting'),
+    projectionMode: String(projectionEngine?.projectionMode ?? projectionEngine?.mode?.mode ?? 'WAITING'),
+    projectionModeLabel: String(projectionEngine?.projectionModeLabel ?? projectionEngine?.mode?.label ?? 'Waiting'),
+    aiPermission: String(projectionEngine?.aiPermission ?? 'WAIT'),
+    conflict,
+    source: String(projectionEngine?.activeTargetSource ?? projectionEngine?.target?.source ?? 'Unified Projection Engine'),
+    targetType: String(projectionEngine?.activeTargetType ?? projectionEngine?.target?.type ?? ''),
+    marketState: projectionEngine?.marketState,
+    target: projectionEngine?.target,
+    ghostPath: projectionEngine?.ghostPath,
+    alignment: projectionEngine?.alignment,
+    mode: projectionEngine?.mode,
+    learning: projectionEngine?.learning,
+  }
+}
+
 function inferTargetFromSignal(signal: any) {
   // Real Target Price ML first, then only chart ghost overlay target fallback.
   return readNumberPath(signal, [
+    'projectionEngine.activeTargetPrice',
+    'projectionEngine.target.price',
+    'projectionEngine.targetPrice',
+    'projectionEngine.targetPlan.targetPrice',
+    'projectionEngine.targetMl.targetPrice',
+    'projectionEngine.finalTargetPrice',
+    'projectionEngine.ghostOverlayTargetPrice',
+    'unifiedProjectionEngine.activeTargetPrice',
+    'unifiedProjectionEngine.target.price',
+    'unifiedProjectionEngine.targetPrice',
+    'unifiedProjectionEngine.targetPlan.targetPrice',
+    'unifiedProjectionEngine.targetMl.targetPrice',
+    'unifiedProjectionEngine.finalTargetPrice',
+    'unifiedProjectionEngine.ghostOverlayTargetPrice',
     'finalTargetPrice',
     'overallTargetPrice',
     'targetMl.finalTargetPrice',
@@ -414,11 +574,16 @@ function inferEntryFromSignal(signal: any, activePrice?: number) {
 
 function readGhostTargetMlContext(source: any) {
   const ghostSources = [
+    source?.projectionEngine?.ghostPath?.candles,
+    source?.unifiedProjectionEngine?.ghostPath?.candles,
+    source?.ghostPath?.candles,
     source?.ghostCandles,
     source?.ghosts,
     source?.projection,
     source?.ghostProjection,
     source?.ghostCandleProjection,
+    source?.overlayPayload?.projectionEngine?.ghostPath?.candles,
+    source?.overlayPayload?.unifiedProjectionEngine?.ghostPath?.candles,
     source?.overlayPayload?.ghostCandles,
     source?.overlayPayload?.ghosts,
   ]
@@ -483,11 +648,14 @@ function readGhostTargetMlContext(source: any) {
   }
 }
 
-function buildTargetMlSnapshot(signal: any, overlayPayload: any) {
+function buildTargetMlSnapshot(signal: any, overlayPayload: any, unifiedIntelligence?: any) {
+  const projectionEngine = readProjectionEngine(signal, overlayPayload, unifiedIntelligence)
+  const projectionSnapshot = buildProjectionEngineSnapshot(projectionEngine)
   const signalContext = readGhostTargetMlContext(signal)
   const overlayContext = readGhostTargetMlContext(overlayPayload)
 
   const targetConfidence = Math.max(
+    toFiniteNumber(projectionSnapshot.targetConfidence, 0),
     toFiniteNumber(
       signal?.targetConfidence ??
       signal?.targetMl?.targetConfidence ??
@@ -500,6 +668,7 @@ function buildTargetMlSnapshot(signal: any, overlayPayload: any) {
   )
 
   const targetPrice =
+    projectionSnapshot.targetPrice ??
     inferTargetFromSignal(signal) ??
     signalContext.targetPrice ??
     overlayContext.targetPrice ??
@@ -512,6 +681,7 @@ function buildTargetMlSnapshot(signal: any, overlayPayload: any) {
     ])
 
   const targetMlAligned = Boolean(
+    projectionSnapshot.available ||
     signal?.targetMlAligned ??
     signal?.targetMl?.targetMlAligned ??
     overlayPayload?.targetMlAligned ??
@@ -537,24 +707,32 @@ function buildTargetMlSnapshot(signal: any, overlayPayload: any) {
     targetMlAligned,
     targetPrice,
     source:
+      projectionSnapshot.source ??
       signal?.targetSource ??
       signal?.targetMl?.source ??
       overlayPayload?.targetSource ??
       overlayPayload?.targetMl?.source ??
       'ghost_target_ml_context',
+    projectionEngine: projectionSnapshot,
   }
 }
 
-function buildGhostMlSnapshot(signal: any, overlayPayload: any) {
+function buildGhostMlSnapshot(signal: any, overlayPayload: any, unifiedIntelligence?: any) {
+  const projectionEngine = readProjectionEngine(signal, overlayPayload, unifiedIntelligence)
+  const projectionSnapshot = buildProjectionEngineSnapshot(projectionEngine)
+
   return {
-    confidence: toFiniteNumber(
-      signal?.ghostConfidence ??
+    confidence: Math.max(
+      toFiniteNumber(projectionSnapshot.ghostConfidence, 0),
+      toFiniteNumber(
+        signal?.ghostConfidence ??
       signal?.confidence ??
       signal?.mlConfidence ??
-      overlayPayload?.ghostConfidence,
-      0,
+        overlayPayload?.ghostConfidence,
+        0,
+      )
     ),
-    mlReady: Boolean(signal?.mlReady ?? signal?.ghostMlReady ?? overlayPayload?.mlReady),
+    mlReady: Boolean(projectionSnapshot.available || signal?.mlReady ?? signal?.ghostMlReady ?? overlayPayload?.mlReady),
     ghostConfidenceBoost: toFiniteNumber(signal?.ghostConfidenceBoost ?? overlayPayload?.ghostConfidenceBoost, 0),
   }
 }
@@ -601,6 +779,7 @@ export default function AiTraderPanel({
   scorecards,
   overlayPayload,
   unifiedIntelligence,
+  projectionEngine: directProjectionEngine,
   candles,
 }: AiTraderPanelProps) {
   const [decision, setDecision] = useState<AiTraderDecision | null>(null)
@@ -613,11 +792,19 @@ export default function AiTraderPanel({
   const [minRiskReward, setMinRiskReward] = useState(1.25)
   const [lastAutoOpenKey, setLastAutoOpenKey] = useState('')
 
+  const activeProjectionEngine = useMemo(() => {
+    return directProjectionEngine ?? readProjectionEngine(signal, overlayPayload, unifiedIntelligence)
+  }, [directProjectionEngine, signal, overlayPayload, unifiedIntelligence])
+
+  const projectionSnapshot = useMemo(() => {
+    return buildProjectionEngineSnapshot(activeProjectionEngine)
+  }, [activeProjectionEngine])
+
   const payload = useMemo(() => {
-    const targetSnapshot = buildTargetMlSnapshot(signal, overlayPayload)
-    const target = targetSnapshot.targetPrice
+    const targetSnapshot = buildTargetMlSnapshot(signal, overlayPayload, unifiedIntelligence)
+    const target = projectionSnapshot.targetPrice ?? targetSnapshot.targetPrice
     const entry = inferEntryFromSignal(signal, activePrice)
-    const side = normalizeDecision(signal?.signal ?? signal?.type ?? signal?.direction)
+    const side = readProjectionSide(activeProjectionEngine, signal?.signal ?? signal?.type ?? signal?.direction)
 
     return {
       symbol,
@@ -626,22 +813,59 @@ export default function AiTraderPanel({
       entryPrice: entry,
       targetPrice: target,
       side,
-      signal,
+      signal: {
+        ...(signal ?? {}),
+        projectionEngine: activeProjectionEngine,
+        unifiedProjectionEngine: activeProjectionEngine,
+        activeTargetPrice: target,
+        activeTargetSource: projectionSnapshot.source,
+        projectionMode: projectionSnapshot.projectionMode,
+        projectionModeLabel: projectionSnapshot.projectionModeLabel,
+        aiPermission: projectionSnapshot.aiPermission,
+        targetGhostAlignment: projectionSnapshot.alignment,
+      },
       scorecards,
-      ghostMl: buildGhostMlSnapshot(signal, overlayPayload),
-      targetMl: targetSnapshot,
+      ghostMl: buildGhostMlSnapshot(signal, overlayPayload, unifiedIntelligence),
+      targetMl: {
+        ...targetSnapshot,
+        targetPrice: target,
+        targetConfidence: projectionSnapshot.targetConfidence || targetSnapshot.targetConfidence,
+        projectionEngine: projectionSnapshot,
+      },
       entryMl: buildEntryMlSnapshot(signal),
       nrtrContext: scorecards?.nrtrStrategyFeeds ?? scorecards?.nrtrCharts ?? {},
-      unifiedIntelligence,
+      unifiedIntelligence: {
+        ...(unifiedIntelligence ?? {}),
+        projectionEngine: activeProjectionEngine,
+        unifiedProjectionEngine: activeProjectionEngine,
+      },
+      projectionEngine: activeProjectionEngine,
+      projectionEngineContext: projectionSnapshot,
       context: {
         mode: 'dashboard_only_ai_paper_trader',
         dashboardOnly: true,
         noBroker: true,
+        projectionEngineMode: projectionSnapshot.projectionMode,
+        projectionEngineLabel: projectionSnapshot.projectionModeLabel,
+        aiPermission: projectionSnapshot.aiPermission,
+        targetGhostConflict: projectionSnapshot.conflict,
       },
       minConfidence,
       minRiskReward,
     }
-  }, [activePrice, signal, scorecards, overlayPayload, unifiedIntelligence, symbol, timeframe, minConfidence, minRiskReward])
+  }, [
+    activePrice,
+    signal,
+    scorecards,
+    overlayPayload,
+    unifiedIntelligence,
+    symbol,
+    timeframe,
+    minConfidence,
+    minRiskReward,
+    activeProjectionEngine,
+    projectionSnapshot,
+  ])
 
   const safePayload = useMemo(() => sanitizeAiTraderPayload(payload), [payload])
 
@@ -810,8 +1034,14 @@ export default function AiTraderPanel({
   const blockers = getBlockerAnalysis(decision, summary, minConfidence, minRiskReward)
 
   const directionalContext = decision?.details?.directionalContext ?? {}
-  const ghostMlConfidence = toFiniteNumber(directionalContext.ghostConfidence, 0)
-  const targetMlConfidence = toFiniteNumber(directionalContext.targetConfidence, 0)
+  const ghostMlConfidence = Math.max(
+    toFiniteNumber(projectionSnapshot.ghostConfidence, 0),
+    toFiniteNumber(directionalContext.ghostConfidence, 0)
+  )
+  const targetMlConfidence = Math.max(
+    toFiniteNumber(projectionSnapshot.targetConfidence, 0),
+    toFiniteNumber(directionalContext.targetConfidence, 0)
+  )
   const entryMlConfidence = toFiniteNumber(directionalContext.entryConfidence, 0)
   const aiConfidence = toFiniteNumber(decision?.confidence, 0)
 
@@ -946,6 +1176,8 @@ export default function AiTraderPanel({
         <StatBox label="Stop" value={formatPrice(decision?.stop)} tone="warn" />
         <StatBox label="Current P&L" value={formatMoney(decision?.currentPnl)} tone={toFiniteNumber(decision?.currentPnl, 0) >= 0 ? 'bull' : 'bear'} />
         <StatBox label="Max P&L" value={formatMoney(decision?.maxPnl)} tone={toFiniteNumber(decision?.maxPnl, 0) >= 0 ? 'bull' : 'bear'} />
+        <StatBox label="Projection" value={projectionSnapshot.projectionModeLabel || projectionSnapshot.projectionMode} tone={projectionSnapshot.conflict ? 'warn' : projectionSnapshot.available ? 'bull' : 'neutral'} />
+        <StatBox label="AI Permission" value={projectionSnapshot.aiPermission} tone={projectionSnapshot.aiPermission === 'CAN_CONSIDER' ? 'bull' : projectionSnapshot.conflict ? 'warn' : 'neutral'} />
       </div>
 
       <div className="mt-4 rounded-xl border border-dark-700 bg-dark-900/60 p-4">
@@ -961,7 +1193,19 @@ export default function AiTraderPanel({
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+          <MlStatusCard
+            title="Projection Engine"
+            status={projectionSnapshot.available ? projectionSnapshot.projectionModeLabel : 'Waiting'}
+            confidence={toFiniteNumber(projectionSnapshot.alignmentScore, 0)}
+            tone={projectionSnapshot.conflict ? 'warn' : projectionSnapshot.available ? 'bull' : 'neutral'}
+            detail={
+              projectionSnapshot.available
+                ? `Target ${formatPrice(projectionSnapshot.targetPrice)} • ${projectionSnapshot.aiPermission} • ${projectionSnapshot.alignmentLabel}`
+                : 'Waiting for Unified Projection Engine target, ghost route, and alignment.'
+            }
+          />
+
           <MlStatusCard
             title="Ghost ML"
             status={getMlStrengthLabel(ghostMlConfidence)}
@@ -1003,6 +1247,8 @@ export default function AiTraderPanel({
           <StatBox label="Entry ML" value={`${entryMlConfidence.toFixed(1)}%`} tone={getMlStrengthTone(entryMlConfidence)} />
           <StatBox label="Target" value={formatPrice(decision?.target)} />
           <StatBox label="RR" value={`${toFiniteNumber(decision?.riskReward, 0).toFixed(2)}R`} tone={toFiniteNumber(decision?.riskReward, 0) >= minRiskReward ? 'bull' : 'warn'} />
+          <StatBox label="Target Source" value={projectionSnapshot.source || '—'} />
+          <StatBox label="Alignment" value={`${toFiniteNumber(projectionSnapshot.alignmentScore, 0).toFixed(1)}%`} tone={projectionSnapshot.conflict ? 'warn' : toFiniteNumber(projectionSnapshot.alignmentScore, 0) >= 60 ? 'bull' : 'neutral'} />
         </div>
       </div>
 
