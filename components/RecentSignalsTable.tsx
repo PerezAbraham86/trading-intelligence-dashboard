@@ -1157,6 +1157,9 @@ function getTrueMlSmcTargetPrice(
     candidates.push(...collectFinalMlTargetCandidates(source))
   })
 
+  // Final/Unified ML target is the source of truth. Do not replace it with
+  // a synthetic NRTR target just because it conflicts with the current BUY/SELL
+  // card direction. A conflict is useful information and should remain visible.
   for (const candidate of candidates) {
     if (!Number.isFinite(candidate) || candidate <= 0) continue
 
@@ -1165,10 +1168,6 @@ function getTrueMlSmcTargetPrice(
 
       // Reject obviously wrong scale values only.
       if (distance > 0.35) continue
-
-      // True targets must be directional when signal direction is known.
-      if (signalType === 'BUY' && candidate <= currentPrice) continue
-      if (signalType === 'SELL' && candidate >= currentPrice) continue
     }
 
     return candidate
@@ -1262,6 +1261,11 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
     symbol,
   })
   const target = trueTarget ?? fallbackTarget
+  const targetDirectionConflict = Boolean(
+    trueTarget &&
+    hasCurrent &&
+    ((type === 'BUY' && trueTarget <= current) || (type === 'SELL' && trueTarget >= current))
+  )
 
   const pnlData = calculateDirectionalPnl({
     entry,
@@ -1287,9 +1291,13 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
     ? `Settings: SMMA ${input.settings.smmaLength ?? 20}, ${input.settings.nrtrMode ?? 'ATR-Based'} ${input.settings.nrtrMode === 'Percentage' ? `${input.settings.nrtrPercent ?? 0.25}%` : `${input.settings.nrtrAtrLength ?? 14} x${input.settings.nrtrAtrMultiplier ?? 3}`}.`
     : ''
 
-  const targetText = target === null
-    ? 'Target from ML/SMC or NRTR projection.'
-    : 'Target from ML/SMC or NRTR projection.'
+  const targetText = targetDirectionConflict
+    ? 'Final ML target conflicts with current chart direction.'
+    : trueTarget
+      ? 'Target from Final ML/SMC context.'
+      : target
+        ? 'Target from NRTR display projection.'
+        : 'Target unavailable.'
 
   const bodyText = input.label.toLowerCase().includes('main')
     ? `Main chart signal card. ${trend.source}. ${targetText} ${settingsText}`
