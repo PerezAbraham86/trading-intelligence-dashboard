@@ -1054,23 +1054,19 @@ function getDeepTargetNumber(source: unknown, path: Array<string | number>) {
   return Number.isFinite(value) && value > 0 ? value : NaN
 }
 
-function collectFinalMlTargetCandidates(source: unknown): number[] {
-  const candidates: number[] = []
+function collectFinalMlTargetCandidates(source: unknown): { realTargets: number[]; ghostOverlayTargets: number[] } {
+  const realTargets: number[] = []
+  const ghostOverlayTargets: number[] = []
 
-  // STRICT TARGET PRICE ML ONLY:
-  // no NRTR fallback, no ghost close fallback, no regular TP, no synthetic target.
-  const directPaths: Array<Array<string | number>> = [
+  const realPaths: Array<Array<string | number>> = [
     ['finalTargetPrice'],
     ['overallTargetPrice'],
-
     ['targetMl', 'finalTargetPrice'],
     ['targetMl', 'overallTargetPrice'],
     ['targetMl', 'targetPrice'],
-
     ['targetPlan', 'finalTargetPrice'],
     ['targetPlan', 'overallTargetPrice'],
     ['targetPlan', 'targetPrice'],
-
     ['overlayPayload', 'finalTargetPrice'],
     ['overlayPayload', 'overallTargetPrice'],
     ['overlayPayload', 'targetMl', 'finalTargetPrice'],
@@ -1079,7 +1075,6 @@ function collectFinalMlTargetCandidates(source: unknown): number[] {
     ['overlayPayload', 'targetPlan', 'finalTargetPrice'],
     ['overlayPayload', 'targetPlan', 'overallTargetPrice'],
     ['overlayPayload', 'targetPlan', 'targetPrice'],
-
     ['unifiedIntelligence', 'finalTargetPrice'],
     ['unifiedIntelligence', 'overallTargetPrice'],
     ['unifiedIntelligence', 'targetMl', 'finalTargetPrice'],
@@ -1087,9 +1082,9 @@ function collectFinalMlTargetCandidates(source: unknown): number[] {
     ['unifiedIntelligence', 'targetMl', 'targetPrice'],
   ]
 
-  directPaths.forEach((path) => {
+  realPaths.forEach((path) => {
     const value = getDeepTargetNumber(source, path)
-    if (Number.isFinite(value) && value > 0) candidates.push(value)
+    if (Number.isFinite(value) && value > 0) realTargets.push(value)
   })
 
   const sourceAny: any = source
@@ -1111,7 +1106,7 @@ function collectFinalMlTargetCandidates(source: unknown): number[] {
     if (!Array.isArray(ghostList)) return
 
     ghostList.forEach((ghost) => {
-      const ghostPaths: Array<Array<string | number>> = [
+      const realGhostPaths: Array<Array<string | number>> = [
         ['finalTargetPrice'],
         ['overallTargetPrice'],
         ['targetMl', 'finalTargetPrice'],
@@ -1122,14 +1117,25 @@ function collectFinalMlTargetCandidates(source: unknown): number[] {
         ['targetPlan', 'targetPrice'],
       ]
 
-      ghostPaths.forEach((path) => {
+      realGhostPaths.forEach((path) => {
         const value = getDeepTargetNumber(ghost, path)
-        if (Number.isFinite(value) && value > 0) candidates.push(value)
+        if (Number.isFinite(value) && value > 0) realTargets.push(value)
+      })
+
+      const ghostOverlayPaths: Array<Array<string | number>> = [
+        ['ghostTargetPrice'],
+        ['projectedTargetPrice'],
+        ['close'],
+      ]
+
+      ghostOverlayPaths.forEach((path) => {
+        const value = getDeepTargetNumber(ghost, path)
+        if (Number.isFinite(value) && value > 0) ghostOverlayTargets.push(value)
       })
     })
   })
 
-  return candidates
+  return { realTargets, ghostOverlayTargets }
 }
 
 
@@ -1140,15 +1146,19 @@ function getTrueMlSmcTargetPrice(
   signalType: 'BUY' | 'SELL' | 'HOLD' = 'HOLD'
 ) {
   const sources: unknown[] = [latestSignal, fallbackSignal].filter(Boolean)
-  const candidates: number[] = []
+  const realCandidates: number[] = []
+  const ghostOverlayCandidates: number[] = []
 
   sources.forEach((source) => {
-    candidates.push(...collectFinalMlTargetCandidates(source))
+    const collected = collectFinalMlTargetCandidates(source)
+    realCandidates.push(...collected.realTargets)
+    ghostOverlayCandidates.push(...collected.ghostOverlayTargets)
   })
 
-  // Final/Unified ML target is the source of truth. Do not replace it with
-  // a synthetic NRTR target just because it conflicts with the current BUY/SELL
-  // card direction. A conflict is useful information and should remain visible.
+  // Real Target Price ML is primary. If unavailable, use ONLY the last
+  // chart-overlaid ghost candle target/close as the fallback.
+  const candidates = realCandidates.length > 0 ? realCandidates : ghostOverlayCandidates
+
   for (const candidate of candidates) {
     if (!Number.isFinite(candidate) || candidate <= 0) continue
 
@@ -1283,8 +1293,8 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
   const targetText = targetDirectionConflict
     ? 'Final ML target conflicts with current chart direction.'
     : trueTarget
-      ? 'Target from Real Target Price ML context.'
-      : 'Real Target Price ML unavailable.'
+      ? 'Target from Real Target Price ML or chart ghost overlay.'
+      : 'Real Target Price ML and ghost overlay target unavailable.'
 
   const bodyText = input.label.toLowerCase().includes('main')
     ? `Main chart signal card. ${trend.source}. ${targetText} ${settingsText}`
