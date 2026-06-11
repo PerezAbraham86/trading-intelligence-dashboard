@@ -54,6 +54,8 @@ type ChartSignalCardInput = {
   latestSignal?: RecentSignal
   activePrice?: number
   settings?: ChartCardStrategySettings
+  overlayPayload?: any
+  unifiedIntelligence?: any
 }
 
 type RecentSignalsTableProps = {
@@ -1028,141 +1030,148 @@ function getNumberFromPath(source: unknown, path: string[]) {
   return Number.isFinite(number) ? number : NaN
 }
 
-function getTrueMlSmcTargetPrice(
-  latestSignal?: RecentSignal,
-  fallbackSignal?: RecentSignal,
-  currentPrice?: number,
-  signalType?: 'BUY' | 'SELL' | 'HOLD'
-) {
-  const sources = [latestSignal as unknown, fallbackSignal as unknown].filter(Boolean)
+function getDeepTargetNumber(source: unknown, path: Array<string | number>) {
+  let current: any = source
 
-  const targetPaths = [
-    // New Target ML payloads.
-    ['targetMl', 'targetPrice'],
-    ['targetMl', 'target'],
-    ['targetMl', 'takeProfitPrice'],
-    ['targetMl', 'tp1'],
+  for (const key of path) {
+    if (current == null) return NaN
+
+    if (typeof key === 'number') {
+      if (!Array.isArray(current)) return NaN
+      current = current[key]
+      continue
+    }
+
+    if (typeof current === 'object' && key in current) {
+      current = current[key]
+      continue
+    }
+
+    return NaN
+  }
+
+  const value = Number(current)
+  return Number.isFinite(value) && value > 0 ? value : NaN
+}
+
+function collectFinalMlTargetCandidates(source: unknown): number[] {
+  const candidates: number[] = []
+
+  const directPaths: Array<Array<string | number>> = [
+    ['finalTargetPrice'],
+    ['overallTargetPrice'],
+    ['targetPrice'],
+    ['target'],
+    ['target_price'],
+    ['takeProfitPrice'],
+    ['take_profit_price'],
+    ['tp1'],
+    ['tp1Price'],
+
     ['targetMl', 'finalTargetPrice'],
     ['targetMl', 'overallTargetPrice'],
+    ['targetMl', 'targetPrice'],
+    ['targetMl', 'target'],
+    ['targetMl', 'targetConfidence'],
 
+    ['targetPlan', 'finalTargetPrice'],
+    ['targetPlan', 'overallTargetPrice'],
     ['targetPlan', 'targetPrice'],
     ['targetPlan', 'target'],
     ['targetPlan', 'takeProfitPrice'],
     ['targetPlan', 'tp1'],
-    ['targetPlan', 'finalTargetPrice'],
-    ['targetPlan', 'overallTargetPrice'],
 
-    // New per-ghost target fields.
-    ['ghostTargetPrice'],
-    ['projectedTargetPrice'],
-    ['finalTargetPrice'],
-    ['overallTargetPrice'],
-
-    ['mlFeatures', 'targetPrice'],
-    ['mlFeatures', 'target_price'],
-    ['mlFeatures', 'takeProfitPrice'],
-    ['mlFeatures', 'take_profit_price'],
-    ['mlFeatures', 'tp1'],
-    ['mlFeatures', 'tp1Price'],
-
-    ['chartMlFeatures', 'targetPrice'],
-    ['chartMlFeatures', 'target_price'],
-    ['chartMlFeatures', 'takeProfitPrice'],
-    ['chartMlFeatures', 'take_profit_price'],
-    ['chartMlFeatures', 'tp1'],
-    ['chartMlFeatures', 'tp1Price'],
-
-    ['scorecards', 'overall', 'targetPrice'],
-    ['scorecards', 'overall', 'target_price'],
-    ['scorecards', 'overall', 'takeProfitPrice'],
-    ['scorecards', 'overall', 'take_profit_price'],
-    ['scorecards', 'overall', 'tp1'],
-    ['scorecards', 'overall', 'tp1Price'],
-
-    ['chartScorecards', 'overall', 'targetPrice'],
-    ['chartScorecards', 'overall', 'target_price'],
-    ['chartScorecards', 'overall', 'takeProfitPrice'],
-    ['chartScorecards', 'overall', 'take_profit_price'],
-    ['chartScorecards', 'overall', 'tp1'],
-    ['chartScorecards', 'overall', 'tp1Price'],
-
-    ['chartScorecards', 'smc', 'targetPrice'],
-    ['chartScorecards', 'smc', 'target_price'],
-    ['chartScorecards', 'smc', 'takeProfitPrice'],
-    ['chartScorecards', 'smc', 'tp1'],
-
-    ['chartScorecards', 'ghost', 'targetPrice'],
-    ['chartScorecards', 'ghost', 'target_price'],
-    ['chartScorecards', 'ghost', 'takeProfitPrice'],
-    ['chartScorecards', 'ghost', 'tp1'],
-
-    ['unifiedIntelligence', 'targetMl', 'targetPrice'],
-    ['unifiedIntelligence', 'targetMl', 'target'],
-    ['unifiedIntelligence', 'targetPlan', 'targetPrice'],
-    ['unifiedIntelligence', 'targetPlan', 'target'],
-    ['unifiedIntelligence', 'finalTargetPrice'],
-    ['unifiedIntelligence', 'overallTargetPrice'],
-
-    ['unifiedIntelligence', 'targetPrice'],
-    ['unifiedIntelligence', 'target_price'],
-    ['unifiedIntelligence', 'takeProfitPrice'],
-    ['unifiedIntelligence', 'tp1'],
-    ['unifiedIntelligence', 'tradePlan', 'targetPrice'],
-    ['unifiedIntelligence', 'tradePlan', 'target_price'],
-    ['unifiedIntelligence', 'tradePlan', 'takeProfitPrice'],
-    ['unifiedIntelligence', 'tradePlan', 'take_profit_price'],
-    ['unifiedIntelligence', 'tradePlan', 'tp1'],
-    ['unifiedIntelligence', 'tradePlan', 'tp1Price'],
-
-    ['overlayPayload', 'targetMl', 'targetPrice'],
-    ['overlayPayload', 'targetMl', 'target'],
-    ['overlayPayload', 'targetMl', 'takeProfitPrice'],
-    ['overlayPayload', 'targetMl', 'tp1'],
-    ['overlayPayload', 'targetPlan', 'targetPrice'],
-    ['overlayPayload', 'targetPlan', 'target'],
-    ['overlayPayload', 'targetPlan', 'takeProfitPrice'],
-    ['overlayPayload', 'targetPlan', 'tp1'],
     ['overlayPayload', 'finalTargetPrice'],
     ['overlayPayload', 'overallTargetPrice'],
-
     ['overlayPayload', 'targetPrice'],
-    ['overlayPayload', 'target_price'],
-    ['overlayPayload', 'takeProfitPrice'],
-    ['overlayPayload', 'tp1'],
-    ['overlayPayload', 'tradePlan', 'targetPrice'],
-    ['overlayPayload', 'tradePlan', 'target_price'],
-    ['overlayPayload', 'tradePlan', 'takeProfitPrice'],
-    ['overlayPayload', 'tradePlan', 'take_profit_price'],
-    ['overlayPayload', 'tradePlan', 'tp1'],
-    ['overlayPayload', 'tradePlan', 'tp1Price'],
+    ['overlayPayload', 'target'],
+    ['overlayPayload', 'targetMl', 'finalTargetPrice'],
+    ['overlayPayload', 'targetMl', 'overallTargetPrice'],
+    ['overlayPayload', 'targetMl', 'targetPrice'],
+    ['overlayPayload', 'targetPlan', 'finalTargetPrice'],
+    ['overlayPayload', 'targetPlan', 'overallTargetPrice'],
+    ['overlayPayload', 'targetPlan', 'targetPrice'],
 
-    ['targetPrice'],
-    ['target'],
-    ['takeProfitPrice'],
-    ['tp1'],
-    ['tp1Price'],
+    ['unifiedIntelligence', 'finalTargetPrice'],
+    ['unifiedIntelligence', 'overallTargetPrice'],
+    ['unifiedIntelligence', 'targetPrice'],
+    ['unifiedIntelligence', 'targetMl', 'finalTargetPrice'],
+    ['unifiedIntelligence', 'targetMl', 'overallTargetPrice'],
+    ['unifiedIntelligence', 'targetMl', 'targetPrice'],
   ]
 
-  for (const source of sources) {
-    for (const path of targetPaths) {
-      const candidate = getNumberFromPath(source, path)
+  directPaths.forEach((path) => {
+    const value = getDeepTargetNumber(source, path)
+    if (Number.isFinite(value) && value > 0) candidates.push(value)
+  })
 
-      if (!Number.isFinite(candidate) || candidate <= 0) continue
+  const sourceAny: any = source
+  const ghostLists = [
+    sourceAny?.ghostCandles,
+    sourceAny?.ghosts,
+    sourceAny?.projection,
+    sourceAny?.ghostProjection,
+    sourceAny?.ghostCandleProjection,
+    sourceAny?.projectedGhostCandles,
+    sourceAny?.overlayPayload?.ghostCandles,
+    sourceAny?.overlayPayload?.ghosts,
+    sourceAny?.overlayPayload?.projection,
+    sourceAny?.unifiedIntelligence?.ghostCandles,
+    sourceAny?.unifiedIntelligence?.ghosts,
+  ]
 
-      if (currentPrice && Number.isFinite(currentPrice) && currentPrice > 0) {
-        const distance = Math.abs(candidate - currentPrice) / currentPrice
+  ghostLists.forEach((ghostList) => {
+    if (!Array.isArray(ghostList)) return
 
-        // Reject obviously wrong scale values.
-        if (distance > 0.35) continue
+    ghostList.forEach((ghost) => {
+      const ghostPaths: Array<Array<string | number>> = [
+        ['finalTargetPrice'],
+        ['overallTargetPrice'],
+        ['ghostTargetPrice'],
+        ['projectedTargetPrice'],
+        ['targetPrice'],
+        ['target'],
+        ['close'],
+      ]
 
-        // True targets must be directional. A BUY target should be above price,
-        // and a SELL target should be below price.
-        if (signalType === 'BUY' && candidate <= currentPrice) continue
-        if (signalType === 'SELL' && candidate >= currentPrice) continue
-      }
+      ghostPaths.forEach((path) => {
+        const value = getDeepTargetNumber(ghost, path)
+        if (Number.isFinite(value) && value > 0) candidates.push(value)
+      })
+    })
+  })
 
-      return candidate
+  return candidates
+}
+
+function getTrueMlSmcTargetPrice(
+  latestSignal?: RecentSignal,
+  fallbackSignal?: RecentSignal,
+  currentPrice?: number,
+  signalType: 'BUY' | 'SELL' | 'HOLD' = 'HOLD'
+) {
+  const sources: unknown[] = [latestSignal, fallbackSignal].filter(Boolean)
+  const candidates: number[] = []
+
+  sources.forEach((source) => {
+    candidates.push(...collectFinalMlTargetCandidates(source))
+  })
+
+  for (const candidate of candidates) {
+    if (!Number.isFinite(candidate) || candidate <= 0) continue
+
+    if (currentPrice && Number.isFinite(currentPrice) && currentPrice > 0) {
+      const distance = Math.abs(candidate - currentPrice) / currentPrice
+
+      // Reject obviously wrong scale values only.
+      if (distance > 0.35) continue
+
+      // True targets must be directional when signal direction is known.
+      if (signalType === 'BUY' && candidate <= currentPrice) continue
+      if (signalType === 'SELL' && candidate >= currentPrice) continue
     }
+
+    return candidate
   }
 
   return null
@@ -1234,8 +1243,14 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
   // 1) True ML/SMC/Target ML target when available.
   // 2) Dashboard-safe NRTR projection target so Recent Signals does not go blank.
   //    This is not fed back into Ghost ML or Target ML. It is display/P&L only.
+  const latestSignalWithTargetContext = {
+    ...(input.latestSignal ?? {}),
+    overlayPayload: input.overlayPayload ?? (input.latestSignal as any)?.overlayPayload,
+    unifiedIntelligence: input.unifiedIntelligence ?? (input.latestSignal as any)?.unifiedIntelligence,
+  } as RecentSignal
+
   const trueTarget = getTrueMlSmcTargetPrice(
-    input.latestSignal,
+    latestSignalWithTargetContext,
     fallbackSignal,
     hasCurrent ? current : undefined,
     type
