@@ -388,7 +388,7 @@ function buildOverallTechnicalSentiment(
   symbol: string
 ): TechnicalSentiment | null {
   const activeEntries = timeframes
-    .map((timeframe) => ({
+    .map((timeframe: string) => ({
       timeframe,
       sentiment: timeframeSentiments[timeframe] ?? null,
     }))
@@ -552,7 +552,7 @@ function getPythonGhostText(engineState: PythonEngineState | null | undefined) {
 
 function getOverallGhostConfidence(engineStates: Record<string, PythonEngineState | null>, timeframes: string[]) {
   const values = timeframes
-    .map((timeframe) => getAverageGhostConfidence(engineStates[timeframe]))
+    .map((timeframe: string) => getAverageGhostConfidence(engineStates[timeframe]))
     .filter((value) => value > 0)
 
   if (values.length === 0) return 0
@@ -562,11 +562,11 @@ function getOverallGhostConfidence(engineStates: Record<string, PythonEngineStat
 
 function getOverallGhostText(engineStates: Record<string, PythonEngineState | null>, timeframes: string[]) {
   const texts = timeframes
-    .map((timeframe) => getPythonGhostText(engineStates[timeframe]))
+    .map((timeframe: string) => getPythonGhostText(engineStates[timeframe]))
     .filter(Boolean)
 
-  const bullish = texts.filter((text) => text.toLowerCase().includes('bull')).length
-  const bearish = texts.filter((text) => text.toLowerCase().includes('bear')).length
+  const bullish = texts.filter((text: string) => text.toLowerCase().includes('bull')).length
+  const bearish = texts.filter((text: string) => text.toLowerCase().includes('bear')).length
 
   if (bullish > bearish) return 'Multi-Timeframe Python Bullish Projection'
   if (bearish > bullish) return 'Multi-Timeframe Python Bearish Projection'
@@ -2910,7 +2910,7 @@ function buildGhostCandlesForChart(
   const lastRealTime = timeToUnixSeconds(lastRealCandle.time)
   let previousProjected: DashboardCandle | GhostCandle = lastRealCandle
 
-  return pythonGhostCandles.slice(0, 10).map((ghost, index) => {
+  return pythonGhostCandles.slice(0, 10).map((ghost: any, index: number) => {
     const open = toFiniteNumber(ghost.open ?? ghost.o, NaN)
     const high = toFiniteNumber(ghost.high ?? ghost.h, NaN)
     const low = toFiniteNumber(ghost.low ?? ghost.l, NaN)
