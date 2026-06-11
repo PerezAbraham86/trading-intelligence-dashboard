@@ -514,8 +514,8 @@ function getAverageGhostConfidence(engineState: PythonEngineState | null | undef
   if (ghostCandles.length === 0) return 0
 
   const values = ghostCandles
-    .map((ghost) => Number(ghost.confidence ?? 0))
-    .filter((value) => Number.isFinite(value))
+    .map((ghost: any) => Number(ghost.confidence ?? 0))
+    .filter((value: number) => Number.isFinite(value))
 
   if (values.length === 0) return 0
 
