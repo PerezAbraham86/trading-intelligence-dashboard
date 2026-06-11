@@ -799,7 +799,6 @@ export default function AiTraderPanel({
   const targetMlConfidence = toFiniteNumber(directionalContext.targetConfidence, 0)
   const entryMlConfidence = toFiniteNumber(directionalContext.entryConfidence, 0)
   const aiConfidence = toFiniteNumber(decision?.confidence, 0)
-  const aiIsRefreshing = isLoading && Boolean(decision)
 
   const openTrades = Array.isArray(summary?.openTrades) ? summary?.openTrades ?? [] : []
   const closedTrades =
@@ -826,11 +825,6 @@ export default function AiTraderPanel({
             <span className="rounded-full border border-red-400/30 bg-red-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-red-200">
               No Broker
             </span>
-            {aiIsRefreshing ? (
-              <span className="rounded-full border border-blue-400/30 bg-blue-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-blue-200">
-                Refreshing
-              </span>
-            ) : null}
           </div>
           <p className="mt-1 text-xs text-gray-400">
             Simulated AI trades only. Learns from dashboard entries, targets, stops, P&amp;L, and closed outcomes.
@@ -948,7 +942,7 @@ export default function AiTraderPanel({
             </div>
           </div>
           <div className="text-[10px] font-bold uppercase tracking-wide text-gray-500">
-            {aiIsRefreshing ? 'Refreshing without clearing last decision' : 'Stable last decision displayed'}
+            Background refresh enabled
           </div>
         </div>
 
@@ -994,7 +988,6 @@ export default function AiTraderPanel({
           <StatBox label="Entry ML" value={`${entryMlConfidence.toFixed(1)}%`} tone={getMlStrengthTone(entryMlConfidence)} />
           <StatBox label="Target" value={formatPrice(decision?.target)} />
           <StatBox label="RR" value={`${toFiniteNumber(decision?.riskReward, 0).toFixed(2)}R`} tone={toFiniteNumber(decision?.riskReward, 0) >= minRiskReward ? 'bull' : 'warn'} />
-          <StatBox label="Refresh State" value={aiIsRefreshing ? 'Refreshing' : 'Stable'} tone={aiIsRefreshing ? 'warn' : 'bull'} />
         </div>
       </div>
 
