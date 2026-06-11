@@ -116,6 +116,31 @@ except Exception:
 
 
 try:
+    from api.projection_engine import (
+        build_unified_projection_engine,
+        evaluate_open_projections as evaluate_projection_engine_open_projections,
+        projection_engine_export,
+        projection_engine_status,
+        reset_projection_engine_memory,
+    )
+except Exception:
+    try:
+        from projection_engine import (
+            build_unified_projection_engine,
+            evaluate_open_projections as evaluate_projection_engine_open_projections,
+            projection_engine_export,
+            projection_engine_status,
+            reset_projection_engine_memory,
+        )
+    except Exception:
+        build_unified_projection_engine = None
+        evaluate_projection_engine_open_projections = None
+        projection_engine_export = None
+        projection_engine_status = None
+        reset_projection_engine_memory = None
+
+
+try:
     from api.ml_feature_store import (
         get_ml_feature_store_summary,
         get_recent_ml_feature_snapshots,
@@ -368,6 +393,30 @@ class AiTraderEvaluatePayload(BaseModel):
     timeframe: Optional[Any] = "1m"
     currentPrice: Optional[Any] = None
     candles: Optional[Any] = None
+
+class ProjectionEnginePayload(BaseModel):
+    # Loose payload on purpose. The dashboard sends mixed frontend context objects,
+    # candle arrays, scorecards, external tables, overlay payloads, and optional
+    # target/ghost context. The projection engine normalizes the shape internally.
+    symbol: Optional[Any] = "MES1!"
+    timeframe: Optional[Any] = "1m"
+    candles: Optional[Any] = None
+    limit: Optional[Any] = 800
+    ghostCount: Optional[Any] = 3
+    autoRegister: Optional[Any] = True
+    currentPrice: Optional[Any] = None
+    price: Optional[Any] = None
+    resetAll: Optional[Any] = None
+
+    signal: Optional[Any] = None
+    scorecards: Optional[Any] = None
+    mlFeatures: Optional[Any] = None
+    overlayPayload: Optional[Any] = None
+    chartOverlays: Optional[Any] = None
+    unifiedIntelligence: Optional[Any] = None
+    externalTables: Optional[Any] = None
+    context: Optional[Any] = None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BASIC HELPERS
@@ -7288,6 +7337,274 @@ async def webhook_tradingview(request: FastAPIRequest) -> Dict[str, Any]:
         "storedCandles": len(RECENT_CANDLES),
         "createdAt": now_iso(),
     }
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UNIFIED PROJECTION ENGINE ROUTES
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _projection_payload_to_dict(payload: Any) -> Dict[str, Any]:
+    data = model_to_dict(payload)
+    if not isinstance(data, dict):
+        data = {}
+    return data
+
+
+def _projection_symbol_timeframe(data: Dict[str, Any]) -> Tuple[str, str]:
+    symbol = normalize_symbol(str(data.get("symbol") or data.get("ticker") or "MES1!"))
+    timeframe = normalize_timeframe(str(data.get("timeframe") or data.get("tf") or "1m"))
+    return symbol, timeframe
+
+
+def _projection_int(value: Any, fallback: int, low: int, high: int) -> int:
+    try:
+        parsed = int(float(value))
+    except Exception:
+        parsed = fallback
+    return max(low, min(high, parsed))
+
+
+def _projection_bool(value: Any, fallback: bool = True) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return fallback
+    raw = str(value).strip().lower()
+    if raw in {"1", "true", "yes", "y", "on"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off"}:
+        return False
+    return fallback
+
+
+def _projection_candles_from_payload(data: Dict[str, Any], symbol: str, timeframe: str, limit: int) -> List[Dict[str, Any]]:
+    raw_candles = data.get("candles")
+    candles = raw_candles if isinstance(raw_candles, list) else []
+
+    normalized: List[Dict[str, Any]] = []
+    for item in candles:
+        if isinstance(item, dict):
+            candle = dict(item)
+            candle["symbol"] = normalize_symbol(str(candle.get("symbol") or symbol))
+            candle["timeframe"] = normalize_timeframe(str(candle.get("timeframe") or timeframe))
+            normalized.append(candle)
+
+    normalized = filter_valid_candles_for_symbol(merge_candles_by_time(normalized), symbol)[-limit:]
+
+    if normalized:
+        return normalized
+
+    try:
+        return get_dashboard_candles(symbol, timeframe, limit)
+    except Exception as error:
+        print(f"[Projection Engine] candle fallback failed: {error}")
+        return []
+
+
+def _projection_context_from_payload(data: Dict[str, Any]) -> Dict[str, Any]:
+    context = data.get("context") if isinstance(data.get("context"), dict) else {}
+
+    overlay_payload = (
+        data.get("overlayPayload")
+        if isinstance(data.get("overlayPayload"), dict)
+        else data.get("chartOverlays")
+        if isinstance(data.get("chartOverlays"), dict)
+        else context.get("overlayPayload")
+        if isinstance(context.get("overlayPayload"), dict)
+        else context.get("chartOverlays")
+        if isinstance(context.get("chartOverlays"), dict)
+        else {}
+    )
+
+    scorecards = (
+        data.get("scorecards")
+        if isinstance(data.get("scorecards"), dict)
+        else overlay_payload.get("scorecards")
+        if isinstance(overlay_payload, dict) and isinstance(overlay_payload.get("scorecards"), dict)
+        else context.get("scorecards")
+        if isinstance(context.get("scorecards"), dict)
+        else {}
+    )
+
+    ml_features = (
+        data.get("mlFeatures")
+        if isinstance(data.get("mlFeatures"), dict)
+        else overlay_payload.get("mlFeatures")
+        if isinstance(overlay_payload, dict) and isinstance(overlay_payload.get("mlFeatures"), dict)
+        else context.get("mlFeatures")
+        if isinstance(context.get("mlFeatures"), dict)
+        else {}
+    )
+
+    unified_intelligence = (
+        data.get("unifiedIntelligence")
+        if isinstance(data.get("unifiedIntelligence"), dict)
+        else context.get("unifiedIntelligence")
+        if isinstance(context.get("unifiedIntelligence"), dict)
+        else {}
+    )
+
+    external_tables = (
+        data.get("externalTables")
+        if isinstance(data.get("externalTables"), dict)
+        else context.get("externalTables")
+        if isinstance(context.get("externalTables"), dict)
+        else {}
+    )
+
+    signal = (
+        data.get("signal")
+        if isinstance(data.get("signal"), dict)
+        else context.get("signal")
+        if isinstance(context.get("signal"), dict)
+        else LATEST_SIGNAL
+        if isinstance(LATEST_SIGNAL, dict)
+        else {}
+    )
+
+    return {
+        "overlayPayload": overlay_payload if isinstance(overlay_payload, dict) else {},
+        "scorecards": scorecards if isinstance(scorecards, dict) else {},
+        "mlFeatures": ml_features if isinstance(ml_features, dict) else {},
+        "unifiedIntelligence": unified_intelligence if isinstance(unified_intelligence, dict) else {},
+        "externalTables": external_tables if isinstance(external_tables, dict) else {},
+        "signal": signal if isinstance(signal, dict) else {},
+    }
+
+
+def build_projection_engine_from_dashboard_payload(data: Dict[str, Any]) -> Dict[str, Any]:
+    if build_unified_projection_engine is None:
+        raise HTTPException(status_code=503, detail="api.projection_engine module is unavailable")
+
+    symbol, timeframe = _projection_symbol_timeframe(data)
+    limit = _projection_int(data.get("limit"), 800, 50, 5000)
+    ghost_count = _projection_int(data.get("ghostCount"), 3, 1, 10)
+    auto_register = _projection_bool(data.get("autoRegister"), True)
+
+    candles = _projection_candles_from_payload(data, symbol, timeframe, limit)
+    context = _projection_context_from_payload(data)
+
+    try:
+        if evaluate_projection_engine_open_projections is not None and candles:
+            evaluate_projection_engine_open_projections(
+                symbol=symbol,
+                timeframe=timeframe,
+                candles=candles,
+                currentPrice=to_float(candles[-1].get("close"), 0),
+            )
+    except Exception as error:
+        print(f"[Projection Engine] pre-build evaluation failed: {error}")
+
+    engine = build_unified_projection_engine(
+        symbol=symbol,
+        timeframe=timeframe,
+        candles=candles,
+        scorecards=context["scorecards"],
+        mlFeatures=context["mlFeatures"],
+        overlayPayload=context["overlayPayload"],
+        unifiedIntelligence=context["unifiedIntelligence"],
+        externalTables=context["externalTables"],
+        signal=context["signal"],
+        ghostCount=ghost_count,
+        autoRegister=auto_register,
+    )
+
+    if not isinstance(engine, dict):
+        raise HTTPException(status_code=500, detail="Projection engine returned invalid payload")
+
+    return engine
+
+
+@app.post("/api/projection-engine/build")
+async def api_projection_engine_build(payload: ProjectionEnginePayload) -> Dict[str, Any]:
+    data = _projection_payload_to_dict(payload)
+    return build_projection_engine_from_dashboard_payload(data)
+
+
+@app.post("/projection-engine/build")
+async def api_projection_engine_build_alias(payload: ProjectionEnginePayload) -> Dict[str, Any]:
+    data = _projection_payload_to_dict(payload)
+    return build_projection_engine_from_dashboard_payload(data)
+
+
+@app.get("/api/projection-engine/status")
+async def api_projection_engine_status(symbol: str = "", timeframe: str = "") -> Dict[str, Any]:
+    if projection_engine_status is None:
+        raise HTTPException(status_code=503, detail="api.projection_engine module is unavailable")
+
+    return projection_engine_status(symbol=symbol, timeframe=timeframe)
+
+
+@app.get("/projection-engine/status")
+async def api_projection_engine_status_alias(symbol: str = "", timeframe: str = "") -> Dict[str, Any]:
+    if projection_engine_status is None:
+        raise HTTPException(status_code=503, detail="api.projection_engine module is unavailable")
+
+    return projection_engine_status(symbol=symbol, timeframe=timeframe)
+
+
+@app.post("/api/projection-engine/evaluate")
+async def api_projection_engine_evaluate(payload: ProjectionEnginePayload) -> Dict[str, Any]:
+    if evaluate_projection_engine_open_projections is None:
+        raise HTTPException(status_code=503, detail="api.projection_engine module is unavailable")
+
+    data = _projection_payload_to_dict(payload)
+    symbol, timeframe = _projection_symbol_timeframe(data)
+    limit = _projection_int(data.get("limit"), 800, 50, 5000)
+    candles = _projection_candles_from_payload(data, symbol, timeframe, limit)
+    current_price = data.get("currentPrice") or data.get("price") or (candles[-1].get("close") if candles else None)
+
+    return evaluate_projection_engine_open_projections(
+        symbol=symbol,
+        timeframe=timeframe,
+        candles=candles,
+        currentPrice=current_price,
+    )
+
+
+@app.post("/projection-engine/evaluate")
+async def api_projection_engine_evaluate_alias(payload: ProjectionEnginePayload) -> Dict[str, Any]:
+    return await api_projection_engine_evaluate(payload)
+
+
+@app.get("/api/projection-engine/export")
+async def api_projection_engine_export() -> Dict[str, Any]:
+    if projection_engine_export is None:
+        raise HTTPException(status_code=503, detail="api.projection_engine module is unavailable")
+
+    return projection_engine_export()
+
+
+@app.get("/projection-engine/export")
+async def api_projection_engine_export_alias() -> Dict[str, Any]:
+    if projection_engine_export is None:
+        raise HTTPException(status_code=503, detail="api.projection_engine module is unavailable")
+
+    return projection_engine_export()
+
+
+@app.post("/api/projection-engine/reset")
+async def api_projection_engine_reset(payload: ProjectionEnginePayload) -> Dict[str, Any]:
+    if reset_projection_engine_memory is None:
+        raise HTTPException(status_code=503, detail="api.projection_engine module is unavailable")
+
+    data = _projection_payload_to_dict(payload)
+    symbol = data.get("symbol")
+    timeframe = data.get("timeframe")
+    reset_all = _projection_bool(data.get("resetAll"), False)
+
+    if reset_all:
+        symbol = None
+        timeframe = None
+
+    return reset_projection_engine_memory(symbol=symbol, timeframe=timeframe)
+
+
+@app.post("/projection-engine/reset")
+async def api_projection_engine_reset_alias(payload: ProjectionEnginePayload) -> Dict[str, Any]:
+    return await api_projection_engine_reset(payload)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
