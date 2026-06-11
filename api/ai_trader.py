@@ -12,6 +12,9 @@ MEMORY_PATH = Path(os.getenv("AI_TRADER_MEMORY_PATH", str(Path(__file__).with_na
 MAX_CLOSED_TRADES = int(os.getenv("AI_TRADER_MAX_CLOSED_TRADES", "2500"))
 DEFAULT_MIN_CONFIDENCE = float(os.getenv("AI_TRADER_MIN_CONFIDENCE", "62"))
 DEFAULT_MIN_RR = float(os.getenv("AI_TRADER_MIN_RR", "1.25"))
+MAX_DECISION_OBSERVATIONS = int(os.getenv("AI_TRADER_MAX_DECISION_OBSERVATIONS", "10000"))
+VIRTUAL_TRADE_MAX_BARS = int(os.getenv("AI_TRADER_VIRTUAL_TRADE_MAX_BARS", "12"))
+PHASE6_BUCKET_MODE = "phase6_projection_engine"
 
 
 def now_iso() -> str:
@@ -219,12 +222,14 @@ def infer_target(side: str, entry: float, target: Any = None, signal: Optional[D
 def load_memory() -> Dict[str, Any]:
     if not MEMORY_PATH.exists():
         return {
-            "version": 1,
+            "version": 2,
             "createdAt": now_iso(),
             "updatedAt": now_iso(),
             "openTrades": [],
             "closedTrades": [],
             "decisionLog": [],
+            "virtualOpenTrades": [],
+            "virtualClosedTrades": [],
         }
 
     try:
@@ -234,37 +239,60 @@ def load_memory() -> Dict[str, Any]:
     except Exception:
         data = {}
 
-    data.setdefault("version", 1)
+    data.setdefault("version", 2)
     data.setdefault("createdAt", now_iso())
     data.setdefault("updatedAt", now_iso())
     data.setdefault("openTrades", [])
     data.setdefault("closedTrades", [])
     data.setdefault("decisionLog", [])
+    data.setdefault("virtualOpenTrades", [])
+    data.setdefault("virtualClosedTrades", [])
 
-    if not isinstance(data["openTrades"], list):
-        data["openTrades"] = []
-    if not isinstance(data["closedTrades"], list):
-        data["closedTrades"] = []
-    if not isinstance(data["decisionLog"], list):
-        data["decisionLog"] = []
+    for key in ["openTrades", "closedTrades", "decisionLog", "virtualOpenTrades", "virtualClosedTrades"]:
+        if not isinstance(data.get(key), list):
+            data[key] = []
 
     return data
 
 
 def save_memory(memory: Dict[str, Any]) -> Dict[str, Any]:
     MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    memory["version"] = max(to_int(memory.get("version"), 2), 2)
     memory["updatedAt"] = now_iso()
     memory["closedTrades"] = safe_list(memory.get("closedTrades"))[-MAX_CLOSED_TRADES:]
-    memory["decisionLog"] = safe_list(memory.get("decisionLog"))[-MAX_CLOSED_TRADES:]
-    MEMORY_PATH.write_text(json.dumps(memory, indent=2, sort_keys=True), encoding="utf-8")
+    memory["virtualClosedTrades"] = safe_list(memory.get("virtualClosedTrades"))[-MAX_CLOSED_TRADES:]
+    memory["decisionLog"] = safe_list(memory.get("decisionLog"))[-MAX_DECISION_OBSERVATIONS:]
+    memory["openTrades"] = safe_list(memory.get("openTrades"))
+    memory["virtualOpenTrades"] = safe_list(memory.get("virtualOpenTrades"))[-250:]
+
+    tmp_path = MEMORY_PATH.with_suffix(MEMORY_PATH.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(memory, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path.replace(MEMORY_PATH)
     return memory
 
 
+
 def trade_bucket(symbol: str, timeframe: str, side: str, confidence: float, context: Optional[Dict[str, Any]] = None) -> str:
-    confidence_band = int(clamp(math.floor(confidence / 10.0) * 10, 0, 100))
     context = safe_dict(context)
-    mode = str(context.get("mode") or context.get("entryMode") or "dashboard").lower()
-    return f"{normalize_symbol(symbol)}|{normalize_timeframe(timeframe)}|{side}|{mode}|conf{confidence_band}"
+    raw_mode = str(
+        context.get("projectionEngineMode")
+        or context.get("projectionEngineLabel")
+        or context.get("mode")
+        or context.get("entryMode")
+        or "dashboard"
+    ).lower()
+
+    # Phase 6 fix:
+    # Do NOT include confidence bands in the learning key. The old key split memory
+    # across many buckets and made observations appear to rise/fall between refreshes.
+    # Keep one stable bucket per symbol + timeframe + side + engine family.
+    if "projection" in raw_mode or "target_guided" in raw_mode or context.get("aiPermission"):
+        mode = PHASE6_BUCKET_MODE
+    else:
+        mode = raw_mode.replace(" ", "_")[:48] or "dashboard"
+
+    return f"{normalize_symbol(symbol)}|{normalize_timeframe(timeframe)}|{side}|{mode}"
+
 
 
 def summarize_closed_trades(closed_trades: List[Dict[str, Any]], bucket: Optional[str] = None) -> Dict[str, Any]:
@@ -318,10 +346,37 @@ def summarize_decision_log(decision_log: List[Dict[str, Any]], bucket: Optional[
 
 
 def ai_memory_status(memory: Dict[str, Any], bucket: Optional[str] = None) -> Dict[str, Any]:
-    closed_stats = summarize_closed_trades(memory.get("closedTrades", []), bucket=bucket)
+    closed_source = combined_closed_trades(memory)
+    closed_stats = summarize_closed_trades(closed_source, bucket=bucket)
     decision_stats = summarize_decision_log(memory.get("decisionLog", []), bucket=bucket)
-    overall_closed = summarize_closed_trades(memory.get("closedTrades", []), bucket=None)
+    overall_closed = summarize_closed_trades(closed_source, bucket=None)
     overall_decisions = summarize_decision_log(memory.get("decisionLog", []), bucket=None)
+
+    if closed_stats["samples"] >= 8:
+        stage = "TRADE_LEARNING_READY"
+        message = f"AI trade memory ready: {closed_stats['samples']} closed/virtual outcomes in this bucket"
+    elif overall_closed["samples"] >= 8:
+        stage = "GLOBAL_TRADE_LEARNING"
+        message = f"AI using global outcome memory: {overall_closed['samples']} closed/virtual outcomes"
+    elif decision_stats["samples"] >= 10:
+        stage = "OBSERVATION_LEARNING_READY"
+        message = f"AI observation memory ready: {decision_stats['samples']} live decisions in this setup"
+    elif overall_decisions["samples"] >= 10:
+        stage = "GLOBAL_OBSERVATION_LEARNING"
+        message = f"AI observing globally: {overall_decisions['samples']} total live decisions"
+    else:
+        stage = "WARMING_UP"
+        message = f"AI memory warming up: {overall_decisions['samples']} decision observations, {overall_closed['samples']} closed/virtual outcomes"
+
+    return {
+        "stage": stage,
+        "message": message,
+        "bucketDecisionStats": decision_stats,
+        "overallDecisionStats": overall_decisions,
+        "bucketClosedStats": closed_stats,
+        "overallClosedStats": overall_closed,
+    }
+
 
     if closed_stats["samples"] >= 8:
         stage = "TRADE_LEARNING_READY"
@@ -349,10 +404,127 @@ def ai_memory_status(memory: Dict[str, Any], bucket: Optional[str] = None) -> Di
     }
 
 
+
+def combined_closed_trades(memory: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [
+        trade for trade in [
+            *safe_list(memory.get("closedTrades")),
+            *safe_list(memory.get("virtualClosedTrades")),
+        ]
+        if isinstance(trade, dict)
+    ]
+
+
+def decision_observation_key(decision: Dict[str, Any]) -> str:
+    return "|".join([
+        normalize_symbol(decision.get("symbol")),
+        normalize_timeframe(decision.get("timeframe")),
+        str(decision.get("rawDecision") or decision.get("decision") or "HOLD"),
+        str(round(to_float(decision.get("entry"), 0.0), 2)),
+        str(round(to_float(decision.get("target"), 0.0), 2)),
+        str(round(to_float(decision.get("stop"), 0.0), 2)),
+        str(round(to_float(decision.get("confidence"), 0.0), 1)),
+    ])
+
+
+def maybe_open_virtual_learning_trade(memory: Dict[str, Any], decision: Dict[str, Any]) -> None:
+    side = normalize_side(decision.get("rawDecision") or decision.get("decision"))
+    if side not in {"BUY", "SELL"}:
+        return
+
+    symbol = normalize_symbol(decision.get("symbol"))
+    timeframe = normalize_timeframe(decision.get("timeframe"))
+    entry = to_float(decision.get("entry"), 0.0)
+    target = to_float(decision.get("target"), 0.0)
+    stop = to_float(decision.get("stop"), 0.0)
+    bucket = str(read_path(decision, "details.bucket", fallback=decision.get("bucket") or trade_bucket(symbol, timeframe, side, to_float(decision.get("confidence"), 0.0), read_path(decision, "details.context", fallback={}))))
+
+    if entry <= 0 or target <= 0 or stop <= 0:
+        return
+
+    virtual_open = safe_list(memory.get("virtualOpenTrades"))
+    for trade in virtual_open:
+        if not isinstance(trade, dict):
+            continue
+        if normalize_symbol(trade.get("symbol")) != symbol:
+            continue
+        if normalize_timeframe(trade.get("timeframe")) != timeframe:
+            continue
+        if normalize_side(trade.get("side")) != side:
+            continue
+        if trade.get("bucket") != bucket:
+            continue
+        if abs(to_float(trade.get("entry"), 0.0) - entry) / max(entry, 0.000001) <= 0.0002:
+            trade["lastSeenAt"] = now_iso()
+            trade["seenCount"] = to_int(trade.get("seenCount"), 1) + 1
+            trade["confidence"] = max(to_float(trade.get("confidence"), 0.0), to_float(decision.get("confidence"), 0.0))
+            return
+
+    virtual_open.append({
+        "id": "VIRTUAL-" + build_trade_id(symbol, timeframe, side, decision.get("createdAt")),
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "side": side,
+        "entry": round(entry, 8),
+        "target": round(target, 8),
+        "stop": round(stop, 8),
+        "riskReward": decision.get("riskReward"),
+        "confidence": decision.get("confidence"),
+        "confidenceGrade": decision.get("confidenceGrade"),
+        "bucket": bucket,
+        "reason": decision.get("reason"),
+        "entryTime": decision.get("createdAt") or now_iso(),
+        "createdAt": now_iso(),
+        "updatedAt": now_iso(),
+        "lastSeenAt": now_iso(),
+        "seenCount": 1,
+        "barsOpen": 0,
+        "status": "VIRTUAL_OPEN",
+        "dashboardOnly": True,
+        "virtualLearningOnly": True,
+    })
+    memory["virtualOpenTrades"] = virtual_open
+
+
 def remember_ai_decision(decision: Dict[str, Any]) -> None:
     try:
         memory = load_memory()
         decision_log = safe_list(memory.get("decisionLog"))
+
+        bucket = str(read_path(decision, "details.bucket", fallback=decision.get("bucket") or ""))
+        created_at = decision.get("createdAt") or now_iso()
+        compact = {
+            "id": f"DECISION-{normalize_symbol(decision.get('symbol'))}-{normalize_timeframe(decision.get('timeframe'))}-{created_at}",
+            "observationKey": decision_observation_key(decision),
+            "symbol": normalize_symbol(decision.get("symbol")),
+            "timeframe": normalize_timeframe(decision.get("timeframe")),
+            "decision": decision.get("decision"),
+            "rawDecision": decision.get("rawDecision") or decision.get("decision"),
+            "allowedToTrade": bool(decision.get("allowedToTrade")),
+            "confidence": to_float(decision.get("confidence"), 0.0),
+            "confidenceGrade": decision.get("confidenceGrade"),
+            "entry": decision.get("entry"),
+            "target": decision.get("target"),
+            "stop": decision.get("stop"),
+            "riskReward": decision.get("riskReward"),
+            "bucket": bucket,
+            "reason": decision.get("reason"),
+            "projectionEngineMode": read_path(decision, "details.projectionEngine.mode", "details.context.projectionEngineMode", fallback=None),
+            "aiPermission": read_path(decision, "details.projectionEngine.aiPermission", "details.context.aiPermission", fallback=None),
+            "createdAt": created_at,
+        }
+
+        # Phase 6 fix:
+        # Every decision call counts as an observation. We no longer collapse repeat
+        # refreshes into one row, because that made the UI appear stuck at 0/1 samples.
+        decision_log.append(compact)
+        memory["decisionLog"] = decision_log[-MAX_DECISION_OBSERVATIONS:]
+        maybe_open_virtual_learning_trade(memory, decision)
+        save_memory(memory)
+    except Exception:
+        # Decision memory should never break the dashboard.
+        return
+
 
         bucket = str(read_path(decision, "details.bucket", fallback=decision.get("bucket") or ""))
         compact = {
@@ -536,8 +708,9 @@ def score_ai_decision(
         base -= 25.0
 
     bucket = trade_bucket(symbol, timeframe, side, base, context)
-    bucket_stats = summarize_closed_trades(memory.get("closedTrades", []), bucket=bucket)
-    overall_stats = summarize_closed_trades(memory.get("closedTrades", []), bucket=None)
+    closed_source = combined_closed_trades(memory)
+    bucket_stats = summarize_closed_trades(closed_source, bucket=bucket)
+    overall_stats = summarize_closed_trades(closed_source, bucket=None)
 
     learning_adjustment = 0.0
 
@@ -672,6 +845,8 @@ def get_ai_trader_decision(
     context: Optional[Dict[str, Any]] = None,
     minConfidence: Any = None,
     minRiskReward: Any = None,
+    projectionEngine: Optional[Dict[str, Any]] = None,
+    projectionEngineContext: Optional[Dict[str, Any]] = None,
     **_: Any,
 ) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
@@ -707,13 +882,17 @@ def get_ai_trader_decision(
     min_rr = to_float(minRiskReward, DEFAULT_MIN_RR)
 
     if decision_side not in {"BUY", "SELL"}:
-        return {
+        memory = load_memory()
+        bucket = trade_bucket(normalized_symbol, normalized_timeframe, "HOLD", 0.0, context)
+        memory_status = ai_memory_status(memory, bucket=bucket)
+        decision_result = {
             "eventType": "AI_TRADER_DECISION",
             "status": "Waiting",
             "dashboardOnly": True,
             "brokerConnected": False,
             "allowedToTrade": False,
             "decision": "HOLD",
+            "rawDecision": "HOLD",
             "confidence": 0,
             "confidenceGrade": "F",
             "symbol": normalized_symbol,
@@ -726,10 +905,17 @@ def get_ai_trader_decision(
             "reason": "No clear BUY or SELL side was available.",
             "details": {
                 "source": "dashboard_ai_trader",
-                "memory": summarize_closed_trades(load_memory().get("closedTrades", [])),
+                "noBroker": True,
+                "bucket": bucket,
+                "memoryStatus": memory_status,
+                "directionalContext": {},
+                "projectionEngine": safe_dict(_.get("projectionEngine") if isinstance(_, dict) else {}),
+                "context": context,
             },
             "createdAt": now_iso(),
         }
+        remember_ai_decision(decision_result)
+        return decision_result
 
     score = score_ai_decision(
         symbol=normalized_symbol,
@@ -800,6 +986,8 @@ def get_ai_trader_decision(
             "overallStats": score["overallStats"],
             "memoryStatus": score["memoryStatus"],
             "directionalContext": score["directionalContext"],
+            "projectionEngine": safe_dict(projectionEngine) or safe_dict(projectionEngineContext) or safe_dict(context.get("projectionEngine")),
+            "context": context,
         },
         "createdAt": now_iso(),
     }
@@ -878,7 +1066,6 @@ def open_ai_trade(**payload: Any) -> Dict[str, Any]:
 
     open_trades.append(trade)
     memory["openTrades"] = open_trades
-    memory["decisionLog"] = safe_list(memory.get("decisionLog")) + [decision]
     save_memory(memory)
 
     return {
@@ -1023,6 +1210,122 @@ def evaluate_ai_trades(
     if current <= 0:
         current = latest_close
 
+    def evaluate_trade_list(trades: List[Any], virtual: bool = False) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        closed_rows: List[Dict[str, Any]] = []
+        still_rows: List[Dict[str, Any]] = []
+
+        for trade in trades:
+            if not isinstance(trade, dict):
+                continue
+
+            if normalize_symbol(trade.get("symbol")) != symbol or normalize_timeframe(trade.get("timeframe")) != timeframe:
+                still_rows.append(trade)
+                continue
+
+            side = normalize_side(trade.get("side"))
+            target = to_float(trade.get("target"), 0.0)
+            stop = to_float(trade.get("stop"), 0.0)
+            entry = to_float(trade.get("entry"), 0.0)
+            exit_price = 0.0
+            exit_reason = ""
+            bars_open = to_int(trade.get("barsOpen"), 0) + 1
+
+            if side == "BUY":
+                if target > 0 and latest_high >= target:
+                    exit_price = target
+                    exit_reason = "target_hit"
+                elif stop > 0 and latest_low <= stop:
+                    exit_price = stop
+                    exit_reason = "stop_hit"
+            elif side == "SELL":
+                if target > 0 and latest_low <= target:
+                    exit_price = target
+                    exit_reason = "target_hit"
+                elif stop > 0 and latest_high >= stop:
+                    exit_price = stop
+                    exit_reason = "stop_hit"
+
+            if virtual and exit_price <= 0 and bars_open >= VIRTUAL_TRADE_MAX_BARS and current > 0:
+                exit_price = current
+                exit_reason = "virtual_timeout"
+
+            if exit_price > 0:
+                pnl = signed_move(side, entry, exit_price) * point_value(symbol) if entry > 0 else 0.0
+                risk_points = abs(signed_move(side, entry, stop))
+                r_multiple = signed_move(side, entry, exit_price) / risk_points if risk_points > 0 else 0.0
+                trade.update({
+                    "status": "VIRTUAL_CLOSED" if virtual else "CLOSED",
+                    "exit": exit_price,
+                    "exitPrice": exit_price,
+                    "exitReason": exit_reason,
+                    "exitTime": now_iso(),
+                    "pnl": round(pnl, 4),
+                    "rMultiple": round(r_multiple, 4),
+                    "result": "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN"),
+                    "barsOpen": bars_open,
+                    "updatedAt": now_iso(),
+                    "virtualLearningOnly": bool(virtual),
+                })
+                closed_rows.append(trade)
+            else:
+                trade["barsOpen"] = bars_open
+                trade["currentPrice"] = current
+                trade["currentPnl"] = round(signed_move(side, entry, current) * point_value(symbol), 4) if entry > 0 and current > 0 else 0.0
+                trade["updatedAt"] = now_iso()
+                still_rows.append(trade)
+
+        return closed_rows, still_rows
+
+    closed, still_open = evaluate_trade_list(safe_list(memory.get("openTrades")), virtual=False)
+    virtual_closed, virtual_still_open = evaluate_trade_list(safe_list(memory.get("virtualOpenTrades")), virtual=True)
+
+    memory["openTrades"] = still_open
+    memory["closedTrades"] = safe_list(memory.get("closedTrades")) + closed
+    memory["virtualOpenTrades"] = virtual_still_open
+    memory["virtualClosedTrades"] = safe_list(memory.get("virtualClosedTrades")) + virtual_closed
+    save_memory(memory)
+
+    return {
+        "eventType": "AI_TRADER_EVALUATE",
+        "status": "Evaluated",
+        "dashboardOnly": True,
+        "brokerConnected": False,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "closedCount": len(closed),
+        "virtualClosedCount": len(virtual_closed),
+        "openCount": len(still_open),
+        "virtualOpenCount": len(virtual_still_open),
+        "closedTrades": closed,
+        "virtualClosedTrades": virtual_closed,
+        "openTrades": [
+            trade for trade in still_open
+            if isinstance(trade, dict)
+            and normalize_symbol(trade.get("symbol")) == symbol
+            and normalize_timeframe(trade.get("timeframe")) == timeframe
+        ],
+        "virtualOpenTrades": [
+            trade for trade in virtual_still_open
+            if isinstance(trade, dict)
+            and normalize_symbol(trade.get("symbol")) == symbol
+            and normalize_timeframe(trade.get("timeframe")) == timeframe
+        ],
+        "summary": ai_trader_summary(symbol=symbol, timeframe=timeframe),
+        "createdAt": now_iso(),
+    }
+
+
+    latest_high = latest_low = latest_close = current
+
+    if candles:
+        high, low, close = candle_high_low_close(candles[-1])
+        latest_high = high or current
+        latest_low = low or current
+        latest_close = close or current
+
+    if current <= 0:
+        current = latest_close
+
     closed: List[Dict[str, Any]] = []
     still_open: List[Dict[str, Any]] = []
 
@@ -1117,6 +1420,48 @@ def ai_trader_summary(symbol: Any = "", timeframe: Any = "") -> Dict[str, Any]:
         return True
 
     open_trades = [trade for trade in safe_list(memory.get("openTrades")) if isinstance(trade, dict) and matches(trade)]
+    virtual_open_trades = [trade for trade in safe_list(memory.get("virtualOpenTrades")) if isinstance(trade, dict) and matches(trade)]
+    real_closed_trades = [trade for trade in safe_list(memory.get("closedTrades")) if isinstance(trade, dict) and matches(trade)]
+    virtual_closed_trades = [trade for trade in safe_list(memory.get("virtualClosedTrades")) if isinstance(trade, dict) and matches(trade)]
+    closed_trades = real_closed_trades + virtual_closed_trades
+    stats = summarize_closed_trades(closed_trades)
+    memory_status = ai_memory_status(memory)
+
+    return {
+        "eventType": "AI_TRADER_SUMMARY",
+        "status": "Ready",
+        "dashboardOnly": True,
+        "brokerConnected": False,
+        "symbol": normalized_symbol or "ALL",
+        "timeframe": normalized_timeframe or "ALL",
+        "openTrades": open_trades[-20:],
+        "virtualOpenTrades": virtual_open_trades[-20:],
+        "closedTrades": closed_trades[-20:],
+        "realClosedTrades": real_closed_trades[-20:],
+        "virtualClosedTrades": virtual_closed_trades[-20:],
+        "recentClosedTrades": closed_trades[-10:],
+        "openCount": len(open_trades),
+        "virtualOpenCount": len(virtual_open_trades),
+        "closedCount": len(closed_trades),
+        "realClosedCount": len(real_closed_trades),
+        "virtualClosedCount": len(virtual_closed_trades),
+        "stats": stats,
+        "decisionStats": memory_status["overallDecisionStats"],
+        "memoryStatus": memory_status,
+        "memoryPath": str(MEMORY_PATH),
+        "phase6MemoryFix": True,
+        "createdAt": now_iso(),
+    }
+
+
+    def matches(trade: Dict[str, Any]) -> bool:
+        if normalized_symbol and normalize_symbol(trade.get("symbol")) != normalized_symbol:
+            return False
+        if normalized_timeframe and normalize_timeframe(trade.get("timeframe")) != normalized_timeframe:
+            return False
+        return True
+
+    open_trades = [trade for trade in safe_list(memory.get("openTrades")) if isinstance(trade, dict) and matches(trade)]
     closed_trades = [trade for trade in safe_list(memory.get("closedTrades")) if isinstance(trade, dict) and matches(trade)]
     stats = summarize_closed_trades(closed_trades)
     memory_status = ai_memory_status(memory)
@@ -1163,6 +1508,8 @@ def reset_ai_trader_memory(symbol: Optional[Any] = None, timeframe: Optional[Any
             "openTrades": [],
             "closedTrades": [],
             "decisionLog": [],
+            "virtualOpenTrades": [],
+            "virtualClosedTrades": [],
         }
         save_memory(memory)
         return {
@@ -1189,6 +1536,8 @@ def reset_ai_trader_memory(symbol: Optional[Any] = None, timeframe: Optional[Any
     memory["openTrades"] = [trade for trade in safe_list(memory.get("openTrades")) if keep(trade)]
     memory["closedTrades"] = [trade for trade in safe_list(memory.get("closedTrades")) if keep(trade)]
     memory["decisionLog"] = [trade for trade in safe_list(memory.get("decisionLog")) if keep(trade)]
+    memory["virtualOpenTrades"] = [trade for trade in safe_list(memory.get("virtualOpenTrades")) if keep(trade)]
+    memory["virtualClosedTrades"] = [trade for trade in safe_list(memory.get("virtualClosedTrades")) if keep(trade)]
     save_memory(memory)
 
     return {
