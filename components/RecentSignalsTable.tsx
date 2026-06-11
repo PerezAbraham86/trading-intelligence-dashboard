@@ -1168,6 +1168,36 @@ function getTrueMlSmcTargetPrice(
   return null
 }
 
+
+function calculateRecentSignalsFallbackTarget({
+  entry,
+  current,
+  signalType,
+  symbol,
+}: {
+  entry: number | null
+  current: number | null
+  signalType: 'BUY' | 'SELL' | 'HOLD'
+  symbol: string
+}) {
+  if (!entry || entry <= 0 || signalType === 'HOLD') return null
+
+  const liveDistance =
+    current && current > 0
+      ? Math.abs(current - entry)
+      : 0
+
+  const minPointDistance =
+    symbol.includes('MES') ? 2 :
+    symbol.includes('ES') ? 2 :
+    entry * 0.0015
+
+  const targetDistance = Math.max(liveDistance * 1.5, minPointDistance)
+  const target = signalType === 'BUY' ? entry + targetDistance : entry - targetDistance
+
+  return Number.isFinite(target) && target > 0 ? target : null
+}
+
 function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: RecentSignal): SignalCardView {
   const symbol = normalizeSymbol(input.symbol ?? fallbackSignal?.symbol)
   const timeframe = normalizeTimeframe(input.timeframe ?? fallbackSignal?.primaryTimeframe ?? fallbackSignal?.timeframe)
@@ -1200,16 +1230,23 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
     signalType: type,
   })
 
-  // True target rule:
-  // Do NOT generate synthetic targets from ATR/NRTR/SMMA here.
-  // The target must come from the ML/SMC payload. If the backend/system has not
-  // produced a target yet, show "—" instead of inventing one.
-  const target = getTrueMlSmcTargetPrice(
+  // Target priority:
+  // 1) True ML/SMC/Target ML target when available.
+  // 2) Dashboard-safe NRTR projection target so Recent Signals does not go blank.
+  //    This is not fed back into Ghost ML or Target ML. It is display/P&L only.
+  const trueTarget = getTrueMlSmcTargetPrice(
     input.latestSignal,
     fallbackSignal,
     hasCurrent ? current : undefined,
     type
   )
+  const fallbackTarget = calculateRecentSignalsFallbackTarget({
+    entry,
+    current: hasCurrent ? current : null,
+    signalType: type,
+    symbol,
+  })
+  const target = trueTarget ?? fallbackTarget
 
   const pnlData = calculateDirectionalPnl({
     entry,
@@ -1236,8 +1273,8 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
     : ''
 
   const targetText = target === null
-    ? 'Target waiting for ML/SMC.'
-    : 'Target from ML/SMC.'
+    ? 'Target from ML/SMC or NRTR projection.'
+    : 'Target from ML/SMC or NRTR projection.'
 
   const bodyText = input.label.toLowerCase().includes('main')
     ? `Main chart signal card. ${trend.source}. ${targetText} ${settingsText}`
