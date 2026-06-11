@@ -102,6 +102,42 @@ type PythonEngineState = {
   factors?: TechnicalIndicator[]
 }
 
+type ProjectionEngineState = {
+  eventType?: string
+  status?: string
+  symbol?: string
+  timeframe?: string
+  projectionId?: string
+  createdAt?: string
+
+  marketState?: any
+  target?: any
+  ghostPath?: any
+  alignment?: any
+  mode?: any
+  learning?: any
+
+  currentPrice?: number
+  activeTargetPrice?: number | null
+  activeTargetSource?: string
+  activeTargetType?: string
+  activeTargetConfidence?: number | null
+
+  targetPrice?: number | null
+  finalTargetPrice?: number | null
+  ghostOverlayTargetPrice?: number | null
+  targetConfidence?: number | null
+  ghostConfidence?: number | null
+  projectionMode?: string
+  projectionModeLabel?: string
+  aiPermission?: string
+
+  ghostCandles?: PythonGhostCandle[]
+  ghosts?: PythonGhostCandle[]
+  targetMl?: any
+  targetPlan?: any
+}
+
 type ChartSelection = {
   symbol: string
   timeframe: string
@@ -458,12 +494,16 @@ function buildOverallTechnicalSentiment(
   }
 }
 
-function getPythonGhostCandles(engineState: PythonEngineState | null | undefined) {
+function getPythonGhostCandles(engineState: PythonEngineState | ProjectionEngineState | null | undefined) {
   if (!engineState) return []
 
-  if (Array.isArray(engineState.ghostCandles)) return engineState.ghostCandles
-  if (Array.isArray(engineState.ghostProjections)) return engineState.ghostProjections
-  if (Array.isArray(engineState.projections)) return engineState.projections
+  const raw = engineState as any
+
+  if (Array.isArray(raw.ghostPath?.candles)) return raw.ghostPath.candles
+  if (Array.isArray(raw.ghostCandles)) return raw.ghostCandles
+  if (Array.isArray(raw.ghosts)) return raw.ghosts
+  if (Array.isArray(raw.ghostProjections)) return raw.ghostProjections
+  if (Array.isArray(raw.projections)) return raw.projections
 
   return []
 }
@@ -1072,6 +1112,63 @@ function getGhostCandlesFromUnifiedOverlay(overlayPayload: any | null | undefine
   }
 
   return []
+}
+
+function getProjectionGhostCandles(projectionEngine: ProjectionEngineState | null | undefined): PythonGhostCandle[] {
+  if (!projectionEngine || typeof projectionEngine !== 'object') return []
+
+  const raw = projectionEngine as any
+
+  if (Array.isArray(raw.ghostPath?.candles)) return raw.ghostPath.candles
+  if (Array.isArray(raw.ghostCandles)) return raw.ghostCandles
+  if (Array.isArray(raw.ghosts)) return raw.ghosts
+
+  return []
+}
+
+function mergeProjectionEngineIntoUnifiedIntelligence(
+  unifiedIntelligence: any | null,
+  projectionEngine: ProjectionEngineState | null
+) {
+  if (!projectionEngine || typeof projectionEngine !== 'object') {
+    return unifiedIntelligence
+  }
+
+  const ghostCandles = getProjectionGhostCandles(projectionEngine)
+
+  return {
+    ...(unifiedIntelligence && typeof unifiedIntelligence === 'object' ? unifiedIntelligence : {}),
+    projectionEngine,
+    unifiedProjectionEngine: projectionEngine,
+    target: projectionEngine.target,
+    ghostPath: projectionEngine.ghostPath,
+    alignment: projectionEngine.alignment,
+    mode: projectionEngine.mode,
+    learning: projectionEngine.learning,
+    activeTargetPrice: projectionEngine.activeTargetPrice,
+    activeTargetSource: projectionEngine.activeTargetSource,
+    activeTargetType: projectionEngine.activeTargetType,
+    activeTargetConfidence: projectionEngine.activeTargetConfidence,
+    targetPrice: projectionEngine.targetPrice,
+    finalTargetPrice: projectionEngine.finalTargetPrice,
+    ghostOverlayTargetPrice: projectionEngine.ghostOverlayTargetPrice,
+    targetConfidence: projectionEngine.targetConfidence,
+    ghostConfidence: projectionEngine.ghostConfidence,
+    projectionMode: projectionEngine.projectionMode,
+    projectionModeLabel: projectionEngine.projectionModeLabel,
+    aiPermission: projectionEngine.aiPermission,
+    targetMl: projectionEngine.targetMl,
+    targetPlan: projectionEngine.targetPlan,
+    ghostCandles,
+    ghostProjection: {
+      ...(unifiedIntelligence?.ghostProjection ?? {}),
+      candles: ghostCandles,
+      ghostCandles,
+      confidence: projectionEngine.ghostConfidence,
+      direction: projectionEngine.ghostPath?.direction,
+      source: 'unified_projection_engine',
+    },
+  }
 }
 
 
@@ -3834,6 +3931,8 @@ export default function Dashboard() {
   const [isClient, setIsClient] = useState(false)
   const [pythonEngineState, setPythonEngineState] =
     useState<PythonEngineState | null>(null)
+  const [projectionEngine, setProjectionEngine] =
+    useState<ProjectionEngineState | null>(null)
   const [timeframeEngineStates, setTimeframeEngineStates] =
     useState<Record<string, PythonEngineState | null>>({})
   const [sharedTechnicalSentiment, setSharedTechnicalSentiment] =
@@ -4028,6 +4127,7 @@ export default function Dashboard() {
     setChartScorecards(null)
     setChartMlFeatures(null)
     setPythonEngineState(null)
+    setProjectionEngine(null)
     setTimeframeEngineStates({})
     setSharedTechnicalSentiment(null)
     setTimeframeTechnicalSentiments({})
@@ -4155,21 +4255,49 @@ export default function Dashboard() {
     }
   }, [apiBaseUrl, isClient, selectedSymbol, selectedTimeframe, dashboardTimeframes, mainCandlesReady])
 
+  const primaryEngineState = useMemo(() => {
+    if (!projectionEngine) return pythonEngineState
+
+    const projectionGhosts = getProjectionGhostCandles(projectionEngine)
+
+    return {
+      ...(pythonEngineState ?? {}),
+      ...projectionEngine,
+      projectionEngine,
+      unifiedProjectionEngine: projectionEngine,
+      overlayPayload: (pythonEngineState as any)?.overlayPayload,
+      chartOverlays: (pythonEngineState as any)?.chartOverlays,
+      ghostCandles: projectionGhosts.length > 0
+        ? projectionGhosts
+        : getPythonGhostCandles(pythonEngineState),
+      ghostEngine: {
+        phase: 'phase6_unified_projection_engine',
+        source: 'api/projection_engine.py',
+        count: projectionGhosts.length,
+      },
+    } as PythonEngineState
+  }, [projectionEngine, pythonEngineState])
+
+  const mergedUnifiedIntelligence = useMemo(() => {
+    return mergeProjectionEngineIntoUnifiedIntelligence(mainUnifiedIntelligence, projectionEngine)
+  }, [mainUnifiedIntelligence, projectionEngine])
+
   const augmentedLatestSignal = useMemo(() => {
     const sharedTargetMlContext = buildSharedTargetMlContext(
+      projectionEngine,
       latestSignal,
       mainChartOverlayPayload,
-      mainUnifiedIntelligence,
-      pythonEngineState,
+      mergedUnifiedIntelligence,
+      primaryEngineState,
       timeframeEngineStates
     )
 
-    const mainGhostConfidence = getAverageGhostConfidence(pythonEngineState)
+    const mainGhostConfidence = getAverageGhostConfidence(primaryEngineState)
     const overallGhostConfidence = getOverallGhostConfidence(timeframeEngineStates, dashboardTimeframes)
     const ghostConfidence = Math.max(mainGhostConfidence, overallGhostConfidence)
     const pythonGhostText =
       getOverallGhostText(timeframeEngineStates, dashboardTimeframes) ||
-      getPythonGhostText(pythonEngineState)
+      getPythonGhostText(primaryEngineState)
 
     const scorecardPatch = mainOverlayReady && chartScorecards
       ? buildScorecardSignalPatch(chartScorecards, chartMlFeatures)
@@ -4225,6 +4353,17 @@ export default function Dashboard() {
       // Keep scorecard-derived factor fields on top after base signal normalization.
       ...(scorecardPatch as any),
 
+      // Phase 6 unified projection engine is now the canonical shared brain.
+      projectionEngine,
+      unifiedProjectionEngine: projectionEngine,
+      projectionMode: projectionEngine?.projectionMode,
+      projectionModeLabel: projectionEngine?.projectionModeLabel,
+      aiPermission: projectionEngine?.aiPermission,
+      targetGhostAlignment: projectionEngine?.alignment,
+      ghostPath: projectionEngine?.ghostPath,
+      marketState: projectionEngine?.marketState,
+      learning: projectionEngine?.learning,
+
       // Shared Target ML context is the canonical target source for all panels.
       // Ghost Projection, Recent Signals, AI Trader, and future paper trader
       // should all read these same fields.
@@ -4232,7 +4371,8 @@ export default function Dashboard() {
     }
   }, [
     latestSignal,
-    pythonEngineState,
+    projectionEngine,
+    primaryEngineState,
     timeframeEngineStates,
     dashboardTimeframes,
     sharedTechnicalSentiment,
@@ -4247,7 +4387,7 @@ export default function Dashboard() {
     chartScorecards,
     chartMlFeatures,
     mainChartOverlayPayload,
-    mainUnifiedIntelligence,
+    mergedUnifiedIntelligence,
     mainOverlayReady,
   ])
 
@@ -4324,6 +4464,86 @@ export default function Dashboard() {
       nrtrPurpose: "strategy_context_only",
     }
   }, [chartMlFeatures, matrixScorecards])
+
+  useEffect(() => {
+    if (!isClient || !apiBaseUrl || !mainCandlesReady || mainChartCandles.length === 0) return
+
+    let cancelled = false
+    let intervalId: ReturnType<typeof setInterval> | null = null
+
+    async function buildProjectionEngine() {
+      try {
+        const response = await fetch(`${apiBaseUrl}/api/projection-engine/build`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          cache: 'no-store',
+          body: JSON.stringify({
+            symbol: selectedSymbol,
+            timeframe: selectedTimeframe,
+            candles: dashboardCandlesToOverlayCandles(mainChartCandles).slice(-700),
+            scorecards: matrixScorecards,
+            mlFeatures: matrixMlFeatures,
+            overlayPayload: mainChartOverlayPayload,
+            unifiedIntelligence: mergedUnifiedIntelligence,
+            externalTables: {
+              technicalSentiment: sharedTechnicalSentiment,
+              timeframeTechnicalSentiments,
+            },
+            signal: {
+              ...(latestSignal ?? {}),
+              symbol: selectedSymbol,
+              timeframe: selectedTimeframe,
+              price: activeChartPrice ?? latestSignal?.price ?? latestSignal?.current,
+              current: activeChartPrice ?? latestSignal?.current ?? latestSignal?.price,
+            },
+            ghostCount: 3,
+            autoRegister: true,
+          }),
+        })
+
+        if (!response.ok) {
+          throw new Error(`Projection engine request failed: ${response.status}`)
+        }
+
+        const json = await response.json()
+
+        if (!cancelled && json && typeof json === 'object') {
+          setProjectionEngine(json as ProjectionEngineState)
+        }
+      } catch (error) {
+        console.error('Unified projection engine sync error:', error)
+
+        if (!cancelled) {
+          setProjectionEngine(null)
+        }
+      }
+    }
+
+    buildProjectionEngine()
+    intervalId = setInterval(buildProjectionEngine, 7000)
+
+    return () => {
+      cancelled = true
+      if (intervalId) clearInterval(intervalId)
+    }
+  }, [
+    activeChartPrice,
+    apiBaseUrl,
+    isClient,
+    latestSignal,
+    mainCandlesReady,
+    mainChartCandles,
+    mainChartOverlayPayload,
+    mainUnifiedIntelligence,
+    matrixMlFeatures,
+    matrixScorecards,
+    selectedSymbol,
+    selectedTimeframe,
+    sharedTechnicalSentiment,
+    timeframeTechnicalSentiments,
+  ])
 
   const safeDashboardStatus = getSafeDashboardStatus({
     error: null,
@@ -4458,7 +4678,7 @@ export default function Dashboard() {
             isClient={isClient}
             enabled={chartConfigsHydrated}
             priority="main"
-            engineState={pythonEngineState}
+            engineState={primaryEngineState}
             showOverlayLines
             onCandlesUpdate={setMainChartCandles}
             onOverlayPayloadUpdate={setMainChartOverlayPayload}
@@ -4577,7 +4797,7 @@ export default function Dashboard() {
             <div className="xl:col-span-2">
               <UnifiedIntelligenceMatrix
                 signal={augmentedLatestSignal as any}
-                unifiedIntelligence={mainUnifiedIntelligence}
+                unifiedIntelligence={mergedUnifiedIntelligence}
                 overlayPayload={mainChartOverlayPayload}
                 scorecards={matrixScorecards}
                 mlFeatures={matrixMlFeatures}
@@ -4595,7 +4815,7 @@ export default function Dashboard() {
               activePrice={activeChartPrice ?? undefined}
               overlayPayload={mainChartOverlayPayload}
               scorecards={chartScorecards}
-              unifiedIntelligence={mainUnifiedIntelligence}
+              unifiedIntelligence={mergedUnifiedIntelligence}
             />
           </div>
 
@@ -4615,7 +4835,7 @@ export default function Dashboard() {
                 activePrice: activeChartPrice ?? undefined,
                 settings: mainChartIndicatorSettings,
                 overlayPayload: mainChartOverlayPayload,
-                unifiedIntelligence: mainUnifiedIntelligence,
+                unifiedIntelligence: mergedUnifiedIntelligence,
               },
               {
                 label: 'Mini Chart 1',
@@ -4625,7 +4845,7 @@ export default function Dashboard() {
                 latestSignal: augmentedLatestSignal,
                 settings: miniChartOneIndicatorSettings,
                 overlayPayload: mainChartOverlayPayload,
-                unifiedIntelligence: mainUnifiedIntelligence,
+                unifiedIntelligence: mergedUnifiedIntelligence,
               },
               {
                 label: 'Mini Chart 2',
@@ -4635,7 +4855,7 @@ export default function Dashboard() {
                 latestSignal: augmentedLatestSignal,
                 settings: miniChartTwoIndicatorSettings,
                 overlayPayload: mainChartOverlayPayload,
-                unifiedIntelligence: mainUnifiedIntelligence,
+                unifiedIntelligence: mergedUnifiedIntelligence,
               },
             ]}
           />
@@ -4647,7 +4867,7 @@ export default function Dashboard() {
             scorecards={matrixScorecards}
             mlFeatures={matrixMlFeatures}
             overlayPayload={mainChartOverlayPayload}
-            unifiedIntelligence={mainUnifiedIntelligence}
+            unifiedIntelligence={mergedUnifiedIntelligence}
             mainSettings={mainChartIndicatorSettings}
             miniOneSettings={miniChartOneIndicatorSettings}
             miniTwoSettings={miniChartTwoIndicatorSettings}
@@ -4662,7 +4882,7 @@ export default function Dashboard() {
               signal={augmentedLatestSignal}
               scorecards={matrixScorecards}
               overlayPayload={mainChartOverlayPayload}
-              unifiedIntelligence={mainUnifiedIntelligence}
+              unifiedIntelligence={mergedUnifiedIntelligence}
               candles={mainChartCandles}
             />
           </div>
