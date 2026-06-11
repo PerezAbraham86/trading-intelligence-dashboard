@@ -51,6 +51,22 @@ type AiTraderSummary = {
   recentClosedTrades?: any[]
   openCount?: number
   closedCount?: number
+  decisionStats?: {
+    samples?: number
+    buyBias?: number
+    sellBias?: number
+    holdCount?: number
+    tradeReadyCount?: number
+    avgConfidence?: number
+  }
+  memoryStatus?: {
+    stage?: string
+    message?: string
+    bucketDecisionStats?: any
+    overallDecisionStats?: any
+    bucketClosedStats?: any
+    overallClosedStats?: any
+  }
   stats?: {
     samples?: number
     wins?: number
@@ -98,6 +114,129 @@ function formatPercent(value: any) {
   if (!Number.isFinite(parsed)) return '—'
 
   return `${(parsed * 100).toFixed(1)}%`
+}
+
+function formatCount(value: any) {
+  const parsed = Number(value)
+
+  if (!Number.isFinite(parsed)) return '0'
+
+  return parsed.toLocaleString()
+}
+
+function formatAiStage(value: any) {
+  const raw = String(value ?? 'WARMING_UP').replaceAll('_', ' ').toLowerCase()
+
+  return raw.replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function getBlockerAnalysis(decision: AiTraderDecision | null, summary: AiTraderSummary | null, minConfidence: number, minRiskReward: number) {
+  const blockers: Array<{ label: string; detail: string; severity: 'high' | 'medium' | 'low' }> = []
+
+  const confidence = toFiniteNumber(decision?.confidence, 0)
+  const riskReward = toFiniteNumber(decision?.riskReward, 0)
+  const directional = decision?.details?.directionalContext ?? {}
+  const memoryStatus = summary?.memoryStatus ?? decision?.details?.memoryStatus ?? {}
+  const targetConfidence = toFiniteNumber(directional?.targetConfidence, 0)
+  const ghostConfidence = toFiniteNumber(directional?.ghostConfidence, 0)
+  const entryConfidence = toFiniteNumber(directional?.entryConfidence, 0)
+  const nrtrConflicts = toFiniteNumber(directional?.nrtrConflictCount, 0)
+  const nrtrAgreements = toFiniteNumber(directional?.nrtrAgreementCount, 0)
+
+  if (confidence < minConfidence) {
+    blockers.push({
+      label: 'Confidence below threshold',
+      detail: `${confidence.toFixed(1)}% / required ${minConfidence.toFixed(1)}%`,
+      severity: 'high',
+    })
+  }
+
+  if (riskReward > 0 && riskReward < minRiskReward) {
+    blockers.push({
+      label: 'Risk/Reward below minimum',
+      detail: `${riskReward.toFixed(2)}R / required ${minRiskReward.toFixed(2)}R`,
+      severity: 'high',
+    })
+  }
+
+  if (targetConfidence <= 0) {
+    blockers.push({
+      label: 'Target ML confidence missing',
+      detail: 'Target exists, but confidence is not flowing into the AI context yet.',
+      severity: 'medium',
+    })
+  } else if (targetConfidence < 50) {
+    blockers.push({
+      label: 'Target ML is weak',
+      detail: `${targetConfidence.toFixed(1)} confidence`,
+      severity: 'medium',
+    })
+  }
+
+  if (ghostConfidence > 0 && ghostConfidence < 45) {
+    blockers.push({
+      label: 'Ghost ML is weak',
+      detail: `${ghostConfidence.toFixed(1)} confidence`,
+      severity: 'medium',
+    })
+  }
+
+  if (entryConfidence > 0 && entryConfidence < 55) {
+    blockers.push({
+      label: 'Entry ML is weak',
+      detail: `${entryConfidence.toFixed(1)} confidence`,
+      severity: 'medium',
+    })
+  }
+
+  if (nrtrConflicts > 0) {
+    blockers.push({
+      label: 'NRTR conflict',
+      detail: `${nrtrConflicts} chart(s) conflict, ${nrtrAgreements} agree`,
+      severity: 'medium',
+    })
+  }
+
+  if (toFiniteNumber(summary?.closedCount, 0) < 8) {
+    blockers.push({
+      label: 'Trade memory not mature',
+      detail: String(memoryStatus?.message ?? 'Need more closed dashboard AI trades.'),
+      severity: 'low',
+    })
+  }
+
+  if (blockers.length === 0 && decision?.allowedToTrade) {
+    blockers.push({
+      label: 'No active blocker',
+      detail: 'AI is allowed to open dashboard paper trades.',
+      severity: 'low',
+    })
+  }
+
+  if (blockers.length === 0) {
+    blockers.push({
+      label: 'Waiting for clean setup',
+      detail: 'No major blocker found, but AI has not confirmed trade readiness.',
+      severity: 'low',
+    })
+  }
+
+  return blockers
+}
+
+function BlockerBadge({ severity }: { severity: 'high' | 'medium' | 'low' }) {
+  const className =
+    severity === 'high'
+      ? 'border-red-400/30 bg-red-400/10 text-red-200'
+      : severity === 'medium'
+        ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
+        : 'border-blue-400/30 bg-blue-400/10 text-blue-200'
+
+  return (
+    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-black uppercase tracking-wide ${className}`}>
+      {severity}
+    </span>
+  )
 }
 
 function readNumberPath(source: any, paths: string[]) {
@@ -587,6 +726,10 @@ export default function AiTraderPanel({
           : 'neutral'
 
   const stats = summary?.stats ?? {}
+  const decisionStats = summary?.decisionStats ?? summary?.memoryStatus?.overallDecisionStats ?? {}
+  const memoryStatus = summary?.memoryStatus ?? decision?.details?.memoryStatus ?? {}
+  const blockers = getBlockerAnalysis(decision, summary, minConfidence, minRiskReward)
+
   const openTrades = Array.isArray(summary?.openTrades) ? summary?.openTrades ?? [] : []
   const closedTrades =
     Array.isArray(summary?.recentClosedTrades)
@@ -736,11 +879,42 @@ export default function AiTraderPanel({
               ))}
             </div>
           ) : null}
+
+          <div className="mt-4 rounded-xl border border-dark-700 bg-dark-800/70 p-3">
+            <div className="mb-2 text-xs font-black uppercase tracking-wide text-gray-400">Blocker Analysis</div>
+            <div className="space-y-2">
+              {blockers.slice(0, 6).map((blocker) => (
+                <div key={`${blocker.label}-${blocker.detail}`} className="flex flex-col gap-1 rounded-lg border border-dark-700 bg-dark-900/70 px-3 py-2 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <div className="text-xs font-black text-white">{blocker.label}</div>
+                    <div className="text-xs text-gray-500">{blocker.detail}</div>
+                  </div>
+                  <BlockerBadge severity={blocker.severity} />
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
 
         <div className="rounded-xl border border-dark-700 bg-dark-900/70 p-4">
-          <div className="mb-3 text-xs font-black uppercase tracking-wide text-gray-400">Learning Memory</div>
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div className="text-xs font-black uppercase tracking-wide text-gray-400">Learning Memory</div>
+            <span className="rounded-full border border-purple-400/30 bg-purple-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-purple-200">
+              {formatAiStage(memoryStatus.stage)}
+            </span>
+          </div>
+
+          <div className="mb-3 rounded-lg border border-dark-700 bg-dark-800/70 px-3 py-2 text-xs text-gray-300">
+            {String(memoryStatus.message ?? 'AI memory is collecting live decision observations.')}
+          </div>
+
           <div className="grid grid-cols-2 gap-2">
+            <StatBox label="Decisions" value={formatCount(decisionStats.samples)} />
+            <StatBox label="Trade Ready" value={formatCount(decisionStats.tradeReadyCount)} tone="bull" />
+            <StatBox label="HOLD Count" value={formatCount(decisionStats.holdCount)} tone="warn" />
+            <StatBox label="Avg AI Conf" value={`${toFiniteNumber(decisionStats.avgConfidence, 0).toFixed(1)}%`} />
+            <StatBox label="BUY Bias" value={formatCount(decisionStats.buyBias)} tone="bull" />
+            <StatBox label="SELL Bias" value={formatCount(decisionStats.sellBias)} tone="bear" />
             <StatBox label="Open" value={String(summary?.openCount ?? 0)} />
             <StatBox label="Closed" value={String(summary?.closedCount ?? 0)} />
             <StatBox label="Win Rate" value={formatPercent(stats.winRate)} tone="bull" />
