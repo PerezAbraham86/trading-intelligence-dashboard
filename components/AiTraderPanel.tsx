@@ -196,21 +196,134 @@ function inferEntryFromSignal(signal: any, activePrice?: number) {
   ]) ?? activePrice
 }
 
-function buildTargetMlSnapshot(signal: any, overlayPayload: any) {
+function readGhostTargetMlContext(source: any) {
+  const ghostSources = [
+    source?.ghostCandles,
+    source?.ghosts,
+    source?.projection,
+    source?.ghostProjection,
+    source?.ghostCandleProjection,
+    source?.overlayPayload?.ghostCandles,
+    source?.overlayPayload?.ghosts,
+  ]
+
+  let bestTarget = readNumberPath(source, [
+    'finalTargetPrice',
+    'overallTargetPrice',
+    'targetPrice',
+    'targetMl.targetPrice',
+    'targetPlan.targetPrice',
+  ])
+  let bestConfidence = toFiniteNumber(
+    source?.targetConfidence ??
+    source?.targetMl?.targetConfidence ??
+    source?.targetPlan?.targetConfidence,
+    0,
+  )
+  let aligned = Boolean(source?.targetMlAligned ?? source?.targetMl?.targetMlAligned)
+  let ready = Boolean(source?.targetMlReady ?? source?.targetMl?.targetMlReady)
+
+  ghostSources.forEach((ghostList) => {
+    if (!Array.isArray(ghostList)) return
+
+    ghostList.forEach((ghost: any) => {
+      const ghostTarget = readNumberPath(ghost, [
+        'finalTargetPrice',
+        'overallTargetPrice',
+        'ghostTargetPrice',
+        'projectedTargetPrice',
+        'targetPrice',
+        'close',
+      ])
+
+      const ghostConfidence = toFiniteNumber(
+        ghost?.targetConfidence ??
+        ghost?.targetMlConfidence ??
+        ghost?.confidence,
+        0,
+      )
+
+      if (!bestTarget && ghostTarget && ghostTarget > 0) {
+        bestTarget = ghostTarget
+      }
+
+      if (ghostConfidence > bestConfidence) {
+        bestConfidence = ghostConfidence
+      }
+
+      aligned = aligned || Boolean(ghost?.targetMlAligned)
+      ready = ready || Boolean(ghost?.targetMlReady) || Boolean(ghost?.targetMlAligned) || ghostConfidence > 0
+    })
+  })
+
   return {
-    targetConfidence: toFiniteNumber(
+    targetPrice: bestTarget,
+    targetConfidence: bestConfidence,
+    targetMlAligned: aligned,
+    targetMlReady: ready || aligned || bestConfidence > 0 || Boolean(bestTarget),
+  }
+}
+
+function buildTargetMlSnapshot(signal: any, overlayPayload: any) {
+  const signalContext = readGhostTargetMlContext(signal)
+  const overlayContext = readGhostTargetMlContext(overlayPayload)
+
+  const targetConfidence = Math.max(
+    toFiniteNumber(
       signal?.targetConfidence ??
       signal?.targetMl?.targetConfidence ??
-      overlayPayload?.targetConfidence,
+      overlayPayload?.targetConfidence ??
+      overlayPayload?.targetMl?.targetConfidence,
       0,
     ),
-    targetMlReady: Boolean(
-      signal?.targetMlReady ??
-      signal?.targetMl?.targetMlReady ??
-      overlayPayload?.targetMlReady,
-    ),
-    targetPrice: inferTargetFromSignal(signal),
-    source: signal?.targetSource ?? signal?.targetMl?.source ?? overlayPayload?.targetSource,
+    toFiniteNumber(signalContext.targetConfidence, 0),
+    toFiniteNumber(overlayContext.targetConfidence, 0),
+  )
+
+  const targetPrice =
+    inferTargetFromSignal(signal) ??
+    signalContext.targetPrice ??
+    overlayContext.targetPrice ??
+    readNumberPath(overlayPayload, [
+      'finalTargetPrice',
+      'overallTargetPrice',
+      'targetPrice',
+      'targetMl.targetPrice',
+      'targetPlan.targetPrice',
+    ])
+
+  const targetMlAligned = Boolean(
+    signal?.targetMlAligned ??
+    signal?.targetMl?.targetMlAligned ??
+    overlayPayload?.targetMlAligned ??
+    overlayPayload?.targetMl?.targetMlAligned ??
+    signalContext.targetMlAligned ??
+    overlayContext.targetMlAligned,
+  )
+
+  const targetMlReady = Boolean(
+    signal?.targetMlReady ??
+    signal?.targetMl?.targetMlReady ??
+    overlayPayload?.targetMlReady ??
+    overlayPayload?.targetMl?.targetMlReady ??
+    signalContext.targetMlReady ??
+    overlayContext.targetMlReady ??
+    targetMlAligned ??
+    targetConfidence > 0 ??
+    targetPrice,
+  )
+
+  return {
+    targetConfidence,
+    targetMlReady,
+    targetMlAligned,
+    targetPrice,
+    source:
+      signal?.targetSource ??
+      signal?.targetMl?.source ??
+      overlayPayload?.targetSource ??
+      overlayPayload?.targetMl?.source ??
+      'ghost_target_ml_context',
   }
 }
 
@@ -283,7 +396,8 @@ export default function AiTraderPanel({
   const [lastAutoOpenKey, setLastAutoOpenKey] = useState('')
 
   const payload = useMemo(() => {
-    const target = inferTargetFromSignal(signal)
+    const targetSnapshot = buildTargetMlSnapshot(signal, overlayPayload)
+    const target = inferTargetFromSignal(signal) ?? targetSnapshot.targetPrice
     const entry = inferEntryFromSignal(signal, activePrice)
     const side = normalizeDecision(signal?.signal ?? signal?.type ?? signal?.direction)
 
@@ -297,7 +411,7 @@ export default function AiTraderPanel({
       signal,
       scorecards,
       ghostMl: buildGhostMlSnapshot(signal, overlayPayload),
-      targetMl: buildTargetMlSnapshot(signal, overlayPayload),
+      targetMl: targetSnapshot,
       entryMl: buildEntryMlSnapshot(signal),
       nrtrContext: scorecards?.nrtrStrategyFeeds ?? scorecards?.nrtrCharts ?? {},
       unifiedIntelligence,
