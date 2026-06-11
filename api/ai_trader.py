@@ -882,6 +882,7 @@ export default function AiTraderPanel({
       },
       projectionEngine: activeProjectionEngine,
       projectionEngineContext: projectionSnapshot,
+      candles: Array.isArray(candles) ? candles.slice(-80) : [],
       context: {
         mode: 'dashboard_only_ai_paper_trader',
         dashboardOnly: true,
@@ -906,12 +907,21 @@ export default function AiTraderPanel({
     minRiskReward,
     activeProjectionEngine,
     projectionSnapshot,
+    candles,
   ])
 
   const safePayload = useMemo(() => sanitizeAiTraderPayload(payload), [payload])
 
   const fetchDecision = useCallback(async () => {
-    if (!apiBaseUrl || !liveActivePrice || liveActivePrice <= 0) return
+    if (!apiBaseUrl) {
+      setErrorText('AI Trader is waiting for apiBaseUrl.')
+      return
+    }
+
+    if (!liveActivePrice || liveActivePrice <= 0) {
+      setErrorText('AI Trader is waiting for live price. Check mainChartCandles, activePrice, or latest signal price.')
+      return
+    }
 
     try {
       setIsLoading(true)
@@ -1262,6 +1272,29 @@ export default function AiTraderPanel({
           </div>
         </div>
 
+        <div className="mb-3 grid grid-cols-2 gap-2 md:grid-cols-4">
+          <StatBox
+            label="Live Price"
+            value={formatPrice(liveActivePrice)}
+            tone={liveActivePrice > 0 ? 'bull' : 'warn'}
+          />
+          <StatBox
+            label="Candles"
+            value={formatCount(Array.isArray(candles) ? candles.length : 0)}
+            tone={Array.isArray(candles) && candles.length > 0 ? 'bull' : 'warn'}
+          />
+          <StatBox
+            label="Payload"
+            value={liveActivePrice > 0 ? 'READY' : 'WAITING'}
+            tone={liveActivePrice > 0 ? 'bull' : 'warn'}
+          />
+          <StatBox
+            label="Decision Route"
+            value={apiBaseUrl ? 'READY' : 'NO API'}
+            tone={apiBaseUrl ? 'bull' : 'warn'}
+          />
+        </div>
+
         <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
           <MlStatusCard
             title="Projection Engine"
@@ -1364,6 +1397,11 @@ export default function AiTraderPanel({
 
           <div className="mb-3 rounded-lg border border-dark-700 bg-dark-800/70 px-3 py-2 text-xs text-gray-300">
             {String(memoryStatus.message ?? 'AI memory is collecting live decision observations.')}
+            {toFiniteNumber(decisionStats.samples, 0) > 0 ? (
+              <span className="ml-2 font-black text-emerald-300">
+                • {formatCount(decisionStats.samples)} live observations loaded
+              </span>
+            ) : null}
           </div>
 
           <div className="mb-3 grid grid-cols-2 gap-2">
