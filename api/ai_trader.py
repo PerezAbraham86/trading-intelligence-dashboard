@@ -294,6 +294,111 @@ def summarize_closed_trades(closed_trades: List[Dict[str, Any]], bucket: Optiona
     }
 
 
+def summarize_decision_log(decision_log: List[Dict[str, Any]], bucket: Optional[str] = None) -> Dict[str, Any]:
+    rows = [
+        decision for decision in safe_list(decision_log)
+        if isinstance(decision, dict) and (bucket is None or decision.get("bucket") == bucket)
+    ]
+
+    total = len(rows)
+    buy_bias = sum(1 for decision in rows if normalize_side(decision.get("rawDecision") or decision.get("decision")) == "BUY")
+    sell_bias = sum(1 for decision in rows if normalize_side(decision.get("rawDecision") or decision.get("decision")) == "SELL")
+    hold_count = sum(1 for decision in rows if normalize_side(decision.get("decision")) == "HOLD")
+    trade_ready = sum(1 for decision in rows if bool(decision.get("allowedToTrade")))
+    avg_confidence = sum(to_float(decision.get("confidence"), 0.0) for decision in rows) / total if total else 0.0
+
+    return {
+        "samples": total,
+        "buyBias": buy_bias,
+        "sellBias": sell_bias,
+        "holdCount": hold_count,
+        "tradeReadyCount": trade_ready,
+        "avgConfidence": round(avg_confidence, 4),
+    }
+
+
+def ai_memory_status(memory: Dict[str, Any], bucket: Optional[str] = None) -> Dict[str, Any]:
+    closed_stats = summarize_closed_trades(memory.get("closedTrades", []), bucket=bucket)
+    decision_stats = summarize_decision_log(memory.get("decisionLog", []), bucket=bucket)
+    overall_closed = summarize_closed_trades(memory.get("closedTrades", []), bucket=None)
+    overall_decisions = summarize_decision_log(memory.get("decisionLog", []), bucket=None)
+
+    if closed_stats["samples"] >= 8:
+        stage = "TRADE_LEARNING_READY"
+        message = f"AI trade memory ready: {closed_stats['samples']} closed trades in this bucket"
+    elif overall_closed["samples"] >= 20:
+        stage = "GLOBAL_TRADE_LEARNING"
+        message = f"AI using global trade memory: {overall_closed['samples']} closed trades"
+    elif decision_stats["samples"] >= 10:
+        stage = "OBSERVATION_LEARNING"
+        message = f"AI memory observing {decision_stats['samples']} live decisions in this setup"
+    elif overall_decisions["samples"] >= 10:
+        stage = "GLOBAL_OBSERVATION_LEARNING"
+        message = f"AI memory observing {overall_decisions['samples']} total live decisions"
+    else:
+        stage = "WARMING_UP"
+        message = f"AI memory warming up: {overall_decisions['samples']} decision observations, {overall_closed['samples']} closed trades"
+
+    return {
+        "stage": stage,
+        "message": message,
+        "bucketDecisionStats": decision_stats,
+        "overallDecisionStats": overall_decisions,
+        "bucketClosedStats": closed_stats,
+        "overallClosedStats": overall_closed,
+    }
+
+
+def remember_ai_decision(decision: Dict[str, Any]) -> None:
+    try:
+        memory = load_memory()
+        decision_log = safe_list(memory.get("decisionLog"))
+
+        bucket = str(read_path(decision, "details.bucket", fallback=decision.get("bucket") or ""))
+        compact = {
+            "id": f"DECISION-{normalize_symbol(decision.get('symbol'))}-{normalize_timeframe(decision.get('timeframe'))}-{decision.get('createdAt')}",
+            "symbol": normalize_symbol(decision.get("symbol")),
+            "timeframe": normalize_timeframe(decision.get("timeframe")),
+            "decision": decision.get("decision"),
+            "rawDecision": decision.get("rawDecision"),
+            "allowedToTrade": bool(decision.get("allowedToTrade")),
+            "confidence": to_float(decision.get("confidence"), 0.0),
+            "confidenceGrade": decision.get("confidenceGrade"),
+            "entry": decision.get("entry"),
+            "target": decision.get("target"),
+            "stop": decision.get("stop"),
+            "riskReward": decision.get("riskReward"),
+            "bucket": bucket,
+            "reason": decision.get("reason"),
+            "createdAt": decision.get("createdAt") or now_iso(),
+        }
+
+        # Avoid repeated identical observations from the 15-second refresh loop.
+        last = decision_log[-1] if decision_log and isinstance(decision_log[-1], dict) else {}
+        duplicate_key = (
+            last.get("symbol") == compact["symbol"]
+            and last.get("timeframe") == compact["timeframe"]
+            and last.get("decision") == compact["decision"]
+            and last.get("rawDecision") == compact["rawDecision"]
+            and round(to_float(last.get("entry"), 0.0), 2) == round(to_float(compact["entry"], 0.0), 2)
+            and round(to_float(last.get("target"), 0.0), 2) == round(to_float(compact["target"], 0.0), 2)
+            and round(to_float(last.get("confidence"), 0.0), 1) == round(to_float(compact["confidence"], 0.0), 1)
+        )
+
+        if duplicate_key:
+            last["updatedAt"] = now_iso()
+            last["repeatCount"] = to_int(last.get("repeatCount"), 1) + 1
+            decision_log[-1] = last
+        else:
+            decision_log.append(compact)
+
+        memory["decisionLog"] = decision_log[-MAX_CLOSED_TRADES:]
+        save_memory(memory)
+    except Exception:
+        # Decision memory should never break the dashboard.
+        return
+
+
 def extract_directional_context(
     side: str,
     scorecards: Optional[Dict[str, Any]] = None,
@@ -472,12 +577,14 @@ def score_ai_decision(
     if directional["nrtrConflictCount"]:
         reasons.append(f"NRTR strategy context conflicts on {directional['nrtrConflictCount']} chart(s)")
 
+    memory_status = ai_memory_status(memory, bucket=bucket)
+
     if bucket_stats["samples"] >= 8:
-        reasons.append(f"Learned bucket win rate {bucket_stats['winRate'] * 100:.1f}% from {bucket_stats['samples']} samples")
+        reasons.append(f"Learned bucket win rate {bucket_stats['winRate'] * 100:.1f}% from {bucket_stats['samples']} closed trades")
     elif overall_stats["samples"] >= 20:
-        reasons.append(f"Overall AI memory win rate {overall_stats['winRate'] * 100:.1f}% from {overall_stats['samples']} samples")
+        reasons.append(f"Overall AI trade memory win rate {overall_stats['winRate'] * 100:.1f}% from {overall_stats['samples']} closed trades")
     else:
-        reasons.append("AI memory still warming up")
+        reasons.append(memory_status["message"])
 
     return {
         "confidence": round(confidence, 2),
@@ -487,6 +594,7 @@ def score_ai_decision(
         "bucket": bucket,
         "bucketStats": bucket_stats,
         "overallStats": overall_stats,
+        "memoryStatus": memory_status,
         "directionalContext": directional,
         "reasons": reasons,
     }
@@ -659,7 +767,7 @@ def get_ai_trader_decision(
     else:
         reason = f"AI {decision_side}: " + " | ".join(score["reasons"][:4])
 
-    return {
+    decision_result = {
         "eventType": "AI_TRADER_DECISION",
         "status": "Ready" if allowed else "Waiting",
         "dashboardOnly": True,
@@ -690,10 +798,14 @@ def get_ai_trader_decision(
             "bucket": score["bucket"],
             "bucketStats": score["bucketStats"],
             "overallStats": score["overallStats"],
+            "memoryStatus": score["memoryStatus"],
             "directionalContext": score["directionalContext"],
         },
         "createdAt": now_iso(),
     }
+
+    remember_ai_decision(decision_result)
+    return decision_result
 
 
 def open_ai_trade(**payload: Any) -> Dict[str, Any]:
@@ -1007,6 +1119,7 @@ def ai_trader_summary(symbol: Any = "", timeframe: Any = "") -> Dict[str, Any]:
     open_trades = [trade for trade in safe_list(memory.get("openTrades")) if isinstance(trade, dict) and matches(trade)]
     closed_trades = [trade for trade in safe_list(memory.get("closedTrades")) if isinstance(trade, dict) and matches(trade)]
     stats = summarize_closed_trades(closed_trades)
+    memory_status = ai_memory_status(memory)
 
     return {
         "eventType": "AI_TRADER_SUMMARY",
@@ -1021,6 +1134,8 @@ def ai_trader_summary(symbol: Any = "", timeframe: Any = "") -> Dict[str, Any]:
         "openCount": len(open_trades),
         "closedCount": len(closed_trades),
         "stats": stats,
+        "decisionStats": memory_status["overallDecisionStats"],
+        "memoryStatus": memory_status,
         "memoryPath": str(MEMORY_PATH),
         "createdAt": now_iso(),
     }
