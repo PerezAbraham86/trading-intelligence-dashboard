@@ -47,6 +47,8 @@ type AiTraderSummary = {
   dashboardOnly?: boolean
   brokerConnected?: boolean
   openTrades?: any[]
+  closedTrades?: any[]
+  recentClosedTrades?: any[]
   openCount?: number
   closedCount?: number
   stats?: {
@@ -275,6 +277,10 @@ export default function AiTraderPanel({
   const [isLoading, setIsLoading] = useState(false)
   const [actionStatus, setActionStatus] = useState('')
   const [errorText, setErrorText] = useState('')
+  const [autoPaperMode, setAutoPaperMode] = useState(false)
+  const [minConfidence, setMinConfidence] = useState(62)
+  const [minRiskReward, setMinRiskReward] = useState(1.25)
+  const [lastAutoOpenKey, setLastAutoOpenKey] = useState('')
 
   const payload = useMemo(() => {
     const target = inferTargetFromSignal(signal)
@@ -300,10 +306,10 @@ export default function AiTraderPanel({
         dashboardOnly: true,
         noBroker: true,
       },
-      minConfidence: 62,
-      minRiskReward: 1.25,
+      minConfidence,
+      minRiskReward,
     }
-  }, [activePrice, signal, scorecards, overlayPayload, unifiedIntelligence, symbol, timeframe])
+  }, [activePrice, signal, scorecards, overlayPayload, unifiedIntelligence, symbol, timeframe, minConfidence, minRiskReward])
 
   const safePayload = useMemo(() => sanitizeAiTraderPayload(payload), [payload])
 
@@ -424,6 +430,28 @@ export default function AiTraderPanel({
   }, [fetchSummary])
 
   useEffect(() => {
+    if (!autoPaperMode) return
+    if (!decision?.allowedToTrade) return
+
+    const side = normalizeDecision(decision.rawDecision ?? decision.decision)
+    if (side === 'HOLD') return
+
+    const key = [
+      symbol,
+      timeframe,
+      side,
+      Number(decision.entry ?? 0).toFixed(4),
+      Number(decision.target ?? 0).toFixed(4),
+      Number(decision.stop ?? 0).toFixed(4),
+    ].join('|')
+
+    if (key === lastAutoOpenKey) return
+
+    setLastAutoOpenKey(key)
+    openDashboardTrade()
+  }, [autoPaperMode, decision, lastAutoOpenKey, openDashboardTrade, symbol, timeframe])
+
+  useEffect(() => {
     const id = window.setInterval(() => {
       fetchDecision()
       fetchSummary()
@@ -446,6 +474,12 @@ export default function AiTraderPanel({
 
   const stats = summary?.stats ?? {}
   const openTrades = Array.isArray(summary?.openTrades) ? summary?.openTrades ?? [] : []
+  const closedTrades =
+    Array.isArray(summary?.recentClosedTrades)
+      ? summary?.recentClosedTrades ?? []
+      : Array.isArray(summary?.closedTrades)
+        ? summary?.closedTrades ?? []
+        : []
 
   return (
     <motion.div
@@ -470,7 +504,47 @@ export default function AiTraderPanel({
           </p>
         </div>
 
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <label className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-black ${
+            autoPaperMode
+              ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-200'
+              : 'border-dark-600 bg-dark-900 text-gray-400'
+          }`}>
+            <input
+              type="checkbox"
+              checked={autoPaperMode}
+              onChange={(event) => setAutoPaperMode(event.target.checked)}
+              className="h-3 w-3"
+            />
+            Auto Paper
+          </label>
+
+          <label className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-gray-400">
+            Min Conf
+            <input
+              type="number"
+              min={1}
+              max={100}
+              step={1}
+              value={minConfidence}
+              onChange={(event) => setMinConfidence(Math.max(1, Math.min(100, Number(event.target.value) || 62)))}
+              className="ml-2 w-14 rounded border border-dark-600 bg-dark-800 px-2 py-1 text-xs text-white"
+            />
+          </label>
+
+          <label className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-gray-400">
+            Min RR
+            <input
+              type="number"
+              min={0.1}
+              max={10}
+              step={0.05}
+              value={minRiskReward}
+              onChange={(event) => setMinRiskReward(Math.max(0.1, Math.min(10, Number(event.target.value) || 1.25)))}
+              className="ml-2 w-16 rounded border border-dark-600 bg-dark-800 px-2 py-1 text-xs text-white"
+            />
+          </label>
+
           <button
             type="button"
             onClick={fetchDecision}
@@ -495,7 +569,7 @@ export default function AiTraderPanel({
                 : 'cursor-not-allowed border border-dark-600 bg-dark-900 text-gray-600'
             }`}
           >
-            Open AI Paper Trade
+            {autoPaperMode ? 'Auto Paper Armed' : 'Open AI Paper Trade'}
           </button>
         </div>
       </div>
@@ -524,6 +598,7 @@ export default function AiTraderPanel({
           tone={rawDecision === 'BUY' ? 'bull' : rawDecision === 'SELL' ? 'bear' : 'neutral'}
         />
         <StatBox label="Confidence" value={`${toFiniteNumber(decision?.confidence, 0).toFixed(1)}% ${decision?.confidenceGrade ?? ''}`} tone="neutral" />
+        <StatBox label="Auto Paper" value={autoPaperMode ? 'ARMED' : 'OFF'} tone={autoPaperMode ? 'bull' : 'neutral'} />
         <StatBox label="Entry" value={formatPrice(decision?.entry)} />
         <StatBox label="Target" value={formatPrice(decision?.target)} />
         <StatBox label="Stop" value={formatPrice(decision?.stop)} tone="warn" />
@@ -601,6 +676,50 @@ export default function AiTraderPanel({
           </div>
         </div>
       ) : null}
+      {closedTrades.length > 0 ? (
+        <div className="mt-4 rounded-xl border border-dark-700 bg-dark-900/70 p-4">
+          <div className="mb-3 text-xs font-black uppercase tracking-wide text-gray-400">Recent Closed AI Trades</div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] text-left text-xs">
+              <thead className="text-gray-500">
+                <tr>
+                  <th className="pb-2">Result</th>
+                  <th className="pb-2">Side</th>
+                  <th className="pb-2">Entry</th>
+                  <th className="pb-2">Exit</th>
+                  <th className="pb-2">Target</th>
+                  <th className="pb-2">Stop</th>
+                  <th className="pb-2">P&L</th>
+                  <th className="pb-2">R</th>
+                  <th className="pb-2">Exit Reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                {closedTrades.slice(-5).reverse().map((trade: any) => (
+                  <tr key={trade.id ?? `${trade.side}-${trade.exitTime}`} className="border-t border-dark-700 text-gray-300">
+                    <td className={`py-2 font-black ${String(trade.result).toUpperCase() === 'WIN' ? 'text-emerald-300' : 'text-red-300'}`}>
+                      {trade.result ?? 'CLOSED'}
+                    </td>
+                    <td className={`py-2 font-black ${normalizeDecision(trade.side) === 'BUY' ? 'text-emerald-300' : 'text-red-300'}`}>
+                      {trade.side}
+                    </td>
+                    <td className="py-2">{formatPrice(trade.entry)}</td>
+                    <td className="py-2">{formatPrice(trade.exit ?? trade.exitPrice)}</td>
+                    <td className="py-2">{formatPrice(trade.target)}</td>
+                    <td className="py-2">{formatPrice(trade.stop)}</td>
+                    <td className={`py-2 font-bold ${toFiniteNumber(trade.pnl, 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                      {formatMoney(trade.pnl)}
+                    </td>
+                    <td className="py-2">{toFiniteNumber(trade.rMultiple, 0).toFixed(2)}</td>
+                    <td className="py-2 text-gray-500">{trade.exitReason ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+
     </motion.div>
   )
 }
