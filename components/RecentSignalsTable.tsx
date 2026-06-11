@@ -27,6 +27,15 @@ type RecentSignal = {
   chartScorecards?: Record<string, unknown>
   unifiedIntelligence?: Record<string, unknown>
   overlayPayload?: Record<string, unknown>
+  projectionEngine?: any
+  unifiedProjectionEngine?: any
+  ghostPath?: any
+  targetGhostAlignment?: any
+  projectionMode?: string
+  projectionModeLabel?: string
+  aiPermission?: string
+  marketState?: any
+  learning?: any
 }
 
 type ChartCardCandle = {
@@ -56,6 +65,7 @@ type ChartSignalCardInput = {
   settings?: ChartCardStrategySettings
   overlayPayload?: any
   unifiedIntelligence?: any
+  projectionEngine?: any
 }
 
 type RecentSignalsTableProps = {
@@ -1054,9 +1064,188 @@ function getDeepTargetNumber(source: unknown, path: Array<string | number>) {
   return Number.isFinite(value) && value > 0 ? value : NaN
 }
 
+function readProjectionEngineFromSource(source: unknown) {
+  if (!source || typeof source !== 'object') return null
+
+  const raw = source as any
+  const candidates = [
+    raw.projectionEngine,
+    raw.unifiedProjectionEngine,
+    raw.unifiedIntelligence?.projectionEngine,
+    raw.unifiedIntelligence?.unifiedProjectionEngine,
+    raw.overlayPayload?.projectionEngine,
+    raw.overlayPayload?.unifiedProjectionEngine,
+    raw.chartOverlays?.projectionEngine,
+    raw.chartOverlays?.unifiedProjectionEngine,
+    raw,
+  ]
+
+  for (const candidate of candidates) {
+    if (
+      candidate &&
+      typeof candidate === 'object' &&
+      (
+        candidate.eventType === 'UNIFIED_PROJECTION_ENGINE' ||
+        candidate.ghostPath ||
+        candidate.target ||
+        candidate.alignment ||
+        candidate.activeTargetPrice
+      )
+    ) {
+      return candidate
+    }
+  }
+
+  return null
+}
+
+function collectProjectionEngineTargets(source: unknown): { realTargets: number[]; ghostOverlayTargets: number[] } {
+  const realTargets: number[] = []
+  const ghostOverlayTargets: number[] = []
+  const projectionEngine = readProjectionEngineFromSource(source)
+
+  if (!projectionEngine) {
+    return { realTargets, ghostOverlayTargets }
+  }
+
+  const activeTarget = getDeepTargetNumber(projectionEngine, ['activeTargetPrice'])
+  const targetPrice = getDeepTargetNumber(projectionEngine, ['targetPrice'])
+  const finalTarget = getDeepTargetNumber(projectionEngine, ['finalTargetPrice'])
+  const targetObjectPrice = getDeepTargetNumber(projectionEngine, ['target', 'price'])
+  const targetPlanPrice = getDeepTargetNumber(projectionEngine, ['targetPlan', 'targetPrice'])
+  const targetMlPrice = getDeepTargetNumber(projectionEngine, ['targetMl', 'targetPrice'])
+  const ghostOverlayTarget = getDeepTargetNumber(projectionEngine, ['ghostOverlayTargetPrice'])
+
+  const targetType = String(
+    projectionEngine.activeTargetType ??
+      projectionEngine.target?.type ??
+      projectionEngine.targetPlan?.type ??
+      projectionEngine.targetMl?.type ??
+      ''
+  ).trim()
+
+  const targetSource = String(
+    projectionEngine.activeTargetSource ??
+      projectionEngine.target?.source ??
+      projectionEngine.targetPlan?.source ??
+      projectionEngine.targetMl?.source ??
+      ''
+  ).trim()
+
+  const isGhostOverlay =
+    targetType === 'GHOST_OVERLAY_TARGET' ||
+    targetSource.includes('ghost_overlay') ||
+    targetSource.includes('chart_overlay_ghost')
+
+  ;[
+    finalTarget,
+    targetObjectPrice,
+    targetPlanPrice,
+    targetMlPrice,
+  ].forEach((value) => {
+    if (Number.isFinite(value) && value > 0) realTargets.push(value)
+  })
+
+  if (Number.isFinite(activeTarget) && activeTarget > 0) {
+    if (isGhostOverlay) ghostOverlayTargets.push(activeTarget)
+    else realTargets.push(activeTarget)
+  }
+
+  if (Number.isFinite(targetPrice) && targetPrice > 0) {
+    if (isGhostOverlay) ghostOverlayTargets.push(targetPrice)
+    else realTargets.push(targetPrice)
+  }
+
+  if (Number.isFinite(ghostOverlayTarget) && ghostOverlayTarget > 0) {
+    ghostOverlayTargets.push(ghostOverlayTarget)
+  }
+
+  const ghostCandles =
+    Array.isArray(projectionEngine.ghostPath?.candles)
+      ? projectionEngine.ghostPath.candles
+      : Array.isArray(projectionEngine.ghostCandles)
+        ? projectionEngine.ghostCandles
+        : Array.isArray(projectionEngine.ghosts)
+          ? projectionEngine.ghosts
+          : []
+
+  ghostCandles.forEach((ghost: any) => {
+    const realGhostPaths: Array<Array<string | number>> = [
+      ['finalTargetPrice'],
+      ['overallTargetPrice'],
+      ['targetMl', 'finalTargetPrice'],
+      ['targetMl', 'overallTargetPrice'],
+      ['targetMl', 'targetPrice'],
+      ['targetPlan', 'finalTargetPrice'],
+      ['targetPlan', 'overallTargetPrice'],
+      ['targetPlan', 'targetPrice'],
+    ]
+
+    realGhostPaths.forEach((path) => {
+      const value = getDeepTargetNumber(ghost, path)
+      if (Number.isFinite(value) && value > 0) realTargets.push(value)
+    })
+
+    const overlayPaths: Array<Array<string | number>> = [
+      ['ghostTargetPrice'],
+      ['projectedTargetPrice'],
+      ['close'],
+    ]
+
+    overlayPaths.forEach((path) => {
+      const value = getDeepTargetNumber(ghost, path)
+      if (Number.isFinite(value) && value > 0) ghostOverlayTargets.push(value)
+    })
+  })
+
+  return { realTargets, ghostOverlayTargets }
+}
+
+function getProjectionTargetSourceText(source: unknown) {
+  const projectionEngine = readProjectionEngineFromSource(source)
+
+  if (!projectionEngine) return ''
+
+  const targetType = String(
+    projectionEngine.activeTargetType ??
+      projectionEngine.target?.type ??
+      projectionEngine.targetPlan?.type ??
+      ''
+  ).trim()
+
+  const targetSource = String(
+    projectionEngine.activeTargetSource ??
+      projectionEngine.target?.source ??
+      projectionEngine.targetPlan?.source ??
+      'Unified Projection Engine'
+  ).trim()
+
+  const modeLabel = String(
+    projectionEngine.projectionModeLabel ??
+      projectionEngine.mode?.label ??
+      projectionEngine.projectionMode ??
+      ''
+  ).trim()
+
+  const alignmentLabel = String(
+    projectionEngine.alignment?.label ??
+      ''
+  ).trim()
+
+  const sourceText = targetType === 'GHOST_OVERLAY_TARGET'
+    ? 'Projection Engine ghost overlay target'
+    : targetSource || 'Unified Projection Engine target'
+
+  return [sourceText, modeLabel, alignmentLabel].filter(Boolean).join(' • ')
+}
+
 function collectFinalMlTargetCandidates(source: unknown): { realTargets: number[]; ghostOverlayTargets: number[] } {
   const realTargets: number[] = []
   const ghostOverlayTargets: number[] = []
+
+  const projectionTargets = collectProjectionEngineTargets(source)
+  realTargets.push(...projectionTargets.realTargets)
+  ghostOverlayTargets.push(...projectionTargets.ghostOverlayTargets)
 
   const realPaths: Array<Array<string | number>> = [
     ['finalTargetPrice'],
@@ -1089,6 +1278,9 @@ function collectFinalMlTargetCandidates(source: unknown): { realTargets: number[
 
   const sourceAny: any = source
   const ghostLists = [
+    sourceAny?.projectionEngine?.ghostPath?.candles,
+    sourceAny?.unifiedProjectionEngine?.ghostPath?.candles,
+    sourceAny?.ghostPath?.candles,
     sourceAny?.ghostCandles,
     sourceAny?.ghosts,
     sourceAny?.projection,
@@ -1098,6 +1290,9 @@ function collectFinalMlTargetCandidates(source: unknown): { realTargets: number[
     sourceAny?.overlayPayload?.ghostCandles,
     sourceAny?.overlayPayload?.ghosts,
     sourceAny?.overlayPayload?.projection,
+    sourceAny?.unifiedIntelligence?.projectionEngine?.ghostPath?.candles,
+    sourceAny?.unifiedIntelligence?.unifiedProjectionEngine?.ghostPath?.candles,
+    sourceAny?.unifiedIntelligence?.ghostPath?.candles,
     sourceAny?.unifiedIntelligence?.ghostCandles,
     sourceAny?.unifiedIntelligence?.ghosts,
   ]
@@ -1238,11 +1433,22 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
   })
 
   // Target priority:
-  // 1) True ML/SMC/Target ML target when available.
-  // 2) Dashboard-safe NRTR projection target so Recent Signals does not go blank.
-  //    This is not fed back into Ghost ML or Target ML. It is display/P&L only.
+  // 1) Phase 6 Unified Projection Engine target.
+  // 2) Real Target Price ML target.
+  // 3) Target-guided ghost route endpoint only as fallback.
+  // No NRTR/synthetic target is used for Max P&L.
   const latestSignalWithTargetContext = {
     ...(input.latestSignal ?? {}),
+    projectionEngine:
+      input.projectionEngine ??
+      (input.latestSignal as any)?.projectionEngine ??
+      (input.unifiedIntelligence as any)?.projectionEngine ??
+      (input.unifiedIntelligence as any)?.unifiedProjectionEngine,
+    unifiedProjectionEngine:
+      input.projectionEngine ??
+      (input.latestSignal as any)?.unifiedProjectionEngine ??
+      (input.unifiedIntelligence as any)?.unifiedProjectionEngine ??
+      (input.unifiedIntelligence as any)?.projectionEngine,
     overlayPayload: input.overlayPayload ?? (input.latestSignal as any)?.overlayPayload,
     unifiedIntelligence: input.unifiedIntelligence ?? (input.latestSignal as any)?.unifiedIntelligence,
   } as RecentSignal
@@ -1253,12 +1459,6 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
     hasCurrent ? current : undefined,
     type
   )
-  const fallbackTarget = calculateRecentSignalsFallbackTarget({
-    entry,
-    current: hasCurrent ? current : null,
-    signalType: type,
-    symbol,
-  })
   const target = trueTarget
   const targetDirectionConflict = Boolean(
     trueTarget &&
@@ -1290,11 +1490,15 @@ function buildCardFromChart(input: ChartSignalCardInput, fallbackSignal?: Recent
     ? `Settings: SMMA ${input.settings.smmaLength ?? 20}, ${input.settings.nrtrMode ?? 'ATR-Based'} ${input.settings.nrtrMode === 'Percentage' ? `${input.settings.nrtrPercent ?? 0.25}%` : `${input.settings.nrtrAtrLength ?? 14} x${input.settings.nrtrAtrMultiplier ?? 3}`}.`
     : ''
 
+  const projectionTargetSource = getProjectionTargetSourceText(latestSignalWithTargetContext)
+
   const targetText = targetDirectionConflict
-    ? 'Final ML target conflicts with current chart direction.'
+    ? 'Unified target conflicts with current chart direction.'
     : trueTarget
-      ? 'Target from Real Target Price ML or chart ghost overlay.'
-      : 'Real Target Price ML and ghost overlay target unavailable.'
+      ? projectionTargetSource
+        ? `Target from ${projectionTargetSource}.`
+        : 'Target from Unified Projection Engine, Real Target Price ML, or target-guided ghost route.'
+      : 'Unified Projection Engine target unavailable.'
 
   const bodyText = input.label.toLowerCase().includes('main')
     ? `Main chart signal card. ${trend.source}. ${targetText} ${settingsText}`
