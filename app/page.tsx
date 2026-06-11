@@ -1221,13 +1221,13 @@ function buildSharedTargetMlContext(...sources: any[]) {
   })
 
   const ghosts = collectSharedGhostCandles(...sources)
+  const ghostOverlayTargetCandidates: number[] = []
+  const ghostOverlayConfidenceCandidates: number[] = []
 
   ghosts.forEach((ghost) => {
     if (!ghost || typeof ghost !== 'object') return
 
-    // Only accept explicit Target Price ML fields.
-    // Do NOT use ghost candle close, projected close, NRTR, or synthetic fallback
-    // as the unified Target ML target.
+    // Real Target Price ML fields only.
     const finalTarget =
       readSharedTargetNumber(ghost, ['finalTargetPrice']) ||
       readSharedTargetNumber(ghost, ['overallTargetPrice']) ||
@@ -1252,6 +1252,25 @@ function buildSharedTargetMlContext(...sources: any[]) {
       confidenceCandidates.push(confidence)
     }
 
+    // Ghost overlay fallback: ONLY the explicit projected/end ghost candle prices.
+    // This is not Target Price ML. It is a chart projection target for display and AI context.
+    const ghostOverlayTarget =
+      readSharedTargetNumber(ghost, ['ghostTargetPrice']) ||
+      readSharedTargetNumber(ghost, ['projectedTargetPrice']) ||
+      readSharedTargetNumber(ghost, ['close'])
+
+    if (Number.isFinite(ghostOverlayTarget) && ghostOverlayTarget > 0) {
+      ghostOverlayTargetCandidates.push(ghostOverlayTarget)
+    }
+
+    const ghostOverlayConfidence =
+      readSharedTargetNumber(ghost, ['confidence']) ||
+      readSharedTargetNumber(ghost, ['baseConfidence'])
+
+    if (Number.isFinite(ghostOverlayConfidence) && ghostOverlayConfidence > 0) {
+      ghostOverlayConfidenceCandidates.push(ghostOverlayConfidence)
+    }
+
     targetMlReady = targetMlReady || Boolean(ghost.targetMlReady) || Boolean(ghost.targetMlAligned)
     targetMlAligned = targetMlAligned || Boolean(ghost.targetMlAligned)
     targetSource = targetSource || String(ghost.targetSource ?? ghost.source ?? '').trim()
@@ -1260,19 +1279,44 @@ function buildSharedTargetMlContext(...sources: any[]) {
   const finalTargetPrice = targetCandidates.find((value) => Number.isFinite(value) && value > 0) ?? null
   const targetConfidence = confidenceCandidates.length > 0 ? Math.max(...confidenceCandidates) : null
 
+  const ghostOverlayTargetPrice =
+    ghostOverlayTargetCandidates.length > 0
+      ? ghostOverlayTargetCandidates[ghostOverlayTargetCandidates.length - 1]
+      : null
+  const ghostOverlayConfidence =
+    ghostOverlayConfidenceCandidates.length > 0
+      ? Math.max(...ghostOverlayConfidenceCandidates)
+      : null
+
+  const activeTargetPrice = finalTargetPrice ?? ghostOverlayTargetPrice
+  const activeTargetSource = finalTargetPrice
+    ? (targetSource || 'real_target_price_ml')
+    : ghostOverlayTargetPrice
+      ? 'ghost_overlay_target'
+      : 'target_unavailable'
+  const activeTargetConfidence = finalTargetPrice ? targetConfidence : ghostOverlayConfidence
+
   return {
     finalTargetPrice,
     overallTargetPrice: finalTargetPrice,
-    targetPrice: finalTargetPrice,
-    target: finalTargetPrice,
+    ghostOverlayTargetPrice,
+    ghostOverlayConfidence,
+    activeTargetPrice,
+    activeTargetSource,
+    targetPrice: activeTargetPrice,
+    target: activeTargetPrice,
     targetConfidence,
     targetMlConfidence: targetConfidence,
     targetMlReady: Boolean(finalTargetPrice && (targetMlReady || targetMlAligned || targetConfidence)),
     targetMlAligned: Boolean(finalTargetPrice && targetMlAligned),
-    targetSource: targetSource || 'shared_target_ml_context',
+    targetSource: activeTargetSource,
     targetMl: {
       finalTargetPrice,
       overallTargetPrice: finalTargetPrice,
+      ghostOverlayTargetPrice,
+      ghostOverlayConfidence,
+      activeTargetPrice,
+      activeTargetSource,
       targetPrice: finalTargetPrice,
       target: finalTargetPrice,
       targetConfidence,
@@ -1280,18 +1324,22 @@ function buildSharedTargetMlContext(...sources: any[]) {
       targetMlConfidence: targetConfidence,
       targetMlReady: Boolean(finalTargetPrice && (targetMlReady || targetMlAligned || targetConfidence)),
       targetMlAligned: Boolean(finalTargetPrice && targetMlAligned),
-      source: targetSource || 'shared_target_ml_context',
+      source: targetSource || 'real_target_price_ml',
     },
     targetPlan: {
       finalTargetPrice,
       overallTargetPrice: finalTargetPrice,
+      ghostOverlayTargetPrice,
+      ghostOverlayConfidence,
+      activeTargetPrice,
+      activeTargetSource,
       targetPrice: finalTargetPrice,
       target: finalTargetPrice,
       targetConfidence,
       confidence: targetConfidence,
       targetMlReady: Boolean(finalTargetPrice && (targetMlReady || targetMlAligned || targetConfidence)),
       targetMlAligned: Boolean(finalTargetPrice && targetMlAligned),
-      source: targetSource || 'shared_target_ml_context',
+      source: targetSource || 'real_target_price_ml',
     },
   }
 }
