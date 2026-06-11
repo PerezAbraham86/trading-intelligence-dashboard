@@ -682,12 +682,14 @@ function buildTargetMlSnapshot(signal: any, overlayPayload: any, unifiedIntellig
 
   const targetMlAligned = Boolean(
     projectionSnapshot.available ||
-    signal?.targetMlAligned ??
-    signal?.targetMl?.targetMlAligned ??
-    overlayPayload?.targetMlAligned ??
-    overlayPayload?.targetMl?.targetMlAligned ??
-    signalContext.targetMlAligned ??
-    overlayContext.targetMlAligned,
+      Boolean(
+        signal?.targetMlAligned ??
+          signal?.targetMl?.targetMlAligned ??
+          overlayPayload?.targetMlAligned ??
+          overlayPayload?.targetMl?.targetMlAligned ??
+          signalContext.targetMlAligned ??
+          overlayContext.targetMlAligned
+      )
   )
 
   const targetMlReady = Boolean(
@@ -732,7 +734,10 @@ function buildGhostMlSnapshot(signal: any, overlayPayload: any, unifiedIntellige
         0,
       )
     ),
-    mlReady: Boolean(projectionSnapshot.available || signal?.mlReady ?? signal?.ghostMlReady ?? overlayPayload?.mlReady),
+    mlReady: Boolean(
+      projectionSnapshot.available ||
+        Boolean(signal?.mlReady ?? signal?.ghostMlReady ?? overlayPayload?.mlReady)
+    ),
     ghostConfidenceBoost: toFiniteNumber(signal?.ghostConfidenceBoost ?? overlayPayload?.ghostConfidenceBoost, 0),
   }
 }
