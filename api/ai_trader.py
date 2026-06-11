@@ -749,6 +749,38 @@ function buildEntryMlSnapshot(signal: any) {
   }
 }
 
+function getLatestCandleClose(candles: any[] | undefined) {
+  if (!Array.isArray(candles) || candles.length === 0) return undefined
+
+  for (let index = candles.length - 1; index >= 0; index -= 1) {
+    const candle = candles[index]
+    const close = toFiniteNumber(candle?.close ?? candle?.c, 0)
+
+    if (close > 0) return close
+  }
+
+  return undefined
+}
+
+function getLiveAiCurrentPrice(activePrice: any, signal: any, candles: any[] | undefined) {
+  const candidates = [
+    activePrice,
+    getLatestCandleClose(candles),
+    signal?.current,
+    signal?.price,
+    signal?.entry,
+    signal?.close,
+    signal?.last,
+  ]
+
+  for (const candidate of candidates) {
+    const value = toFiniteNumber(candidate, 0)
+    if (value > 0) return value
+  }
+
+  return 0
+}
+
 function StatBox({
   label,
   value,
@@ -797,6 +829,10 @@ export default function AiTraderPanel({
   const [minRiskReward, setMinRiskReward] = useState(1.25)
   const [lastAutoOpenKey, setLastAutoOpenKey] = useState('')
 
+  const liveActivePrice = useMemo(() => {
+    return getLiveAiCurrentPrice(activePrice, signal, candles)
+  }, [activePrice, signal, candles])
+
   const activeProjectionEngine = useMemo(() => {
     return directProjectionEngine ?? readProjectionEngine(signal, overlayPayload, unifiedIntelligence)
   }, [directProjectionEngine, signal, overlayPayload, unifiedIntelligence])
@@ -808,13 +844,13 @@ export default function AiTraderPanel({
   const payload = useMemo(() => {
     const targetSnapshot = buildTargetMlSnapshot(signal, overlayPayload, unifiedIntelligence)
     const target = projectionSnapshot.targetPrice ?? targetSnapshot.targetPrice
-    const entry = inferEntryFromSignal(signal, activePrice)
+    const entry = inferEntryFromSignal(signal, liveActivePrice)
     const side = readProjectionSide(activeProjectionEngine, signal?.signal ?? signal?.type ?? signal?.direction)
 
     return {
       symbol,
       timeframe,
-      currentPrice: activePrice,
+      currentPrice: liveActivePrice,
       entryPrice: entry,
       targetPrice: target,
       side,
@@ -859,7 +895,7 @@ export default function AiTraderPanel({
       minRiskReward,
     }
   }, [
-    activePrice,
+    liveActivePrice,
     signal,
     scorecards,
     overlayPayload,
@@ -875,7 +911,7 @@ export default function AiTraderPanel({
   const safePayload = useMemo(() => sanitizeAiTraderPayload(payload), [payload])
 
   const fetchDecision = useCallback(async () => {
-    if (!apiBaseUrl || !activePrice || activePrice <= 0) return
+    if (!apiBaseUrl || !liveActivePrice || liveActivePrice <= 0) return
 
     try {
       setIsLoading(true)
@@ -900,7 +936,7 @@ export default function AiTraderPanel({
     } finally {
       setIsLoading(false)
     }
-  }, [apiBaseUrl, activePrice, safePayload])
+  }, [apiBaseUrl, liveActivePrice, safePayload])
 
   const fetchSummary = useCallback(async () => {
     if (!apiBaseUrl) return
@@ -938,7 +974,7 @@ export default function AiTraderPanel({
         body: JSON.stringify(sanitizeAiTraderPayload({
           symbol,
           timeframe,
-          currentPrice: activePrice,
+          currentPrice: liveActivePrice,
           candles: Array.isArray(candles) ? candles.slice(-25) : [],
         })),
       })
@@ -953,7 +989,7 @@ export default function AiTraderPanel({
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : 'Evaluate failed')
     }
-  }, [apiBaseUrl, activePrice, candles, symbol, timeframe])
+  }, [apiBaseUrl, liveActivePrice, candles, symbol, timeframe])
 
   const openDashboardTrade = useCallback(async () => {
     if (!apiBaseUrl) return
