@@ -24,6 +24,15 @@ type TradingSignal = {
   tp1?: number
   targetMl?: any
   targetPlan?: any
+  projectionEngine?: any
+  unifiedProjectionEngine?: any
+  ghostPath?: any
+  targetGhostAlignment?: any
+  projectionMode?: string
+  projectionModeLabel?: string
+  aiPermission?: string
+  marketState?: any
+  learning?: any
 }
 
 type GhostCandleProjectionProps = {
@@ -44,8 +53,13 @@ type GhostCandle = {
   high: number
   low: number
   close: number
-  source?: 'python' | 'chart' | 'scorecard' | 'unified'
+  source?: 'python' | 'chart' | 'scorecard' | 'unified' | 'projection'
   targetReaction?: string
+  projectionMode?: string
+  projectionModeLabel?: string
+  alignmentScore?: number | null
+  alignmentLabel?: string
+  aiPermission?: string
   targetSeverity?: number
   priceScaleWarning?: boolean
 
@@ -92,6 +106,12 @@ type OverlayPayload = {
   scorecards?: any
   mlFeatures?: any
   unifiedIntelligence?: any
+  projectionEngine?: any
+  unifiedProjectionEngine?: any
+  ghostPath?: any
+  alignment?: any
+  mode?: any
+  target?: any
   overlayFlags?: Record<string, boolean>
   source?: string
   status?: string
@@ -207,10 +227,139 @@ function normalizeDirection(value: any, open: number, close: number): 'UP' | 'DO
   return 'NEUTRAL'
 }
 
+function readProjectionEngine(
+  signal?: TradingSignal,
+  unifiedIntelligence?: any | null,
+  payload?: OverlayPayload | null
+) {
+  const candidates = [
+    unifiedIntelligence?.projectionEngine,
+    unifiedIntelligence?.unifiedProjectionEngine,
+    unifiedIntelligence?.components?.projectionEngine,
+    unifiedIntelligence?.components?.unifiedProjectionEngine,
+    signal?.projectionEngine,
+    signal?.unifiedProjectionEngine,
+    payload?.projectionEngine,
+    payload?.unifiedProjectionEngine,
+    (payload as any)?.unifiedIntelligence?.projectionEngine,
+    (payload as any)?.unifiedIntelligence?.unifiedProjectionEngine,
+    unifiedIntelligence,
+  ]
+
+  for (const candidate of candidates) {
+    if (
+      candidate &&
+      typeof candidate === 'object' &&
+      (
+        candidate.eventType === 'UNIFIED_PROJECTION_ENGINE' ||
+        candidate.ghostPath ||
+        candidate.target ||
+        candidate.alignment ||
+        candidate.activeTargetPrice
+      )
+    ) {
+      return candidate
+    }
+  }
+
+  return null
+}
+
+function readProjectionGhostCandles(projectionEngine: any | null | undefined): any[] {
+  if (!projectionEngine || typeof projectionEngine !== 'object') return []
+
+  const candidates = [
+    projectionEngine.ghostPath?.candles,
+    projectionEngine.ghostCandles,
+    projectionEngine.ghosts,
+    projectionEngine.ghostProjection?.candles,
+  ]
+
+  for (const value of candidates) {
+    if (Array.isArray(value) && value.length > 0) return value
+  }
+
+  return []
+}
+
+function readProjectionTargetPlan(projectionEngine: any | null | undefined) {
+  if (!projectionEngine || typeof projectionEngine !== 'object') return null
+
+  const target = projectionEngine.target && typeof projectionEngine.target === 'object'
+    ? projectionEngine.target
+    : null
+  const targetPlan = projectionEngine.targetPlan && typeof projectionEngine.targetPlan === 'object'
+    ? projectionEngine.targetPlan
+    : null
+  const targetMl = projectionEngine.targetMl && typeof projectionEngine.targetMl === 'object'
+    ? projectionEngine.targetMl
+    : null
+
+  const activeTargetPrice =
+    toNumber(projectionEngine.activeTargetPrice) ??
+    toNumber(projectionEngine.targetPrice) ??
+    toNumber(target?.price) ??
+    toNumber(targetPlan?.targetPrice) ??
+    toNumber(targetMl?.targetPrice)
+
+  if (!activeTargetPrice) return null
+
+  const source =
+    String(
+      projectionEngine.activeTargetSource ??
+        target?.source ??
+        targetPlan?.source ??
+        targetMl?.source ??
+        'unified_projection_engine'
+    ).trim() || 'unified_projection_engine'
+
+  const targetType =
+    String(
+      projectionEngine.activeTargetType ??
+        target?.type ??
+        targetPlan?.type ??
+        targetMl?.type ??
+        ''
+    ).trim()
+
+  const isGhostOverlay = targetType === 'GHOST_OVERLAY_TARGET' || source.includes('ghost_overlay')
+
+  return {
+    targetPrice: activeTargetPrice,
+    target: activeTargetPrice,
+    finalTargetPrice: isGhostOverlay ? null : activeTargetPrice,
+    ghostOverlayTargetPrice: isGhostOverlay ? activeTargetPrice : null,
+    targetConfidence:
+      isGhostOverlay
+        ? toNumber(projectionEngine.ghostConfidence) ?? toNumber(target?.confidence)
+        : toNumber(projectionEngine.targetConfidence) ??
+          toNumber(projectionEngine.activeTargetConfidence) ??
+          toNumber(target?.confidence) ??
+          toNumber(targetPlan?.targetConfidence) ??
+          toNumber(targetMl?.targetConfidence),
+    targetSource: source,
+    source,
+    targetType,
+    targetMlReady: Boolean(!isGhostOverlay && activeTargetPrice),
+    targetMlAligned: Boolean(activeTargetPrice),
+    ghostConfidenceBoost: toNumber(projectionEngine.ghostConfidence),
+    projectionMode: projectionEngine.projectionMode ?? projectionEngine.mode?.mode,
+    projectionModeLabel: projectionEngine.projectionModeLabel ?? projectionEngine.mode?.label,
+    alignmentScore: toNumber(projectionEngine.alignment?.score),
+    alignmentLabel: projectionEngine.alignment?.label,
+    aiPermission: projectionEngine.aiPermission,
+  }
+}
+
 function readUnifiedGhostCandles(unifiedIntelligence: any | null | undefined): any[] {
   if (!unifiedIntelligence || typeof unifiedIntelligence !== 'object') return []
 
+  const projectionEngine = readProjectionEngine(undefined, unifiedIntelligence, null)
+  const projectionGhosts = readProjectionGhostCandles(projectionEngine)
+  if (projectionGhosts.length > 0) return projectionGhosts
+
   const candidates = [
+    unifiedIntelligence.ghostPath?.candles,
     unifiedIntelligence.ghostProjection?.candles,
     unifiedIntelligence.ghostProjection?.ghostCandles,
     unifiedIntelligence.components?.ghost?.candles,
@@ -248,7 +397,12 @@ function getUnifiedProjectionScorecards(unifiedIntelligence: any | null | undefi
 function readRawGhostCandles(payload: OverlayPayload | null): any[] {
   if (!payload || typeof payload !== 'object') return []
 
+  const projectionEngine = readProjectionEngine(undefined, payload?.unifiedIntelligence, payload)
+  const projectionGhosts = readProjectionGhostCandles(projectionEngine)
+  if (projectionGhosts.length > 0) return projectionGhosts
+
   const candidates = [
+    payload.ghostPath?.candles,
     payload.ghostCandles,
     payload.ghostProjections,
     payload.projections,
@@ -266,8 +420,13 @@ function readRawGhostCandles(payload: OverlayPayload | null): any[] {
   return []
 }
 
-function readTargetPlan(payload: OverlayPayload | null, signal?: TradingSignal) {
-  if (!payload && !signal) return null
+function readTargetPlan(payload: OverlayPayload | null, signal?: TradingSignal, unifiedIntelligence?: any | null) {
+  if (!payload && !signal && !unifiedIntelligence) return null
+
+  const projectionEngine = readProjectionEngine(signal, unifiedIntelligence, payload)
+  const projectionTargetPlan = readProjectionTargetPlan(projectionEngine)
+
+  if (projectionTargetPlan) return projectionTargetPlan
 
   const candidates = [
     payload?.targetMl,
@@ -339,6 +498,7 @@ function normalizeRawGhostCandles(rawGhosts: any[], sourceText: string, targetPl
       0
 
     const source = String(ghost.source ?? sourceText ?? '').toLowerCase()
+    const isProjection = source.includes('projection') || sourceText.toLowerCase().includes('projection')
     const isUnified = source.includes('unified') || sourceText.toLowerCase().includes('unified')
     const isPython = source.includes('python') || sourceText.toLowerCase().includes('python')
 
@@ -363,7 +523,9 @@ function normalizeRawGhostCandles(rawGhosts: any[], sourceText: string, targetPl
 
     const targetConfidence =
       toNumber(ghost.targetConfidence) ??
+      toNumber(ghost.targetMlConfidence) ??
       toNumber(targetPlan?.targetConfidence) ??
+      toNumber(targetPlan?.confidence) ??
       null
 
     const ghostConfidenceBoost =
@@ -373,7 +535,7 @@ function normalizeRawGhostCandles(rawGhosts: any[], sourceText: string, targetPl
 
     const targetMlReady = Boolean(ghost.targetMlReady ?? targetPlan?.targetMlReady)
     const targetMlAligned = Boolean(ghost.targetMlAligned ?? targetPlan?.targetMlAligned ?? targetPrice)
-    const targetSource = String(ghost.targetSource ?? targetPlan?.targetSource ?? targetPlan?.source ?? '').trim()
+    const targetSource = String(ghost.targetSource ?? ghost.targetType ?? targetPlan?.targetSource ?? targetPlan?.source ?? '').trim()
 
     // Display confidence must allow Target ML to lift ghost confidence.
     // Old UI waited for Unified confirmation only, which kept ghost confidence stuck.
@@ -399,14 +561,19 @@ function normalizeRawGhostCandles(rawGhosts: any[], sourceText: string, targetPl
         : rawReaction
 
     candles.push({
-      label: ghost.label ? String(ghost.label) : `${isUnified ? 'UI' : isPython ? 'PY' : 'Ghost'} #${index + 1}`,
+      label: ghost.label ? String(ghost.label) : `${isProjection ? 'PE' : isUnified ? 'UI' : isPython ? 'PY' : 'Ghost'} #${index + 1}`,
       direction: normalizeDirection(ghost.direction ?? ghost.dir ?? ghost.signal, open, close),
       confidence: Math.round(clamp(displayedConfidence)),
       open: roundPrice(open),
       high: roundPrice(high),
       low: roundPrice(low),
       close: roundPrice(close),
-      source: isUnified ? 'unified' : isPython ? 'python' : 'chart',
+      source: isProjection ? 'projection' : isUnified ? 'unified' : isPython ? 'python' : 'chart',
+      projectionMode: ghost.projectionMode ?? targetPlan?.projectionMode,
+      projectionModeLabel: targetPlan?.projectionModeLabel,
+      alignmentScore: toNumber(targetPlan?.alignmentScore),
+      alignmentLabel: targetPlan?.alignmentLabel,
+      aiPermission: targetPlan?.aiPermission,
       targetReaction,
       targetSeverity: typeof ghost.targetSeverity === 'number' ? ghost.targetSeverity : toNumber(ghost.targetSeverity) ?? undefined,
       targetMlAligned,
@@ -529,12 +696,20 @@ function getSyncedGhostCandles(
   if (payload && payloadSymbol !== normalizeSymbol(activeSymbol)) return []
   if (payload && !isSameTimeframe(payloadTimeframe, activeTimeframe)) return []
 
-  const targetPlan = readTargetPlan(payload, signal)
-  const unifiedGhosts = readUnifiedGhostCandles(unifiedIntelligence ?? (payload as any)?.unifiedIntelligence)
+  const projectionEngine = readProjectionEngine(signal, unifiedIntelligence ?? (payload as any)?.unifiedIntelligence, payload)
+  const targetPlan = readTargetPlan(payload, signal, unifiedIntelligence)
+  const projectionGhosts = readProjectionGhostCandles(projectionEngine)
+  const unifiedGhosts = projectionGhosts.length > 0
+    ? projectionGhosts
+    : readUnifiedGhostCandles(unifiedIntelligence ?? (payload as any)?.unifiedIntelligence)
   const rawGhosts = unifiedGhosts.length > 0 ? unifiedGhosts : readRawGhostCandles(payload)
   const normalized = normalizeRawGhostCandles(
     rawGhosts,
-    unifiedGhosts.length > 0 ? 'unified_intelligence' : String(payload?.source ?? 'python'),
+    projectionGhosts.length > 0
+      ? 'unified_projection_engine'
+      : unifiedGhosts.length > 0
+        ? 'unified_intelligence'
+        : String(payload?.source ?? 'python'),
     targetPlan
   )
 
@@ -562,6 +737,12 @@ function getProjectionText(candles: GhostCandle[], signal?: TradingSignal) {
   const first = candles[0]
 
   if (!first) return 'Waiting for synced chart ghost'
+
+  if (first.source === 'projection') {
+    if (first.direction === 'UP') return 'Unified Projection Engine Bullish Route'
+    if (first.direction === 'DOWN') return 'Unified Projection Engine Bearish Route'
+    return 'Unified Projection Engine Neutral Route'
+  }
 
   if (first.targetMlAligned || first.targetPrice) {
     if (first.direction === 'UP') return 'Target ML-Aligned Bullish Projection'
@@ -721,12 +902,14 @@ export default function GhostCandleProjection({
   )
 
   const projectionText = getProjectionText(candles, signal)
+  const isProjectionPowered = candles.some((candle) => candle.source === 'projection')
   const isUnifiedPowered = candles.some((candle) => candle.source === 'unified')
   const isPythonPowered = candles.some((candle) => candle.source === 'python')
   const isScorecardBacked = candles.some((candle) => candle.source === 'scorecard')
   const isTargetMlAligned = candles.some((candle) => candle.targetMlAligned)
   const rawGhostCount = readRawGhostCandles(activePayload).length
-  const targetPlan = readTargetPlan(activePayload, signal)
+  const projectionEngine = readProjectionEngine(signal, unifiedIntelligence, activePayload)
+  const targetPlan = readTargetPlan(activePayload, signal, unifiedIntelligence)
 
   return (
     <motion.div
@@ -739,7 +922,9 @@ export default function GhostCandleProjection({
         <div>
           <h2 className="text-xl font-bold text-white">Ghost Candle Projections</h2>
           <p className="mt-1 text-xs text-gray-500">
-            {isTargetMlAligned
+            {isProjectionPowered
+              ? `Unified Projection Engine • ${symbol} • ${timeframe}`
+              : isTargetMlAligned
               ? `Target ML aligned • ${symbol} • ${timeframe}`
               : isUnifiedPowered
               ? `Unified Intelligence • ${symbol} • ${timeframe}`
@@ -764,12 +949,13 @@ export default function GhostCandleProjection({
       </div>
 
       {targetPlan && (
-        <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-5">
-          <MiniInfo label="Final ML Target" value={formatPrice(targetPlan.targetPrice ?? targetPlan.target)} accent />
+        <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-6">
+          <MiniInfo label="Active Target" value={formatPrice(targetPlan.targetPrice ?? targetPlan.target)} accent />
           <MiniInfo label="Source" value={String(targetPlan.targetSource ?? targetPlan.source ?? '—')} />
           <MiniInfo label="Confidence" value={formatPercent(targetPlan.targetConfidence)} accent={Number(targetPlan.targetConfidence) >= 60} />
-          <MiniInfo label="Target ML" value={targetPlan.targetMlReady ? 'READY' : 'LEARNING'} />
-          <MiniInfo label="Ghost Boost" value={formatNumber(targetPlan.ghostConfidenceBoost, 2)} accent={Number(targetPlan.ghostConfidenceBoost) > 0} />
+          <MiniInfo label="Mode" value={String(targetPlan.projectionModeLabel ?? targetPlan.projectionMode ?? projectionEngine?.projectionModeLabel ?? 'Learning')} />
+          <MiniInfo label="Alignment" value={targetPlan.alignmentLabel ? `${targetPlan.alignmentLabel} ${formatPercent(targetPlan.alignmentScore)}` : formatPercent(projectionEngine?.alignment?.score)} accent={Number(targetPlan.alignmentScore ?? projectionEngine?.alignment?.score) >= 60} />
+          <MiniInfo label="AI Permission" value={String(targetPlan.aiPermission ?? projectionEngine?.aiPermission ?? 'WAIT')} />
         </div>
       )}
 
@@ -800,6 +986,12 @@ export default function GhostCandleProjection({
                     <span className={`text-xs font-bold ${styles.text}`}>
                       {styles.arrow} {candle.direction}
                     </span>
+
+                    {candle.source === 'projection' && (
+                      <span className={`rounded border px-2 py-0.5 text-[10px] font-bold ${styles.sourceBadge}`}>
+                        PROJECTION ENGINE
+                      </span>
+                    )}
 
                     {candle.source === 'unified' && (
                       <span className={`rounded border px-2 py-0.5 text-[10px] font-bold ${styles.sourceBadge}`}>
@@ -862,10 +1054,10 @@ export default function GhostCandleProjection({
                 {(candle.targetMlAligned || candle.targetPrice || candle.targetConfidence) && (
                   <div className="mt-3 grid grid-cols-2 gap-2 text-xs md:grid-cols-5">
                     <MiniInfo label={`${candle.label} Target`} value={formatPrice(candle.targetPrice)} accent />
-                    <MiniInfo label="Final ML Target" value={formatPrice(candle.finalTargetPrice)} />
+                    <MiniInfo label="Engine Target" value={formatPrice(candle.finalTargetPrice ?? candle.targetPrice)} />
                     <MiniInfo label="Target Conf" value={formatPercent(candle.targetConfidence)} accent={Number(candle.targetConfidence) >= 60} />
-                    <MiniInfo label="Target Ready" value={candle.targetMlReady ? 'YES' : 'LEARNING'} />
-                    <MiniInfo label="Ghost Boost" value={formatNumber(candle.ghostConfidenceBoost, 2)} accent={Number(candle.ghostConfidenceBoost) > 0} />
+                    <MiniInfo label="Mode" value={String(candle.projectionModeLabel ?? candle.projectionMode ?? 'Learning')} />
+                    <MiniInfo label="Alignment" value={candle.alignmentLabel ? `${candle.alignmentLabel} ${formatPercent(candle.alignmentScore)}` : formatPercent(candle.alignmentScore)} accent={Number(candle.alignmentScore) >= 60} />
                   </div>
                 )}
 
