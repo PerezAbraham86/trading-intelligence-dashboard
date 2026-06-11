@@ -1073,6 +1073,232 @@ function getGhostCandlesFromUnifiedOverlay(overlayPayload: any | null | undefine
   return []
 }
 
+
+function readSharedTargetNumber(source: any, path: string[]) {
+  let current = source
+
+  for (const key of path) {
+    if (!current || typeof current !== 'object' || !(key in current)) {
+      return NaN
+    }
+
+    current = current[key]
+  }
+
+  const parsed = Number(current)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : NaN
+}
+
+function collectSharedGhostCandles(...sources: any[]) {
+  const ghosts: any[] = []
+
+  sources.forEach((source) => {
+    if (!source || typeof source !== 'object') return
+
+    const candidates = [
+      source.ghostCandles,
+      source.ghostProjections,
+      source.projections,
+      source.ghostProjection?.candles,
+      source.ghostProjection?.ghostCandles,
+      source.components?.ghost?.candles,
+      source.components?.ghost?.ghostCandles,
+      source.overlayPayload?.ghostCandles,
+      source.overlayPayload?.ghostProjections,
+      source.overlayPayload?.projections,
+      source.chartOverlays?.ghostCandles,
+      source.chartOverlays?.ghostProjections,
+      source.unifiedIntelligence?.ghostCandles,
+      source.unifiedIntelligence?.ghostProjection?.candles,
+      source.unifiedIntelligence?.components?.ghost?.candles,
+    ]
+
+    candidates.forEach((candidate) => {
+      if (Array.isArray(candidate)) {
+        ghosts.push(...candidate)
+      }
+    })
+  })
+
+  return ghosts
+}
+
+function buildSharedTargetMlContext(...sources: any[]) {
+  const targetCandidates: number[] = []
+  const confidenceCandidates: number[] = []
+  let targetMlReady = false
+  let targetMlAligned = false
+  let targetSource = ''
+
+  const targetPaths = [
+    ['finalTargetPrice'],
+    ['overallTargetPrice'],
+    ['targetPrice'],
+    ['target'],
+    ['takeProfitPrice'],
+    ['tp1'],
+
+    ['targetMl', 'finalTargetPrice'],
+    ['targetMl', 'overallTargetPrice'],
+    ['targetMl', 'targetPrice'],
+    ['targetMl', 'target'],
+
+    ['targetPlan', 'finalTargetPrice'],
+    ['targetPlan', 'overallTargetPrice'],
+    ['targetPlan', 'targetPrice'],
+    ['targetPlan', 'target'],
+    ['targetPlan', 'takeProfitPrice'],
+    ['targetPlan', 'tp1'],
+
+    ['overlayPayload', 'finalTargetPrice'],
+    ['overlayPayload', 'overallTargetPrice'],
+    ['overlayPayload', 'targetPrice'],
+    ['overlayPayload', 'targetMl', 'finalTargetPrice'],
+    ['overlayPayload', 'targetMl', 'overallTargetPrice'],
+    ['overlayPayload', 'targetMl', 'targetPrice'],
+    ['overlayPayload', 'targetPlan', 'finalTargetPrice'],
+    ['overlayPayload', 'targetPlan', 'overallTargetPrice'],
+    ['overlayPayload', 'targetPlan', 'targetPrice'],
+
+    ['unifiedIntelligence', 'finalTargetPrice'],
+    ['unifiedIntelligence', 'overallTargetPrice'],
+    ['unifiedIntelligence', 'targetPrice'],
+    ['unifiedIntelligence', 'targetMl', 'finalTargetPrice'],
+    ['unifiedIntelligence', 'targetMl', 'overallTargetPrice'],
+    ['unifiedIntelligence', 'targetMl', 'targetPrice'],
+  ]
+
+  const confidencePaths = [
+    ['targetConfidence'],
+    ['targetMlConfidence'],
+    ['confidence'],
+    ['targetMl', 'targetConfidence'],
+    ['targetMl', 'confidence'],
+    ['targetPlan', 'targetConfidence'],
+    ['targetPlan', 'confidence'],
+    ['overlayPayload', 'targetConfidence'],
+    ['overlayPayload', 'targetMl', 'targetConfidence'],
+    ['overlayPayload', 'targetPlan', 'targetConfidence'],
+    ['unifiedIntelligence', 'targetConfidence'],
+    ['unifiedIntelligence', 'targetMl', 'targetConfidence'],
+  ]
+
+  sources.forEach((source) => {
+    if (!source || typeof source !== 'object') return
+
+    targetPaths.forEach((path) => {
+      const value = readSharedTargetNumber(source, path)
+      if (Number.isFinite(value) && value > 0) {
+        targetCandidates.push(value)
+      }
+    })
+
+    confidencePaths.forEach((path) => {
+      const value = readSharedTargetNumber(source, path)
+      if (Number.isFinite(value) && value > 0) {
+        confidenceCandidates.push(value)
+      }
+    })
+
+    targetMlReady =
+      targetMlReady ||
+      Boolean(source.targetMlReady) ||
+      Boolean(source.targetMl?.targetMlReady) ||
+      Boolean(source.targetPlan?.targetMlReady) ||
+      Boolean(source.overlayPayload?.targetMlReady) ||
+      Boolean(source.overlayPayload?.targetMl?.targetMlReady)
+
+    targetMlAligned =
+      targetMlAligned ||
+      Boolean(source.targetMlAligned) ||
+      Boolean(source.targetMl?.targetMlAligned) ||
+      Boolean(source.targetPlan?.targetMlAligned) ||
+      Boolean(source.overlayPayload?.targetMlAligned) ||
+      Boolean(source.overlayPayload?.targetMl?.targetMlAligned)
+
+    targetSource =
+      targetSource ||
+      String(
+        source.targetSource ??
+        source.targetMl?.targetSource ??
+        source.targetMl?.source ??
+        source.targetPlan?.targetSource ??
+        source.targetPlan?.source ??
+        source.overlayPayload?.targetSource ??
+        source.overlayPayload?.targetMl?.source ??
+        ''
+      ).trim()
+  })
+
+  const ghosts = collectSharedGhostCandles(...sources)
+
+  ghosts.forEach((ghost) => {
+    if (!ghost || typeof ghost !== 'object') return
+
+    const finalTarget =
+      readSharedTargetNumber(ghost, ['finalTargetPrice']) ||
+      readSharedTargetNumber(ghost, ['overallTargetPrice']) ||
+      readSharedTargetNumber(ghost, ['targetPrice']) ||
+      readSharedTargetNumber(ghost, ['ghostTargetPrice']) ||
+      readSharedTargetNumber(ghost, ['projectedTargetPrice'])
+
+    if (Number.isFinite(finalTarget) && finalTarget > 0) {
+      targetCandidates.push(finalTarget)
+    }
+
+    const confidence =
+      readSharedTargetNumber(ghost, ['targetConfidence']) ||
+      readSharedTargetNumber(ghost, ['targetMlConfidence']) ||
+      readSharedTargetNumber(ghost, ['confidence'])
+
+    if (Number.isFinite(confidence) && confidence > 0) {
+      confidenceCandidates.push(confidence)
+    }
+
+    targetMlReady = targetMlReady || Boolean(ghost.targetMlReady) || Boolean(ghost.targetMlAligned)
+    targetMlAligned = targetMlAligned || Boolean(ghost.targetMlAligned)
+    targetSource = targetSource || String(ghost.targetSource ?? ghost.source ?? '').trim()
+  })
+
+  const finalTargetPrice = targetCandidates.find((value) => Number.isFinite(value) && value > 0) ?? null
+  const targetConfidence = confidenceCandidates.length > 0 ? Math.max(...confidenceCandidates) : null
+
+  return {
+    finalTargetPrice,
+    overallTargetPrice: finalTargetPrice,
+    targetPrice: finalTargetPrice,
+    target: finalTargetPrice,
+    targetConfidence,
+    targetMlConfidence: targetConfidence,
+    targetMlReady: Boolean(targetMlReady || targetMlAligned || targetConfidence || finalTargetPrice),
+    targetMlAligned: Boolean(targetMlAligned || finalTargetPrice),
+    targetSource: targetSource || 'shared_target_ml_context',
+    targetMl: {
+      finalTargetPrice,
+      overallTargetPrice: finalTargetPrice,
+      targetPrice: finalTargetPrice,
+      target: finalTargetPrice,
+      targetConfidence,
+      confidence: targetConfidence,
+      targetMlConfidence: targetConfidence,
+      targetMlReady: Boolean(targetMlReady || targetMlAligned || targetConfidence || finalTargetPrice),
+      targetMlAligned: Boolean(targetMlAligned || finalTargetPrice),
+      source: targetSource || 'shared_target_ml_context',
+    },
+    targetPlan: {
+      finalTargetPrice,
+      overallTargetPrice: finalTargetPrice,
+      targetPrice: finalTargetPrice,
+      target: finalTargetPrice,
+      targetConfidence,
+      confidence: targetConfidence,
+      targetMlReady: Boolean(targetMlReady || targetMlAligned || targetConfidence || finalTargetPrice),
+      targetMlAligned: Boolean(targetMlAligned || finalTargetPrice),
+      source: targetSource || 'shared_target_ml_context',
+    },
+  }
+}
+
 function getScorecardsFromOverlayPayload(...sources: unknown[]) {
   for (const source of sources) {
     if (!source || typeof source !== 'object') continue
@@ -3884,6 +4110,14 @@ export default function Dashboard() {
   }, [apiBaseUrl, isClient, selectedSymbol, selectedTimeframe, dashboardTimeframes, mainCandlesReady])
 
   const augmentedLatestSignal = useMemo(() => {
+    const sharedTargetMlContext = buildSharedTargetMlContext(
+      latestSignal,
+      mainChartOverlayPayload,
+      mainUnifiedIntelligence,
+      pythonEngineState,
+      timeframeEngineStates
+    )
+
     const mainGhostConfidence = getAverageGhostConfidence(pythonEngineState)
     const overallGhostConfidence = getOverallGhostConfidence(timeframeEngineStates, dashboardTimeframes)
     const ghostConfidence = Math.max(mainGhostConfidence, overallGhostConfidence)
@@ -3944,6 +4178,11 @@ export default function Dashboard() {
 
       // Keep scorecard-derived factor fields on top after base signal normalization.
       ...(scorecardPatch as any),
+
+      // Shared Target ML context is the canonical target source for all panels.
+      // Ghost Projection, Recent Signals, AI Trader, and future paper trader
+      // should all read these same fields.
+      ...sharedTargetMlContext,
     }
   }, [
     latestSignal,
@@ -3961,6 +4200,8 @@ export default function Dashboard() {
     mainChartSelection.candleMode,
     chartScorecards,
     chartMlFeatures,
+    mainChartOverlayPayload,
+    mainUnifiedIntelligence,
     mainOverlayReady,
   ])
 
@@ -4327,6 +4568,8 @@ export default function Dashboard() {
                 latestSignal: augmentedLatestSignal,
                 activePrice: activeChartPrice ?? undefined,
                 settings: mainChartIndicatorSettings,
+                overlayPayload: mainChartOverlayPayload,
+                unifiedIntelligence: mainUnifiedIntelligence,
               },
               {
                 label: 'Mini Chart 1',
@@ -4335,6 +4578,8 @@ export default function Dashboard() {
                 candles: miniChartOneCandles,
                 latestSignal: augmentedLatestSignal,
                 settings: miniChartOneIndicatorSettings,
+                overlayPayload: mainChartOverlayPayload,
+                unifiedIntelligence: mainUnifiedIntelligence,
               },
               {
                 label: 'Mini Chart 2',
@@ -4343,6 +4588,8 @@ export default function Dashboard() {
                 candles: miniChartTwoCandles,
                 latestSignal: augmentedLatestSignal,
                 settings: miniChartTwoIndicatorSettings,
+                overlayPayload: mainChartOverlayPayload,
+                unifiedIntelligence: mainUnifiedIntelligence,
               },
             ]}
           />
