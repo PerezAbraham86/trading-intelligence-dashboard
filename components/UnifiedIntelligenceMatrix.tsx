@@ -174,8 +174,223 @@ function getArrayPath(...values: unknown[]): any[] {
   return []
 }
 
-function getGhostCandles(unifiedIntelligence: any, overlayPayload: any, scorecards: any): any[] {
+function readProjectionEngine(signal: any, unifiedIntelligence: any, overlayPayload: any) {
   const candidates = [
+    unifiedIntelligence?.projectionEngine,
+    unifiedIntelligence?.unifiedProjectionEngine,
+    unifiedIntelligence?.components?.projectionEngine,
+    unifiedIntelligence?.components?.unifiedProjectionEngine,
+    signal?.projectionEngine,
+    signal?.unifiedProjectionEngine,
+    overlayPayload?.projectionEngine,
+    overlayPayload?.unifiedProjectionEngine,
+    overlayPayload?.unifiedIntelligence?.projectionEngine,
+    overlayPayload?.unifiedIntelligence?.unifiedProjectionEngine,
+    unifiedIntelligence,
+  ]
+
+  for (const candidate of candidates) {
+    if (
+      candidate &&
+      typeof candidate === 'object' &&
+      (
+        candidate.eventType === 'UNIFIED_PROJECTION_ENGINE' ||
+        candidate.ghostPath ||
+        candidate.target ||
+        candidate.alignment ||
+        candidate.marketState ||
+        candidate.activeTargetPrice
+      )
+    ) {
+      return candidate
+    }
+  }
+
+  return null
+}
+
+function projectionTargetPrice(projectionEngine: any) {
+  return firstValue(
+    projectionEngine?.activeTargetPrice,
+    projectionEngine?.target?.price,
+    projectionEngine?.targetPrice,
+    projectionEngine?.targetPlan?.targetPrice,
+    projectionEngine?.targetMl?.targetPrice,
+    projectionEngine?.finalTargetPrice,
+    projectionEngine?.ghostOverlayTargetPrice,
+    projectionEngine?.ghostPath?.targetPrice,
+    projectionEngine?.ghostPath?.endPrice,
+  )
+}
+
+function projectionTargetConfidence(projectionEngine: any) {
+  return getScore(
+    projectionEngine?.activeTargetConfidence,
+    projectionEngine?.target?.confidence,
+    projectionEngine?.targetPlan?.targetConfidence,
+    projectionEngine?.targetMl?.targetConfidence,
+    projectionEngine?.targetConfidence,
+  )
+}
+
+function projectionGhostCandles(projectionEngine: any): any[] {
+  const candidates = [
+    projectionEngine?.ghostPath?.candles,
+    projectionEngine?.ghostCandles,
+    projectionEngine?.ghosts,
+    projectionEngine?.ghostProjection?.candles,
+  ]
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate) && candidate.length > 0) return candidate
+  }
+
+  return []
+}
+
+function formatProjectionSource(value: unknown) {
+  const raw = String(value ?? '').trim()
+  if (!raw) return 'Unified Projection Engine'
+
+  return raw
+    .replace(/_/g, ' ')
+    .replace(/:/g, ' • ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function getProjectionEngineRows(projectionEngine: any): MatrixRow[] {
+  if (!projectionEngine || typeof projectionEngine !== 'object') return []
+
+  const rows: MatrixRow[] = []
+  const marketState = projectionEngine.marketState ?? {}
+  const target = projectionEngine.target ?? {}
+  const ghostPath = projectionEngine.ghostPath ?? {}
+  const alignment = projectionEngine.alignment ?? {}
+  const mode = projectionEngine.mode ?? {}
+  const learning = projectionEngine.learning ?? {}
+
+  const targetPrice = projectionTargetPrice(projectionEngine)
+  const targetConfidence = projectionTargetConfidence(projectionEngine)
+  const ghostCandles = projectionGhostCandles(projectionEngine)
+  const ghostConfidence = getScore(
+    ghostPath.confidence,
+    projectionEngine.ghostConfidence,
+    averageGhostConfidence(ghostCandles),
+  )
+  const alignmentScore = getScore(alignment.score)
+  const marketDirection = firstValue(marketState.direction, target.direction, ghostPath.direction, 'neutral')
+  const aiPermission = firstValue(projectionEngine.aiPermission, 'WAIT')
+  const targetSource = firstValue(projectionEngine.activeTargetSource, target.source, projectionEngine.targetPlan?.source, 'Unified Projection Engine')
+  const targetType = firstValue(projectionEngine.activeTargetType, target.type, projectionEngine.targetPlan?.type, 'TARGET')
+
+  rows.push({
+    key: 'projection-engine',
+    source: 'Unified Projection Engine',
+    system: 'MASTER',
+    direction: directionLabel(marketDirection),
+    score: getScore(marketState.confidence, alignmentScore, targetConfidence),
+    confidence: getScore(marketState.confidence, alignmentScore, targetConfidence),
+    status: normalizeStatus(projectionEngine.status ?? 'active'),
+    details: formatDetails([
+      mode.label ?? projectionEngine.projectionModeLabel ?? projectionEngine.projectionMode,
+      `Target ${formatNumber(targetPrice, 2)}`,
+      `AI ${aiPermission}`,
+      alignment.label ? `Alignment ${alignment.label}` : null,
+    ]),
+  })
+
+  rows.push({
+    key: 'projection-target',
+    source: 'Self-Learning Target',
+    system: 'TARGET',
+    direction: directionLabel(firstValue(target.direction, marketDirection)),
+    score: targetConfidence,
+    confidence: targetConfidence,
+    status: normalizeStatus(target.available === false ? 'waiting' : 'active'),
+    details: formatDetails([
+      `Price ${formatNumber(targetPrice, 2)}`,
+      formatProjectionSource(targetSource),
+      String(targetType),
+      target.reason,
+    ]),
+  })
+
+  rows.push({
+    key: 'projection-ghost-route',
+    source: 'Target-Guided Ghost Route',
+    system: 'GHOST',
+    direction: directionLabel(firstValue(ghostPath.direction, target.direction)),
+    score: ghostConfidence,
+    confidence: ghostConfidence,
+    status: normalizeStatus(ghostPath.available === false ? 'waiting' : 'active'),
+    details: formatDetails([
+      `Candles ${ghostCandles.length}`,
+      `End ${formatNumber(ghostPath.endPrice, 2)}`,
+      `Target ${formatNumber(ghostPath.targetPrice ?? targetPrice, 2)}`,
+      ghostPath.reason,
+    ]),
+  })
+
+  rows.push({
+    key: 'projection-alignment',
+    source: 'Target ↔ Ghost Alignment',
+    system: 'SYNC',
+    direction: directionLabel(alignment.conflict ? 'pending' : alignment.targetAndGhostAgree ? 'active' : 'neutral'),
+    score: alignmentScore,
+    confidence: alignmentScore,
+    status: normalizeStatus(alignment.conflict ? 'conflict' : alignment.targetAndGhostAgree ? 'active' : 'learning'),
+    details: formatDetails([
+      alignment.label,
+      alignment.reason,
+      alignment.distanceErrorPoints !== undefined ? `Error ${formatNumber(alignment.distanceErrorPoints, 2)} pts` : null,
+    ]),
+  })
+
+  rows.push({
+    key: 'projection-ai-permission',
+    source: 'AI Permission',
+    system: 'AI',
+    direction: directionLabel(String(aiPermission).includes('CAN') ? 'active' : String(aiPermission).includes('CONFLICT') ? 'pending' : 'neutral'),
+    score: getScore(alignmentScore, projectionEngine.activeTargetConfidence),
+    confidence: getScore(alignmentScore, projectionEngine.activeTargetConfidence),
+    status: normalizeStatus(aiPermission),
+    details: formatDetails([
+      `Mode ${mode.label ?? projectionEngine.projectionModeLabel ?? projectionEngine.projectionMode ?? 'Learning'}`,
+      learning.targetHitRate !== undefined ? `Target hit ${(Number(learning.targetHitRate) * 100).toFixed(1)}%` : null,
+      learning.directionAccuracy !== undefined ? `Direction ${(Number(learning.directionAccuracy) * 100).toFixed(1)}%` : null,
+    ]),
+  })
+
+  return rows
+}
+
+function getProjectionSourceRow(source: any, fallbackKey: string, fallbackSource: string): MatrixRow | null {
+  if (!source || typeof source !== 'object') return null
+
+  return {
+    key: fallbackKey,
+    source: fallbackSource,
+    system: 'MARKET',
+    direction: directionLabel(firstValue(source.direction, 'neutral')),
+    score: getScore(source.score, source.confidence),
+    confidence: getScore(source.confidence, source.score),
+    status: normalizeStatus(firstValue(source.status, source.score ? 'active' : 'waiting')),
+    details: formatDetails([
+      source.name,
+      source.reason,
+      source.score !== undefined ? `Score ${formatNumber(source.score, 1)}` : null,
+    ]),
+  }
+}
+
+function getGhostCandles(unifiedIntelligence: any, overlayPayload: any, scorecards: any): any[] {
+  const projectionEngine = readProjectionEngine(undefined, unifiedIntelligence, overlayPayload)
+  const engineGhosts = projectionGhostCandles(projectionEngine)
+
+  if (engineGhosts.length > 0) return engineGhosts
+
+  const candidates = [
+    getPath(unifiedIntelligence, 'ghostPath.candles'),
     getPath(unifiedIntelligence, 'ghostProjection.candles'),
     getPath(unifiedIntelligence, 'ghostProjection.projections'),
     getPath(unifiedIntelligence, 'components.ghost.candles'),
@@ -217,12 +432,12 @@ function inferGhostDirection(candles: any[], fallback: unknown) {
 
 function averageGhostConfidence(candles: any[]): number | null {
   const values = candles
-    .map((candle) => Number(candle?.confidence ?? candle?.score ?? candle?.probability))
-    .filter((value) => Number.isFinite(value) && value > 0)
+    .map((candle: any) => Number(candle?.confidence ?? candle?.score ?? candle?.probability))
+    .filter((value: number) => Number.isFinite(value) && value > 0)
 
   if (values.length === 0) return null
 
-  return clampPercent(values.reduce((sum, value) => sum + value, 0) / values.length)
+  return clampPercent(values.reduce((sum: number, value: number) => sum + value, 0) / values.length)
 }
 
 function getSmcRow(signal: any, unifiedIntelligence: any, overlayPayload: any, scorecards: any): MatrixRow {
@@ -340,8 +555,22 @@ function buildRows({
 }: UnifiedIntelligenceMatrixProps): MatrixRow[] {
   const rows: MatrixRow[] = []
   const components = unifiedIntelligence?.components ?? {}
+  const projectionEngine = readProjectionEngine(signal, unifiedIntelligence, overlayPayload)
 
+  rows.push(...getProjectionEngineRows(projectionEngine))
   rows.push(getSmcRow(signal, unifiedIntelligence, overlayPayload, scorecards))
+
+  const sourceMap = projectionEngine?.marketState?.sourceMap ?? {}
+  ;[
+    getProjectionSourceRow(sourceMap.alphaDlm, 'projection-alpha-dlm', 'AlphaX / DLM Feed'),
+    getProjectionSourceRow(sourceMap.orderBlocks, 'projection-order-blocks', 'Order Blocks Feed'),
+    getProjectionSourceRow(sourceMap.liquidity, 'projection-liquidity', 'Liquidity / Sweeps Feed'),
+    getProjectionSourceRow(sourceMap.fvgPdZones, 'projection-fvg-pd', 'FVG / PD Zones Feed'),
+    getProjectionSourceRow(sourceMap.metersGauges, 'projection-meters', 'Meters / Gauges Feed'),
+    getProjectionSourceRow(sourceMap.externalTables, 'projection-external-tables', 'External Tables Feed'),
+  ].forEach((row) => {
+    if (row) rows.push(row)
+  })
 
   rows.push({
     key: 'alphax',
@@ -392,15 +621,18 @@ function buildRows({
 
   rows.push({
     key: 'ghost',
-    source: 'Python Ghost Candles',
+    source: readProjectionEngine(signal, unifiedIntelligence, overlayPayload) ? 'Projection Engine Ghost Candles' : 'Python Ghost Candles',
     system: 'ML',
     direction: directionLabel(ghostDirection),
     score: ghostConfidence,
     confidence: ghostConfidence,
     status: normalizeStatus(ghostCandles.length || ghostConfidence ? 'active' : 'waiting'),
     details: formatDetails([
+      getPath(unifiedIntelligence, 'projectionEngine.ghostPath.reason'),
+      getPath(unifiedIntelligence, 'ghostPath.reason'),
       getPath(unifiedIntelligence, 'ghostProjection.reason'),
       ghostCandles[0]?.targetReaction,
+      ghostCandles[0]?.projectionMode,
       `Projections ${ghostCandles.length || scorecards?.ghost?.count || 0}`,
     ]),
   })
@@ -595,7 +827,7 @@ export default function UnifiedIntelligenceMatrix(props: UnifiedIntelligenceMatr
         <div>
           <h2 className="text-xl font-bold text-white">Unified Intelligence Matrix</h2>
           <p className="mt-1 text-xs text-gray-500">
-            Combined SMC, AlphaX, Ghost, NRTR, SMMA, external data, pressure, and ML context •{' '}
+            Phase 6 unified projection engine • SMC, AlphaX, OB, Liquidity, FVG, Target, Ghost Route, AI Permission, NRTR strategy feeds •{' '}
             {props.activeSymbol ?? props.signal?.symbol ?? 'MES1!'} • {props.activeTimeframe ?? props.signal?.activeTimeframe ?? props.signal?.timeframe ?? '1m'}
           </p>
         </div>
@@ -686,7 +918,7 @@ export default function UnifiedIntelligenceMatrix(props: UnifiedIntelligenceMatr
       </div>
 
       <div className="mt-4 rounded-lg border border-dark-700 bg-dark-900/50 px-3 py-2 text-xs text-gray-500">
-        Builder: MARKETBOS unified matrix. NRTR Main, Mini 1, and Mini 2 are separated strategy feeds. They are not used for Ghost ML or Target ML hierarchy.
+        Builder: MARKETBOS Phase 6 unified matrix. Projection Engine is the master context. NRTR Main, Mini 1, and Mini 2 remain separated strategy feeds and are not used inside Ghost ML or Target ML hierarchy.
       </div>
     </motion.div>
   )
