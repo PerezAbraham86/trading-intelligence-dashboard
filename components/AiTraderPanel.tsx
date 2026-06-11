@@ -302,15 +302,15 @@ function buildTargetMlSnapshot(signal: any, overlayPayload: any) {
   )
 
   const targetMlReady = Boolean(
-    signal?.targetMlReady ??
-    signal?.targetMl?.targetMlReady ??
-    overlayPayload?.targetMlReady ??
-    overlayPayload?.targetMl?.targetMlReady ??
-    signalContext.targetMlReady ??
-    overlayContext.targetMlReady ??
-    targetMlAligned ??
-    targetConfidence > 0 ??
-    targetPrice,
+    signal?.targetMlReady ||
+    signal?.targetMl?.targetMlReady ||
+    overlayPayload?.targetMlReady ||
+    overlayPayload?.targetMl?.targetMlReady ||
+    signalContext.targetMlReady ||
+    overlayContext.targetMlReady ||
+    targetMlAligned ||
+    targetConfidence > 0 ||
+    Boolean(targetPrice)
   )
 
   return {
