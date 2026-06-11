@@ -1016,6 +1016,8 @@ def ai_trader_summary(symbol: Any = "", timeframe: Any = "") -> Dict[str, Any]:
         "symbol": normalized_symbol or "ALL",
         "timeframe": normalized_timeframe or "ALL",
         "openTrades": open_trades[-20:],
+        "closedTrades": closed_trades[-20:],
+        "recentClosedTrades": closed_trades[-10:],
         "openCount": len(open_trades),
         "closedCount": len(closed_trades),
         "stats": stats,
