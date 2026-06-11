@@ -1,1551 +1,1448 @@
-from __future__ import annotations
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { motion } from 'framer-motion'
 
-import json
-import math
-import os
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+type AiTraderPanelProps = {
+  apiBaseUrl?: string
+  symbol: string
+  timeframe: string
+  activePrice?: number
+  signal?: any
+  scorecards?: any
+  overlayPayload?: any
+  unifiedIntelligence?: any
+  projectionEngine?: any
+  candles?: any[]
+}
 
+type AiTraderDecision = {
+  eventType?: string
+  status?: string
+  dashboardOnly?: boolean
+  brokerConnected?: boolean
+  allowedToTrade?: boolean
+  decision?: 'BUY' | 'SELL' | 'HOLD' | string
+  rawDecision?: 'BUY' | 'SELL' | 'HOLD' | string
+  confidence?: number
+  baseConfidence?: number
+  learningAdjustment?: number
+  confidenceGrade?: string
+  symbol?: string
+  timeframe?: string
+  entry?: number
+  target?: number
+  stop?: number
+  riskReward?: number
+  currentPrice?: number
+  currentPnl?: number
+  maxPnl?: number
+  riskPnl?: number
+  reason?: string
+  reasons?: string[]
+  details?: any
+  createdAt?: string
+}
 
-MEMORY_PATH = Path(os.getenv("AI_TRADER_MEMORY_PATH", str(Path(__file__).with_name("ai_trader_memory.json"))))
-MAX_CLOSED_TRADES = int(os.getenv("AI_TRADER_MAX_CLOSED_TRADES", "2500"))
-DEFAULT_MIN_CONFIDENCE = float(os.getenv("AI_TRADER_MIN_CONFIDENCE", "62"))
-DEFAULT_MIN_RR = float(os.getenv("AI_TRADER_MIN_RR", "1.25"))
-MAX_DECISION_OBSERVATIONS = int(os.getenv("AI_TRADER_MAX_DECISION_OBSERVATIONS", "10000"))
-VIRTUAL_TRADE_MAX_BARS = int(os.getenv("AI_TRADER_VIRTUAL_TRADE_MAX_BARS", "12"))
-PHASE6_BUCKET_MODE = "phase6_projection_engine"
+type AiTraderSummary = {
+  eventType?: string
+  status?: string
+  dashboardOnly?: boolean
+  brokerConnected?: boolean
+  openTrades?: any[]
+  closedTrades?: any[]
+  recentClosedTrades?: any[]
+  openCount?: number
+  closedCount?: number
+  decisionStats?: {
+    samples?: number
+    buyBias?: number
+    sellBias?: number
+    holdCount?: number
+    tradeReadyCount?: number
+    avgConfidence?: number
+  }
+  memoryStatus?: {
+    stage?: string
+    message?: string
+    bucketDecisionStats?: any
+    overallDecisionStats?: any
+    bucketClosedStats?: any
+    overallClosedStats?: any
+  }
+  stats?: {
+    samples?: number
+    wins?: number
+    losses?: number
+    winRate?: number
+    profitFactor?: number
+    avgPnl?: number
+    avgR?: number
+  }
+}
 
+function toFiniteNumber(value: any, fallback = 0) {
+  const parsed = Number(value)
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+  return Number.isFinite(parsed) ? parsed : fallback
+}
 
+function formatPrice(value: any) {
+  const parsed = Number(value)
 
-def to_float(value: Any, fallback: float = 0.0) -> float:
-    try:
-        if value is None:
-            return fallback
-        parsed = float(value)
-        if not math.isfinite(parsed):
-            return fallback
-        return parsed
-    except Exception:
-        return fallback
+  if (!Number.isFinite(parsed) || parsed <= 0) return '—'
 
+  return parsed.toLocaleString(undefined, {
+    minimumFractionDigits: parsed > 100 ? 2 : 4,
+    maximumFractionDigits: parsed > 100 ? 2 : 6,
+  })
+}
 
-def to_int(value: Any, fallback: int = 0) -> int:
-    try:
-        if value is None:
-            return fallback
-        parsed = int(value)
-        return parsed
-    except Exception:
-        return fallback
+function formatMoney(value: any) {
+  const parsed = Number(value)
 
+  if (!Number.isFinite(parsed)) return '—'
 
-def clamp(value: float, low: float, high: float) -> float:
-    return max(low, min(high, value))
+  const sign = parsed > 0 ? '+' : parsed < 0 ? '-' : ''
 
+  return `${sign}$${Math.abs(parsed).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`
+}
 
-def normalize_symbol(symbol: Any) -> str:
-    raw = str(symbol or "MES1!").upper().strip()
-    raw = raw.replace("CME_MINI:", "").replace("CME:", "").replace("BINANCE:", "").replace("COINBASE:", "")
+function formatPercent(value: any) {
+  const parsed = Number(value)
 
-    if raw in {"MES", "MES1", "MES1!", "/MES"}:
-        return "MES1!"
-    if raw in {"ES", "ES1", "ES1!", "/ES"}:
-        return "ES1!"
-    if "BTC" in raw:
-        return "BTCUSD"
-    if "ETH" in raw:
-        return "ETHUSD"
+  if (!Number.isFinite(parsed)) return '—'
 
-    return raw or "MES1!"
+  return `${(parsed * 100).toFixed(1)}%`
+}
 
+function formatCount(value: any) {
+  const parsed = Number(value)
 
-def normalize_timeframe(timeframe: Any) -> str:
-    raw = str(timeframe or "1m").lower().strip()
-    mapping = {
-        "1": "1m",
-        "1m": "1m",
-        "3": "3m",
-        "3m": "3m",
-        "5": "5m",
-        "5m": "5m",
-        "10": "10m",
-        "10m": "10m",
-        "15": "15m",
-        "15m": "15m",
-        "30": "30m",
-        "30m": "30m",
-        "60": "1h",
-        "60m": "1h",
-        "1h": "1h",
+  if (!Number.isFinite(parsed)) return '0'
+
+  return parsed.toLocaleString()
+}
+
+function formatAiStage(value: any) {
+  const raw = String(value ?? 'WARMING_UP').replace(/_/g, ' ').toLowerCase()
+
+  return raw.replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function getBlockerAnalysis(decision: AiTraderDecision | null, summary: AiTraderSummary | null, minConfidence: number, minRiskReward: number) {
+  const blockers: Array<{ label: string; detail: string; severity: 'high' | 'medium' | 'low' }> = []
+
+  const confidence = toFiniteNumber(decision?.confidence, 0)
+  const riskReward = toFiniteNumber(decision?.riskReward, 0)
+  const directional = decision?.details?.directionalContext ?? {}
+  const memoryStatus = summary?.memoryStatus ?? decision?.details?.memoryStatus ?? {}
+  const targetConfidence = toFiniteNumber(directional?.targetConfidence, 0)
+  const ghostConfidence = toFiniteNumber(directional?.ghostConfidence, 0)
+  const entryConfidence = toFiniteNumber(directional?.entryConfidence, 0)
+  const nrtrConflicts = toFiniteNumber(directional?.nrtrConflictCount, 0)
+  const nrtrAgreements = toFiniteNumber(directional?.nrtrAgreementCount, 0)
+
+  if (confidence < minConfidence) {
+    blockers.push({
+      label: 'Confidence below threshold',
+      detail: `${confidence.toFixed(1)}% / required ${minConfidence.toFixed(1)}%`,
+      severity: 'high',
+    })
+  }
+
+  if (riskReward > 0 && riskReward < minRiskReward) {
+    blockers.push({
+      label: 'Risk/Reward below minimum',
+      detail: `${riskReward.toFixed(2)}R / required ${minRiskReward.toFixed(2)}R`,
+      severity: 'high',
+    })
+  }
+
+  if (targetConfidence <= 0) {
+    blockers.push({
+      label: 'Target ML confidence missing',
+      detail: 'Target exists, but confidence is not flowing into the AI context yet.',
+      severity: 'medium',
+    })
+  } else if (targetConfidence < 50) {
+    blockers.push({
+      label: 'Target ML is weak',
+      detail: `${targetConfidence.toFixed(1)} confidence`,
+      severity: 'medium',
+    })
+  }
+
+  if (ghostConfidence > 0 && ghostConfidence < 45) {
+    blockers.push({
+      label: 'Ghost ML is weak',
+      detail: `${ghostConfidence.toFixed(1)} confidence`,
+      severity: 'medium',
+    })
+  }
+
+  if (entryConfidence > 0 && entryConfidence < 55) {
+    blockers.push({
+      label: 'Entry ML is weak',
+      detail: `${entryConfidence.toFixed(1)} confidence`,
+      severity: 'medium',
+    })
+  }
+
+  if (nrtrConflicts > 0) {
+    blockers.push({
+      label: 'NRTR conflict',
+      detail: `${nrtrConflicts} chart(s) conflict, ${nrtrAgreements} agree`,
+      severity: 'medium',
+    })
+  }
+
+  if (toFiniteNumber(summary?.closedCount, 0) < 8) {
+    blockers.push({
+      label: 'Trade memory not mature',
+      detail: String(memoryStatus?.message ?? 'Need more closed dashboard AI trades.'),
+      severity: 'low',
+    })
+  }
+
+  if (blockers.length === 0 && decision?.allowedToTrade) {
+    blockers.push({
+      label: 'No active blocker',
+      detail: 'AI is allowed to open dashboard paper trades.',
+      severity: 'low',
+    })
+  }
+
+  if (blockers.length === 0) {
+    blockers.push({
+      label: 'Waiting for clean setup',
+      detail: 'No major blocker found, but AI has not confirmed trade readiness.',
+      severity: 'low',
+    })
+  }
+
+  return blockers
+}
+
+function BlockerBadge({ severity }: { severity: 'high' | 'medium' | 'low' }) {
+  const className =
+    severity === 'high'
+      ? 'border-red-400/30 bg-red-400/10 text-red-200'
+      : severity === 'medium'
+        ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
+        : 'border-blue-400/30 bg-blue-400/10 text-blue-200'
+
+  return (
+    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-black uppercase tracking-wide ${className}`}>
+      {severity}
+    </span>
+  )
+}
+
+function getMlStrengthLabel(value: any) {
+  const score = toFiniteNumber(value, 0)
+
+  if (score >= 75) return 'Strong'
+  if (score >= 55) return 'Active'
+  if (score > 0) return 'Learning'
+
+  return 'Waiting'
+}
+
+function getMlStrengthTone(value: any): 'neutral' | 'bull' | 'bear' | 'warn' {
+  const score = toFiniteNumber(value, 0)
+
+  if (score >= 55) return 'bull'
+  if (score > 0) return 'warn'
+
+  return 'neutral'
+}
+
+function MlStatusCard({
+  title,
+  status,
+  confidence,
+  detail,
+  tone = 'neutral',
+}: {
+  title: string
+  status: string
+  confidence: number
+  detail: string
+  tone?: 'neutral' | 'bull' | 'bear' | 'warn'
+}) {
+  const border =
+    tone === 'bull'
+      ? 'border-emerald-400/30 bg-emerald-400/10'
+      : tone === 'bear'
+        ? 'border-red-400/30 bg-red-400/10'
+        : tone === 'warn'
+          ? 'border-amber-400/30 bg-amber-400/10'
+          : 'border-dark-700 bg-dark-900/70'
+
+  const text =
+    tone === 'bull'
+      ? 'text-emerald-200'
+      : tone === 'bear'
+        ? 'text-red-200'
+        : tone === 'warn'
+          ? 'text-amber-200'
+          : 'text-gray-200'
+
+  return (
+    <div className={`rounded-xl border p-4 ${border}`}>
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <div className="text-xs font-black uppercase tracking-wide text-gray-400">{title}</div>
+        <span className={`rounded-full border border-current/30 px-2 py-1 text-[10px] font-black uppercase tracking-wide ${text}`}>
+          {status}
+        </span>
+      </div>
+      <div className={`text-2xl font-black ${text}`}>{confidence.toFixed(1)}%</div>
+      <div className="mt-2 text-xs leading-5 text-gray-400">{detail}</div>
+    </div>
+  )
+}
+
+function readNumberPath(source: any, paths: string[]) {
+  for (const path of paths) {
+    const value = path.split('.').reduce((current: any, key: string) => {
+      if (current && typeof current === 'object' && key in current) return current[key]
+      return undefined
+    }, source)
+
+    const parsed = Number(value)
+
+    if (Number.isFinite(parsed) && parsed > 0) return parsed
+  }
+
+  return undefined
+}
+
+function normalizeDecision(value: any): 'BUY' | 'SELL' | 'HOLD' {
+  const raw = String(value ?? '').toUpperCase()
+
+  if (raw.includes('BUY') || raw.includes('LONG') || raw.includes('BULL')) return 'BUY'
+  if (raw.includes('SELL') || raw.includes('SHORT') || raw.includes('BEAR')) return 'SELL'
+
+  return 'HOLD'
+}
+
+function sanitizeAiTraderPayload(value: any, depth = 0): any {
+  if (depth > 6) return null
+
+  if (value === undefined) return null
+  if (value === null) return null
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null
+  }
+
+  if (typeof value === 'string' || typeof value === 'boolean') {
+    return value
+  }
+
+  if (Array.isArray(value)) {
+    return value.slice(0, 50).map((item) => sanitizeAiTraderPayload(item, depth + 1))
+  }
+
+  if (typeof value === 'object') {
+    const result: Record<string, any> = {}
+
+    Object.entries(value).forEach(([key, entry]) => {
+      if (typeof entry === 'function') return
+      if (typeof entry === 'symbol') return
+      result[key] = sanitizeAiTraderPayload(entry, depth + 1)
+    })
+
+    return result
+  }
+
+  return null
+}
+
+async function readApiError(response: Response) {
+  const text = await response.text().catch(() => '')
+
+  if (!text) return `${response.status}`
+
+  try {
+    const json = JSON.parse(text)
+    return `${response.status}: ${JSON.stringify(json).slice(0, 500)}`
+  } catch {
+    return `${response.status}: ${text.slice(0, 500)}`
+  }
+}
+
+function readProjectionEngine(signal: any, overlayPayload: any, unifiedIntelligence: any) {
+  const candidates = [
+    unifiedIntelligence?.projectionEngine,
+    unifiedIntelligence?.unifiedProjectionEngine,
+    unifiedIntelligence?.components?.projectionEngine,
+    unifiedIntelligence?.components?.unifiedProjectionEngine,
+    signal?.projectionEngine,
+    signal?.unifiedProjectionEngine,
+    overlayPayload?.projectionEngine,
+    overlayPayload?.unifiedProjectionEngine,
+    overlayPayload?.unifiedIntelligence?.projectionEngine,
+    overlayPayload?.unifiedIntelligence?.unifiedProjectionEngine,
+    unifiedIntelligence,
+  ]
+
+  for (const candidate of candidates) {
+    if (
+      candidate &&
+      typeof candidate === 'object' &&
+      (
+        candidate.eventType === 'UNIFIED_PROJECTION_ENGINE' ||
+        candidate.ghostPath ||
+        candidate.target ||
+        candidate.alignment ||
+        candidate.activeTargetPrice
+      )
+    ) {
+      return candidate
     }
-    return mapping.get(raw, raw or "1m")
+  }
 
+  return null
+}
 
-def normalize_side(value: Any) -> str:
-    raw = str(value or "").upper().strip()
+function readProjectionTarget(projectionEngine: any) {
+  if (!projectionEngine || typeof projectionEngine !== 'object') return undefined
 
-    if raw in {"BUY", "BULL", "BULLISH", "LONG", "1"}:
-        return "BUY"
-    if raw in {"SELL", "BEAR", "BEARISH", "SHORT", "-1"}:
-        return "SELL"
+  return readNumberPath(projectionEngine, [
+    'activeTargetPrice',
+    'target.price',
+    'targetPrice',
+    'targetPlan.targetPrice',
+    'targetPlan.finalTargetPrice',
+    'targetMl.targetPrice',
+    'finalTargetPrice',
+    'ghostOverlayTargetPrice',
+    'ghostPath.targetPrice',
+    'ghostPath.endPrice',
+  ])
+}
 
-    return "HOLD"
+function readProjectionGhostConfidence(projectionEngine: any) {
+  if (!projectionEngine || typeof projectionEngine !== 'object') return 0
 
+  return Math.max(
+    toFiniteNumber(projectionEngine?.ghostConfidence, 0),
+    toFiniteNumber(projectionEngine?.ghostPath?.confidence, 0),
+    toFiniteNumber(projectionEngine?.alignment?.score, 0),
+  )
+}
 
-def point_value(symbol: str) -> float:
-    normalized = normalize_symbol(symbol)
+function readProjectionTargetConfidence(projectionEngine: any) {
+  if (!projectionEngine || typeof projectionEngine !== 'object') return 0
 
-    if normalized.startswith("MES"):
-        return 5.0
-    if normalized.startswith("ES"):
-        return 50.0
+  const targetType = String(
+    projectionEngine?.activeTargetType ??
+      projectionEngine?.target?.type ??
+      projectionEngine?.targetPlan?.type ??
+      ''
+  )
 
-    return 1.0
+  const isGhostOverlay = targetType === 'GHOST_OVERLAY_TARGET'
 
+  if (isGhostOverlay) {
+    return 0
+  }
 
-def safe_dict(value: Any) -> Dict[str, Any]:
-    return value if isinstance(value, dict) else {}
+  return Math.max(
+    toFiniteNumber(projectionEngine?.targetConfidence, 0),
+    toFiniteNumber(projectionEngine?.activeTargetConfidence, 0),
+    toFiniteNumber(projectionEngine?.target?.confidence, 0),
+    toFiniteNumber(projectionEngine?.targetPlan?.targetConfidence, 0),
+    toFiniteNumber(projectionEngine?.targetMl?.targetConfidence, 0),
+  )
+}
 
+function readProjectionSide(projectionEngine: any, fallback: any) {
+  const direction = String(
+    projectionEngine?.target?.direction ??
+      projectionEngine?.ghostPath?.direction ??
+      projectionEngine?.marketState?.direction ??
+      projectionEngine?.targetDirection ??
+      ''
+  ).toUpperCase()
 
-def safe_list(value: Any) -> List[Any]:
-    return value if isinstance(value, list) else []
+  if (direction.includes('BULL') || direction.includes('UP') || direction.includes('BUY')) return 'BUY'
+  if (direction.includes('BEAR') || direction.includes('DOWN') || direction.includes('SELL')) return 'SELL'
 
+  return normalizeDecision(fallback)
+}
 
-def read_path(data: Any, *paths: str, fallback: Any = None) -> Any:
-    for path in paths:
-        current = data
-        ok = True
-
-        for key in path.split("."):
-            if isinstance(current, dict) and key in current:
-                current = current[key]
-            else:
-                ok = False
-                break
-
-        if ok and current is not None:
-            return current
-
-    return fallback
-
-
-def extract_score(value: Any, *paths: str, fallback: float = 0.0) -> float:
-    return to_float(read_path(value, *paths, fallback=fallback), fallback)
-
-
-def signed_move(side: str, start: float, end: float) -> float:
-    if side == "BUY":
-        return end - start
-    if side == "SELL":
-        return start - end
-    return 0.0
-
-
-def calculate_rr(side: str, entry: float, target: float, stop: float) -> float:
-    if side not in {"BUY", "SELL"} or entry <= 0 or target <= 0 or stop <= 0:
-        return 0.0
-
-    reward = signed_move(side, entry, target)
-    risk = -signed_move(side, entry, stop)
-
-    if reward <= 0 or risk <= 0:
-        return 0.0
-
-    return reward / risk
-
-
-def infer_side_from_target(entry: float, target: float, explicit_side: Any = None) -> str:
-    side = normalize_side(explicit_side)
-
-    if side != "HOLD":
-        return side
-
-    if entry > 0 and target > 0:
-        if target > entry:
-            return "BUY"
-        if target < entry:
-            return "SELL"
-
-    return "HOLD"
-
-
-def infer_stop(side: str, entry: float, target: float, stop: Any = None) -> float:
-    parsed_stop = to_float(stop, 0.0)
-
-    if parsed_stop > 0:
-        return parsed_stop
-
-    if side not in {"BUY", "SELL"} or entry <= 0 or target <= 0:
-        return 0.0
-
-    reward_points = abs(target - entry)
-    risk_points = max(reward_points / 2.0, entry * 0.001)
-
-    return entry - risk_points if side == "BUY" else entry + risk_points
-
-
-def infer_target(side: str, entry: float, target: Any = None, signal: Optional[Dict[str, Any]] = None) -> float:
-    parsed_target = to_float(target, 0.0)
-
-    if parsed_target > 0:
-        return parsed_target
-
-    signal = safe_dict(signal)
-    parsed_target = to_float(
-        read_path(
-            signal,
-            "targetPrice",
-            "target",
-            "targetMl.targetPrice",
-            "targetPlan.targetPrice",
-            "finalTargetPrice",
-            "overallTargetPrice",
-            "ghostTargetPrice",
-            "projectedTargetPrice",
-            "takeProfitPrice",
-            "tp1",
-            fallback=0,
-        ),
-        0.0,
-    )
-
-    if parsed_target > 0:
-        return parsed_target
-
-    return 0.0
-
-
-def load_memory() -> Dict[str, Any]:
-    if not MEMORY_PATH.exists():
-        return {
-            "version": 2,
-            "createdAt": now_iso(),
-            "updatedAt": now_iso(),
-            "openTrades": [],
-            "closedTrades": [],
-            "decisionLog": [],
-            "virtualOpenTrades": [],
-            "virtualClosedTrades": [],
-        }
-
-    try:
-        data = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError("memory file root must be object")
-    except Exception:
-        data = {}
-
-    data.setdefault("version", 2)
-    data.setdefault("createdAt", now_iso())
-    data.setdefault("updatedAt", now_iso())
-    data.setdefault("openTrades", [])
-    data.setdefault("closedTrades", [])
-    data.setdefault("decisionLog", [])
-    data.setdefault("virtualOpenTrades", [])
-    data.setdefault("virtualClosedTrades", [])
-
-    for key in ["openTrades", "closedTrades", "decisionLog", "virtualOpenTrades", "virtualClosedTrades"]:
-        if not isinstance(data.get(key), list):
-            data[key] = []
-
-    return data
-
-
-def save_memory(memory: Dict[str, Any]) -> Dict[str, Any]:
-    MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    memory["version"] = max(to_int(memory.get("version"), 2), 2)
-    memory["updatedAt"] = now_iso()
-    memory["closedTrades"] = safe_list(memory.get("closedTrades"))[-MAX_CLOSED_TRADES:]
-    memory["virtualClosedTrades"] = safe_list(memory.get("virtualClosedTrades"))[-MAX_CLOSED_TRADES:]
-    memory["decisionLog"] = safe_list(memory.get("decisionLog"))[-MAX_DECISION_OBSERVATIONS:]
-    memory["openTrades"] = safe_list(memory.get("openTrades"))
-    memory["virtualOpenTrades"] = safe_list(memory.get("virtualOpenTrades"))[-250:]
-
-    tmp_path = MEMORY_PATH.with_suffix(MEMORY_PATH.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(memory, indent=2, sort_keys=True), encoding="utf-8")
-    tmp_path.replace(MEMORY_PATH)
-    return memory
-
-
-
-def trade_bucket(symbol: str, timeframe: str, side: str, confidence: float, context: Optional[Dict[str, Any]] = None) -> str:
-    context = safe_dict(context)
-    raw_mode = str(
-        context.get("projectionEngineMode")
-        or context.get("projectionEngineLabel")
-        or context.get("mode")
-        or context.get("entryMode")
-        or "dashboard"
-    ).lower()
-
-    # Phase 6 fix:
-    # Do NOT include confidence bands in the learning key. The old key split memory
-    # across many buckets and made observations appear to rise/fall between refreshes.
-    # Keep one stable bucket per symbol + timeframe + side + engine family.
-    if "projection" in raw_mode or "target_guided" in raw_mode or context.get("aiPermission"):
-        mode = PHASE6_BUCKET_MODE
-    else:
-        mode = raw_mode.replace(" ", "_")[:48] or "dashboard"
-
-    return f"{normalize_symbol(symbol)}|{normalize_timeframe(timeframe)}|{side}|{mode}"
-
-
-
-def summarize_closed_trades(closed_trades: List[Dict[str, Any]], bucket: Optional[str] = None) -> Dict[str, Any]:
-    rows = [
-        trade for trade in safe_list(closed_trades)
-        if isinstance(trade, dict) and (bucket is None or trade.get("bucket") == bucket)
-    ]
-
-    total = len(rows)
-    wins = sum(1 for trade in rows if to_float(trade.get("pnl"), 0.0) > 0)
-    losses = sum(1 for trade in rows if to_float(trade.get("pnl"), 0.0) < 0)
-    gross_profit = sum(max(0.0, to_float(trade.get("pnl"), 0.0)) for trade in rows)
-    gross_loss = abs(sum(min(0.0, to_float(trade.get("pnl"), 0.0)) for trade in rows))
-    avg_pnl = sum(to_float(trade.get("pnl"), 0.0) for trade in rows) / total if total else 0.0
-    avg_r = sum(to_float(trade.get("rMultiple"), 0.0) for trade in rows) / total if total else 0.0
-    win_rate = wins / total if total else 0.0
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
-
+function buildProjectionEngineSnapshot(projectionEngine: any) {
+  if (!projectionEngine || typeof projectionEngine !== 'object') {
     return {
-        "samples": total,
-        "wins": wins,
-        "losses": losses,
-        "winRate": round(win_rate, 4),
-        "profitFactor": round(profit_factor, 4),
-        "avgPnl": round(avg_pnl, 4),
-        "avgR": round(avg_r, 4),
+      available: false,
+      targetPrice: undefined,
+      targetConfidence: 0,
+      ghostConfidence: 0,
+      alignmentScore: 0,
+      alignmentLabel: 'Waiting',
+      projectionMode: 'WAITING',
+      projectionModeLabel: 'Waiting',
+      aiPermission: 'WAIT',
+      conflict: false,
     }
+  }
+
+  const targetPrice = readProjectionTarget(projectionEngine)
+  const targetConfidence = readProjectionTargetConfidence(projectionEngine)
+  const ghostConfidence = readProjectionGhostConfidence(projectionEngine)
+  const alignmentScore = toFiniteNumber(projectionEngine?.alignment?.score, 0)
+  const conflict = Boolean(projectionEngine?.alignment?.conflict || projectionEngine?.mode?.conflict)
+
+  return {
+    available: Boolean(targetPrice),
+    targetPrice,
+    targetConfidence,
+    ghostConfidence,
+    alignmentScore,
+    alignmentLabel: String(projectionEngine?.alignment?.label ?? 'Waiting'),
+    projectionMode: String(projectionEngine?.projectionMode ?? projectionEngine?.mode?.mode ?? 'WAITING'),
+    projectionModeLabel: String(projectionEngine?.projectionModeLabel ?? projectionEngine?.mode?.label ?? 'Waiting'),
+    aiPermission: String(projectionEngine?.aiPermission ?? 'WAIT'),
+    conflict,
+    source: String(projectionEngine?.activeTargetSource ?? projectionEngine?.target?.source ?? 'Unified Projection Engine'),
+    targetType: String(projectionEngine?.activeTargetType ?? projectionEngine?.target?.type ?? ''),
+    marketState: projectionEngine?.marketState,
+    target: projectionEngine?.target,
+    ghostPath: projectionEngine?.ghostPath,
+    alignment: projectionEngine?.alignment,
+    mode: projectionEngine?.mode,
+    learning: projectionEngine?.learning,
+  }
+}
+
+function inferTargetFromSignal(signal: any) {
+  // Real Target Price ML first, then only chart ghost overlay target fallback.
+  return readNumberPath(signal, [
+    'projectionEngine.activeTargetPrice',
+    'projectionEngine.target.price',
+    'projectionEngine.targetPrice',
+    'projectionEngine.targetPlan.targetPrice',
+    'projectionEngine.targetMl.targetPrice',
+    'projectionEngine.finalTargetPrice',
+    'projectionEngine.ghostOverlayTargetPrice',
+    'unifiedProjectionEngine.activeTargetPrice',
+    'unifiedProjectionEngine.target.price',
+    'unifiedProjectionEngine.targetPrice',
+    'unifiedProjectionEngine.targetPlan.targetPrice',
+    'unifiedProjectionEngine.targetMl.targetPrice',
+    'unifiedProjectionEngine.finalTargetPrice',
+    'unifiedProjectionEngine.ghostOverlayTargetPrice',
+    'finalTargetPrice',
+    'overallTargetPrice',
+    'targetMl.finalTargetPrice',
+    'targetMl.overallTargetPrice',
+    'targetMl.targetPrice',
+    'targetPlan.finalTargetPrice',
+    'targetPlan.overallTargetPrice',
+    'targetPlan.targetPrice',
+    'activeTargetPrice',
+    'ghostOverlayTargetPrice',
+    'targetMl.activeTargetPrice',
+    'targetMl.ghostOverlayTargetPrice',
+    'targetPlan.activeTargetPrice',
+    'targetPlan.ghostOverlayTargetPrice',
+    'overlayPayload.finalTargetPrice',
+    'overlayPayload.overallTargetPrice',
+    'overlayPayload.targetMl.finalTargetPrice',
+    'overlayPayload.targetMl.overallTargetPrice',
+    'overlayPayload.targetMl.targetPrice',
+    'overlayPayload.activeTargetPrice',
+    'overlayPayload.ghostOverlayTargetPrice',
+  ])
+}
 
 
-def summarize_decision_log(decision_log: List[Dict[str, Any]], bucket: Optional[str] = None) -> Dict[str, Any]:
-    rows = [
-        decision for decision in safe_list(decision_log)
-        if isinstance(decision, dict) and (bucket is None or decision.get("bucket") == bucket)
-    ]
+function inferEntryFromSignal(signal: any, activePrice?: number) {
+  return readNumberPath(signal, [
+    'entryPrice',
+    'entry',
+    'nrtrEntryPrice',
+    'strategyEntryPrice',
+    'price',
+    'close',
+  ]) ?? activePrice
+}
 
-    total = len(rows)
-    buy_bias = sum(1 for decision in rows if normalize_side(decision.get("rawDecision") or decision.get("decision")) == "BUY")
-    sell_bias = sum(1 for decision in rows if normalize_side(decision.get("rawDecision") or decision.get("decision")) == "SELL")
-    hold_count = sum(1 for decision in rows if normalize_side(decision.get("decision")) == "HOLD")
-    trade_ready = sum(1 for decision in rows if bool(decision.get("allowedToTrade")))
-    avg_confidence = sum(to_float(decision.get("confidence"), 0.0) for decision in rows) / total if total else 0.0
+function readGhostTargetMlContext(source: any) {
+  const ghostSources = [
+    source?.projectionEngine?.ghostPath?.candles,
+    source?.unifiedProjectionEngine?.ghostPath?.candles,
+    source?.ghostPath?.candles,
+    source?.ghostCandles,
+    source?.ghosts,
+    source?.projection,
+    source?.ghostProjection,
+    source?.ghostCandleProjection,
+    source?.overlayPayload?.projectionEngine?.ghostPath?.candles,
+    source?.overlayPayload?.unifiedProjectionEngine?.ghostPath?.candles,
+    source?.overlayPayload?.ghostCandles,
+    source?.overlayPayload?.ghosts,
+  ]
 
-    return {
-        "samples": total,
-        "buyBias": buy_bias,
-        "sellBias": sell_bias,
-        "holdCount": hold_count,
-        "tradeReadyCount": trade_ready,
-        "avgConfidence": round(avg_confidence, 4),
-    }
+  let bestTarget = readNumberPath(source, [
+    'finalTargetPrice',
+    'overallTargetPrice',
+    'targetMl.finalTargetPrice',
+    'targetMl.overallTargetPrice',
+    'targetMl.targetPrice',
+    'targetPlan.finalTargetPrice',
+    'targetPlan.overallTargetPrice',
+    'targetPlan.targetPrice',
+  ])
+  let bestConfidence = toFiniteNumber(
+    source?.targetConfidence ??
+    source?.targetMl?.targetConfidence ??
+    source?.targetPlan?.targetConfidence,
+    0,
+  )
+  let aligned = Boolean(source?.targetMlAligned ?? source?.targetMl?.targetMlAligned)
+  let ready = Boolean(source?.targetMlReady ?? source?.targetMl?.targetMlReady)
 
+  ghostSources.forEach((ghostList) => {
+    if (!Array.isArray(ghostList)) return
 
-def ai_memory_status(memory: Dict[str, Any], bucket: Optional[str] = None) -> Dict[str, Any]:
-    closed_source = combined_closed_trades(memory)
-    closed_stats = summarize_closed_trades(closed_source, bucket=bucket)
-    decision_stats = summarize_decision_log(memory.get("decisionLog", []), bucket=bucket)
-    overall_closed = summarize_closed_trades(closed_source, bucket=None)
-    overall_decisions = summarize_decision_log(memory.get("decisionLog", []), bucket=None)
+    ghostList.forEach((ghost: any) => {
+      const ghostTarget = readNumberPath(ghost, [
+        'finalTargetPrice',
+        'overallTargetPrice',
+        'ghostTargetPrice',
+        'projectedTargetPrice',
+        'targetPrice',
+        'close',
+      ])
 
-    if closed_stats["samples"] >= 8:
-        stage = "TRADE_LEARNING_READY"
-        message = f"AI trade memory ready: {closed_stats['samples']} closed/virtual outcomes in this bucket"
-    elif overall_closed["samples"] >= 8:
-        stage = "GLOBAL_TRADE_LEARNING"
-        message = f"AI using global outcome memory: {overall_closed['samples']} closed/virtual outcomes"
-    elif decision_stats["samples"] >= 10:
-        stage = "OBSERVATION_LEARNING_READY"
-        message = f"AI observation memory ready: {decision_stats['samples']} live decisions in this setup"
-    elif overall_decisions["samples"] >= 10:
-        stage = "GLOBAL_OBSERVATION_LEARNING"
-        message = f"AI observing globally: {overall_decisions['samples']} total live decisions"
-    else:
-        stage = "WARMING_UP"
-        message = f"AI memory warming up: {overall_decisions['samples']} decision observations, {overall_closed['samples']} closed/virtual outcomes"
+      const ghostConfidence = toFiniteNumber(
+        ghost?.targetConfidence ??
+        ghost?.targetMlConfidence ??
+        ghost?.confidence,
+        0,
+      )
 
-    return {
-        "stage": stage,
-        "message": message,
-        "bucketDecisionStats": decision_stats,
-        "overallDecisionStats": overall_decisions,
-        "bucketClosedStats": closed_stats,
-        "overallClosedStats": overall_closed,
-    }
+      if (!bestTarget && ghostTarget && ghostTarget > 0) {
+        bestTarget = ghostTarget
+      }
 
+      if (ghostConfidence > bestConfidence) {
+        bestConfidence = ghostConfidence
+      }
 
-    if closed_stats["samples"] >= 8:
-        stage = "TRADE_LEARNING_READY"
-        message = f"AI trade memory ready: {closed_stats['samples']} closed trades in this bucket"
-    elif overall_closed["samples"] >= 20:
-        stage = "GLOBAL_TRADE_LEARNING"
-        message = f"AI using global trade memory: {overall_closed['samples']} closed trades"
-    elif decision_stats["samples"] >= 10:
-        stage = "OBSERVATION_LEARNING"
-        message = f"AI memory observing {decision_stats['samples']} live decisions in this setup"
-    elif overall_decisions["samples"] >= 10:
-        stage = "GLOBAL_OBSERVATION_LEARNING"
-        message = f"AI memory observing {overall_decisions['samples']} total live decisions"
-    else:
-        stage = "WARMING_UP"
-        message = f"AI memory warming up: {overall_decisions['samples']} decision observations, {overall_closed['samples']} closed trades"
+      aligned = aligned || Boolean(ghost?.targetMlAligned)
+      ready = ready || Boolean(ghost?.targetMlReady) || Boolean(ghost?.targetMlAligned) || ghostConfidence > 0
+    })
+  })
 
-    return {
-        "stage": stage,
-        "message": message,
-        "bucketDecisionStats": decision_stats,
-        "overallDecisionStats": overall_decisions,
-        "bucketClosedStats": closed_stats,
-        "overallClosedStats": overall_closed,
-    }
+  return {
+    targetPrice: bestTarget,
+    targetConfidence: bestConfidence,
+    targetMlAligned: aligned,
+    targetMlReady: ready || aligned || bestConfidence > 0 || Boolean(bestTarget),
+  }
+}
 
+function buildTargetMlSnapshot(signal: any, overlayPayload: any, unifiedIntelligence?: any) {
+  const projectionEngine = readProjectionEngine(signal, overlayPayload, unifiedIntelligence)
+  const projectionSnapshot = buildProjectionEngineSnapshot(projectionEngine)
+  const signalContext = readGhostTargetMlContext(signal)
+  const overlayContext = readGhostTargetMlContext(overlayPayload)
 
+  const targetConfidence = Math.max(
+    toFiniteNumber(projectionSnapshot.targetConfidence, 0),
+    toFiniteNumber(
+      signal?.targetConfidence ??
+      signal?.targetMl?.targetConfidence ??
+      overlayPayload?.targetConfidence ??
+      overlayPayload?.targetMl?.targetConfidence,
+      0,
+    ),
+    toFiniteNumber(signalContext.targetConfidence, 0),
+    toFiniteNumber(overlayContext.targetConfidence, 0),
+  )
 
-def combined_closed_trades(memory: Dict[str, Any]) -> List[Dict[str, Any]]:
-    return [
-        trade for trade in [
-            *safe_list(memory.get("closedTrades")),
-            *safe_list(memory.get("virtualClosedTrades")),
-        ]
-        if isinstance(trade, dict)
-    ]
-
-
-def decision_observation_key(decision: Dict[str, Any]) -> str:
-    return "|".join([
-        normalize_symbol(decision.get("symbol")),
-        normalize_timeframe(decision.get("timeframe")),
-        str(decision.get("rawDecision") or decision.get("decision") or "HOLD"),
-        str(round(to_float(decision.get("entry"), 0.0), 2)),
-        str(round(to_float(decision.get("target"), 0.0), 2)),
-        str(round(to_float(decision.get("stop"), 0.0), 2)),
-        str(round(to_float(decision.get("confidence"), 0.0), 1)),
+  const targetPrice =
+    projectionSnapshot.targetPrice ??
+    inferTargetFromSignal(signal) ??
+    signalContext.targetPrice ??
+    overlayContext.targetPrice ??
+    readNumberPath(overlayPayload, [
+      'finalTargetPrice',
+      'overallTargetPrice',
+      'targetPrice',
+      'targetMl.targetPrice',
+      'targetPlan.targetPrice',
     ])
 
+  const targetMlAligned = Boolean(
+    projectionSnapshot.available ||
+      Boolean(
+        signal?.targetMlAligned ??
+          signal?.targetMl?.targetMlAligned ??
+          overlayPayload?.targetMlAligned ??
+          overlayPayload?.targetMl?.targetMlAligned ??
+          signalContext.targetMlAligned ??
+          overlayContext.targetMlAligned
+      )
+  )
 
-def maybe_open_virtual_learning_trade(memory: Dict[str, Any], decision: Dict[str, Any]) -> None:
-    side = normalize_side(decision.get("rawDecision") or decision.get("decision"))
-    if side not in {"BUY", "SELL"}:
-        return
+  const targetMlReady = Boolean(
+    signal?.targetMlReady ||
+    signal?.targetMl?.targetMlReady ||
+    overlayPayload?.targetMlReady ||
+    overlayPayload?.targetMl?.targetMlReady ||
+    signalContext.targetMlReady ||
+    overlayContext.targetMlReady ||
+    targetMlAligned ||
+    targetConfidence > 0
+  )
 
-    symbol = normalize_symbol(decision.get("symbol"))
-    timeframe = normalize_timeframe(decision.get("timeframe"))
-    entry = to_float(decision.get("entry"), 0.0)
-    target = to_float(decision.get("target"), 0.0)
-    stop = to_float(decision.get("stop"), 0.0)
-    bucket = str(read_path(decision, "details.bucket", fallback=decision.get("bucket") or trade_bucket(symbol, timeframe, side, to_float(decision.get("confidence"), 0.0), read_path(decision, "details.context", fallback={}))))
+  return {
+    targetConfidence,
+    targetMlReady,
+    targetMlAligned,
+    targetPrice,
+    source:
+      projectionSnapshot.source ??
+      signal?.targetSource ??
+      signal?.targetMl?.source ??
+      overlayPayload?.targetSource ??
+      overlayPayload?.targetMl?.source ??
+      'ghost_target_ml_context',
+    projectionEngine: projectionSnapshot,
+  }
+}
 
-    if entry <= 0 or target <= 0 or stop <= 0:
-        return
+function buildGhostMlSnapshot(signal: any, overlayPayload: any, unifiedIntelligence?: any) {
+  const projectionEngine = readProjectionEngine(signal, overlayPayload, unifiedIntelligence)
+  const projectionSnapshot = buildProjectionEngineSnapshot(projectionEngine)
 
-    virtual_open = safe_list(memory.get("virtualOpenTrades"))
-    for trade in virtual_open:
-        if not isinstance(trade, dict):
-            continue
-        if normalize_symbol(trade.get("symbol")) != symbol:
-            continue
-        if normalize_timeframe(trade.get("timeframe")) != timeframe:
-            continue
-        if normalize_side(trade.get("side")) != side:
-            continue
-        if trade.get("bucket") != bucket:
-            continue
-        if abs(to_float(trade.get("entry"), 0.0) - entry) / max(entry, 0.000001) <= 0.0002:
-            trade["lastSeenAt"] = now_iso()
-            trade["seenCount"] = to_int(trade.get("seenCount"), 1) + 1
-            trade["confidence"] = max(to_float(trade.get("confidence"), 0.0), to_float(decision.get("confidence"), 0.0))
-            return
+  return {
+    confidence: Math.max(
+      toFiniteNumber(projectionSnapshot.ghostConfidence, 0),
+      toFiniteNumber(
+        signal?.ghostConfidence ??
+      signal?.confidence ??
+      signal?.mlConfidence ??
+        overlayPayload?.ghostConfidence,
+        0,
+      )
+    ),
+    mlReady: Boolean(
+      projectionSnapshot.available ||
+        Boolean(signal?.mlReady ?? signal?.ghostMlReady ?? overlayPayload?.mlReady)
+    ),
+    ghostConfidenceBoost: toFiniteNumber(signal?.ghostConfidenceBoost ?? overlayPayload?.ghostConfidenceBoost, 0),
+  }
+}
 
-    virtual_open.append({
-        "id": "VIRTUAL-" + build_trade_id(symbol, timeframe, side, decision.get("createdAt")),
-        "symbol": symbol,
-        "timeframe": timeframe,
-        "side": side,
-        "entry": round(entry, 8),
-        "target": round(target, 8),
-        "stop": round(stop, 8),
-        "riskReward": decision.get("riskReward"),
-        "confidence": decision.get("confidence"),
-        "confidenceGrade": decision.get("confidenceGrade"),
-        "bucket": bucket,
-        "reason": decision.get("reason"),
-        "entryTime": decision.get("createdAt") or now_iso(),
-        "createdAt": now_iso(),
-        "updatedAt": now_iso(),
-        "lastSeenAt": now_iso(),
-        "seenCount": 1,
-        "barsOpen": 0,
-        "status": "VIRTUAL_OPEN",
-        "dashboardOnly": True,
-        "virtualLearningOnly": True,
-    })
-    memory["virtualOpenTrades"] = virtual_open
+function buildEntryMlSnapshot(signal: any) {
+  return {
+    entryConfidence: toFiniteNumber(signal?.entryConfidence ?? signal?.entryMlConfidence, 0),
+    confidence: toFiniteNumber(signal?.entryConfidence ?? signal?.entryMlConfidence, 0),
+  }
+}
 
+function StatBox({
+  label,
+  value,
+  tone = 'neutral',
+}: {
+  label: string
+  value: string
+  tone?: 'neutral' | 'bull' | 'bear' | 'warn'
+}) {
+  const toneClass =
+    tone === 'bull'
+      ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
+      : tone === 'bear'
+        ? 'border-red-400/30 bg-red-400/10 text-red-200'
+        : tone === 'warn'
+          ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
+          : 'border-dark-600 bg-dark-800/80 text-gray-200'
 
-def remember_ai_decision(decision: Dict[str, Any]) -> None:
-    try:
-        memory = load_memory()
-        decision_log = safe_list(memory.get("decisionLog"))
+  return (
+    <div className={`rounded-xl border px-3 py-2 ${toneClass}`}>
+      <div className="text-[10px] uppercase tracking-wide text-gray-400">{label}</div>
+      <div className="mt-1 text-sm font-black">{value}</div>
+    </div>
+  )
+}
 
-        bucket = str(read_path(decision, "details.bucket", fallback=decision.get("bucket") or ""))
-        created_at = decision.get("createdAt") or now_iso()
-        compact = {
-            "id": f"DECISION-{normalize_symbol(decision.get('symbol'))}-{normalize_timeframe(decision.get('timeframe'))}-{created_at}",
-            "observationKey": decision_observation_key(decision),
-            "symbol": normalize_symbol(decision.get("symbol")),
-            "timeframe": normalize_timeframe(decision.get("timeframe")),
-            "decision": decision.get("decision"),
-            "rawDecision": decision.get("rawDecision") or decision.get("decision"),
-            "allowedToTrade": bool(decision.get("allowedToTrade")),
-            "confidence": to_float(decision.get("confidence"), 0.0),
-            "confidenceGrade": decision.get("confidenceGrade"),
-            "entry": decision.get("entry"),
-            "target": decision.get("target"),
-            "stop": decision.get("stop"),
-            "riskReward": decision.get("riskReward"),
-            "bucket": bucket,
-            "reason": decision.get("reason"),
-            "projectionEngineMode": read_path(decision, "details.projectionEngine.mode", "details.context.projectionEngineMode", fallback=None),
-            "aiPermission": read_path(decision, "details.projectionEngine.aiPermission", "details.context.aiPermission", fallback=None),
-            "createdAt": created_at,
-        }
+export default function AiTraderPanel({
+  apiBaseUrl,
+  symbol,
+  timeframe,
+  activePrice,
+  signal,
+  scorecards,
+  overlayPayload,
+  unifiedIntelligence,
+  projectionEngine: directProjectionEngine,
+  candles,
+}: AiTraderPanelProps) {
+  const [decision, setDecision] = useState<AiTraderDecision | null>(null)
+  const [summary, setSummary] = useState<AiTraderSummary | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
+  const [actionStatus, setActionStatus] = useState('')
+  const [errorText, setErrorText] = useState('')
+  const [autoPaperMode, setAutoPaperMode] = useState(false)
+  const [minConfidence, setMinConfidence] = useState(62)
+  const [minRiskReward, setMinRiskReward] = useState(1.25)
+  const [lastAutoOpenKey, setLastAutoOpenKey] = useState('')
 
-        # Phase 6 fix:
-        # Every decision call counts as an observation. We no longer collapse repeat
-        # refreshes into one row, because that made the UI appear stuck at 0/1 samples.
-        decision_log.append(compact)
-        memory["decisionLog"] = decision_log[-MAX_DECISION_OBSERVATIONS:]
-        maybe_open_virtual_learning_trade(memory, decision)
-        save_memory(memory)
-    except Exception:
-        # Decision memory should never break the dashboard.
-        return
+  const activeProjectionEngine = useMemo(() => {
+    return directProjectionEngine ?? readProjectionEngine(signal, overlayPayload, unifiedIntelligence)
+  }, [directProjectionEngine, signal, overlayPayload, unifiedIntelligence])
 
+  const projectionSnapshot = useMemo(() => {
+    return buildProjectionEngineSnapshot(activeProjectionEngine)
+  }, [activeProjectionEngine])
 
-        bucket = str(read_path(decision, "details.bucket", fallback=decision.get("bucket") or ""))
-        compact = {
-            "id": f"DECISION-{normalize_symbol(decision.get('symbol'))}-{normalize_timeframe(decision.get('timeframe'))}-{decision.get('createdAt')}",
-            "symbol": normalize_symbol(decision.get("symbol")),
-            "timeframe": normalize_timeframe(decision.get("timeframe")),
-            "decision": decision.get("decision"),
-            "rawDecision": decision.get("rawDecision"),
-            "allowedToTrade": bool(decision.get("allowedToTrade")),
-            "confidence": to_float(decision.get("confidence"), 0.0),
-            "confidenceGrade": decision.get("confidenceGrade"),
-            "entry": decision.get("entry"),
-            "target": decision.get("target"),
-            "stop": decision.get("stop"),
-            "riskReward": decision.get("riskReward"),
-            "bucket": bucket,
-            "reason": decision.get("reason"),
-            "createdAt": decision.get("createdAt") or now_iso(),
-        }
-
-        # Avoid repeated identical observations from the 15-second refresh loop.
-        last = decision_log[-1] if decision_log and isinstance(decision_log[-1], dict) else {}
-        duplicate_key = (
-            last.get("symbol") == compact["symbol"]
-            and last.get("timeframe") == compact["timeframe"]
-            and last.get("decision") == compact["decision"]
-            and last.get("rawDecision") == compact["rawDecision"]
-            and round(to_float(last.get("entry"), 0.0), 2) == round(to_float(compact["entry"], 0.0), 2)
-            and round(to_float(last.get("target"), 0.0), 2) == round(to_float(compact["target"], 0.0), 2)
-            and round(to_float(last.get("confidence"), 0.0), 1) == round(to_float(compact["confidence"], 0.0), 1)
-        )
-
-        if duplicate_key:
-            last["updatedAt"] = now_iso()
-            last["repeatCount"] = to_int(last.get("repeatCount"), 1) + 1
-            decision_log[-1] = last
-        else:
-            decision_log.append(compact)
-
-        memory["decisionLog"] = decision_log[-MAX_CLOSED_TRADES:]
-        save_memory(memory)
-    except Exception:
-        # Decision memory should never break the dashboard.
-        return
-
-
-def extract_directional_context(
-    side: str,
-    scorecards: Optional[Dict[str, Any]] = None,
-    ghost_ml: Optional[Dict[str, Any]] = None,
-    target_ml: Optional[Dict[str, Any]] = None,
-    entry_ml: Optional[Dict[str, Any]] = None,
-    nrtr_context: Optional[Dict[str, Any]] = None,
-    signal: Optional[Dict[str, Any]] = None,
-    unified_intelligence: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    scorecards = safe_dict(scorecards)
-    ghost_ml = safe_dict(ghost_ml)
-    target_ml = safe_dict(target_ml)
-    entry_ml = safe_dict(entry_ml)
-    nrtr_context = safe_dict(nrtr_context)
-    signal = safe_dict(signal)
-    unified_intelligence = safe_dict(unified_intelligence)
-
-    bull_score = max(
-        extract_score(scorecards, "bullScore", "main.bullScore", "overall.bullScore"),
-        extract_score(signal, "bullScore", "bullishScore"),
-        extract_score(unified_intelligence, "bullScore", "scorecards.bullScore"),
-    )
-    bear_score = max(
-        extract_score(scorecards, "bearScore", "main.bearScore", "overall.bearScore"),
-        extract_score(signal, "bearScore", "bearishScore"),
-        extract_score(unified_intelligence, "bearScore", "scorecards.bearScore"),
-    )
-
-    target_confidence = max(
-        extract_score(target_ml, "targetConfidence", "confidence", "targetPlan.targetConfidence"),
-        extract_score(signal, "targetConfidence", "targetMl.targetConfidence"),
-    )
-    ghost_confidence = max(
-        extract_score(ghost_ml, "ghostConfidence", "confidence", "mlConfidence", "baseConfidence"),
-        extract_score(signal, "ghostConfidence", "confidence", "mlConfidence"),
-    )
-    entry_confidence = max(
-        extract_score(entry_ml, "entryConfidence", "confidence"),
-        extract_score(signal, "entryConfidence", "entryMlConfidence"),
-    )
-
-    target_ready = bool(
-        read_path(target_ml, "targetMlReady", "ready", fallback=False)
-        or read_path(signal, "targetMlReady", "targetMl.targetMlReady", fallback=False)
-        or target_confidence > 0
-    )
-    ghost_ready = bool(
-        read_path(ghost_ml, "mlReady", "ready", fallback=False)
-        or read_path(signal, "mlReady", "ghostMlReady", fallback=False)
-        or ghost_confidence > 0
-    )
-
-    nrtr_main = normalize_side(read_path(nrtr_context, "main.direction", "nrtrMain.direction", "direction", fallback=""))
-    nrtr_mini1 = normalize_side(read_path(nrtr_context, "mini1.direction", "nrtrMini1.direction", fallback=""))
-    nrtr_mini2 = normalize_side(read_path(nrtr_context, "mini2.direction", "nrtrMini2.direction", fallback=""))
-
-    nrtr_agreements = sum(1 for direction in [nrtr_main, nrtr_mini1, nrtr_mini2] if direction == side)
-    nrtr_conflicts = sum(1 for direction in [nrtr_main, nrtr_mini1, nrtr_mini2] if direction in {"BUY", "SELL"} and direction != side)
-
-    directional_score = bull_score - bear_score if side == "BUY" else bear_score - bull_score
+  const payload = useMemo(() => {
+    const targetSnapshot = buildTargetMlSnapshot(signal, overlayPayload, unifiedIntelligence)
+    const target = projectionSnapshot.targetPrice ?? targetSnapshot.targetPrice
+    const entry = inferEntryFromSignal(signal, activePrice)
+    const side = readProjectionSide(activeProjectionEngine, signal?.signal ?? signal?.type ?? signal?.direction)
 
     return {
-        "bullScore": round(bull_score, 4),
-        "bearScore": round(bear_score, 4),
-        "directionalScore": round(directional_score, 4),
-        "targetConfidence": round(target_confidence, 4),
-        "ghostConfidence": round(ghost_confidence, 4),
-        "entryConfidence": round(entry_confidence, 4),
-        "targetReady": target_ready,
-        "ghostReady": ghost_ready,
-        "nrtrAgreementCount": nrtr_agreements,
-        "nrtrConflictCount": nrtr_conflicts,
-        "nrtrMain": nrtr_main,
-        "nrtrMini1": nrtr_mini1,
-        "nrtrMini2": nrtr_mini2,
+      symbol,
+      timeframe,
+      currentPrice: activePrice,
+      entryPrice: entry,
+      targetPrice: target,
+      side,
+      signal: {
+        ...(signal ?? {}),
+        projectionEngine: activeProjectionEngine,
+        unifiedProjectionEngine: activeProjectionEngine,
+        activeTargetPrice: target,
+        activeTargetSource: projectionSnapshot.source,
+        projectionMode: projectionSnapshot.projectionMode,
+        projectionModeLabel: projectionSnapshot.projectionModeLabel,
+        aiPermission: projectionSnapshot.aiPermission,
+        targetGhostAlignment: projectionSnapshot.alignment,
+      },
+      scorecards,
+      ghostMl: buildGhostMlSnapshot(signal, overlayPayload, unifiedIntelligence),
+      targetMl: {
+        ...targetSnapshot,
+        targetPrice: target,
+        targetConfidence: projectionSnapshot.targetConfidence || targetSnapshot.targetConfidence,
+        projectionEngine: projectionSnapshot,
+      },
+      entryMl: buildEntryMlSnapshot(signal),
+      nrtrContext: scorecards?.nrtrStrategyFeeds ?? scorecards?.nrtrCharts ?? {},
+      unifiedIntelligence: {
+        ...(unifiedIntelligence ?? {}),
+        projectionEngine: activeProjectionEngine,
+        unifiedProjectionEngine: activeProjectionEngine,
+      },
+      projectionEngine: activeProjectionEngine,
+      projectionEngineContext: projectionSnapshot,
+      context: {
+        mode: 'dashboard_only_ai_paper_trader',
+        dashboardOnly: true,
+        noBroker: true,
+        projectionEngineMode: projectionSnapshot.projectionMode,
+        projectionEngineLabel: projectionSnapshot.projectionModeLabel,
+        aiPermission: projectionSnapshot.aiPermission,
+        targetGhostConflict: projectionSnapshot.conflict,
+      },
+      minConfidence,
+      minRiskReward,
     }
+  }, [
+    activePrice,
+    signal,
+    scorecards,
+    overlayPayload,
+    unifiedIntelligence,
+    symbol,
+    timeframe,
+    minConfidence,
+    minRiskReward,
+    activeProjectionEngine,
+    projectionSnapshot,
+  ])
 
+  const safePayload = useMemo(() => sanitizeAiTraderPayload(payload), [payload])
 
-def score_ai_decision(
-    *,
-    symbol: str,
-    timeframe: str,
-    side: str,
-    entry: float,
-    target: float,
-    stop: float,
-    risk_reward: float,
-    scorecards: Optional[Dict[str, Any]] = None,
-    ghost_ml: Optional[Dict[str, Any]] = None,
-    target_ml: Optional[Dict[str, Any]] = None,
-    entry_ml: Optional[Dict[str, Any]] = None,
-    nrtr_context: Optional[Dict[str, Any]] = None,
-    signal: Optional[Dict[str, Any]] = None,
-    unified_intelligence: Optional[Dict[str, Any]] = None,
-    context: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    memory = load_memory()
-    context = safe_dict(context)
+  const fetchDecision = useCallback(async () => {
+    if (!apiBaseUrl || !activePrice || activePrice <= 0) return
 
-    directional = extract_directional_context(
-        side=side,
-        scorecards=scorecards,
-        ghost_ml=ghost_ml,
-        target_ml=target_ml,
-        entry_ml=entry_ml,
-        nrtr_context=nrtr_context,
-        signal=signal,
-        unified_intelligence=unified_intelligence,
-    )
+    try {
+      setIsLoading(true)
+      setErrorText('')
 
-    base = 38.0
-
-    if directional["targetReady"]:
-        base += min(18.0, directional["targetConfidence"] * 0.18)
-    if directional["ghostReady"]:
-        base += min(14.0, directional["ghostConfidence"] * 0.14)
-    if directional["entryConfidence"] > 0:
-        base += min(18.0, directional["entryConfidence"] * 0.18)
-
-    base += clamp(directional["directionalScore"] * 0.18, -18.0, 18.0)
-    base += directional["nrtrAgreementCount"] * 4.0
-    base -= directional["nrtrConflictCount"] * 5.0
-
-    if risk_reward >= 2.0:
-        base += 8.0
-    elif risk_reward >= 1.5:
-        base += 5.0
-    elif risk_reward >= DEFAULT_MIN_RR:
-        base += 2.0
-    else:
-        base -= 15.0
-
-    if entry <= 0 or target <= 0 or stop <= 0:
-        base -= 25.0
-
-    bucket = trade_bucket(symbol, timeframe, side, base, context)
-    closed_source = combined_closed_trades(memory)
-    bucket_stats = summarize_closed_trades(closed_source, bucket=bucket)
-    overall_stats = summarize_closed_trades(closed_source, bucket=None)
-
-    learning_adjustment = 0.0
-
-    if bucket_stats["samples"] >= 8:
-        learning_adjustment += (bucket_stats["winRate"] - 0.50) * 30.0
-        learning_adjustment += clamp((bucket_stats["profitFactor"] - 1.0) * 5.0, -8.0, 10.0)
-        learning_adjustment += clamp(bucket_stats["avgR"] * 4.0, -8.0, 8.0)
-    elif overall_stats["samples"] >= 20:
-        learning_adjustment += (overall_stats["winRate"] - 0.50) * 18.0
-        learning_adjustment += clamp((overall_stats["profitFactor"] - 1.0) * 3.0, -5.0, 6.0)
-        learning_adjustment += clamp(overall_stats["avgR"] * 2.0, -4.0, 4.0)
-
-    confidence = clamp(base + learning_adjustment, 0.0, 100.0)
-
-    reasons: List[str] = []
-
-    if directional["targetReady"]:
-        reasons.append(f"Target ML active ({directional['targetConfidence']:.0f} confidence)")
-    else:
-        reasons.append("Target ML not ready")
-
-    if directional["ghostReady"]:
-        reasons.append(f"Ghost ML active ({directional['ghostConfidence']:.0f} confidence)")
-    else:
-        reasons.append("Ghost ML not ready")
-
-    if directional["entryConfidence"] > 0:
-        reasons.append(f"Entry ML confidence {directional['entryConfidence']:.0f}")
-
-    if directional["directionalScore"] > 0:
-        reasons.append(f"SMC/scorecard favors {side}")
-    elif directional["directionalScore"] < 0:
-        reasons.append("SMC/scorecard conflicts with trade side")
-
-    if directional["nrtrAgreementCount"]:
-        reasons.append(f"NRTR strategy context agrees on {directional['nrtrAgreementCount']} chart(s)")
-    if directional["nrtrConflictCount"]:
-        reasons.append(f"NRTR strategy context conflicts on {directional['nrtrConflictCount']} chart(s)")
-
-    memory_status = ai_memory_status(memory, bucket=bucket)
-
-    if bucket_stats["samples"] >= 8:
-        reasons.append(f"Learned bucket win rate {bucket_stats['winRate'] * 100:.1f}% from {bucket_stats['samples']} closed trades")
-    elif overall_stats["samples"] >= 20:
-        reasons.append(f"Overall AI trade memory win rate {overall_stats['winRate'] * 100:.1f}% from {overall_stats['samples']} closed trades")
-    else:
-        reasons.append(memory_status["message"])
-
-    return {
-        "confidence": round(confidence, 2),
-        "baseConfidence": round(base, 2),
-        "learningAdjustment": round(learning_adjustment, 2),
-        "confidenceGrade": confidence_grade(confidence),
-        "bucket": bucket,
-        "bucketStats": bucket_stats,
-        "overallStats": overall_stats,
-        "memoryStatus": memory_status,
-        "directionalContext": directional,
-        "reasons": reasons,
-    }
-
-
-def confidence_grade(confidence: float) -> str:
-    if confidence >= 85:
-        return "A+"
-    if confidence >= 78:
-        return "A"
-    if confidence >= 70:
-        return "B"
-    if confidence >= 62:
-        return "C"
-    if confidence >= 50:
-        return "D"
-    return "F"
-
-
-def choose_decision_side(
-    *,
-    entry: float,
-    target: float,
-    side: Any = None,
-    signal: Optional[Dict[str, Any]] = None,
-    scorecards: Optional[Dict[str, Any]] = None,
-) -> str:
-    explicit = normalize_side(side)
-    if explicit != "HOLD":
-        return explicit
-
-    signal = safe_dict(signal)
-    signal_side = normalize_side(read_path(signal, "signal", "type", "side", "direction", fallback=""))
-    if signal_side != "HOLD":
-        return signal_side
-
-    inferred = infer_side_from_target(entry, target)
-    if inferred != "HOLD":
-        return inferred
-
-    scorecards = safe_dict(scorecards)
-    bull = extract_score(scorecards, "bullScore", "main.bullScore", "overall.bullScore")
-    bear = extract_score(scorecards, "bearScore", "main.bearScore", "overall.bearScore")
-
-    if bull > bear + 5:
-        return "BUY"
-    if bear > bull + 5:
-        return "SELL"
-
-    return "HOLD"
-
-
-def build_trade_id(symbol: str, timeframe: str, side: str, entry_time: Optional[Any] = None) -> str:
-    stamp = str(entry_time or now_iso()).replace(":", "-").replace(".", "-")
-    return f"AI-{normalize_symbol(symbol)}-{normalize_timeframe(timeframe)}-{side}-{stamp}"
-
-
-def get_ai_trader_decision(
-    *,
-    symbol: Any = "MES1!",
-    timeframe: Any = "1m",
-    currentPrice: Any = None,
-    entryPrice: Any = None,
-    targetPrice: Any = None,
-    stopPrice: Any = None,
-    side: Any = None,
-    riskReward: Any = None,
-    signal: Optional[Dict[str, Any]] = None,
-    scorecards: Optional[Dict[str, Any]] = None,
-    ghostMl: Optional[Dict[str, Any]] = None,
-    targetMl: Optional[Dict[str, Any]] = None,
-    entryMl: Optional[Dict[str, Any]] = None,
-    nrtrContext: Optional[Dict[str, Any]] = None,
-    unifiedIntelligence: Optional[Dict[str, Any]] = None,
-    context: Optional[Dict[str, Any]] = None,
-    minConfidence: Any = None,
-    minRiskReward: Any = None,
-    projectionEngine: Optional[Dict[str, Any]] = None,
-    projectionEngineContext: Optional[Dict[str, Any]] = None,
-    **_: Any,
-) -> Dict[str, Any]:
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-    signal = safe_dict(signal)
-    context = safe_dict(context)
-
-    current_price = to_float(currentPrice, 0.0)
-    entry = to_float(entryPrice, 0.0)
-
-    if entry <= 0:
-        entry = to_float(
-            read_path(
-                signal,
-                "entryPrice",
-                "entry",
-                "nrtrEntryPrice",
-                "strategyEntryPrice",
-                "price",
-                "current",
-                "close",
-                fallback=current_price,
-            ),
-            current_price,
-        )
-
-    target = infer_target(normalize_side(side), entry, targetPrice, signal=signal)
-    decision_side = choose_decision_side(entry=entry, target=target, side=side, signal=signal, scorecards=scorecards)
-    stop = infer_stop(decision_side, entry, target, stopPrice)
-    rr = to_float(riskReward, 0.0) or calculate_rr(decision_side, entry, target, stop)
-
-    min_confidence = to_float(minConfidence, DEFAULT_MIN_CONFIDENCE)
-    min_rr = to_float(minRiskReward, DEFAULT_MIN_RR)
-
-    if decision_side not in {"BUY", "SELL"}:
-        memory = load_memory()
-        bucket = trade_bucket(normalized_symbol, normalized_timeframe, "HOLD", 0.0, context)
-        memory_status = ai_memory_status(memory, bucket=bucket)
-        decision_result = {
-            "eventType": "AI_TRADER_DECISION",
-            "status": "Waiting",
-            "dashboardOnly": True,
-            "brokerConnected": False,
-            "allowedToTrade": False,
-            "decision": "HOLD",
-            "rawDecision": "HOLD",
-            "confidence": 0,
-            "confidenceGrade": "F",
-            "symbol": normalized_symbol,
-            "timeframe": normalized_timeframe,
-            "entry": entry,
-            "target": target,
-            "stop": stop,
-            "riskReward": rr,
-            "currentPrice": current_price,
-            "reason": "No clear BUY or SELL side was available.",
-            "details": {
-                "source": "dashboard_ai_trader",
-                "noBroker": True,
-                "bucket": bucket,
-                "memoryStatus": memory_status,
-                "directionalContext": {},
-                "projectionEngine": safe_dict(_.get("projectionEngine") if isinstance(_, dict) else {}),
-                "context": context,
-            },
-            "createdAt": now_iso(),
-        }
-        remember_ai_decision(decision_result)
-        return decision_result
-
-    score = score_ai_decision(
-        symbol=normalized_symbol,
-        timeframe=normalized_timeframe,
-        side=decision_side,
-        entry=entry,
-        target=target,
-        stop=stop,
-        risk_reward=rr,
-        scorecards=scorecards,
-        ghost_ml=ghostMl,
-        target_ml=targetMl,
-        entry_ml=entryMl,
-        nrtr_context=nrtrContext,
-        signal=signal,
-        unified_intelligence=unifiedIntelligence,
-        context=context,
-    )
-
-    allowed = (
-        decision_side in {"BUY", "SELL"}
-        and entry > 0
-        and target > 0
-        and stop > 0
-        and rr >= min_rr
-        and score["confidence"] >= min_confidence
-    )
-
-    current_pnl = signed_move(decision_side, entry, current_price) * point_value(normalized_symbol) if current_price > 0 and entry > 0 else 0.0
-    max_pnl = signed_move(decision_side, entry, target) * point_value(normalized_symbol) if target > 0 and entry > 0 else 0.0
-    risk_pnl = -abs(signed_move(decision_side, entry, stop) * point_value(normalized_symbol)) if stop > 0 and entry > 0 else 0.0
-
-    if not allowed:
-        reason = "AI HOLD: requirements not met. " + " | ".join(score["reasons"][:4])
-    else:
-        reason = f"AI {decision_side}: " + " | ".join(score["reasons"][:4])
-
-    decision_result = {
-        "eventType": "AI_TRADER_DECISION",
-        "status": "Ready" if allowed else "Waiting",
-        "dashboardOnly": True,
-        "brokerConnected": False,
-        "allowedToTrade": bool(allowed),
-        "decision": decision_side if allowed else "HOLD",
-        "rawDecision": decision_side,
-        "confidence": score["confidence"],
-        "baseConfidence": score["baseConfidence"],
-        "learningAdjustment": score["learningAdjustment"],
-        "confidenceGrade": score["confidenceGrade"],
-        "symbol": normalized_symbol,
-        "timeframe": normalized_timeframe,
-        "entry": round(entry, 8),
-        "target": round(target, 8),
-        "stop": round(stop, 8),
-        "riskReward": round(rr, 4),
-        "currentPrice": round(current_price, 8),
-        "currentPnl": round(current_pnl, 4),
-        "maxPnl": round(max_pnl, 4),
-        "riskPnl": round(risk_pnl, 4),
-        "pointValue": point_value(normalized_symbol),
-        "reason": reason,
-        "reasons": score["reasons"],
-        "details": {
-            "source": "dashboard_ai_trader",
-            "noBroker": True,
-            "bucket": score["bucket"],
-            "bucketStats": score["bucketStats"],
-            "overallStats": score["overallStats"],
-            "memoryStatus": score["memoryStatus"],
-            "directionalContext": score["directionalContext"],
-            "projectionEngine": safe_dict(projectionEngine) or safe_dict(projectionEngineContext) or safe_dict(context.get("projectionEngine")),
-            "context": context,
+      const response = await fetch(`${apiBaseUrl}/api/ai-trader/decision`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
         },
-        "createdAt": now_iso(),
+        body: JSON.stringify(safePayload),
+      })
+
+      if (!response.ok) {
+        throw new Error(`AI trader decision failed: ${await readApiError(response)}`)
+      }
+
+      const json = await response.json()
+      setDecision(json)
+    } catch (error) {
+      setErrorText(error instanceof Error ? error.message : 'AI trader decision failed')
+    } finally {
+      setIsLoading(false)
     }
+  }, [apiBaseUrl, activePrice, safePayload])
 
-    remember_ai_decision(decision_result)
-    return decision_result
+  const fetchSummary = useCallback(async () => {
+    if (!apiBaseUrl) return
 
+    try {
+      const params = new URLSearchParams({
+        symbol,
+        timeframe,
+      })
 
-def open_ai_trade(**payload: Any) -> Dict[str, Any]:
-    decision = get_ai_trader_decision(**payload)
+      const response = await fetch(`${apiBaseUrl}/api/ai-trader/summary?${params.toString()}`, {
+        cache: 'no-store',
+      })
 
-    if not decision.get("allowedToTrade"):
-        return {
-            **decision,
-            "eventType": "AI_TRADER_OPEN",
-            "status": "Rejected",
-            "opened": False,
-            "message": "AI trade was not opened because allowedToTrade is false.",
-        }
+      if (!response.ok) return
 
-    memory = load_memory()
-    open_trades = safe_list(memory.get("openTrades"))
-    symbol = normalize_symbol(decision.get("symbol"))
-    timeframe = normalize_timeframe(decision.get("timeframe"))
-    side = normalize_side(decision.get("rawDecision") or decision.get("decision"))
-    entry_time = payload.get("entryTime") or decision.get("createdAt") or now_iso()
+      const json = await response.json()
+      setSummary(json)
+    } catch {
+      // Keep the panel usable even if summary temporarily fails.
+    }
+  }, [apiBaseUrl, symbol, timeframe])
 
-    existing = [
-        trade for trade in open_trades
-        if isinstance(trade, dict)
-        and normalize_symbol(trade.get("symbol")) == symbol
-        and normalize_timeframe(trade.get("timeframe")) == timeframe
-        and normalize_side(trade.get("side")) == side
-    ]
+  const evaluateOpenTrades = useCallback(async () => {
+    if (!apiBaseUrl) return
 
-    if existing:
-        return {
-            "eventType": "AI_TRADER_OPEN",
-            "status": "AlreadyOpen",
-            "opened": False,
-            "dashboardOnly": True,
-            "brokerConnected": False,
-            "trade": existing[-1],
-            "decision": decision,
-            "createdAt": now_iso(),
-        }
+    try {
+      setActionStatus('Evaluating open AI trades...')
 
-    trade = {
-        "id": build_trade_id(symbol, timeframe, side, entry_time),
-        "symbol": symbol,
-        "timeframe": timeframe,
-        "side": side,
-        "entryTime": entry_time,
-        "entry": decision.get("entry"),
-        "target": decision.get("target"),
-        "stop": decision.get("stop"),
-        "riskReward": decision.get("riskReward"),
-        "confidence": decision.get("confidence"),
-        "confidenceGrade": decision.get("confidenceGrade"),
-        "currentPrice": decision.get("currentPrice"),
-        "currentPnl": decision.get("currentPnl"),
-        "maxPnl": decision.get("maxPnl"),
-        "riskPnl": decision.get("riskPnl"),
-        "bucket": read_path(decision, "details.bucket", fallback=""),
-        "reason": decision.get("reason"),
-        "dashboardOnly": True,
-        "brokerConnected": False,
-        "status": "OPEN",
-        "createdAt": now_iso(),
-        "updatedAt": now_iso(),
-        "sourceSnapshot": {
-            "decision": decision,
-            "payloadContext": safe_dict(payload.get("context")),
+      const response = await fetch(`${apiBaseUrl}/api/ai-trader/evaluate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
         },
+        body: JSON.stringify(sanitizeAiTraderPayload({
+          symbol,
+          timeframe,
+          currentPrice: activePrice,
+          candles: Array.isArray(candles) ? candles.slice(-25) : [],
+        })),
+      })
+
+      if (!response.ok) {
+        throw new Error(`AI trader evaluate failed: ${await readApiError(response)}`)
+      }
+
+      const json = await response.json()
+      setSummary(json?.summary ?? null)
+      setActionStatus(`Evaluated • Closed ${json?.closedCount ?? 0} trade(s)`)
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : 'Evaluate failed')
     }
+  }, [apiBaseUrl, activePrice, candles, symbol, timeframe])
 
-    open_trades.append(trade)
-    memory["openTrades"] = open_trades
-    save_memory(memory)
+  const openDashboardTrade = useCallback(async () => {
+    if (!apiBaseUrl) return
 
-    return {
-        "eventType": "AI_TRADER_OPEN",
-        "status": "Open",
-        "opened": True,
-        "dashboardOnly": True,
-        "brokerConnected": False,
-        "trade": trade,
-        "decision": decision,
-        "summary": ai_trader_summary(symbol=symbol, timeframe=timeframe),
-        "createdAt": now_iso(),
+    try {
+      setActionStatus('Opening dashboard-only AI trade...')
+
+      const response = await fetch(`${apiBaseUrl}/api/ai-trader/open`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(safePayload),
+      })
+
+      if (!response.ok) {
+        throw new Error(`AI trader open failed: ${await readApiError(response)}`)
+      }
+
+      const json = await response.json()
+      setDecision(json?.decision ?? decision)
+      setSummary(json?.summary ?? summary)
+      setActionStatus(json?.opened ? 'Dashboard AI trade opened' : json?.message ?? 'AI trade not opened')
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : 'Open failed')
     }
+  }, [apiBaseUrl, safePayload, decision, summary])
 
+  useEffect(() => {
+    fetchDecision()
+  }, [fetchDecision])
 
-def close_ai_trade(
-    *,
-    tradeId: Optional[str] = None,
-    symbol: Any = "MES1!",
-    timeframe: Any = "1m",
-    side: Any = None,
-    exitPrice: Any = None,
-    exitTime: Any = None,
-    exitReason: Optional[str] = None,
-    currentPrice: Any = None,
-    **_: Any,
-) -> Dict[str, Any]:
-    memory = load_memory()
-    symbol = normalize_symbol(symbol)
-    timeframe = normalize_timeframe(timeframe)
-    close_side = normalize_side(side)
-    price = to_float(exitPrice, 0.0) or to_float(currentPrice, 0.0)
+  useEffect(() => {
+    fetchSummary()
+  }, [fetchSummary])
 
-    if price <= 0:
-        return {
-            "eventType": "AI_TRADER_CLOSE",
-            "status": "Rejected",
-            "closed": False,
-            "message": "exitPrice/currentPrice is required to close an AI dashboard trade.",
-            "createdAt": now_iso(),
-        }
+  useEffect(() => {
+    if (!autoPaperMode) return
+    if (!decision?.allowedToTrade) return
 
-    open_trades = safe_list(memory.get("openTrades"))
-    match_index = -1
+    const side = normalizeDecision(decision.rawDecision ?? decision.decision)
+    if (side === 'HOLD') return
 
-    for index, trade in enumerate(open_trades):
-        if not isinstance(trade, dict):
-            continue
+    const key = [
+      symbol,
+      timeframe,
+      side,
+      Number(decision.entry ?? 0).toFixed(4),
+      Number(decision.target ?? 0).toFixed(4),
+      Number(decision.stop ?? 0).toFixed(4),
+    ].join('|')
 
-        if tradeId and trade.get("id") == tradeId:
-            match_index = index
-            break
+    if (key === lastAutoOpenKey) return
 
-        if tradeId:
-            continue
+    setLastAutoOpenKey(key)
+    openDashboardTrade()
+  }, [autoPaperMode, decision, lastAutoOpenKey, openDashboardTrade, symbol, timeframe])
 
-        if normalize_symbol(trade.get("symbol")) != symbol:
-            continue
-        if normalize_timeframe(trade.get("timeframe")) != timeframe:
-            continue
-        if close_side != "HOLD" and normalize_side(trade.get("side")) != close_side:
-            continue
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      fetchDecision()
+      fetchSummary()
+      evaluateOpenTrades()
+    }, 15000)
 
-        match_index = index
+    return () => window.clearInterval(id)
+  }, [fetchDecision, fetchSummary, evaluateOpenTrades])
 
-    if match_index < 0:
-        return {
-            "eventType": "AI_TRADER_CLOSE",
-            "status": "NotFound",
-            "closed": False,
-            "message": "No matching open AI dashboard trade found.",
-            "createdAt": now_iso(),
-        }
+  const aiDecision = normalizeDecision(decision?.decision)
+  const rawDecision = normalizeDecision(decision?.rawDecision)
+  const decisionTone =
+    aiDecision === 'BUY'
+      ? 'bull'
+      : aiDecision === 'SELL'
+        ? 'bear'
+        : rawDecision === 'BUY' || rawDecision === 'SELL'
+          ? 'warn'
+          : 'neutral'
 
-    trade = dict(open_trades.pop(match_index))
-    trade_side = normalize_side(trade.get("side"))
-    entry = to_float(trade.get("entry"), 0.0)
-    target = to_float(trade.get("target"), 0.0)
-    stop = to_float(trade.get("stop"), 0.0)
-    pnl = signed_move(trade_side, entry, price) * point_value(symbol) if entry > 0 else 0.0
-    risk_points = abs(signed_move(trade_side, entry, stop))
-    r_multiple = signed_move(trade_side, entry, price) / risk_points if risk_points > 0 else 0.0
+  const activeMemoryStatus =
+    decision?.details?.memoryStatus ??
+    summary?.memoryStatus ??
+    {}
 
-    trade.update({
-        "status": "CLOSED",
-        "exitTime": exitTime or now_iso(),
-        "exit": price,
-        "exitPrice": price,
-        "exitReason": exitReason or "manual_close",
-        "pnl": round(pnl, 4),
-        "rMultiple": round(r_multiple, 4),
-        "result": "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN"),
-        "updatedAt": now_iso(),
-    })
+  const activeDecisionStats =
+    activeMemoryStatus?.bucketDecisionStats ??
+    activeMemoryStatus?.overallDecisionStats ??
+    summary?.decisionStats ??
+    {}
 
-    memory["openTrades"] = open_trades
-    memory["closedTrades"] = safe_list(memory.get("closedTrades")) + [trade]
-    save_memory(memory)
+  const activeClosedStats =
+    activeMemoryStatus?.bucketClosedStats ??
+    activeMemoryStatus?.overallClosedStats ??
+    summary?.stats ??
+    {}
 
-    return {
-        "eventType": "AI_TRADER_CLOSE",
-        "status": "Closed",
-        "closed": True,
-        "dashboardOnly": True,
-        "brokerConnected": False,
-        "trade": trade,
-        "summary": ai_trader_summary(symbol=symbol, timeframe=timeframe),
-        "createdAt": now_iso(),
-    }
+  const stats = activeClosedStats
+  const decisionStats = activeDecisionStats
+  const memoryStatus = activeMemoryStatus
+  const blockers = getBlockerAnalysis(
+    decision,
+    {
+      ...(summary ?? {}),
+      memoryStatus: activeMemoryStatus,
+      decisionStats: activeDecisionStats,
+      stats: activeClosedStats,
+      closedCount: summary?.closedCount ?? activeClosedStats?.samples ?? 0,
+    },
+    minConfidence,
+    minRiskReward
+  )
 
+  const directionalContext = decision?.details?.directionalContext ?? {}
+  const ghostMlConfidence = Math.max(
+    toFiniteNumber(projectionSnapshot.ghostConfidence, 0),
+    toFiniteNumber(directionalContext.ghostConfidence, 0)
+  )
+  const targetMlConfidence = Math.max(
+    toFiniteNumber(projectionSnapshot.targetConfidence, 0),
+    toFiniteNumber(directionalContext.targetConfidence, 0)
+  )
+  const entryMlConfidence = toFiniteNumber(directionalContext.entryConfidence, 0)
+  const aiConfidence = toFiniteNumber(decision?.confidence, 0)
 
-def candle_high_low_close(candle: Any) -> Tuple[float, float, float]:
-    data = safe_dict(candle)
-    high = to_float(data.get("high", data.get("h")), 0.0)
-    low = to_float(data.get("low", data.get("l")), 0.0)
-    close = to_float(data.get("close", data.get("c")), 0.0)
-    return high, low, close
+  const openTrades = Array.isArray(summary?.openTrades) ? summary?.openTrades ?? [] : []
+  const closedTrades =
+    Array.isArray(summary?.recentClosedTrades)
+      ? summary?.recentClosedTrades ?? []
+      : Array.isArray(summary?.closedTrades)
+        ? summary?.closedTrades ?? []
+        : []
 
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 14 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.35 }}
+      className="mb-6 rounded-2xl border border-purple-400/20 bg-dark-800/90 p-5 shadow-xl"
+    >
+      <div className="mb-4 flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-xl font-black text-white">Dashboard AI Self-Learning Trader</h2>
+            <span className="rounded-full border border-purple-400/30 bg-purple-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-purple-200">
+              Dashboard Only
+            </span>
+            <span className="rounded-full border border-red-400/30 bg-red-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-red-200">
+              No Broker
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-gray-400">
+            Simulated AI trades only. Learns from dashboard entries, targets, stops, P&amp;L, and closed outcomes.
+          </p>
+        </div>
 
-def evaluate_ai_trades(
-    *,
-    symbol: Any = "MES1!",
-    timeframe: Any = "1m",
-    currentPrice: Any = None,
-    candles: Optional[List[Any]] = None,
-    **_: Any,
-) -> Dict[str, Any]:
-    memory = load_memory()
-    symbol = normalize_symbol(symbol)
-    timeframe = normalize_timeframe(timeframe)
-    current = to_float(currentPrice, 0.0)
-    candles = safe_list(candles)
+        <div className="flex flex-wrap items-center gap-2">
+          <label className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-black ${
+            autoPaperMode
+              ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-200'
+              : 'border-dark-600 bg-dark-900 text-gray-400'
+          }`}>
+            <input
+              type="checkbox"
+              checked={autoPaperMode}
+              onChange={(event) => setAutoPaperMode(event.target.checked)}
+              className="h-3 w-3"
+            />
+            Auto Paper
+          </label>
 
-    latest_high = latest_low = latest_close = current
+          <label className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-gray-400">
+            Min Conf
+            <input
+              type="number"
+              min={1}
+              max={100}
+              step={1}
+              value={minConfidence}
+              onChange={(event) => setMinConfidence(Math.max(1, Math.min(100, Number(event.target.value) || 62)))}
+              className="ml-2 w-14 rounded border border-dark-600 bg-dark-800 px-2 py-1 text-xs text-white"
+            />
+          </label>
 
-    if candles:
-        high, low, close = candle_high_low_close(candles[-1])
-        latest_high = high or current
-        latest_low = low or current
-        latest_close = close or current
+          <label className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-gray-400">
+            Min RR
+            <input
+              type="number"
+              min={0.1}
+              max={10}
+              step={0.05}
+              value={minRiskReward}
+              onChange={(event) => setMinRiskReward(Math.max(0.1, Math.min(10, Number(event.target.value) || 1.25)))}
+              className="ml-2 w-16 rounded border border-dark-600 bg-dark-800 px-2 py-1 text-xs text-white"
+            />
+          </label>
 
-    if current <= 0:
-        current = latest_close
+          <button
+            type="button"
+            onClick={fetchDecision}
+            className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 text-xs font-bold text-gray-200 hover:border-purple-300"
+          >
+            Refresh AI
+          </button>
+          <button
+            type="button"
+            onClick={evaluateOpenTrades}
+            className="rounded-lg border border-blue-400/30 bg-blue-400/10 px-3 py-2 text-xs font-bold text-blue-200 hover:bg-blue-400/20"
+          >
+            Evaluate Open
+          </button>
+          <button
+            type="button"
+            onClick={openDashboardTrade}
+            disabled={!decision?.allowedToTrade}
+            className={`rounded-lg px-3 py-2 text-xs font-black ${
+              decision?.allowedToTrade
+                ? 'border border-emerald-400/30 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20'
+                : 'cursor-not-allowed border border-dark-600 bg-dark-900 text-gray-600'
+            }`}
+          >
+            {autoPaperMode ? 'Auto Paper Armed' : 'Open AI Paper Trade'}
+          </button>
+        </div>
+      </div>
 
-    def evaluate_trade_list(trades: List[Any], virtual: bool = False) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        closed_rows: List[Dict[str, Any]] = []
-        still_rows: List[Dict[str, Any]] = []
+      {errorText ? (
+        <div className="mb-4 rounded-lg border border-red-400/30 bg-red-400/10 px-3 py-2 text-xs text-red-200">
+          {errorText}
+        </div>
+      ) : null}
 
-        for trade in trades:
-            if not isinstance(trade, dict):
-                continue
+      {actionStatus ? (
+        <div className="mb-4 rounded-lg border border-purple-400/20 bg-purple-400/10 px-3 py-2 text-xs text-purple-200">
+          {actionStatus}
+        </div>
+      ) : null}
 
-            if normalize_symbol(trade.get("symbol")) != symbol or normalize_timeframe(trade.get("timeframe")) != timeframe:
-                still_rows.append(trade)
-                continue
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
+        <StatBox
+          label="AI Decision"
+          value={decision?.decision ?? (isLoading ? 'Loading...' : 'WAITING')}
+          tone={decisionTone as any}
+        />
+        <StatBox
+          label="Raw Bias"
+          value={decision?.rawDecision ?? '—'}
+          tone={rawDecision === 'BUY' ? 'bull' : rawDecision === 'SELL' ? 'bear' : 'neutral'}
+        />
+        <StatBox label="Confidence" value={`${toFiniteNumber(decision?.confidence, 0).toFixed(1)}% ${decision?.confidenceGrade ?? ''}`} tone="neutral" />
+        <StatBox label="Auto Paper" value={autoPaperMode ? 'ARMED' : 'OFF'} tone={autoPaperMode ? 'bull' : 'neutral'} />
+        <StatBox label="Entry" value={formatPrice(decision?.entry)} />
+        <StatBox label="Target" value={formatPrice(decision?.target)} />
+        <StatBox label="Stop" value={formatPrice(decision?.stop)} tone="warn" />
+        <StatBox label="Current P&L" value={formatMoney(decision?.currentPnl)} tone={toFiniteNumber(decision?.currentPnl, 0) >= 0 ? 'bull' : 'bear'} />
+        <StatBox label="Max P&L" value={formatMoney(decision?.maxPnl)} tone={toFiniteNumber(decision?.maxPnl, 0) >= 0 ? 'bull' : 'bear'} />
+        <StatBox label="Projection" value={projectionSnapshot.projectionModeLabel || projectionSnapshot.projectionMode} tone={projectionSnapshot.conflict ? 'warn' : projectionSnapshot.available ? 'bull' : 'neutral'} />
+        <StatBox label="AI Permission" value={projectionSnapshot.aiPermission} tone={projectionSnapshot.aiPermission === 'CAN_CONSIDER' ? 'bull' : projectionSnapshot.conflict ? 'warn' : 'neutral'} />
+      </div>
 
-            side = normalize_side(trade.get("side"))
-            target = to_float(trade.get("target"), 0.0)
-            stop = to_float(trade.get("stop"), 0.0)
-            entry = to_float(trade.get("entry"), 0.0)
-            exit_price = 0.0
-            exit_reason = ""
-            bars_open = to_int(trade.get("barsOpen"), 0) + 1
+      <div className="mt-4 rounded-xl border border-dark-700 bg-dark-900/60 p-4">
+        <div className="mb-3 flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
+          <div>
+            <div className="text-sm font-black text-white">ML System Status</div>
+            <div className="text-xs text-gray-500">
+              Live view of Ghost ML, Target Price ML, and AI Trader learning context.
+            </div>
+          </div>
+          <div className="text-[10px] font-bold uppercase tracking-wide text-gray-500">
+            Background refresh enabled
+          </div>
+        </div>
 
-            if side == "BUY":
-                if target > 0 and latest_high >= target:
-                    exit_price = target
-                    exit_reason = "target_hit"
-                elif stop > 0 and latest_low <= stop:
-                    exit_price = stop
-                    exit_reason = "stop_hit"
-            elif side == "SELL":
-                if target > 0 and latest_low <= target:
-                    exit_price = target
-                    exit_reason = "target_hit"
-                elif stop > 0 and latest_high >= stop:
-                    exit_price = stop
-                    exit_reason = "stop_hit"
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+          <MlStatusCard
+            title="Projection Engine"
+            status={projectionSnapshot.available ? projectionSnapshot.projectionModeLabel : 'Waiting'}
+            confidence={toFiniteNumber(projectionSnapshot.alignmentScore, 0)}
+            tone={projectionSnapshot.conflict ? 'warn' : projectionSnapshot.available ? 'bull' : 'neutral'}
+            detail={
+              projectionSnapshot.available
+                ? `Target ${formatPrice(projectionSnapshot.targetPrice)} • ${projectionSnapshot.aiPermission} • ${projectionSnapshot.alignmentLabel}`
+                : 'Waiting for Unified Projection Engine target, ghost route, and alignment.'
+            }
+          />
 
-            if virtual and exit_price <= 0 and bars_open >= VIRTUAL_TRADE_MAX_BARS and current > 0:
-                exit_price = current
-                exit_reason = "virtual_timeout"
+          <MlStatusCard
+            title="Ghost ML"
+            status={getMlStrengthLabel(ghostMlConfidence)}
+            confidence={ghostMlConfidence}
+            tone={getMlStrengthTone(ghostMlConfidence)}
+            detail={
+              ghostMlConfidence > 0
+                ? 'Ghost ML is contributing to projected candle confidence and AI decision scoring.'
+                : 'Waiting for Ghost ML confidence to flow into the AI context.'
+            }
+          />
 
-            if exit_price > 0:
-                pnl = signed_move(side, entry, exit_price) * point_value(symbol) if entry > 0 else 0.0
-                risk_points = abs(signed_move(side, entry, stop))
-                r_multiple = signed_move(side, entry, exit_price) / risk_points if risk_points > 0 else 0.0
-                trade.update({
-                    "status": "VIRTUAL_CLOSED" if virtual else "CLOSED",
-                    "exit": exit_price,
-                    "exitPrice": exit_price,
-                    "exitReason": exit_reason,
-                    "exitTime": now_iso(),
-                    "pnl": round(pnl, 4),
-                    "rMultiple": round(r_multiple, 4),
-                    "result": "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN"),
-                    "barsOpen": bars_open,
-                    "updatedAt": now_iso(),
-                    "virtualLearningOnly": bool(virtual),
-                })
-                closed_rows.append(trade)
-            else:
-                trade["barsOpen"] = bars_open
-                trade["currentPrice"] = current
-                trade["currentPnl"] = round(signed_move(side, entry, current) * point_value(symbol), 4) if entry > 0 and current > 0 else 0.0
-                trade["updatedAt"] = now_iso()
-                still_rows.append(trade)
+          <MlStatusCard
+            title="Target Price ML"
+            status={getMlStrengthLabel(targetMlConfidence)}
+            confidence={targetMlConfidence}
+            tone={getMlStrengthTone(targetMlConfidence)}
+            detail={
+              targetMlConfidence > 0
+                ? `Target ML active. Real Target Price ML target ${formatPrice(decision?.target)} is being used for max P&L and risk/reward.`
+                : 'Waiting for real Target Price ML; using chart ghost overlay only if ML target is unavailable.'
+            }
+          />
 
-        return closed_rows, still_rows
+          <MlStatusCard
+            title="AI Trader"
+            status={formatAiStage(memoryStatus.stage)}
+            confidence={aiConfidence}
+            tone={decision?.allowedToTrade ? 'bull' : aiConfidence >= minConfidence ? 'warn' : 'neutral'}
+            detail={
+              decision?.allowedToTrade
+                ? 'AI is trade-ready for dashboard-only paper execution.'
+                : String(memoryStatus.message ?? 'AI is collecting observations and waiting for a clean setup.')
+            }
+          />
+        </div>
 
-    closed, still_open = evaluate_trade_list(safe_list(memory.get("openTrades")), virtual=False)
-    virtual_closed, virtual_still_open = evaluate_trade_list(safe_list(memory.get("virtualOpenTrades")), virtual=True)
+        <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
+          <StatBox label="Entry ML" value={`${entryMlConfidence.toFixed(1)}%`} tone={getMlStrengthTone(entryMlConfidence)} />
+          <StatBox label="Target" value={formatPrice(decision?.target)} />
+          <StatBox label="RR" value={`${toFiniteNumber(decision?.riskReward, 0).toFixed(2)}R`} tone={toFiniteNumber(decision?.riskReward, 0) >= minRiskReward ? 'bull' : 'warn'} />
+          <StatBox label="Target Source" value={projectionSnapshot.source || '—'} />
+          <StatBox label="Alignment" value={`${toFiniteNumber(projectionSnapshot.alignmentScore, 0).toFixed(1)}%`} tone={projectionSnapshot.conflict ? 'warn' : toFiniteNumber(projectionSnapshot.alignmentScore, 0) >= 60 ? 'bull' : 'neutral'} />
+        </div>
+      </div>
 
-    memory["openTrades"] = still_open
-    memory["closedTrades"] = safe_list(memory.get("closedTrades")) + closed
-    memory["virtualOpenTrades"] = virtual_still_open
-    memory["virtualClosedTrades"] = safe_list(memory.get("virtualClosedTrades")) + virtual_closed
-    save_memory(memory)
+      <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-3">
+        <div className="rounded-xl border border-dark-700 bg-dark-900/70 p-4 xl:col-span-2">
+          <div className="mb-2 text-xs font-black uppercase tracking-wide text-gray-400">AI Reason</div>
+          <p className="text-sm leading-6 text-gray-200">
+            {decision?.reason ?? 'Waiting for enough dashboard data to create a decision.'}
+          </p>
 
-    return {
-        "eventType": "AI_TRADER_EVALUATE",
-        "status": "Evaluated",
-        "dashboardOnly": True,
-        "brokerConnected": False,
-        "symbol": symbol,
-        "timeframe": timeframe,
-        "closedCount": len(closed),
-        "virtualClosedCount": len(virtual_closed),
-        "openCount": len(still_open),
-        "virtualOpenCount": len(virtual_still_open),
-        "closedTrades": closed,
-        "virtualClosedTrades": virtual_closed,
-        "openTrades": [
-            trade for trade in still_open
-            if isinstance(trade, dict)
-            and normalize_symbol(trade.get("symbol")) == symbol
-            and normalize_timeframe(trade.get("timeframe")) == timeframe
-        ],
-        "virtualOpenTrades": [
-            trade for trade in virtual_still_open
-            if isinstance(trade, dict)
-            and normalize_symbol(trade.get("symbol")) == symbol
-            and normalize_timeframe(trade.get("timeframe")) == timeframe
-        ],
-        "summary": ai_trader_summary(symbol=symbol, timeframe=timeframe),
-        "createdAt": now_iso(),
-    }
+          {Array.isArray(decision?.reasons) && decision.reasons.length > 0 ? (
+            <div className="mt-3 space-y-1">
+              {decision.reasons.slice(0, 6).map((reason, index) => (
+                <div key={`${reason}-${index}`} className="text-xs text-gray-400">
+                  • {reason}
+                </div>
+              ))}
+            </div>
+          ) : null}
 
+          <div className="mt-4 rounded-xl border border-dark-700 bg-dark-800/70 p-3">
+            <div className="mb-2 text-xs font-black uppercase tracking-wide text-gray-400">Blocker Analysis</div>
+            <div className="space-y-2">
+              {blockers.slice(0, 6).map((blocker) => (
+                <div key={`${blocker.label}-${blocker.detail}`} className="flex flex-col gap-1 rounded-lg border border-dark-700 bg-dark-900/70 px-3 py-2 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <div className="text-xs font-black text-white">{blocker.label}</div>
+                    <div className="text-xs text-gray-500">{blocker.detail}</div>
+                  </div>
+                  <BlockerBadge severity={blocker.severity} />
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
 
-    latest_high = latest_low = latest_close = current
+        <div className="rounded-xl border border-dark-700 bg-dark-900/70 p-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div className="text-xs font-black uppercase tracking-wide text-gray-400">Learning Memory</div>
+            <span className="rounded-full border border-purple-400/30 bg-purple-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-purple-200">
+              {formatAiStage(memoryStatus.stage)}
+            </span>
+          </div>
 
-    if candles:
-        high, low, close = candle_high_low_close(candles[-1])
-        latest_high = high or current
-        latest_low = low or current
-        latest_close = close or current
+          <div className="mb-3 rounded-lg border border-dark-700 bg-dark-800/70 px-3 py-2 text-xs text-gray-300">
+            {String(memoryStatus.message ?? 'AI memory is collecting live decision observations.')}
+          </div>
 
-    if current <= 0:
-        current = latest_close
+          <div className="mb-3 grid grid-cols-2 gap-2">
+            <StatBox
+              label="Live Observations"
+              value={formatCount(decisionStats.samples)}
+              tone={toFiniteNumber(decisionStats.samples, 0) >= 10 ? 'bull' : 'warn'}
+            />
+            <StatBox
+              label="Memory Source"
+              value={decision?.details?.memoryStatus ? 'LIVE DECISION' : summary?.memoryStatus ? 'SUMMARY' : 'WAITING'}
+              tone={decision?.details?.memoryStatus ? 'bull' : 'warn'}
+            />
+          </div>
 
-    closed: List[Dict[str, Any]] = []
-    still_open: List[Dict[str, Any]] = []
+          <div className="grid grid-cols-2 gap-2">
+            <StatBox label="Decisions" value={formatCount(decisionStats.samples)} />
+            <StatBox label="Trade Ready" value={formatCount(decisionStats.tradeReadyCount)} tone="bull" />
+            <StatBox label="HOLD Count" value={formatCount(decisionStats.holdCount)} tone="warn" />
+            <StatBox label="Avg AI Conf" value={`${toFiniteNumber(decisionStats.avgConfidence, 0).toFixed(1)}%`} />
+            <StatBox label="BUY Bias" value={formatCount(decisionStats.buyBias)} tone="bull" />
+            <StatBox label="SELL Bias" value={formatCount(decisionStats.sellBias)} tone="bear" />
+            <StatBox label="Open" value={String(summary?.openCount ?? 0)} />
+            <StatBox label="Closed" value={String(summary?.closedCount ?? 0)} />
+            <StatBox label="Win Rate" value={formatPercent(stats.winRate)} tone="bull" />
+            <StatBox label="Profit Factor" value={toFiniteNumber(stats.profitFactor, 0).toFixed(2)} />
+            <StatBox label="Avg P&L" value={formatMoney(stats.avgPnl)} />
+            <StatBox label="Avg R" value={toFiniteNumber(stats.avgR, 0).toFixed(2)} />
+          </div>
+        </div>
+      </div>
 
-    for trade in safe_list(memory.get("openTrades")):
-        if not isinstance(trade, dict):
-            continue
+      {openTrades.length > 0 ? (
+        <div className="mt-4 rounded-xl border border-dark-700 bg-dark-900/70 p-4">
+          <div className="mb-3 text-xs font-black uppercase tracking-wide text-gray-400">Open Dashboard AI Trades</div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] text-left text-xs">
+              <thead className="text-gray-500">
+                <tr>
+                  <th className="pb-2">Side</th>
+                  <th className="pb-2">Entry</th>
+                  <th className="pb-2">Target</th>
+                  <th className="pb-2">Stop</th>
+                  <th className="pb-2">Current</th>
+                  <th className="pb-2">P&L</th>
+                  <th className="pb-2">Confidence</th>
+                  <th className="pb-2">Reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                {openTrades.slice(-5).map((trade: any) => (
+                  <tr key={trade.id ?? `${trade.side}-${trade.entryTime}`} className="border-t border-dark-700 text-gray-300">
+                    <td className={`py-2 font-black ${normalizeDecision(trade.side) === 'BUY' ? 'text-emerald-300' : 'text-red-300'}`}>
+                      {trade.side}
+                    </td>
+                    <td className="py-2">{formatPrice(trade.entry)}</td>
+                    <td className="py-2">{formatPrice(trade.target)}</td>
+                    <td className="py-2">{formatPrice(trade.stop)}</td>
+                    <td className="py-2">{formatPrice(trade.currentPrice)}</td>
+                    <td className={`py-2 font-bold ${toFiniteNumber(trade.currentPnl, 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                      {formatMoney(trade.currentPnl)}
+                    </td>
+                    <td className="py-2">{toFiniteNumber(trade.confidence, 0).toFixed(1)}%</td>
+                    <td className="max-w-[280px] truncate py-2 text-gray-500">{trade.reason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+      {closedTrades.length > 0 ? (
+        <div className="mt-4 rounded-xl border border-dark-700 bg-dark-900/70 p-4">
+          <div className="mb-3 text-xs font-black uppercase tracking-wide text-gray-400">Recent Closed AI Trades</div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] text-left text-xs">
+              <thead className="text-gray-500">
+                <tr>
+                  <th className="pb-2">Result</th>
+                  <th className="pb-2">Side</th>
+                  <th className="pb-2">Entry</th>
+                  <th className="pb-2">Exit</th>
+                  <th className="pb-2">Target</th>
+                  <th className="pb-2">Stop</th>
+                  <th className="pb-2">P&L</th>
+                  <th className="pb-2">R</th>
+                  <th className="pb-2">Exit Reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                {closedTrades.slice(-5).reverse().map((trade: any) => (
+                  <tr key={trade.id ?? `${trade.side}-${trade.exitTime}`} className="border-t border-dark-700 text-gray-300">
+                    <td className={`py-2 font-black ${String(trade.result).toUpperCase() === 'WIN' ? 'text-emerald-300' : 'text-red-300'}`}>
+                      {trade.result ?? 'CLOSED'}
+                    </td>
+                    <td className={`py-2 font-black ${normalizeDecision(trade.side) === 'BUY' ? 'text-emerald-300' : 'text-red-300'}`}>
+                      {trade.side}
+                    </td>
+                    <td className="py-2">{formatPrice(trade.entry)}</td>
+                    <td className="py-2">{formatPrice(trade.exit ?? trade.exitPrice)}</td>
+                    <td className="py-2">{formatPrice(trade.target)}</td>
+                    <td className="py-2">{formatPrice(trade.stop)}</td>
+                    <td className={`py-2 font-bold ${toFiniteNumber(trade.pnl, 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                      {formatMoney(trade.pnl)}
+                    </td>
+                    <td className="py-2">{toFiniteNumber(trade.rMultiple, 0).toFixed(2)}</td>
+                    <td className="py-2 text-gray-500">{trade.exitReason ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
 
-        if normalize_symbol(trade.get("symbol")) != symbol or normalize_timeframe(trade.get("timeframe")) != timeframe:
-            still_open.append(trade)
-            continue
-
-        side = normalize_side(trade.get("side"))
-        target = to_float(trade.get("target"), 0.0)
-        stop = to_float(trade.get("stop"), 0.0)
-        exit_price = 0.0
-        exit_reason = ""
-
-        if side == "BUY":
-            if target > 0 and latest_high >= target:
-                exit_price = target
-                exit_reason = "target_hit"
-            elif stop > 0 and latest_low <= stop:
-                exit_price = stop
-                exit_reason = "stop_hit"
-        elif side == "SELL":
-            if target > 0 and latest_low <= target:
-                exit_price = target
-                exit_reason = "target_hit"
-            elif stop > 0 and latest_high >= stop:
-                exit_price = stop
-                exit_reason = "stop_hit"
-
-        if exit_price > 0:
-            entry = to_float(trade.get("entry"), 0.0)
-            pnl = signed_move(side, entry, exit_price) * point_value(symbol) if entry > 0 else 0.0
-            risk_points = abs(signed_move(side, entry, stop))
-            r_multiple = signed_move(side, entry, exit_price) / risk_points if risk_points > 0 else 0.0
-            trade.update({
-                "status": "CLOSED",
-                "exit": exit_price,
-                "exitPrice": exit_price,
-                "exitReason": exit_reason,
-                "exitTime": now_iso(),
-                "pnl": round(pnl, 4),
-                "rMultiple": round(r_multiple, 4),
-                "result": "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN"),
-                "updatedAt": now_iso(),
-            })
-            closed.append(trade)
-        else:
-            entry = to_float(trade.get("entry"), 0.0)
-            trade["currentPrice"] = current
-            trade["currentPnl"] = round(signed_move(side, entry, current) * point_value(symbol), 4) if entry > 0 and current > 0 else 0.0
-            trade["updatedAt"] = now_iso()
-            still_open.append(trade)
-
-    memory["openTrades"] = still_open
-    memory["closedTrades"] = safe_list(memory.get("closedTrades")) + closed
-    save_memory(memory)
-
-    return {
-        "eventType": "AI_TRADER_EVALUATE",
-        "status": "Evaluated",
-        "dashboardOnly": True,
-        "brokerConnected": False,
-        "symbol": symbol,
-        "timeframe": timeframe,
-        "closedCount": len(closed),
-        "openCount": len(still_open),
-        "closedTrades": closed,
-        "openTrades": [
-            trade for trade in still_open
-            if isinstance(trade, dict)
-            and normalize_symbol(trade.get("symbol")) == symbol
-            and normalize_timeframe(trade.get("timeframe")) == timeframe
-        ],
-        "summary": ai_trader_summary(symbol=symbol, timeframe=timeframe),
-        "createdAt": now_iso(),
-    }
-
-
-def ai_trader_summary(symbol: Any = "", timeframe: Any = "") -> Dict[str, Any]:
-    memory = load_memory()
-    normalized_symbol = normalize_symbol(symbol) if symbol else ""
-    normalized_timeframe = normalize_timeframe(timeframe) if timeframe else ""
-
-    def matches(trade: Dict[str, Any]) -> bool:
-        if normalized_symbol and normalize_symbol(trade.get("symbol")) != normalized_symbol:
-            return False
-        if normalized_timeframe and normalize_timeframe(trade.get("timeframe")) != normalized_timeframe:
-            return False
-        return True
-
-    open_trades = [trade for trade in safe_list(memory.get("openTrades")) if isinstance(trade, dict) and matches(trade)]
-    virtual_open_trades = [trade for trade in safe_list(memory.get("virtualOpenTrades")) if isinstance(trade, dict) and matches(trade)]
-    real_closed_trades = [trade for trade in safe_list(memory.get("closedTrades")) if isinstance(trade, dict) and matches(trade)]
-    virtual_closed_trades = [trade for trade in safe_list(memory.get("virtualClosedTrades")) if isinstance(trade, dict) and matches(trade)]
-    closed_trades = real_closed_trades + virtual_closed_trades
-    stats = summarize_closed_trades(closed_trades)
-    memory_status = ai_memory_status(memory)
-
-    return {
-        "eventType": "AI_TRADER_SUMMARY",
-        "status": "Ready",
-        "dashboardOnly": True,
-        "brokerConnected": False,
-        "symbol": normalized_symbol or "ALL",
-        "timeframe": normalized_timeframe or "ALL",
-        "openTrades": open_trades[-20:],
-        "virtualOpenTrades": virtual_open_trades[-20:],
-        "closedTrades": closed_trades[-20:],
-        "realClosedTrades": real_closed_trades[-20:],
-        "virtualClosedTrades": virtual_closed_trades[-20:],
-        "recentClosedTrades": closed_trades[-10:],
-        "openCount": len(open_trades),
-        "virtualOpenCount": len(virtual_open_trades),
-        "closedCount": len(closed_trades),
-        "realClosedCount": len(real_closed_trades),
-        "virtualClosedCount": len(virtual_closed_trades),
-        "stats": stats,
-        "decisionStats": memory_status["overallDecisionStats"],
-        "memoryStatus": memory_status,
-        "memoryPath": str(MEMORY_PATH),
-        "phase6MemoryFix": True,
-        "createdAt": now_iso(),
-    }
-
-
-    def matches(trade: Dict[str, Any]) -> bool:
-        if normalized_symbol and normalize_symbol(trade.get("symbol")) != normalized_symbol:
-            return False
-        if normalized_timeframe and normalize_timeframe(trade.get("timeframe")) != normalized_timeframe:
-            return False
-        return True
-
-    open_trades = [trade for trade in safe_list(memory.get("openTrades")) if isinstance(trade, dict) and matches(trade)]
-    closed_trades = [trade for trade in safe_list(memory.get("closedTrades")) if isinstance(trade, dict) and matches(trade)]
-    stats = summarize_closed_trades(closed_trades)
-    memory_status = ai_memory_status(memory)
-
-    return {
-        "eventType": "AI_TRADER_SUMMARY",
-        "status": "Ready",
-        "dashboardOnly": True,
-        "brokerConnected": False,
-        "symbol": normalized_symbol or "ALL",
-        "timeframe": normalized_timeframe or "ALL",
-        "openTrades": open_trades[-20:],
-        "closedTrades": closed_trades[-20:],
-        "recentClosedTrades": closed_trades[-10:],
-        "openCount": len(open_trades),
-        "closedCount": len(closed_trades),
-        "stats": stats,
-        "decisionStats": memory_status["overallDecisionStats"],
-        "memoryStatus": memory_status,
-        "memoryPath": str(MEMORY_PATH),
-        "createdAt": now_iso(),
-    }
-
-
-def ai_trader_export() -> Dict[str, Any]:
-    memory = load_memory()
-    return {
-        "eventType": "AI_TRADER_EXPORT",
-        "status": "Ready",
-        "dashboardOnly": True,
-        "brokerConnected": False,
-        "memory": memory,
-        "summary": ai_trader_summary(),
-        "createdAt": now_iso(),
-    }
-
-
-def reset_ai_trader_memory(symbol: Optional[Any] = None, timeframe: Optional[Any] = None) -> Dict[str, Any]:
-    if not symbol and not timeframe:
-        memory = {
-            "version": 1,
-            "createdAt": now_iso(),
-            "updatedAt": now_iso(),
-            "openTrades": [],
-            "closedTrades": [],
-            "decisionLog": [],
-            "virtualOpenTrades": [],
-            "virtualClosedTrades": [],
-        }
-        save_memory(memory)
-        return {
-            "eventType": "AI_TRADER_RESET",
-            "status": "Reset",
-            "dashboardOnly": True,
-            "brokerConnected": False,
-            "createdAt": now_iso(),
-        }
-
-    memory = load_memory()
-    normalized_symbol = normalize_symbol(symbol) if symbol else ""
-    normalized_timeframe = normalize_timeframe(timeframe) if timeframe else ""
-
-    def keep(trade: Any) -> bool:
-        if not isinstance(trade, dict):
-            return False
-        if normalized_symbol and normalize_symbol(trade.get("symbol")) != normalized_symbol:
-            return True
-        if normalized_timeframe and normalize_timeframe(trade.get("timeframe")) != normalized_timeframe:
-            return True
-        return False
-
-    memory["openTrades"] = [trade for trade in safe_list(memory.get("openTrades")) if keep(trade)]
-    memory["closedTrades"] = [trade for trade in safe_list(memory.get("closedTrades")) if keep(trade)]
-    memory["decisionLog"] = [trade for trade in safe_list(memory.get("decisionLog")) if keep(trade)]
-    memory["virtualOpenTrades"] = [trade for trade in safe_list(memory.get("virtualOpenTrades")) if keep(trade)]
-    memory["virtualClosedTrades"] = [trade for trade in safe_list(memory.get("virtualClosedTrades")) if keep(trade)]
-    save_memory(memory)
-
-    return {
-        "eventType": "AI_TRADER_RESET",
-        "status": "PartialReset",
-        "dashboardOnly": True,
-        "brokerConnected": False,
-        "symbol": normalized_symbol or "ALL",
-        "timeframe": normalized_timeframe or "ALL",
-        "createdAt": now_iso(),
-    }
+    </motion.div>
+  )
+}
