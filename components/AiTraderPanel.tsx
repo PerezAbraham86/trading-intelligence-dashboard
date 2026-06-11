@@ -239,6 +239,70 @@ function BlockerBadge({ severity }: { severity: 'high' | 'medium' | 'low' }) {
   )
 }
 
+function getMlStrengthLabel(value: any) {
+  const score = toFiniteNumber(value, 0)
+
+  if (score >= 75) return 'Strong'
+  if (score >= 55) return 'Active'
+  if (score > 0) return 'Learning'
+
+  return 'Waiting'
+}
+
+function getMlStrengthTone(value: any): 'neutral' | 'bull' | 'bear' | 'warn' {
+  const score = toFiniteNumber(value, 0)
+
+  if (score >= 55) return 'bull'
+  if (score > 0) return 'warn'
+
+  return 'neutral'
+}
+
+function MlStatusCard({
+  title,
+  status,
+  confidence,
+  detail,
+  tone = 'neutral',
+}: {
+  title: string
+  status: string
+  confidence: number
+  detail: string
+  tone?: 'neutral' | 'bull' | 'bear' | 'warn'
+}) {
+  const border =
+    tone === 'bull'
+      ? 'border-emerald-400/30 bg-emerald-400/10'
+      : tone === 'bear'
+        ? 'border-red-400/30 bg-red-400/10'
+        : tone === 'warn'
+          ? 'border-amber-400/30 bg-amber-400/10'
+          : 'border-dark-700 bg-dark-900/70'
+
+  const text =
+    tone === 'bull'
+      ? 'text-emerald-200'
+      : tone === 'bear'
+        ? 'text-red-200'
+        : tone === 'warn'
+          ? 'text-amber-200'
+          : 'text-gray-200'
+
+  return (
+    <div className={`rounded-xl border p-4 ${border}`}>
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <div className="text-xs font-black uppercase tracking-wide text-gray-400">{title}</div>
+        <span className={`rounded-full border border-current/30 px-2 py-1 text-[10px] font-black uppercase tracking-wide ${text}`}>
+          {status}
+        </span>
+      </div>
+      <div className={`text-2xl font-black ${text}`}>{confidence.toFixed(1)}%</div>
+      <div className="mt-2 text-xs leading-5 text-gray-400">{detail}</div>
+    </div>
+  )
+}
+
 function readNumberPath(source: any, paths: string[]) {
   for (const path of paths) {
     const value = path.split('.').reduce((current: any, key: string) => {
@@ -730,6 +794,13 @@ export default function AiTraderPanel({
   const memoryStatus = summary?.memoryStatus ?? decision?.details?.memoryStatus ?? {}
   const blockers = getBlockerAnalysis(decision, summary, minConfidence, minRiskReward)
 
+  const directionalContext = decision?.details?.directionalContext ?? {}
+  const ghostMlConfidence = toFiniteNumber(directionalContext.ghostConfidence, 0)
+  const targetMlConfidence = toFiniteNumber(directionalContext.targetConfidence, 0)
+  const entryMlConfidence = toFiniteNumber(directionalContext.entryConfidence, 0)
+  const aiConfidence = toFiniteNumber(decision?.confidence, 0)
+  const aiIsRefreshing = isLoading && Boolean(decision)
+
   const openTrades = Array.isArray(summary?.openTrades) ? summary?.openTrades ?? [] : []
   const closedTrades =
     Array.isArray(summary?.recentClosedTrades)
@@ -755,6 +826,11 @@ export default function AiTraderPanel({
             <span className="rounded-full border border-red-400/30 bg-red-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-red-200">
               No Broker
             </span>
+            {aiIsRefreshing ? (
+              <span className="rounded-full border border-blue-400/30 bg-blue-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-blue-200">
+                Refreshing
+              </span>
+            ) : null}
           </div>
           <p className="mt-1 text-xs text-gray-400">
             Simulated AI trades only. Learns from dashboard entries, targets, stops, P&amp;L, and closed outcomes.
@@ -846,7 +922,7 @@ export default function AiTraderPanel({
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
         <StatBox
           label="AI Decision"
-          value={isLoading ? 'Loading...' : (decision?.decision ?? 'WAITING')}
+          value={decision?.decision ?? (isLoading ? 'Loading...' : 'WAITING')}
           tone={decisionTone as any}
         />
         <StatBox
@@ -861,6 +937,65 @@ export default function AiTraderPanel({
         <StatBox label="Stop" value={formatPrice(decision?.stop)} tone="warn" />
         <StatBox label="Current P&L" value={formatMoney(decision?.currentPnl)} tone={toFiniteNumber(decision?.currentPnl, 0) >= 0 ? 'bull' : 'bear'} />
         <StatBox label="Max P&L" value={formatMoney(decision?.maxPnl)} tone={toFiniteNumber(decision?.maxPnl, 0) >= 0 ? 'bull' : 'bear'} />
+      </div>
+
+      <div className="mt-4 rounded-xl border border-dark-700 bg-dark-900/60 p-4">
+        <div className="mb-3 flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
+          <div>
+            <div className="text-sm font-black text-white">ML System Status</div>
+            <div className="text-xs text-gray-500">
+              Live view of Ghost ML, Target Price ML, and AI Trader learning context.
+            </div>
+          </div>
+          <div className="text-[10px] font-bold uppercase tracking-wide text-gray-500">
+            {aiIsRefreshing ? 'Refreshing without clearing last decision' : 'Stable last decision displayed'}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          <MlStatusCard
+            title="Ghost ML"
+            status={getMlStrengthLabel(ghostMlConfidence)}
+            confidence={ghostMlConfidence}
+            tone={getMlStrengthTone(ghostMlConfidence)}
+            detail={
+              ghostMlConfidence > 0
+                ? 'Ghost ML is contributing to projected candle confidence and AI decision scoring.'
+                : 'Waiting for Ghost ML confidence to flow into the AI context.'
+            }
+          />
+
+          <MlStatusCard
+            title="Target Price ML"
+            status={getMlStrengthLabel(targetMlConfidence)}
+            confidence={targetMlConfidence}
+            tone={getMlStrengthTone(targetMlConfidence)}
+            detail={
+              targetMlConfidence > 0
+                ? `Target ML active. Current target ${formatPrice(decision?.target)} is being used for max P&L and risk/reward.`
+                : 'Waiting for final Target ML confidence from unified ghost/target context.'
+            }
+          />
+
+          <MlStatusCard
+            title="AI Trader"
+            status={formatAiStage(memoryStatus.stage)}
+            confidence={aiConfidence}
+            tone={decision?.allowedToTrade ? 'bull' : aiConfidence >= minConfidence ? 'warn' : 'neutral'}
+            detail={
+              decision?.allowedToTrade
+                ? 'AI is trade-ready for dashboard-only paper execution.'
+                : String(memoryStatus.message ?? 'AI is collecting observations and waiting for a clean setup.')
+            }
+          />
+        </div>
+
+        <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
+          <StatBox label="Entry ML" value={`${entryMlConfidence.toFixed(1)}%`} tone={getMlStrengthTone(entryMlConfidence)} />
+          <StatBox label="Target" value={formatPrice(decision?.target)} />
+          <StatBox label="RR" value={`${toFiniteNumber(decision?.riskReward, 0).toFixed(2)}R`} tone={toFiniteNumber(decision?.riskReward, 0) >= minRiskReward ? 'bull' : 'warn'} />
+          <StatBox label="Refresh State" value={aiIsRefreshing ? 'Refreshing' : 'Stable'} tone={aiIsRefreshing ? 'warn' : 'bull'} />
+        </div>
       </div>
 
       <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-3">
