@@ -17,6 +17,7 @@ import ConnectionStatusBadge from '@/components/ConnectionStatusBadge'
 import MarketSentimentGauge from '@/components/MarketSentimentGauge'
 import UnifiedIntelligenceMatrix from '@/components/UnifiedIntelligenceMatrix'
 import AiTraderPanel from '@/components/AiTraderPanel'
+import AiBrainContextPanel from '@/components/AiBrainContextPanel'
 import { motion } from 'framer-motion'
 import { useApiPolling } from '@/hooks/useApiPolling'
 
@@ -4637,6 +4638,19 @@ export default function Dashboard() {
                 unifiedIntelligence: mainUnifiedIntelligence,
               },
             ]}
+          />
+
+          <AiBrainContextPanel
+            symbol={selectedSymbol}
+            timeframe={selectedTimeframe}
+            signal={augmentedLatestSignal}
+            scorecards={matrixScorecards}
+            mlFeatures={matrixMlFeatures}
+            overlayPayload={mainChartOverlayPayload}
+            unifiedIntelligence={mainUnifiedIntelligence}
+            mainSettings={mainChartIndicatorSettings}
+            miniOneSettings={miniChartOneIndicatorSettings}
+            miniTwoSettings={miniChartTwoIndicatorSettings}
           />
 
           <div className="rounded-2xl border border-purple-400/30 bg-purple-950/10 p-1">
