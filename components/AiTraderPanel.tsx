@@ -125,7 +125,7 @@ function formatCount(value: any) {
 }
 
 function formatAiStage(value: any) {
-  const raw = String(value ?? 'WARMING_UP').replaceAll('_', ' ').toLowerCase()
+  const raw = String(value ?? 'WARMING_UP').replace(/_/g, ' ').toLowerCase()
 
   return raw.replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
