@@ -1116,19 +1116,25 @@ async function fetchSharedCandlePayload(
     const previous = SHARED_CANDLE_CACHE.get(key)
     const apiLimit = Math.max(requestedLimit, previous?.limit ?? 0)
 
+    const startYm = new Date().toISOString().slice(0, 7)
+
     const params = new URLSearchParams({
       symbol: normalizedSymbol,
       timeframe: normalizedTimeframe,
+      start_ym: startYm,
       limit: String(apiLimit),
+      extended: 'true',
+      badj: 'true',
+      dadj: 'false',
       force: 'false',
     })
 
-    const response = await fetch(`${apiBaseUrl}/api/candles?${params.toString()}`, {
+    const response = await fetch(`${apiBaseUrl}/api/insightsentry/history?${params.toString()}`, {
       cache: 'no-store',
     })
 
     if (!response.ok) {
-      throw new Error(`Candle API error ${response.status}`)
+      throw new Error(`InsightSentry historical OHLCV error ${response.status}`)
     }
 
     const json = await response.json()
@@ -1138,12 +1144,14 @@ async function fetchSharedCandlePayload(
 
     const entry: SharedCandleCacheEntry = {
       candles,
-      overlayPayload,
-      unifiedIntelligence,
+      // Historical OHLCV is the candle source only. Preserve any previous
+      // overlay/intelligence payload so live refreshes do not blank the canvas.
+      overlayPayload: overlayPayload ?? previous?.overlayPayload ?? null,
+      unifiedIntelligence: unifiedIntelligence ?? previous?.unifiedIntelligence ?? null,
       updatedAt: Date.now(),
       limit: apiLimit,
       provider: typeof json?.provider === 'string' ? json.provider : undefined,
-      source: typeof json?.source === 'string' ? json.source : undefined,
+      source: typeof json?.source === 'string' ? json.source : 'insightsentry_v3_historical_ohlcv',
     }
 
     SHARED_CANDLE_CACHE.set(key, entry)
@@ -1235,7 +1243,7 @@ function getUnifiedOverlayPayload(...sources: unknown[]) {
 
       /**
        * Important:
-       * /api/candles can expose scorecards/mlFeatures at the top level and
+       * older candle payloads can expose scorecards/mlFeatures at the top level and
        * inside overlayPayload. Older cached payloads may have an overlayPayload
        * but empty scorecard objects. Preserve the visual overlay object, but
        * enrich it from the full API response so the ML Scorecards panel does
@@ -3223,14 +3231,27 @@ function useChartCandles(
     let cancelled = false
     let intervalId: ReturnType<typeof setInterval> | null = null
     let liveEventSource: EventSource | null = null
+    let liveSourceConnected = false
+
+    function stopPolling() {
+      if (intervalId) {
+        clearInterval(intervalId)
+        intervalId = null
+      }
+    }
+
+    function startPolling() {
+      if (intervalId || liveSourceConnected) return
+      intervalId = setInterval(fetchCandles, pollMs)
+    }
 
     function applyCachedPayload() {
       const cached = readSharedCandleCache(symbol, timeframe, limit)
       if (!cached || cancelled) return false
 
       setCandles(cached.candles)
-      setOverlayPayload(cached.overlayPayload)
-      setUnifiedIntelligence(cached.unifiedIntelligence)
+      setOverlayPayload((previous) => cached.overlayPayload ?? previous)
+      setUnifiedIntelligence((previous) => cached.unifiedIntelligence ?? previous)
 
       const cachedLivePrice = readSharedLivePriceCache(symbol)
       if (cachedLivePrice) {
@@ -3254,7 +3275,7 @@ function useChartCandles(
         // Priority rule:
         // Main chart owns the refresh. Mini charts reuse main/shared cache when
         // the symbol + timeframe already exist, so identical mini charts do not
-        // start a second /api/candles request.
+        // start a second historical OHLCV request.
         if (priority === 'mini' && cachedWasApplied) {
           setIsLoading(false)
           return
@@ -3267,8 +3288,12 @@ function useChartCandles(
 
         if (!cancelled) {
           setCandles(nextPayload.candles)
-          setOverlayPayload(nextPayload.overlayPayload)
-          setUnifiedIntelligence(nextPayload.unifiedIntelligence)
+
+          // Keep overlay/intelligence stable during polling/history refresh.
+          // Historical OHLCV usually returns candles only, so never replace a
+          // valid canvas overlay with null.
+          setOverlayPayload((previous) => nextPayload.overlayPayload ?? previous)
+          setUnifiedIntelligence((previous) => nextPayload.unifiedIntelligence ?? previous)
         }
       } catch (error) {
         console.error('Lightweight chart candle sync error:', error)
@@ -3298,7 +3323,7 @@ function useChartCandles(
     setOverlayPayload(null)
     setUnifiedIntelligence(null)
     fetchCandles()
-    intervalId = setInterval(fetchCandles, pollMs)
+    startPolling()
 
     if (typeof window !== 'undefined' && typeof EventSource !== 'undefined') {
       const params = new URLSearchParams({
@@ -3309,6 +3334,13 @@ function useChartCandles(
       })
 
       liveEventSource = new EventSource(`${activeApiBaseUrl}/api/live-feed/stream?${params.toString()}`)
+
+      liveEventSource.onopen = () => {
+        liveSourceConnected = true
+        // Once WebSocket/SSE live candles are active, stop the historical
+        // polling loop so old refreshes do not fight live candles or overlays.
+        stopPolling()
+      }
 
       liveEventSource.onmessage = (event) => {
         if (cancelled || !event.data) return
@@ -3327,7 +3359,20 @@ function useChartCandles(
 
           setCandles((previousCandles) => {
             const merged = mergeLiveCandleIntoCandles(previousCandles, liveCandle, limit)
-            writeLiveCandleToSharedCache(symbol, timeframe, limit, liveCandle, overlayPayload, unifiedIntelligence)
+            const cacheEntry = writeLiveCandleToSharedCache(
+              symbol,
+              timeframe,
+              limit,
+              liveCandle,
+              overlayPayload,
+              unifiedIntelligence
+            )
+
+            if (cacheEntry) {
+              setOverlayPayload((previous) => cacheEntry.overlayPayload ?? previous)
+              setUnifiedIntelligence((previous) => cacheEntry.unifiedIntelligence ?? previous)
+            }
+
             return merged
           })
         } catch {
@@ -3352,7 +3397,20 @@ function useChartCandles(
 
           setCandles((previousCandles) => {
             const merged = mergeLiveCandleIntoCandles(previousCandles, liveCandle, limit)
-            writeLiveCandleToSharedCache(symbol, timeframe, limit, liveCandle, overlayPayload, unifiedIntelligence)
+            const cacheEntry = writeLiveCandleToSharedCache(
+              symbol,
+              timeframe,
+              limit,
+              liveCandle,
+              overlayPayload,
+              unifiedIntelligence
+            )
+
+            if (cacheEntry) {
+              setOverlayPayload((previous) => cacheEntry.overlayPayload ?? previous)
+              setUnifiedIntelligence((previous) => cacheEntry.unifiedIntelligence ?? previous)
+            }
+
             return merged
           })
         } catch {
@@ -3361,7 +3419,9 @@ function useChartCandles(
       })
 
       liveEventSource.onerror = () => {
-        // Keep REST candle polling as fallback if SSE disconnects.
+        // Restart historical polling only when the live stream disconnects.
+        liveSourceConnected = false
+        startPolling()
       }
     }
 
@@ -3737,6 +3797,27 @@ function LightweightChartPanel({
     return buildGhostCandlesForChart(engineState, candles, normalizedTimeframe)
   }, [candles, compact, engineState, ghostCandles, normalizedTimeframe, unifiedIntelligence, unifiedOverlayPayload])
 
+  const overlayStableCandleKey = useMemo(() => {
+    if (candles.length === 0) return 'empty'
+
+    // Use the previous candle as the overlay anchor. The current live candle can
+    // change many times per minute; overlays should not rebuild on every tick.
+    const anchorIndex = candles.length > 1 ? candles.length - 2 : candles.length - 1
+    const anchor = candles[anchorIndex]
+    const anchorTime = anchor ? String(anchor.time) : 'na'
+    const anchorClose = anchor ? Number(anchor.close).toFixed(8) : 'na'
+
+    return `${candles.length}:${anchorTime}:${anchorClose}`
+  }, [candles])
+
+  const overlayBaseCandles = useMemo(() => {
+    if (candles.length <= 1) return candles
+
+    // Exclude the still-forming live candle from fallback SMC/AlphaX overlay
+    // calculations. This keeps OB/zones/profile from blinking intrabar.
+    return candles.slice(0, -1)
+  }, [candles, overlayStableCandleKey])
+
   const overlayPayload = useMemo(() => {
     if (!showOverlayLines || compact) return null
 
@@ -3745,8 +3826,8 @@ function LightweightChartPanel({
       engineState
     )
 
-    const fallbackPayload = candles.length >= 20
-      ? buildChartOverlayPayload(dashboardCandlesToOverlayCandles(candles), {
+    const fallbackPayload = overlayBaseCandles.length >= 20
+      ? buildChartOverlayPayload(dashboardCandlesToOverlayCandles(overlayBaseCandles), {
           smcSwingLength: 3,
           smcUseCloseBreak: true,
           alphaXLookback: 20,
@@ -3771,7 +3852,7 @@ function LightweightChartPanel({
      * - order blocks
      */
     return mergeStableOverlayPayloads(fallbackPayload, backendOverlayPayload)
-  }, [candles, compact, engineState, showOverlayLines, unifiedOverlayPayload])
+  }, [compact, engineState, overlayBaseCandles, showOverlayLines, unifiedOverlayPayload])
 
   const scorecards = useMemo(() => {
     return getScorecardsFromOverlayPayload(
