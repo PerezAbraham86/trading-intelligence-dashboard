@@ -15,6 +15,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from api.ghost_ml import (
@@ -166,6 +167,32 @@ except Exception:
         reset_unified_intelligence_memory = None
         unified_intelligence_export = None
         unified_memory_status = None
+
+
+
+try:
+    from api.insightsentry_live_feed import (
+        get_latest_live_snapshot,
+        live_feed_event_generator,
+        live_feed_ping_generator,
+        live_feed_status,
+        refresh_insightsentry_websocket_key,
+    )
+except Exception:
+    try:
+        from insightsentry_live_feed import (
+            get_latest_live_snapshot,
+            live_feed_event_generator,
+            live_feed_ping_generator,
+            live_feed_status,
+            refresh_insightsentry_websocket_key,
+        )
+    except Exception:
+        get_latest_live_snapshot = None
+        live_feed_event_generator = None
+        live_feed_ping_generator = None
+        live_feed_status = None
+        refresh_insightsentry_websocket_key = None
 
 
 try:
@@ -7963,3 +7990,86 @@ if __name__ == "__main__":
 
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("api.main:app", host="0.0.0.0", port=port, reload=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 8 — INSIGHTSENTRY LIVE PRICE / CANDLE FEED ROUTES
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/live-feed/status")
+def api_live_feed_status() -> Dict[str, Any]:
+    if live_feed_status is None:
+        raise HTTPException(status_code=503, detail="api.insightsentry_live_feed module unavailable")
+    return live_feed_status()
+
+
+@app.get("/live-feed/status")
+def api_live_feed_status_alias() -> Dict[str, Any]:
+    return api_live_feed_status()
+
+
+@app.get("/api/live-feed/refresh-key")
+def api_live_feed_refresh_key(force: bool = False) -> Dict[str, Any]:
+    if refresh_insightsentry_websocket_key is None:
+        raise HTTPException(status_code=503, detail="api.insightsentry_live_feed module unavailable")
+    try:
+        return refresh_insightsentry_websocket_key(force=force)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+@app.get("/live-feed/refresh-key")
+def api_live_feed_refresh_key_alias(force: bool = False) -> Dict[str, Any]:
+    return api_live_feed_refresh_key(force=force)
+
+
+@app.get("/api/live-feed/latest")
+def api_live_feed_latest(symbol: str = "MES1!", timeframe: str = "1m") -> Dict[str, Any]:
+    if get_latest_live_snapshot is None:
+        raise HTTPException(status_code=503, detail="api.insightsentry_live_feed module unavailable")
+    return get_latest_live_snapshot(symbol=symbol, timeframe=timeframe)
+
+
+@app.get("/live-feed/latest")
+def api_live_feed_latest_alias(symbol: str = "MES1!", timeframe: str = "1m") -> Dict[str, Any]:
+    return api_live_feed_latest(symbol=symbol, timeframe=timeframe)
+
+
+@app.get("/api/live-feed/stream")
+def api_live_feed_stream(
+    symbol: str = "MES1!",
+    timeframe: str = "1m",
+    limit: int = 700,
+    pollSeconds: float = 1.0,
+) -> StreamingResponse:
+    if live_feed_event_generator is None:
+        raise HTTPException(status_code=503, detail="api.insightsentry_live_feed module unavailable")
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(
+        live_feed_event_generator(symbol=symbol, timeframe=timeframe, limit=limit, pollSeconds=pollSeconds),
+        media_type="text/event-stream",
+        headers=headers,
+    )
+
+
+@app.get("/live-feed/stream")
+def api_live_feed_stream_alias(
+    symbol: str = "MES1!",
+    timeframe: str = "1m",
+    limit: int = 700,
+    pollSeconds: float = 1.0,
+) -> StreamingResponse:
+    return api_live_feed_stream(symbol=symbol, timeframe=timeframe, limit=limit, pollSeconds=pollSeconds)
+
+
+@app.get("/api/live-feed/ping")
+def api_live_feed_ping() -> StreamingResponse:
+    if live_feed_ping_generator is None:
+        raise HTTPException(status_code=503, detail="api.insightsentry_live_feed module unavailable")
+    return StreamingResponse(live_feed_ping_generator(), media_type="text/event-stream")
+
