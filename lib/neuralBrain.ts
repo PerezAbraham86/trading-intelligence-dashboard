@@ -87,7 +87,7 @@ function firstNumber(payload: unknown, keys: string[], fallback = 0): number {
   return fallback
 }
 
-function latestCandleFeatures(candles: Array<Record<string, unknown>> = {}) {
+function latestCandleFeatures(candles: Array<Record<string, unknown>> = []) {
   const rows = Array.isArray(candles) ? candles : []
   if (!rows.length) {
     return {
