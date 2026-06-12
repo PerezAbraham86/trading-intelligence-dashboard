@@ -923,6 +923,67 @@ function extractLiveFeedPriceFromPayload(payload: any, liveCandle?: any): LiveFe
   return null
 }
 
+function extractLiveCandleFromStreamPayload(payload: any): any | null {
+  if (!payload || typeof payload !== 'object') return null
+
+  const direct =
+    payload?.candle ??
+    payload?.liveCandle ??
+    payload?.bar ??
+    payload?.liveBar ??
+    payload?.ohlc ??
+    payload?.data?.candle ??
+    payload?.data?.bar ??
+    payload?.data?.ohlc ??
+    payload?.quote?.candle ??
+    null
+
+  if (direct && typeof direct === 'object') return direct
+
+  const close = toFiniteNumber(
+    payload?.close ??
+      payload?.c ??
+      payload?.price ??
+      payload?.livePrice ??
+      payload?.currentPrice ??
+      payload?.current ??
+      payload?.last ??
+      payload?.lastPrice ??
+      payload?.markPrice ??
+      payload?.quote?.last ??
+      payload?.quote?.price ??
+      payload?.quote?.bid ??
+      payload?.quote?.ask ??
+      payload?.data?.last ??
+      payload?.data?.price,
+    NaN
+  )
+
+  if (!Number.isFinite(close) || close <= 0) return null
+
+  const open = toFiniteNumber(payload?.open ?? payload?.o, close)
+  const high = Math.max(toFiniteNumber(payload?.high ?? payload?.h, close), open, close)
+  const low = Math.min(toFiniteNumber(payload?.low ?? payload?.l, close), open, close)
+
+  return {
+    symbol: payload?.symbol ?? payload?.ticker,
+    timeframe: payload?.timeframe,
+    time:
+      payload?.time ??
+      payload?.timestamp ??
+      payload?.t ??
+      payload?.createdAt ??
+      Math.floor(Date.now() / 1000),
+    open,
+    high,
+    low,
+    close,
+    volume: toFiniteNumber(payload?.volume ?? payload?.v, 0),
+    source: payload?.source ?? payload?.provider ?? 'phase8_live_feed_sse',
+  }
+}
+
+
 function writeSharedLivePriceCache(snapshot: LiveFeedSnapshot | null) {
   if (!snapshot || !Number.isFinite(snapshot.price) || snapshot.price <= 0) return null
 
@@ -3254,7 +3315,7 @@ function useChartCandles(
 
         try {
           const payload = JSON.parse(event.data)
-          const liveCandle = payload?.candle ?? payload?.liveCandle ?? payload?.bar
+          const liveCandle = extractLiveCandleFromStreamPayload(payload)
           if (!liveCandle) return
 
           const livePriceSnapshot = writeSharedLivePriceCache(
@@ -3279,7 +3340,7 @@ function useChartCandles(
 
         try {
           const payload = JSON.parse(event.data)
-          const liveCandle = payload?.candle ?? payload?.liveCandle ?? payload?.bar
+          const liveCandle = extractLiveCandleFromStreamPayload(payload)
           if (!liveCandle) return
 
           const livePriceSnapshot = writeSharedLivePriceCache(
@@ -3309,7 +3370,7 @@ function useChartCandles(
       if (intervalId) clearInterval(intervalId)
       if (liveEventSource) liveEventSource.close()
     }
-  }, [apiBaseUrl, isClient, symbol, timeframe, limit, pollMs, enabled, priority, onLivePriceUpdate, overlayPayload, unifiedIntelligence])
+  }, [apiBaseUrl, isClient, symbol, timeframe, limit, pollMs, enabled, priority, onLivePriceUpdate])
 
   return {
     candles,
