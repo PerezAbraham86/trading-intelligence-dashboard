@@ -141,6 +141,34 @@ except Exception:
 
 
 try:
+    from api.unified_intelligence_memory import (
+        apply_unified_memory_adjustments,
+        evaluate_unified_intelligence_outcome,
+        remember_context_snapshot,
+        reset_unified_intelligence_memory,
+        unified_intelligence_export,
+        unified_memory_status,
+    )
+except Exception:
+    try:
+        from unified_intelligence_memory import (
+            apply_unified_memory_adjustments,
+            evaluate_unified_intelligence_outcome,
+            remember_context_snapshot,
+            reset_unified_intelligence_memory,
+            unified_intelligence_export,
+            unified_memory_status,
+        )
+    except Exception:
+        apply_unified_memory_adjustments = None
+        evaluate_unified_intelligence_outcome = None
+        remember_context_snapshot = None
+        reset_unified_intelligence_memory = None
+        unified_intelligence_export = None
+        unified_memory_status = None
+
+
+try:
     from api.ml_feature_store import (
         get_ml_feature_store_summary,
         get_recent_ml_feature_snapshots,
@@ -416,6 +444,34 @@ class ProjectionEnginePayload(BaseModel):
     unifiedIntelligence: Optional[Any] = None
     externalTables: Optional[Any] = None
     context: Optional[Any] = None
+
+
+class UnifiedIntelligenceMemoryPayload(BaseModel):
+    # Phase 7 memory payload. Keep loose so frontend context snapshots, matrices,
+    # projection-engine state, candle arrays, and outcome objects never 422 before
+    # the unified memory normalizer can read them.
+    symbol: Optional[Any] = "MES1!"
+    timeframe: Optional[Any] = "1m"
+    candles: Optional[Any] = None
+    limit: Optional[Any] = 800
+    currentPrice: Optional[Any] = None
+    price: Optional[Any] = None
+
+    signal: Optional[Any] = None
+    scorecards: Optional[Any] = None
+    mlFeatures: Optional[Any] = None
+    overlayPayload: Optional[Any] = None
+    chartOverlays: Optional[Any] = None
+    unifiedIntelligence: Optional[Any] = None
+    externalTables: Optional[Any] = None
+    projectionEngine: Optional[Any] = None
+    projectionEngineContext: Optional[Any] = None
+    context: Optional[Any] = None
+
+    snapshotId: Optional[Any] = None
+    outcome: Optional[Any] = None
+    rows: Optional[Any] = None
+    resetAll: Optional[Any] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -6571,6 +6627,38 @@ def unified_intelligence(symbol: str = "MES1!", timeframe: str = "1m", limit: in
         ml_feature_store_status=ml_feature_store_status_payload,
     )
     payload["force"] = bool(force)
+
+    # Phase 7: Unified Intelligence now has its own backend learning memory.
+    # Save a lightweight context snapshot whenever this route is called, but never
+    # let memory write failures break the dashboard. Duplicate snapshots are
+    # compressed inside api/unified_intelligence_memory.py.
+    if remember_context_snapshot is not None:
+        try:
+            latest_price = to_float(candles[-1].get("close"), 0) if candles else 0
+            learn_result = remember_context_snapshot(
+                symbol=normalized_symbol,
+                timeframe=normalized_timeframe,
+                candles=candles[-200:] if candles else [],
+                currentPrice=latest_price,
+                signal=LATEST_SIGNAL if isinstance(LATEST_SIGNAL, dict) else {},
+                unifiedIntelligence=payload,
+                overlayPayload=overlay_payload,
+                scorecards=overlay_payload.get("scorecards", {}) if isinstance(overlay_payload, dict) else {},
+                mlFeatures=overlay_payload.get("mlFeatures", {}) if isinstance(overlay_payload, dict) else {},
+            )
+            payload["unifiedMemory"] = learn_result.get("memoryStatus") if isinstance(learn_result, dict) else None
+        except Exception as error:
+            payload["unifiedMemory"] = {
+                "status": "MemoryWarning",
+                "error": str(error)[:300],
+                "createdAt": now_iso(),
+            }
+    elif unified_memory_status is not None:
+        try:
+            payload["unifiedMemory"] = unified_memory_status(symbol=normalized_symbol, timeframe=normalized_timeframe)
+        except Exception as error:
+            payload["unifiedMemory"] = {"status": "MemoryWarning", "error": str(error)[:300]}
+
     return payload
 
 @app.get("/api/ticker-news")
@@ -7338,6 +7426,265 @@ async def webhook_tradingview(request: FastAPIRequest) -> Dict[str, Any]:
         "createdAt": now_iso(),
     }
 
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 7: UNIFIED INTELLIGENCE MEMORY ROUTES
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _ui_memory_payload_to_dict(payload: Any) -> Dict[str, Any]:
+    data = model_to_dict(payload)
+    if not isinstance(data, dict):
+        data = {}
+    return data
+
+
+def _ui_memory_symbol_timeframe(data: Dict[str, Any]) -> Tuple[str, str]:
+    symbol = normalize_symbol(str(data.get("symbol") or data.get("ticker") or "MES1!"))
+    timeframe = normalize_timeframe(str(data.get("timeframe") or data.get("tf") or "1m"))
+    return symbol, timeframe
+
+
+def _ui_memory_candles_from_payload(data: Dict[str, Any], symbol: str, timeframe: str, limit: int) -> List[Dict[str, Any]]:
+    raw_candles = data.get("candles")
+    candles = raw_candles if isinstance(raw_candles, list) else []
+
+    normalized: List[Dict[str, Any]] = []
+    for item in candles:
+        if isinstance(item, dict):
+            candle = dict(item)
+            candle["symbol"] = normalize_symbol(str(candle.get("symbol") or symbol))
+            candle["timeframe"] = normalize_timeframe(str(candle.get("timeframe") or timeframe))
+            normalized.append(candle)
+
+    normalized = filter_valid_candles_for_symbol(merge_candles_by_time(normalized), symbol)[-limit:]
+    if normalized:
+        return normalized
+
+    try:
+        return get_dashboard_candles(symbol, timeframe, limit)
+    except Exception as error:
+        print(f"[Unified Intelligence Memory] candle fallback failed: {error}")
+        return []
+
+
+def _ui_memory_context_from_payload(data: Dict[str, Any]) -> Dict[str, Any]:
+    context = data.get("context") if isinstance(data.get("context"), dict) else {}
+
+    overlay_payload = (
+        data.get("overlayPayload")
+        if isinstance(data.get("overlayPayload"), dict)
+        else data.get("chartOverlays")
+        if isinstance(data.get("chartOverlays"), dict)
+        else context.get("overlayPayload")
+        if isinstance(context.get("overlayPayload"), dict)
+        else context.get("chartOverlays")
+        if isinstance(context.get("chartOverlays"), dict)
+        else {}
+    )
+
+    scorecards = (
+        data.get("scorecards")
+        if isinstance(data.get("scorecards"), dict)
+        else overlay_payload.get("scorecards")
+        if isinstance(overlay_payload, dict) and isinstance(overlay_payload.get("scorecards"), dict)
+        else context.get("scorecards")
+        if isinstance(context.get("scorecards"), dict)
+        else {}
+    )
+
+    ml_features = (
+        data.get("mlFeatures")
+        if isinstance(data.get("mlFeatures"), dict)
+        else overlay_payload.get("mlFeatures")
+        if isinstance(overlay_payload, dict) and isinstance(overlay_payload.get("mlFeatures"), dict)
+        else context.get("mlFeatures")
+        if isinstance(context.get("mlFeatures"), dict)
+        else {}
+    )
+
+    unified_intelligence = (
+        data.get("unifiedIntelligence")
+        if isinstance(data.get("unifiedIntelligence"), dict)
+        else context.get("unifiedIntelligence")
+        if isinstance(context.get("unifiedIntelligence"), dict)
+        else {}
+    )
+
+    projection_engine = (
+        data.get("projectionEngine")
+        if isinstance(data.get("projectionEngine"), dict)
+        else data.get("projectionEngineContext")
+        if isinstance(data.get("projectionEngineContext"), dict)
+        else unified_intelligence.get("projectionEngine")
+        if isinstance(unified_intelligence, dict) and isinstance(unified_intelligence.get("projectionEngine"), dict)
+        else unified_intelligence.get("unifiedProjectionEngine")
+        if isinstance(unified_intelligence, dict) and isinstance(unified_intelligence.get("unifiedProjectionEngine"), dict)
+        else context.get("projectionEngine")
+        if isinstance(context.get("projectionEngine"), dict)
+        else {}
+    )
+
+    signal = (
+        data.get("signal")
+        if isinstance(data.get("signal"), dict)
+        else context.get("signal")
+        if isinstance(context.get("signal"), dict)
+        else LATEST_SIGNAL
+        if isinstance(LATEST_SIGNAL, dict)
+        else {}
+    )
+
+    external_tables = (
+        data.get("externalTables")
+        if isinstance(data.get("externalTables"), dict)
+        else context.get("externalTables")
+        if isinstance(context.get("externalTables"), dict)
+        else {}
+    )
+
+    return {
+        "signal": signal if isinstance(signal, dict) else {},
+        "unifiedIntelligence": unified_intelligence if isinstance(unified_intelligence, dict) else {},
+        "overlayPayload": overlay_payload if isinstance(overlay_payload, dict) else {},
+        "scorecards": scorecards if isinstance(scorecards, dict) else {},
+        "mlFeatures": ml_features if isinstance(ml_features, dict) else {},
+        "externalTables": external_tables if isinstance(external_tables, dict) else {},
+        "projectionEngine": projection_engine if isinstance(projection_engine, dict) else {},
+    }
+
+
+def _ui_memory_build_kwargs(data: Dict[str, Any], include_candles: bool = True) -> Dict[str, Any]:
+    symbol, timeframe = _ui_memory_symbol_timeframe(data)
+    limit = _projection_int(data.get("limit"), 800, 50, 5000)
+    candles = _ui_memory_candles_from_payload(data, symbol, timeframe, limit) if include_candles else []
+    context = _ui_memory_context_from_payload(data)
+    current_price = data.get("currentPrice") or data.get("price") or (candles[-1].get("close") if candles else None)
+
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "candles": candles,
+        "currentPrice": current_price,
+        "signal": context["signal"],
+        "unifiedIntelligence": context["unifiedIntelligence"],
+        "overlayPayload": context["overlayPayload"],
+        "scorecards": context["scorecards"],
+        "mlFeatures": context["mlFeatures"],
+        "projectionEngine": context["projectionEngine"],
+    }
+
+
+@app.post("/api/unified-intelligence/learn")
+async def api_unified_intelligence_learn(payload: UnifiedIntelligenceMemoryPayload) -> Dict[str, Any]:
+    if remember_context_snapshot is None:
+        raise HTTPException(status_code=503, detail="api.unified_intelligence_memory module is unavailable")
+
+    data = _ui_memory_payload_to_dict(payload)
+    kwargs = _ui_memory_build_kwargs(data, include_candles=True)
+    return remember_context_snapshot(**kwargs)
+
+
+@app.post("/unified-intelligence/learn")
+async def api_unified_intelligence_learn_alias(payload: UnifiedIntelligenceMemoryPayload) -> Dict[str, Any]:
+    return await api_unified_intelligence_learn(payload)
+
+
+@app.post("/api/unified-intelligence/evaluate")
+async def api_unified_intelligence_evaluate(payload: UnifiedIntelligenceMemoryPayload) -> Dict[str, Any]:
+    if evaluate_unified_intelligence_outcome is None:
+        raise HTTPException(status_code=503, detail="api.unified_intelligence_memory module is unavailable")
+
+    data = _ui_memory_payload_to_dict(payload)
+    kwargs = _ui_memory_build_kwargs(data, include_candles=True)
+    outcome = data.get("outcome") if isinstance(data.get("outcome"), dict) else None
+    snapshot_id = str(data.get("snapshotId") or "") or None
+
+    return evaluate_unified_intelligence_outcome(
+        snapshotId=snapshot_id,
+        outcome=outcome,
+        **kwargs,
+    )
+
+
+@app.post("/unified-intelligence/evaluate")
+async def api_unified_intelligence_evaluate_alias(payload: UnifiedIntelligenceMemoryPayload) -> Dict[str, Any]:
+    return await api_unified_intelligence_evaluate(payload)
+
+
+@app.get("/api/unified-intelligence/status")
+@app.get("/api/unified-intelligence/memory")
+@app.get("/api/unified-intelligence-memory/status")
+async def api_unified_intelligence_memory_status(symbol: str = "", timeframe: str = "") -> Dict[str, Any]:
+    if unified_memory_status is None:
+        raise HTTPException(status_code=503, detail="api.unified_intelligence_memory module is unavailable")
+
+    return unified_memory_status(symbol=symbol, timeframe=timeframe)
+
+
+@app.get("/unified-intelligence/status")
+async def api_unified_intelligence_memory_status_alias(symbol: str = "", timeframe: str = "") -> Dict[str, Any]:
+    return await api_unified_intelligence_memory_status(symbol=symbol, timeframe=timeframe)
+
+
+@app.post("/api/unified-intelligence/adjust")
+async def api_unified_intelligence_adjust(payload: UnifiedIntelligenceMemoryPayload) -> Dict[str, Any]:
+    if apply_unified_memory_adjustments is None:
+        raise HTTPException(status_code=503, detail="api.unified_intelligence_memory module is unavailable")
+
+    data = _ui_memory_payload_to_dict(payload)
+    symbol, timeframe = _ui_memory_symbol_timeframe(data)
+    rows = data.get("rows") if isinstance(data.get("rows"), list) else []
+    context = data.get("context") if isinstance(data.get("context"), dict) else {}
+
+    return apply_unified_memory_adjustments(
+        symbol=symbol,
+        timeframe=timeframe,
+        rows=rows,
+        context=context,
+    )
+
+
+@app.post("/unified-intelligence/adjust")
+async def api_unified_intelligence_adjust_alias(payload: UnifiedIntelligenceMemoryPayload) -> Dict[str, Any]:
+    return await api_unified_intelligence_adjust(payload)
+
+
+@app.get("/api/unified-intelligence/export")
+@app.get("/api/unified-intelligence-memory/export")
+async def api_unified_intelligence_memory_export() -> Dict[str, Any]:
+    if unified_intelligence_export is None:
+        raise HTTPException(status_code=503, detail="api.unified_intelligence_memory module is unavailable")
+
+    return unified_intelligence_export()
+
+
+@app.get("/unified-intelligence/export")
+async def api_unified_intelligence_memory_export_alias() -> Dict[str, Any]:
+    return await api_unified_intelligence_memory_export()
+
+
+@app.post("/api/unified-intelligence/reset")
+@app.post("/api/unified-intelligence-memory/reset")
+async def api_unified_intelligence_memory_reset(payload: UnifiedIntelligenceMemoryPayload) -> Dict[str, Any]:
+    if reset_unified_intelligence_memory is None:
+        raise HTTPException(status_code=503, detail="api.unified_intelligence_memory module is unavailable")
+
+    data = _ui_memory_payload_to_dict(payload)
+    reset_all = _projection_bool(data.get("resetAll"), False)
+
+    if reset_all:
+        return reset_unified_intelligence_memory(symbol=None, timeframe=None)
+
+    symbol = data.get("symbol")
+    timeframe = data.get("timeframe")
+    return reset_unified_intelligence_memory(symbol=symbol, timeframe=timeframe)
+
+
+@app.post("/unified-intelligence/reset")
+async def api_unified_intelligence_memory_reset_alias(payload: UnifiedIntelligenceMemoryPayload) -> Dict[str, Any]:
+    return await api_unified_intelligence_memory_reset(payload)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
