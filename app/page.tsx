@@ -3250,8 +3250,8 @@ function useChartCandles(
       if (!cached || cancelled) return false
 
       setCandles(cached.candles)
-      setOverlayPayload((previous: ChartOverlayPayload | null) => cached.overlayPayload ?? previous)
-      setUnifiedIntelligence((previous: UnifiedIntelligenceState | null) => cached.unifiedIntelligence ?? previous)
+      setOverlayPayload((previous: any | null) => cached.overlayPayload ?? previous)
+      setUnifiedIntelligence((previous: any | null) => cached.unifiedIntelligence ?? previous)
 
       const cachedLivePrice = readSharedLivePriceCache(symbol)
       if (cachedLivePrice) {
@@ -3292,8 +3292,8 @@ function useChartCandles(
           // Keep overlay/intelligence stable during polling/history refresh.
           // Historical OHLCV usually returns candles only, so never replace a
           // valid canvas overlay with null.
-          setOverlayPayload((previous: ChartOverlayPayload | null) => nextPayload.overlayPayload ?? previous)
-          setUnifiedIntelligence((previous: UnifiedIntelligenceState | null) => nextPayload.unifiedIntelligence ?? previous)
+          setOverlayPayload((previous: any | null) => nextPayload.overlayPayload ?? previous)
+          setUnifiedIntelligence((previous: any | null) => nextPayload.unifiedIntelligence ?? previous)
         }
       } catch (error) {
         console.error('Lightweight chart candle sync error:', error)
@@ -3369,8 +3369,8 @@ function useChartCandles(
             )
 
             if (cacheEntry) {
-              setOverlayPayload((previous: ChartOverlayPayload | null) => cacheEntry.overlayPayload ?? previous)
-              setUnifiedIntelligence((previous: UnifiedIntelligenceState | null) => cacheEntry.unifiedIntelligence ?? previous)
+              setOverlayPayload((previous: any | null) => cacheEntry.overlayPayload ?? previous)
+              setUnifiedIntelligence((previous: any | null) => cacheEntry.unifiedIntelligence ?? previous)
             }
 
             return merged
@@ -3407,8 +3407,8 @@ function useChartCandles(
             )
 
             if (cacheEntry) {
-              setOverlayPayload((previous: ChartOverlayPayload | null) => cacheEntry.overlayPayload ?? previous)
-              setUnifiedIntelligence((previous: UnifiedIntelligenceState | null) => cacheEntry.unifiedIntelligence ?? previous)
+              setOverlayPayload((previous: any | null) => cacheEntry.overlayPayload ?? previous)
+              setUnifiedIntelligence((previous: any | null) => cacheEntry.unifiedIntelligence ?? previous)
             }
 
             return merged
