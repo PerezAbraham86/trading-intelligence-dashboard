@@ -510,6 +510,12 @@ function buildProjectionEngineSnapshot(projectionEngine: any) {
     conflict,
     source: String(projectionEngine?.activeTargetSource ?? projectionEngine?.target?.source ?? 'Unified Projection Engine'),
     targetType: String(projectionEngine?.activeTargetType ?? projectionEngine?.target?.type ?? ''),
+    targetSourceLockActive: Boolean(projectionEngine?.targetSourceLockActive),
+    targetLockedConfidence: toFiniteNumber(projectionEngine?.targetLockedConfidence ?? projectionEngine?.target?.lockedConfidence ?? targetConfidence, targetConfidence),
+    targetLiveConfidence: toFiniteNumber(projectionEngine?.targetLiveConfidence ?? projectionEngine?.target?.liveConfidence ?? targetConfidence, targetConfidence),
+    targetLiveSource: String(projectionEngine?.targetLiveSource ?? projectionEngine?.target?.liveTargetSource ?? projectionEngine?.activeTargetSource ?? projectionEngine?.target?.source ?? 'Unified Projection Engine'),
+    targetLockedAt: String(projectionEngine?.targetLockedAt ?? projectionEngine?.target?.lockedAt ?? ''),
+    learnedReliability: toFiniteNumber(projectionEngine?.targetMl?.learnedReliability ?? projectionEngine?.targetPlan?.learnedReliability ?? 0, 0),
     marketState: projectionEngine?.marketState,
     target: projectionEngine?.target,
     ghostPath: projectionEngine?.ghostPath,
@@ -1123,6 +1129,20 @@ export default function AiTraderPanel({
   )
   const entryMlConfidence = toFiniteNumber(directionalContext.entryConfidence, 0)
   const aiConfidence = toFiniteNumber(decision?.confidence, 0)
+  const liveTargetConfidence = toFiniteNumber((projectionSnapshot as any).targetLiveConfidence ?? targetMlConfidence, targetMlConfidence)
+  const lockedTargetConfidence = toFiniteNumber((projectionSnapshot as any).targetLockedConfidence ?? targetMlConfidence, targetMlConfidence)
+  const targetLearnedReliability = Math.max(
+    toFiniteNumber((projectionSnapshot as any).learnedReliability, 0),
+    toFiniteNumber((payload as any)?.targetMl?.learnedReliability, 0),
+    lockedTargetConfidence,
+  )
+  const aiSetupConfidence = aiConfidence
+  const aiMemorySamples = toFiniteNumber(decisionStats.samples, 0)
+  const aiMemoryProgress = Math.min(100, (aiMemorySamples / 400) * 100)
+  const aiLearnedReliability = Math.max(
+    toFiniteNumber(stats.winRate, 0) * 100,
+    aiMemorySamples > 0 ? Math.min(100, toFiniteNumber(decisionStats.avgConfidence, 0)) : 0,
+  )
 
   const openTrades = Array.isArray(summary?.openTrades) ? summary?.openTrades ?? [] : []
   const closedTrades =
@@ -1322,25 +1342,25 @@ export default function AiTraderPanel({
 
           <MlStatusCard
             title="Target Price ML"
-            status={getMlStrengthLabel(targetMlConfidence)}
+            status={(projectionSnapshot as any).targetSourceLockActive ? 'Source Locked' : getMlStrengthLabel(targetMlConfidence)}
             confidence={targetMlConfidence}
             tone={getMlStrengthTone(targetMlConfidence)}
             detail={
               targetMlConfidence > 0
-                ? `Target ML active. Real Target Price ML target ${formatPrice(decision?.target)} is being used for max P&L and risk/reward.`
+                ? `Live ${liveTargetConfidence.toFixed(1)}% • locked ${lockedTargetConfidence.toFixed(1)}% • learned ${targetLearnedReliability.toFixed(1)}%`
                 : 'Waiting for real Target Price ML; using chart ghost overlay only if ML target is unavailable.'
             }
           />
 
           <MlStatusCard
-            title="AI Trader"
+            title="AI Setup Score"
             status={formatAiStage(memoryStatus.stage)}
-            confidence={aiConfidence}
-            tone={decision?.allowedToTrade ? 'bull' : aiConfidence >= minConfidence ? 'warn' : 'neutral'}
+            confidence={aiSetupConfidence}
+            tone={decision?.allowedToTrade ? 'bull' : aiSetupConfidence >= minConfidence ? 'warn' : 'neutral'}
             detail={
               decision?.allowedToTrade
-                ? 'AI is trade-ready for dashboard-only paper execution.'
-                : String(memoryStatus.message ?? 'AI is collecting observations and waiting for a clean setup.')
+                ? 'Current setup is trade-ready for dashboard-only paper execution.'
+                : `Setup score changes every candle. Memory progress ${aiMemoryProgress.toFixed(1)}% from ${formatCount(aiMemorySamples)} observations.`
             }
           />
         </div>
@@ -1350,6 +1370,13 @@ export default function AiTraderPanel({
           <StatBox label="Target" value={formatPrice(decision?.target)} />
           <StatBox label="RR" value={`${toFiniteNumber(decision?.riskReward, 0).toFixed(2)}R`} tone={toFiniteNumber(decision?.riskReward, 0) >= minRiskReward ? 'bull' : 'warn'} />
           <StatBox label="Target Source" value={projectionSnapshot.source || '—'} />
+          <StatBox label="Target Live Conf" value={`${liveTargetConfidence.toFixed(1)}%`} tone={getMlStrengthTone(liveTargetConfidence)} />
+          <StatBox label="Target Locked Conf" value={`${lockedTargetConfidence.toFixed(1)}%`} tone={(projectionSnapshot as any).targetSourceLockActive ? 'bull' : getMlStrengthTone(lockedTargetConfidence)} />
+          <StatBox label="Target Learned" value={`${targetLearnedReliability.toFixed(1)}%`} tone={getMlStrengthTone(targetLearnedReliability)} />
+          <StatBox label="Source Lock" value={(projectionSnapshot as any).targetSourceLockActive ? 'ACTIVE' : 'STANDBY'} tone={(projectionSnapshot as any).targetSourceLockActive ? 'bull' : 'neutral'} />
+          <StatBox label="AI Setup Conf" value={`${aiSetupConfidence.toFixed(1)}%`} tone={decision?.allowedToTrade ? 'bull' : aiSetupConfidence >= minConfidence ? 'warn' : 'neutral'} />
+          <StatBox label="AI Memory Progress" value={`${aiMemoryProgress.toFixed(1)}%`} tone={aiMemorySamples >= 10 ? 'bull' : 'warn'} />
+          <StatBox label="AI Learned" value={`${aiLearnedReliability.toFixed(1)}%`} tone={aiMemorySamples >= 10 ? 'bull' : 'neutral'} />
           <StatBox label="Alignment" value={`${toFiniteNumber(projectionSnapshot.alignmentScore, 0).toFixed(1)}%`} tone={projectionSnapshot.conflict ? 'warn' : toFiniteNumber(projectionSnapshot.alignmentScore, 0) >= 60 ? 'bull' : 'neutral'} />
         </div>
       </div>
@@ -1415,6 +1442,13 @@ export default function AiTraderPanel({
               value={decision?.details?.memoryStatus ? 'LIVE DECISION' : summary?.memoryStatus ? 'SUMMARY' : 'WAITING'}
               tone={decision?.details?.memoryStatus ? 'bull' : 'warn'}
             />
+          </div>
+
+          <div className="mb-3 grid grid-cols-2 gap-2">
+            <StatBox label="Setup Confidence" value={`${aiSetupConfidence.toFixed(1)}%`} tone={decision?.allowedToTrade ? 'bull' : aiSetupConfidence >= minConfidence ? 'warn' : 'neutral'} />
+            <StatBox label="Memory Progress" value={`${aiMemoryProgress.toFixed(1)}%`} tone={aiMemorySamples >= 10 ? 'bull' : 'warn'} />
+            <StatBox label="Learned Reliability" value={`${aiLearnedReliability.toFixed(1)}%`} tone={aiMemorySamples >= 10 ? 'bull' : 'neutral'} />
+            <StatBox label="Target Lock" value={(projectionSnapshot as any).targetSourceLockActive ? 'ACTIVE' : 'STANDBY'} tone={(projectionSnapshot as any).targetSourceLockActive ? 'bull' : 'neutral'} />
           </div>
 
           <div className="grid grid-cols-2 gap-2">
