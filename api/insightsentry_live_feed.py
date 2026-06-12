@@ -77,6 +77,74 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+
+def timeframe_to_seconds(timeframe: Any = "1m") -> int:
+    text = normalize_timeframe(timeframe)
+    try:
+        if text.endswith("m"):
+            return max(1, int(text[:-1] or "1")) * 60
+        if text.endswith("h"):
+            return max(1, int(text[:-1] or "1")) * 60 * 60
+        if text.endswith("d"):
+            return max(1, int(text[:-1] or "1")) * 24 * 60 * 60
+    except Exception:
+        return 60
+    return 60
+
+
+def bucket_epoch(timestamp: Optional[float] = None, timeframe: Any = "1m") -> int:
+    ts = int(timestamp or datetime.now(timezone.utc).timestamp())
+    seconds = timeframe_to_seconds(timeframe)
+    return ts - (ts % max(1, seconds))
+
+
+def normalize_stream_candle(
+    *,
+    symbol: Any = "MES1!",
+    timeframe: Any = "1m",
+    price: Any = None,
+    previous_candle: Optional[Dict[str, Any]] = None,
+    timestamp: Optional[float] = None,
+    volume: Any = 0,
+    source: str = "insightsentry_live_feed",
+) -> Dict[str, Any]:
+    live_price = to_float(price, 0.0)
+    now_bucket = bucket_epoch(timestamp, timeframe)
+
+    previous = previous_candle if isinstance(previous_candle, dict) else {}
+    previous_time = int(to_float(previous.get("time") or previous.get("t"), 0.0))
+
+    if previous and previous_time == now_bucket:
+        open_price = to_float(previous.get("open") or previous.get("o"), live_price)
+        high_price = max(to_float(previous.get("high") or previous.get("h"), live_price), live_price, open_price)
+        low_price = min(to_float(previous.get("low") or previous.get("l"), live_price), live_price, open_price)
+        prev_volume = to_float(previous.get("volume") or previous.get("v"), 0.0)
+    else:
+        open_price = live_price
+        high_price = live_price
+        low_price = live_price
+        prev_volume = 0.0
+
+    return {
+        "symbol": normalize_symbol(symbol),
+        "timeframe": normalize_timeframe(timeframe),
+        "time": now_bucket,
+        "timestamp": now_bucket,
+        "t": now_bucket,
+        "open": round(open_price, 8),
+        "high": round(high_price, 8),
+        "low": round(low_price, 8),
+        "close": round(live_price, 8),
+        "o": round(open_price, 8),
+        "h": round(high_price, 8),
+        "l": round(low_price, 8),
+        "c": round(live_price, 8),
+        "volume": round(prev_volume + max(0.0, to_float(volume, 0.0)), 8),
+        "v": round(prev_volume + max(0.0, to_float(volume, 0.0)), 8),
+        "source": source,
+        "updatedAt": now_iso(),
+    }
+
 def to_float(value: Any, fallback: float = 0.0) -> float:
     try:
         if value is None:
@@ -282,6 +350,12 @@ def recursive_find_time(payload: Any) -> Optional[Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 # WEBSOCKET KEY + LIVE QUOTE FETCH
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+
+def sse_candle_event(payload: Dict[str, Any]) -> str:
+    """Format a normalized SSE candle event accepted by the frontend."""
+    return f"event: candle\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
 
 
 def refresh_insightsentry_websocket_key(force: bool = False) -> Dict[str, Any]:
