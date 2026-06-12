@@ -10,8 +10,36 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+import websockets
 from fastapi import HTTPException
-from fastapi.responses import StreamingResponse
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MARKETBOS PHASE 8.5 — INSIGHTSENTRY REAL WEBSOCKET LIVE FEED
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# This module is intentionally compatible with the current api/main.py imports:
+#   get_latest_live_snapshot
+#   live_feed_event_generator
+#   live_feed_ping_generator
+#   live_feed_status
+#   refresh_insightsentry_websocket_key
+#
+# RapidAPI flow:
+#   1) Call /v2/websocket-key with RapidAPI headers.
+#   2) Connect one backend WebSocket to wss://realtime.insightsentry.com/live.
+#   3) Send one complete subscription message:
+#      {
+#        "api_key": "<temporary websocket key>",
+#        "subscriptions": [
+#          {"code":"CME_MINI:MES1!","type":"series","bar_type":"minute","bar_interval":1,"max_dp":1000}
+#        ]
+#      }
+#   4) Push incoming series candles to every dashboard EventSource client.
+#
+# Important: InsightSentry websocket plan can allow only 1 active connection, so
+# the browser must NOT connect directly to InsightSentry. This backend owns the
+# one provider websocket and fans out updates through /api/live-feed/stream.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -36,32 +64,52 @@ INSIGHTSENTRY_BASE_URL = (
     or f"https://{INSIGHTSENTRY_HOST}"
 ).rstrip("/")
 
-# RapidAPI/InsightSentry will rate-limit aggressive 1-second REST polling.
-# Default to 5 seconds per symbol across the entire backend process.
-LIVE_FEED_PROVIDER_POLL_SECONDS = float(os.getenv("LIVE_FEED_PROVIDER_POLL_SECONDS", "5.0"))
+INSIGHTSENTRY_WS_LIVE_URL = os.getenv(
+    "INSIGHTSENTRY_WS_LIVE_URL",
+    "wss://realtime.insightsentry.com/live",
+)
+
+# Keep this modest; user plan may support 5 subscriptions and 1 connection.
+INSIGHTSENTRY_WS_MAX_DP = int(os.getenv("INSIGHTSENTRY_WS_MAX_DP", "1000"))
+INSIGHTSENTRY_WS_RECONNECT_MIN_SECONDS = float(os.getenv("INSIGHTSENTRY_WS_RECONNECT_MIN_SECONDS", "2.0"))
+INSIGHTSENTRY_WS_RECONNECT_MAX_SECONDS = float(os.getenv("INSIGHTSENTRY_WS_RECONNECT_MAX_SECONDS", "30.0"))
+INSIGHTSENTRY_WS_PING_SECONDS = float(os.getenv("INSIGHTSENTRY_WS_PING_SECONDS", "20.0"))
+
+# SSE fans out cached websocket data every second without hitting provider limits.
 LIVE_FEED_SSE_HEARTBEAT_SECONDS = float(os.getenv("LIVE_FEED_SSE_HEARTBEAT_SECONDS", "1.0"))
-LIVE_FEED_BACKOFF_SECONDS = float(os.getenv("LIVE_FEED_BACKOFF_SECONDS", "30.0"))
-LIVE_FEED_REQUEST_TIMEOUT_SECONDS = float(os.getenv("LIVE_FEED_REQUEST_TIMEOUT_SECONDS", "10.0"))
+LIVE_FEED_MAX_CANDLES = int(os.getenv("LIVE_FEED_MAX_CANDLES", "3000"))
 
-# Limit history kept in memory per symbol/timeframe.
-LIVE_FEED_MAX_CANDLES = int(os.getenv("LIVE_FEED_MAX_CANDLES", "1500"))
+# REST fallback is disabled by default because REST quote endpoints returned 404/429.
+# Turn it on only if InsightSentry REST quote endpoint is confirmed.
+LIVE_FEED_ENABLE_REST_FALLBACK = os.getenv("LIVE_FEED_ENABLE_REST_FALLBACK", "false").lower() in {"1", "true", "yes"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IN-MEMORY SHARED STATE
+# SHARED STATE
 # ─────────────────────────────────────────────────────────────────────────────
 
-# One cache shared by all connected browser EventSource clients.
+_WS_API_KEY: Optional[str] = None
+_WS_API_KEY_EXPIRATION: float = 0.0
+_WS_MANAGER_TASK: Optional[asyncio.Task] = None
+_WS_FORCE_RESUBSCRIBE = asyncio.Event()
+_WS_STARTED_AT: Optional[str] = None
+
+_DESIRED_SUBSCRIPTIONS: Dict[str, Dict[str, Any]] = {}
 _LIVE_PRICE_CACHE: Dict[str, Dict[str, Any]] = {}
 _LIVE_CANDLE_CACHE: Dict[str, Dict[str, Any]] = {}
 _LIVE_CANDLE_HISTORY: Dict[str, list[Dict[str, Any]]] = {}
-_LIVE_PROVIDER_TASKS: Dict[str, asyncio.Task] = {}
 _LIVE_LAST_ERROR: Dict[str, Dict[str, Any]] = {}
+_LIVE_STATUS: Dict[str, Any] = {
+    "eventType": "LIVE_FEED_STATUS",
+    "status": "Idle",
+    "source": "insightsentry_websocket_backend_bridge",
+    "createdAt": None,
+}
 _LIVE_LOCK = asyncio.Lock()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NORMALIZATION HELPERS
+# BASIC HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def now_iso() -> str:
@@ -92,6 +140,8 @@ def normalize_symbol(value: Any = "MES1!") -> str:
         return "MES1!"
     if raw in {"ES1", "ES1!"} or raw.startswith("ES"):
         return "ES1!"
+    if raw in {"NQ1", "NQ1!"} or raw.startswith("NQ"):
+        return "NQ1!"
     if "BTC" in raw:
         return "BTCUSD"
     if "ETH" in raw:
@@ -100,6 +150,44 @@ def normalize_symbol(value: Any = "MES1!") -> str:
         return "SPY"
 
     return raw or "MES1!"
+
+
+def provider_symbol(symbol: Any) -> str:
+    normalized = normalize_symbol(symbol)
+
+    if normalized == "MES1!":
+        return "CME_MINI:MES1!"
+    if normalized == "ES1!":
+        return "CME_MINI:ES1!"
+    if normalized == "NQ1!":
+        return "CME_MINI:NQ1!"
+    if normalized == "BTCUSD":
+        return "BINANCE:BTCUSDT"
+    if normalized == "ETHUSD":
+        return "BINANCE:ETHUSDT"
+    if normalized == "SPY":
+        return "AMEX:SPY"
+
+    return normalized
+
+
+def symbol_from_provider_code(code: Any) -> str:
+    text = str(code or "").strip().upper()
+
+    if "MES" in text:
+        return "MES1!"
+    if "ES1" in text or text.endswith(":ES") or text == "ES":
+        return "ES1!"
+    if "NQ" in text:
+        return "NQ1!"
+    if "BTC" in text:
+        return "BTCUSD"
+    if "ETH" in text:
+        return "ETHUSD"
+    if "SPY" in text:
+        return "SPY"
+
+    return normalize_symbol(text)
 
 
 def normalize_timeframe(value: Any = "1m") -> str:
@@ -122,22 +210,45 @@ def normalize_timeframe(value: Any = "1m") -> str:
     return aliases.get(text, text or "1m")
 
 
-def timeframe_to_seconds(timeframe: Any = "1m") -> int:
-    text = normalize_timeframe(timeframe)
+def timeframe_to_ws_bar(timeframe: Any = "1m") -> Tuple[str, int]:
+    tf = normalize_timeframe(timeframe)
 
     try:
-        if text.endswith("m"):
-            return max(1, int(text[:-1] or "1")) * 60
-        if text.endswith("h"):
-            return max(1, int(text[:-1] or "1")) * 60 * 60
-        if text.endswith("d"):
-            return max(1, int(text[:-1] or "1")) * 24 * 60 * 60
-        if text.endswith("w"):
-            return max(1, int(text[:-1] or "1")) * 7 * 24 * 60 * 60
+        if tf.endswith("m"):
+            return "minute", max(1, int(tf[:-1] or "1"))
+        if tf.endswith("h"):
+            return "hour", max(1, int(tf[:-1] or "1"))
+        if tf.endswith("d"):
+            return "day", max(1, int(tf[:-1] or "1"))
+        if tf.endswith("w"):
+            return "week", max(1, int(tf[:-1] or "1"))
+        if tf.endswith("s"):
+            return "second", max(1, int(tf[:-1] or "1"))
     except Exception:
-        return 60
+        pass
 
-    return 60
+    return "minute", 1
+
+
+def ws_bar_to_timeframe(message: Dict[str, Any], fallback: str = "1m") -> str:
+    bar_type = str(message.get("bar_type") or "").strip().lower()
+
+    # Docs example gives "bar_type": "1m" in responses.
+    if bar_type.endswith("m") or bar_type.endswith("h") or bar_type.endswith("d") or bar_type.endswith("w"):
+        return normalize_timeframe(bar_type)
+
+    if bar_type in {"minute", "minutes"}:
+        return f"{int(to_float(message.get('bar_interval'), 1))}m"
+    if bar_type in {"hour", "hours"}:
+        return f"{int(to_float(message.get('bar_interval'), 1))}h"
+    if bar_type in {"day", "days"}:
+        return "1d"
+    if bar_type in {"week", "weeks"}:
+        return "1w"
+    if bar_type in {"second", "seconds"}:
+        return f"{int(to_float(message.get('bar_interval'), 1))}s"
+
+    return normalize_timeframe(fallback)
 
 
 def cache_key(symbol: Any, timeframe: Any = "1m") -> str:
@@ -146,186 +257,6 @@ def cache_key(symbol: Any, timeframe: Any = "1m") -> str:
 
 def symbol_key(symbol: Any) -> str:
     return normalize_symbol(symbol)
-
-
-def insightsentry_symbol_variants(symbol: Any) -> list[str]:
-    """Try the symbol formats InsightSentry/RapidAPI may expect.
-
-    Dashboard-normalized symbol is MES1!, but the provider endpoints may expect
-    a venue-prefixed futures symbol like CME_MINI:MES1!. Do not strip the venue
-    when calling the provider; try both.
-    """
-    raw = str(symbol or "MES1!").strip().upper()
-    normalized = normalize_symbol(raw)
-
-    variants: list[str] = []
-
-    def add(value: Any) -> None:
-        text = str(value or "").strip().upper()
-        if text and text not in variants:
-            variants.append(text)
-
-    add(raw)
-
-    if normalized == "MES1!":
-        add("CME_MINI:MES1!")
-        add("CME:MES1!")
-        add("MES1!")
-        add("MES")
-    elif normalized == "ES1!":
-        add("CME_MINI:ES1!")
-        add("CME:ES1!")
-        add("ES1!")
-        add("ES")
-    else:
-        add(normalized)
-
-    return variants
-
-
-def bucket_epoch(timestamp: Optional[float] = None, timeframe: Any = "1m") -> int:
-    ts = int(timestamp or time.time())
-    seconds = timeframe_to_seconds(timeframe)
-    return ts - (ts % max(1, seconds))
-
-
-def rapidapi_headers() -> Dict[str, str]:
-    if not INSIGHTSENTRY_API_KEY:
-        raise HTTPException(status_code=500, detail="INSIGHTSENTRY_API_KEY is missing")
-
-    return {
-        "x-rapidapi-key": INSIGHTSENTRY_API_KEY,
-        "x-rapidapi-host": INSIGHTSENTRY_HOST,
-        "accept": "application/json",
-    }
-
-
-def http_get_json(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
-    query = f"?{urlencode(params)}" if params else ""
-    url = f"{INSIGHTSENTRY_BASE_URL}{path}{query}"
-
-    request = Request(url, headers=rapidapi_headers(), method="GET")
-
-    try:
-        with urlopen(request, timeout=LIVE_FEED_REQUEST_TIMEOUT_SECONDS) as response:
-            raw = response.read().decode("utf-8", errors="replace")
-            return json.loads(raw) if raw else {}
-    except HTTPError as error:
-        raise RuntimeError(f"HTTP Error {error.code}: {error.reason}") from error
-    except URLError as error:
-        raise RuntimeError(f"URL Error: {error.reason}") from error
-    except Exception as error:
-        raise RuntimeError(str(error)) from error
-
-
-def extract_price_from_quote(payload: Any) -> Tuple[float, Dict[str, Any]]:
-    """Extract last/price/bid/ask from multiple InsightSentry/RapidAPI shapes."""
-    if payload is None:
-        return 0.0, {}
-
-    candidates: list[Any] = []
-
-    if isinstance(payload, list):
-        candidates.extend(payload)
-    elif isinstance(payload, dict):
-        candidates.extend(
-            [
-                payload,
-                payload.get("data"),
-                payload.get("quote"),
-                payload.get("result"),
-                payload.get("results"),
-                payload.get("last"),
-            ]
-        )
-
-        for key in ("data", "results", "quotes"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                candidates.extend(value)
-            elif isinstance(value, dict):
-                candidates.append(value)
-
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
-
-        values = [
-            item.get("last"),
-            item.get("lastPrice"),
-            item.get("price"),
-            item.get("mark"),
-            item.get("markPrice"),
-            item.get("mid"),
-            item.get("close"),
-            item.get("c"),
-            item.get("bid"),
-            item.get("ask"),
-        ]
-
-        for value in values:
-            price = to_float(value, 0.0)
-            if price > 0:
-                quote = {
-                    "price": price,
-                    "last": to_float(item.get("last") or item.get("lastPrice") or price, price),
-                    "bid": to_float(item.get("bid"), 0.0) or None,
-                    "ask": to_float(item.get("ask"), 0.0) or None,
-                    "raw": item,
-                }
-                return price, quote
-
-    return 0.0, {}
-
-
-def build_live_candle(
-    *,
-    symbol: Any,
-    timeframe: Any,
-    price: Any,
-    previous_candle: Optional[Dict[str, Any]] = None,
-    timestamp: Optional[float] = None,
-    volume: Any = 0,
-    source: str = "insightsentry_live_feed_throttled",
-) -> Dict[str, Any]:
-    live_price = to_float(price, 0.0)
-    now_bucket = bucket_epoch(timestamp, timeframe)
-
-    previous = previous_candle if isinstance(previous_candle, dict) else {}
-    previous_time = int(to_float(previous.get("time") or previous.get("t"), 0.0))
-
-    if previous and previous_time == now_bucket:
-        open_price = to_float(previous.get("open") or previous.get("o"), live_price)
-        high_price = max(to_float(previous.get("high") or previous.get("h"), live_price), live_price, open_price)
-        low_price = min(to_float(previous.get("low") or previous.get("l"), live_price), live_price, open_price)
-        previous_volume = to_float(previous.get("volume") or previous.get("v"), 0.0)
-    else:
-        open_price = live_price
-        high_price = live_price
-        low_price = live_price
-        previous_volume = 0.0
-
-    total_volume = previous_volume + max(0.0, to_float(volume, 0.0))
-
-    return {
-        "symbol": normalize_symbol(symbol),
-        "timeframe": normalize_timeframe(timeframe),
-        "time": now_bucket,
-        "timestamp": now_bucket,
-        "t": now_bucket,
-        "open": round(open_price, 8),
-        "high": round(high_price, 8),
-        "low": round(low_price, 8),
-        "close": round(live_price, 8),
-        "o": round(open_price, 8),
-        "h": round(high_price, 8),
-        "l": round(low_price, 8),
-        "c": round(live_price, 8),
-        "volume": round(total_volume, 8),
-        "v": round(total_volume, 8),
-        "source": source,
-        "updatedAt": now_iso(),
-    }
 
 
 def sse_event(event: str, payload: Dict[str, Any]) -> str:
@@ -337,250 +268,526 @@ def sse_comment(message: str = "keepalive") -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# INSIGHTSENTRY REQUESTS
+# RAPIDAPI KEY REFRESH
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_insightsentry_l1_quote(symbol: Any) -> Dict[str, Any]:
-    normalized = normalize_symbol(symbol)
-    symbol_variants = insightsentry_symbol_variants(symbol)
-
-    # RapidAPI page is Version v2. The previous v3-only routes returned 404.
-    # Try v2 first, then v3 fallback, and try both query-style and path-style
-    # symbol endpoints.
-    candidate_requests: list[tuple[str, Optional[Dict[str, Any]], str]] = []
-
-    for provider_symbol in symbol_variants:
-        encoded_symbol = quote(provider_symbol, safe="")
-        candidate_requests.extend(
-            [
-                ("/v2/quotes/l1", {"symbol": provider_symbol}, provider_symbol),
-                ("/v2/quote/l1", {"symbol": provider_symbol}, provider_symbol),
-                ("/v2/quotes", {"symbol": provider_symbol}, provider_symbol),
-                ("/v2/quote", {"symbol": provider_symbol}, provider_symbol),
-                (f"/v2/symbols/{encoded_symbol}/quotes/l1", None, provider_symbol),
-                (f"/v2/symbols/{encoded_symbol}/quote", None, provider_symbol),
-                (f"/v2/symbols/{encoded_symbol}/quotes", None, provider_symbol),
-
-                # v3 fallback only after v2 candidates.
-                ("/v3/quotes/l1", {"symbol": provider_symbol}, provider_symbol),
-                ("/v3/quote/l1", {"symbol": provider_symbol}, provider_symbol),
-                ("/v3/quotes", {"symbol": provider_symbol}, provider_symbol),
-                ("/v3/quote", {"symbol": provider_symbol}, provider_symbol),
-                (f"/v3/symbols/{encoded_symbol}/quotes/l1", None, provider_symbol),
-                (f"/v3/symbols/{encoded_symbol}/quote", None, provider_symbol),
-                (f"/v3/symbols/{encoded_symbol}/quotes", None, provider_symbol),
-            ]
-        )
-
-    errors: list[str] = []
-    tried: list[str] = []
-
-    for path, params, provider_symbol in candidate_requests:
-        path_label = f"{path}?{urlencode(params)}" if params else path
-        tried.append(path_label)
-
-        try:
-            payload = http_get_json(path, params=params)
-            price, quote_payload = extract_price_from_quote(payload)
-
-            if price > 0:
-                return {
-                    "symbol": normalized,
-                    "providerSymbol": provider_symbol,
-                    "price": price,
-                    "quote": quote_payload,
-                    "providerPayload": payload,
-                    "sourcePath": path,
-                    "sourceRequest": path_label,
-                    "createdAt": now_iso(),
-                }
-        except Exception as error:
-            error_text = str(error)
-            errors.append(f"{path_label} -> {error_text}")
-
-            # 429 means provider rate limit is active. Stop fallback attempts.
-            if "429" in error_text or "Too Many Requests" in error_text:
-                raise
-
-            # Continue on 404 because endpoint/symbol format may be wrong.
-            continue
-
-    raise RuntimeError(
-        "No valid InsightSentry live quote. Tried: "
-        + " | ".join(tried[:16])
-        + (" ..." if len(tried) > 16 else "")
-        + " Errors: "
-        + " | ".join(errors[-8:])
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SHARED PROVIDER LOOP
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def ensure_provider_task(symbol: Any, timeframe: Any) -> None:
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-    key = cache_key(normalized_symbol, normalized_timeframe)
-
-    async with _LIVE_LOCK:
-        task = _LIVE_PROVIDER_TASKS.get(key)
-        if task and not task.done():
-            return
-
-        _LIVE_PROVIDER_TASKS[key] = asyncio.create_task(
-            provider_poll_loop(normalized_symbol, normalized_timeframe)
-        )
-
-
-async def provider_poll_loop(symbol: str, timeframe: str) -> None:
-    key = cache_key(symbol, timeframe)
-    sym_key = symbol_key(symbol)
-    backoff_until = 0.0
-
-    while True:
-        try:
-            now_ts = time.time()
-
-            if now_ts < backoff_until:
-                await asyncio.sleep(min(5.0, max(1.0, backoff_until - now_ts)))
-                continue
-
-            quote_payload = await asyncio.to_thread(fetch_insightsentry_l1_quote, symbol)
-            price = to_float(quote_payload.get("price"), 0.0)
-
-            if price <= 0:
-                raise RuntimeError("InsightSentry quote returned no valid price")
-
-            previous_candle = _LIVE_CANDLE_CACHE.get(key)
-            candle = build_live_candle(
-                symbol=symbol,
-                timeframe=timeframe,
-                price=price,
-                previous_candle=previous_candle,
-                source="insightsentry_rest_l1_shared_cache",
-            )
-
-            snapshot = {
-                "eventType": "LIVE_PRICE_UPDATE",
-                "status": "Live",
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "price": price,
-                "last": quote_payload.get("quote", {}).get("last") or price,
-                "bid": quote_payload.get("quote", {}).get("bid"),
-                "ask": quote_payload.get("quote", {}).get("ask"),
-                "source": quote_payload.get("sourcePath") or "insightsentry_l1",
-                "createdAt": now_iso(),
-            }
-
-            _LIVE_PRICE_CACHE[sym_key] = snapshot
-            _LIVE_CANDLE_CACHE[key] = candle
-            _LIVE_LAST_ERROR.pop(key, None)
-
-            history = _LIVE_CANDLE_HISTORY.setdefault(key, [])
-            if history and int(history[-1].get("time", 0)) == int(candle.get("time", 0)):
-                history[-1] = candle
-            else:
-                history.append(candle)
-                if len(history) > LIVE_FEED_MAX_CANDLES:
-                    del history[:-LIVE_FEED_MAX_CANDLES]
-
-            await asyncio.sleep(max(2.0, LIVE_FEED_PROVIDER_POLL_SECONDS))
-
-        except Exception as error:
-            error_text = str(error)
-            _LIVE_LAST_ERROR[key] = {
-                "eventType": "LIVE_FEED_ERROR",
-                "status": "Error",
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "error": error_text,
-                "createdAt": now_iso(),
-                "pollSeconds": LIVE_FEED_PROVIDER_POLL_SECONDS,
-            }
-
-            # 429 means the provider rate limit is active. Back off hard.
-            if "429" in error_text or "Too Many Requests" in error_text:
-                backoff_until = time.time() + max(15.0, LIVE_FEED_BACKOFF_SECONDS)
-
-            await asyncio.sleep(max(5.0, min(LIVE_FEED_BACKOFF_SECONDS, 30.0)))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PUBLIC ROUTE HANDLERS IMPORTED BY api/main.py
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def api_live_feed_status(symbol: str = "MES1!", timeframe: str = "1m") -> Dict[str, Any]:
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-    key = cache_key(normalized_symbol, normalized_timeframe)
-
-    await ensure_provider_task(normalized_symbol, normalized_timeframe)
-
-    candle = _LIVE_CANDLE_CACHE.get(key)
-    price = _LIVE_PRICE_CACHE.get(symbol_key(normalized_symbol))
-    error = _LIVE_LAST_ERROR.get(key)
+def rapidapi_headers() -> Dict[str, str]:
+    if not INSIGHTSENTRY_API_KEY:
+        raise HTTPException(status_code=500, detail="INSIGHTSENTRY_API_KEY is missing")
 
     return {
-        "eventType": "LIVE_FEED_STATUS",
-        "status": "Live" if candle or price else "Connecting",
-        "symbol": normalized_symbol,
-        "timeframe": normalized_timeframe,
-        "providerPollSeconds": LIVE_FEED_PROVIDER_POLL_SECONDS,
-        "sseHeartbeatSeconds": LIVE_FEED_SSE_HEARTBEAT_SECONDS,
-        "hasCandle": candle is not None,
-        "hasPrice": price is not None,
-        "price": price,
-        "candle": candle,
-        "lastError": error,
-        "createdAt": now_iso(),
-        "source": "insightsentry_live_feed_shared_throttled",
+        "x-rapidapi-key": INSIGHTSENTRY_API_KEY,
+        "x-rapidapi-host": INSIGHTSENTRY_HOST,
+        "accept": "application/json",
+        "content-type": "application/json",
     }
 
 
-async def api_live_feed_latest(symbol: str = "MES1!", timeframe: str = "1m") -> Dict[str, Any]:
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-    key = cache_key(normalized_symbol, normalized_timeframe)
+def http_get_json(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    query = f"?{urlencode(params)}" if params else ""
+    url = f"{INSIGHTSENTRY_BASE_URL}{path}{query}"
 
-    await ensure_provider_task(normalized_symbol, normalized_timeframe)
+    request = Request(url, headers=rapidapi_headers(), method="GET")
 
-    return {
-        "eventType": "LIVE_FEED_LATEST",
-        "symbol": normalized_symbol,
-        "timeframe": normalized_timeframe,
-        "price": _LIVE_PRICE_CACHE.get(symbol_key(normalized_symbol)),
-        "candle": _LIVE_CANDLE_CACHE.get(key),
-        "history": _LIVE_CANDLE_HISTORY.get(key, [])[-20:],
-        "lastError": _LIVE_LAST_ERROR.get(key),
-        "providerPollSeconds": LIVE_FEED_PROVIDER_POLL_SECONDS,
-        "createdAt": now_iso(),
-    }
-
-
-async def api_live_feed_ping() -> Dict[str, Any]:
-    return {
-        "eventType": "LIVE_FEED_PING",
-        "status": "OK",
-        "providerPollSeconds": LIVE_FEED_PROVIDER_POLL_SECONDS,
-        "createdAt": now_iso(),
-    }
-
-
-async def api_live_feed_refresh_key() -> Dict[str, Any]:
-    """Fetch InsightSentry WebSocket key from RapidAPI. This does not start WebSocket streaming yet."""
     try:
-        payload = await asyncio.to_thread(http_get_json, "/v2/websocket-key", None)
+        with urlopen(request, timeout=12) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            return json.loads(raw) if raw else {}
+    except HTTPError as error:
+        raise RuntimeError(f"HTTP Error {error.code}: {error.reason}") from error
+    except URLError as error:
+        raise RuntimeError(f"URL Error: {error.reason}") from error
     except Exception as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
+        raise RuntimeError(str(error)) from error
+
+
+def refresh_insightsentry_websocket_key(force: bool = False) -> Dict[str, Any]:
+    """Return and cache the temporary WebSocket key for RapidAPI subscriptions."""
+    global _WS_API_KEY, _WS_API_KEY_EXPIRATION
+
+    now_ts = time.time()
+    # Refresh if key is missing or has less than 1 hour left.
+    if (
+        not force
+        and _WS_API_KEY
+        and _WS_API_KEY_EXPIRATION
+        and _WS_API_KEY_EXPIRATION - now_ts > 3600
+    ):
+        return {
+            "eventType": "INSIGHTSENTRY_WEBSOCKET_KEY",
+            "status": "Cached",
+            "hasKey": True,
+            "expiration": _WS_API_KEY_EXPIRATION,
+            "secondsRemaining": int(_WS_API_KEY_EXPIRATION - now_ts),
+            "createdAt": now_iso(),
+            "source": "insightsentry_rapidapi_websocket_key",
+        }
+
+    payload = http_get_json("/v2/websocket-key", None)
+
+    key = str(payload.get("api_key") or "").strip()
+    expiration = to_float(payload.get("expiration"), 0.0)
+
+    if not key:
+        raise HTTPException(status_code=502, detail="InsightSentry websocket-key response did not include api_key")
+
+    _WS_API_KEY = key
+    _WS_API_KEY_EXPIRATION = expiration or (time.time() + 7 * 24 * 60 * 60)
 
     return {
         "eventType": "INSIGHTSENTRY_WEBSOCKET_KEY",
         "status": "OK",
-        "payload": payload,
+        "hasKey": True,
+        "expiration": _WS_API_KEY_EXPIRATION,
+        "secondsRemaining": int(max(0, _WS_API_KEY_EXPIRATION - time.time())),
+        "note": payload.get("note"),
+        "createdAt": now_iso(),
+        "source": "insightsentry_rapidapi_websocket_key",
+    }
+
+
+async def get_ws_key_async(force: bool = False) -> str:
+    result = await asyncio.to_thread(refresh_insightsentry_websocket_key, force)
+    if not _WS_API_KEY:
+        raise RuntimeError(f"Unable to get websocket key: {result}")
+    return _WS_API_KEY
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SUBSCRIPTION + CACHE UPDATE
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def ensure_subscription(symbol: Any, timeframe: Any = "1m") -> None:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    code = provider_symbol(normalized_symbol)
+    bar_type, bar_interval = timeframe_to_ws_bar(normalized_timeframe)
+
+    sub_key = cache_key(normalized_symbol, normalized_timeframe)
+
+    async with _LIVE_LOCK:
+        _DESIRED_SUBSCRIPTIONS[sub_key] = {
+            "code": code,
+            "type": "series",
+            "bar_type": bar_type,
+            "bar_interval": bar_interval,
+            "max_dp": INSIGHTSENTRY_WS_MAX_DP,
+            # Futures only; use regular close/last traded price.
+            "badj": False,
+            "settlement": False,
+        }
+
+    _WS_FORCE_RESUBSCRIBE.set()
+    await ensure_websocket_manager()
+
+
+async def ensure_websocket_manager() -> None:
+    global _WS_MANAGER_TASK
+
+    async with _LIVE_LOCK:
+        if _WS_MANAGER_TASK and not _WS_MANAGER_TASK.done():
+            return
+
+        _WS_MANAGER_TASK = asyncio.create_task(websocket_manager_loop())
+
+
+def subscription_payload(api_key: str) -> Dict[str, Any]:
+    subscriptions = list(_DESIRED_SUBSCRIPTIONS.values())
+
+    # Keep deterministic order and respect small plan limits. User key reported
+    # max_subscriptions=5; keep at most 5 to avoid rejection.
+    subscriptions = sorted(subscriptions, key=lambda item: (item.get("code", ""), item.get("bar_type", ""), item.get("bar_interval", 0)))[:5]
+
+    return {
+        "api_key": api_key,
+        "subscriptions": subscriptions,
+    }
+
+
+def parse_ws_json_message(message: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(message, bytes):
+        message = message.decode("utf-8", errors="replace")
+
+    if not isinstance(message, str):
+        return None
+
+    text = message.strip()
+    if not text or text == "pong":
+        return None
+
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return {
+            "eventType": "RAW_WS_MESSAGE",
+            "message": text,
+        }
+
+
+def normalize_series_candle(symbol: str, timeframe: str, raw_candle: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    open_price = to_float(raw_candle.get("open") or raw_candle.get("o"), 0.0)
+    high_price = to_float(raw_candle.get("high") or raw_candle.get("h"), 0.0)
+    low_price = to_float(raw_candle.get("low") or raw_candle.get("l"), 0.0)
+    close_price = to_float(raw_candle.get("close") or raw_candle.get("c"), 0.0)
+
+    if close_price <= 0:
+        return None
+
+    if open_price <= 0:
+        open_price = close_price
+    if high_price <= 0:
+        high_price = max(open_price, close_price)
+    if low_price <= 0:
+        low_price = min(open_price, close_price)
+
+    timestamp = to_float(raw_candle.get("time") or raw_candle.get("timestamp") or raw_candle.get("t"), time.time())
+    volume = to_float(raw_candle.get("volume") or raw_candle.get("v"), 0.0)
+
+    return {
+        "symbol": normalize_symbol(symbol),
+        "timeframe": normalize_timeframe(timeframe),
+        "time": int(timestamp),
+        "timestamp": int(timestamp),
+        "t": int(timestamp),
+        "open": round(open_price, 8),
+        "high": round(max(high_price, open_price, close_price), 8),
+        "low": round(min(low_price, open_price, close_price), 8),
+        "close": round(close_price, 8),
+        "o": round(open_price, 8),
+        "h": round(max(high_price, open_price, close_price), 8),
+        "l": round(min(low_price, open_price, close_price), 8),
+        "c": round(close_price, 8),
+        "volume": round(volume, 8),
+        "v": round(volume, 8),
+        "source": "insightsentry_ws_series",
+        "updatedAt": now_iso(),
+    }
+
+
+def update_cache_from_candle(symbol: str, timeframe: str, candle: Dict[str, Any], raw_message: Optional[Dict[str, Any]] = None) -> None:
+    key = cache_key(symbol, timeframe)
+    sym_key = symbol_key(symbol)
+    close_price = to_float(candle.get("close") or candle.get("c"), 0.0)
+
+    if close_price <= 0:
+        return
+
+    _LIVE_CANDLE_CACHE[key] = candle
+    _LIVE_PRICE_CACHE[sym_key] = {
+        "eventType": "LIVE_PRICE_UPDATE",
+        "status": "Live",
+        "symbol": normalize_symbol(symbol),
+        "timeframe": normalize_timeframe(timeframe),
+        "price": close_price,
+        "last": close_price,
+        "bid": None,
+        "ask": None,
+        "source": "insightsentry_ws_series",
         "createdAt": now_iso(),
     }
+    _LIVE_LAST_ERROR.pop(key, None)
+
+    history = _LIVE_CANDLE_HISTORY.setdefault(key, [])
+
+    if history and int(history[-1].get("time", 0)) == int(candle.get("time", 0)):
+        history[-1] = candle
+    else:
+        history.append(candle)
+        if len(history) > LIVE_FEED_MAX_CANDLES:
+            del history[:-LIVE_FEED_MAX_CANDLES]
+
+
+def handle_ws_data_message(message: Dict[str, Any]) -> None:
+    if not message:
+        return
+
+    if "server_time" in message:
+        _LIVE_STATUS.update(
+            {
+                "eventType": "LIVE_FEED_STATUS",
+                "status": "Heartbeat",
+                "serverTime": message.get("server_time"),
+                "updatedAt": now_iso(),
+            }
+        )
+        return
+
+    if "message" in message and "series" not in message and "data" not in message:
+        _LIVE_STATUS.update(
+            {
+                "eventType": "LIVE_FEED_STATUS",
+                "status": "Info",
+                "message": message.get("message"),
+                "server": message.get("server"),
+                "updatedAt": now_iso(),
+            }
+        )
+        return
+
+    # Series response shape from docs:
+    # {"code":"NASDAQ:AAPL","bar_end":...,"last_update":...,"bar_type":"1m","series":[{...}]}
+    if isinstance(message.get("series"), list):
+        code = message.get("code")
+        symbol = symbol_from_provider_code(code)
+        timeframe = ws_bar_to_timeframe(message, "1m")
+
+        for raw_candle in message.get("series") or []:
+            if not isinstance(raw_candle, dict):
+                continue
+
+            candle = normalize_series_candle(symbol, timeframe, raw_candle)
+            if candle:
+                update_cache_from_candle(symbol, timeframe, candle, message)
+
+        return
+
+    # Quote response shape from docs:
+    # {"data":[{"code":"NASDAQ:AAPL","last_price":239.42,...}]}
+    if isinstance(message.get("data"), list):
+        for item in message.get("data") or []:
+            if not isinstance(item, dict):
+                continue
+
+            symbol = symbol_from_provider_code(item.get("code"))
+            price = to_float(item.get("last_price") or item.get("last") or item.get("price"), 0.0)
+            if price <= 0:
+                continue
+
+            sym_key = symbol_key(symbol)
+            _LIVE_PRICE_CACHE[sym_key] = {
+                "eventType": "LIVE_PRICE_UPDATE",
+                "status": "Live",
+                "symbol": symbol,
+                "timeframe": "quote",
+                "price": price,
+                "last": price,
+                "bid": to_float(item.get("bid"), 0.0) or None,
+                "ask": to_float(item.get("ask"), 0.0) or None,
+                "source": "insightsentry_ws_quote",
+                "createdAt": now_iso(),
+            }
+
+        return
+
+    if "error" in message or str(message.get("eventType", "")).lower().endswith("error"):
+        error_payload = {
+            "eventType": "LIVE_FEED_ERROR",
+            "status": "Error",
+            "error": message.get("error") or message.get("message") or json.dumps(message),
+            "raw": message,
+            "createdAt": now_iso(),
+        }
+
+        for key in _DESIRED_SUBSCRIPTIONS.keys():
+            _LIVE_LAST_ERROR[key] = error_payload
+
+        _LIVE_STATUS.update(error_payload)
+
+
+async def send_ping_loop(websocket: Any) -> None:
+    while True:
+        await asyncio.sleep(max(15.0, INSIGHTSENTRY_WS_PING_SECONDS))
+        await websocket.send("ping")
+
+
+async def websocket_manager_loop() -> None:
+    global _WS_STARTED_AT
+
+    reconnect_delay = INSIGHTSENTRY_WS_RECONNECT_MIN_SECONDS
+
+    while True:
+        try:
+            if not _DESIRED_SUBSCRIPTIONS:
+                _LIVE_STATUS.update(
+                    {
+                        "eventType": "LIVE_FEED_STATUS",
+                        "status": "Waiting",
+                        "detail": "No active subscriptions yet",
+                        "updatedAt": now_iso(),
+                    }
+                )
+                await asyncio.sleep(1)
+                continue
+
+            api_key = await get_ws_key_async(force=False)
+            _WS_STARTED_AT = now_iso()
+
+            _LIVE_STATUS.update(
+                {
+                    "eventType": "LIVE_FEED_STATUS",
+                    "status": "Connecting",
+                    "url": INSIGHTSENTRY_WS_LIVE_URL,
+                    "subscriptionCount": len(_DESIRED_SUBSCRIPTIONS),
+                    "updatedAt": now_iso(),
+                }
+            )
+
+            async with websockets.connect(
+                INSIGHTSENTRY_WS_LIVE_URL,
+                ping_interval=None,
+                close_timeout=10,
+                max_size=2_000_000,
+            ) as websocket:
+                reconnect_delay = INSIGHTSENTRY_WS_RECONNECT_MIN_SECONDS
+
+                payload = subscription_payload(api_key)
+                await websocket.send(json.dumps(payload))
+
+                _LIVE_STATUS.update(
+                    {
+                        "eventType": "LIVE_FEED_STATUS",
+                        "status": "Subscribed",
+                        "url": INSIGHTSENTRY_WS_LIVE_URL,
+                        "subscriptionCount": len(payload.get("subscriptions", [])),
+                        "subscriptions": payload.get("subscriptions", []),
+                        "updatedAt": now_iso(),
+                    }
+                )
+
+                _WS_FORCE_RESUBSCRIBE.clear()
+                ping_task = asyncio.create_task(send_ping_loop(websocket))
+
+                try:
+                    while True:
+                        receive_task = asyncio.create_task(websocket.recv())
+                        resub_task = asyncio.create_task(_WS_FORCE_RESUBSCRIBE.wait())
+
+                        done, pending = await asyncio.wait(
+                            {receive_task, resub_task},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+
+                        for task in pending:
+                            task.cancel()
+
+                        if resub_task in done and _WS_FORCE_RESUBSCRIBE.is_set():
+                            payload = subscription_payload(api_key)
+                            await websocket.send(json.dumps(payload))
+                            _WS_FORCE_RESUBSCRIBE.clear()
+                            _LIVE_STATUS.update(
+                                {
+                                    "eventType": "LIVE_FEED_STATUS",
+                                    "status": "Resubscribed",
+                                    "subscriptionCount": len(payload.get("subscriptions", [])),
+                                    "subscriptions": payload.get("subscriptions", []),
+                                    "updatedAt": now_iso(),
+                                }
+                            )
+                            continue
+
+                        if receive_task in done:
+                            raw_message = receive_task.result()
+
+                            if raw_message == "pong":
+                                continue
+
+                            parsed = parse_ws_json_message(raw_message)
+                            if parsed:
+                                handle_ws_data_message(parsed)
+
+                finally:
+                    ping_task.cancel()
+
+        except Exception as error:
+            error_text = str(error)
+            _LIVE_STATUS.update(
+                {
+                    "eventType": "LIVE_FEED_ERROR",
+                    "status": "Error",
+                    "error": error_text,
+                    "reconnectDelay": reconnect_delay,
+                    "updatedAt": now_iso(),
+                }
+            )
+
+            for key in _DESIRED_SUBSCRIPTIONS.keys():
+                _LIVE_LAST_ERROR[key] = {
+                    "eventType": "LIVE_FEED_ERROR",
+                    "status": "Error",
+                    "error": error_text,
+                    "createdAt": now_iso(),
+                    "source": "insightsentry_ws_manager",
+                }
+
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(INSIGHTSENTRY_WS_RECONNECT_MAX_SECONDS, reconnect_delay * 2)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PUBLIC ROUTE HELPERS IMPORTED BY api/main.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+def live_feed_status() -> Dict[str, Any]:
+    rows = []
+
+    for key, sub in _DESIRED_SUBSCRIPTIONS.items():
+        symbol, timeframe = key.split("::", 1)
+        rows.append(
+            {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "providerCode": sub.get("code"),
+                "hasCandle": key in _LIVE_CANDLE_CACHE,
+                "candle": _LIVE_CANDLE_CACHE.get(key),
+                "price": _LIVE_PRICE_CACHE.get(symbol_key(symbol)),
+                "lastError": _LIVE_LAST_ERROR.get(key),
+            }
+        )
+
+    return {
+        "eventType": "LIVE_FEED_STATUS",
+        "status": _LIVE_STATUS.get("status", "Idle"),
+        "source": "insightsentry_websocket_backend_bridge",
+        "wsUrl": INSIGHTSENTRY_WS_LIVE_URL,
+        "wsStartedAt": _WS_STARTED_AT,
+        "hasWsKey": bool(_WS_API_KEY),
+        "wsKeyExpiresAt": _WS_API_KEY_EXPIRATION or None,
+        "subscriptionCount": len(_DESIRED_SUBSCRIPTIONS),
+        "subscriptions": list(_DESIRED_SUBSCRIPTIONS.values()),
+        "tracked": rows,
+        "managerRunning": bool(_WS_MANAGER_TASK and not _WS_MANAGER_TASK.done()),
+        "lastStatus": dict(_LIVE_STATUS),
+        "createdAt": now_iso(),
+    }
+
+
+def get_latest_live_snapshot(symbol: str = "MES1!", timeframe: str = "1m") -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    key = cache_key(normalized_symbol, normalized_timeframe)
+
+    return {
+        "eventType": "LIVE_FEED_LATEST",
+        "status": "Live" if _LIVE_CANDLE_CACHE.get(key) else _LIVE_STATUS.get("status", "Waiting"),
+        "symbol": normalized_symbol,
+        "timeframe": normalized_timeframe,
+        "providerCode": provider_symbol(normalized_symbol),
+        "price": _LIVE_PRICE_CACHE.get(symbol_key(normalized_symbol)),
+        "candle": _LIVE_CANDLE_CACHE.get(key),
+        "history": _LIVE_CANDLE_HISTORY.get(key, [])[-20:],
+        "lastError": _LIVE_LAST_ERROR.get(key),
+        "lastStatus": dict(_LIVE_STATUS),
+        "createdAt": now_iso(),
+        "source": "insightsentry_websocket_backend_bridge",
+    }
+
+
+async def live_feed_ping_generator() -> AsyncGenerator[str, None]:
+    while True:
+        yield sse_event(
+            "ping",
+            {
+                "eventType": "LIVE_FEED_PING",
+                "status": "OK",
+                "managerRunning": bool(_WS_MANAGER_TASK and not _WS_MANAGER_TASK.done()),
+                "subscriptionCount": len(_DESIRED_SUBSCRIPTIONS),
+                "wsStatus": _LIVE_STATUS.get("status", "Idle"),
+                "createdAt": now_iso(),
+                "source": "insightsentry_websocket_backend_bridge",
+            },
+        )
+        await asyncio.sleep(max(1.0, LIVE_FEED_SSE_HEARTBEAT_SECONDS))
 
 
 async def live_feed_event_generator(
@@ -593,7 +800,7 @@ async def live_feed_event_generator(
     normalized_timeframe = normalize_timeframe(timeframe)
     key = cache_key(normalized_symbol, normalized_timeframe)
 
-    await ensure_provider_task(normalized_symbol, normalized_timeframe)
+    await ensure_subscription(normalized_symbol, normalized_timeframe)
 
     yield sse_event(
         "status",
@@ -602,15 +809,17 @@ async def live_feed_event_generator(
             "status": "Connected",
             "symbol": normalized_symbol,
             "timeframe": normalized_timeframe,
-            "providerPollSeconds": LIVE_FEED_PROVIDER_POLL_SECONDS,
-            "sseHeartbeatSeconds": LIVE_FEED_SSE_HEARTBEAT_SECONDS,
-            "source": "insightsentry_live_feed_shared_throttled",
+            "providerCode": provider_symbol(normalized_symbol),
+            "wsStatus": _LIVE_STATUS.get("status", "Starting"),
+            "source": "insightsentry_websocket_backend_bridge",
             "createdAt": now_iso(),
         },
     )
 
     last_candle_signature = ""
     last_error_signature = ""
+    last_status_signature = ""
+    heartbeat_seconds = max(0.5, float(pollSeconds or LIVE_FEED_SSE_HEARTBEAT_SECONDS))
 
     while True:
         candle = _LIVE_CANDLE_CACHE.get(key)
@@ -640,133 +849,41 @@ async def live_feed_event_generator(
                         "status": "Live",
                         "symbol": normalized_symbol,
                         "timeframe": normalized_timeframe,
+                        "providerCode": provider_symbol(normalized_symbol),
                         "price": price.get("price") if isinstance(price, dict) else candle.get("close"),
                         "livePrice": price.get("price") if isinstance(price, dict) else candle.get("close"),
                         "candle": candle,
                         "liveCandle": candle,
                         "bar": candle,
-                        "source": "insightsentry_live_feed_shared_throttled",
+                        "source": "insightsentry_ws_series",
                         "createdAt": now_iso(),
                     },
                 )
+
         elif error:
             error_signature = json.dumps(error, sort_keys=True)
             if error_signature != last_error_signature:
                 last_error_signature = error_signature
                 yield sse_event("error", error)
+
         else:
-            yield sse_comment("waiting-for-provider-cache")
-
-        await asyncio.sleep(max(0.5, float(pollSeconds or LIVE_FEED_SSE_HEARTBEAT_SECONDS)))
-
-
-async def api_live_feed_stream(
-    symbol: str = "MES1!",
-    timeframe: str = "1m",
-    pollSeconds: Optional[float] = None,
-) -> StreamingResponse:
-    return StreamingResponse(
-        live_feed_event_generator(symbol=symbol, timeframe=timeframe, pollSeconds=pollSeconds),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# COMPATIBILITY ALIASES FOR CURRENT api/main.py
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# Current api/main.py imports these older names:
-#   get_latest_live_snapshot
-#   live_feed_event_generator
-#   live_feed_ping_generator
-#   live_feed_status
-#   refresh_insightsentry_websocket_key
-#
-# Keep these wrappers so the module imports cleanly without needing another
-# main.py route rewrite.
-
-def live_feed_status() -> Dict[str, Any]:
-    """Synchronous status wrapper expected by api/main.py."""
-    status_rows = []
-
-    for key, candle in _LIVE_CANDLE_CACHE.items():
-        symbol, timeframe = key.split("::", 1)
-        status_rows.append(
-            {
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "hasCandle": candle is not None,
-                "candle": candle,
-                "price": _LIVE_PRICE_CACHE.get(symbol_key(symbol)),
-                "lastError": _LIVE_LAST_ERROR.get(key),
-            }
-        )
-
-    return {
-        "eventType": "LIVE_FEED_STATUS",
-        "status": "Live" if status_rows else "Waiting",
-        "providerPollSeconds": LIVE_FEED_PROVIDER_POLL_SECONDS,
-        "sseHeartbeatSeconds": LIVE_FEED_SSE_HEARTBEAT_SECONDS,
-        "tracked": status_rows,
-        "createdAt": now_iso(),
-        "source": "insightsentry_live_feed_shared_throttled",
-    }
-
-
-def get_latest_live_snapshot(symbol: str = "MES1!", timeframe: str = "1m") -> Dict[str, Any]:
-    """Synchronous latest snapshot wrapper expected by api/main.py."""
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-    key = cache_key(normalized_symbol, normalized_timeframe)
-
-    return {
-        "eventType": "LIVE_FEED_LATEST",
-        "status": "Live" if _LIVE_CANDLE_CACHE.get(key) or _LIVE_PRICE_CACHE.get(symbol_key(normalized_symbol)) else "Waiting",
-        "symbol": normalized_symbol,
-        "timeframe": normalized_timeframe,
-        "price": _LIVE_PRICE_CACHE.get(symbol_key(normalized_symbol)),
-        "candle": _LIVE_CANDLE_CACHE.get(key),
-        "history": _LIVE_CANDLE_HISTORY.get(key, [])[-20:],
-        "lastError": _LIVE_LAST_ERROR.get(key),
-        "providerPollSeconds": LIVE_FEED_PROVIDER_POLL_SECONDS,
-        "createdAt": now_iso(),
-        "source": "insightsentry_live_feed_shared_throttled",
-    }
-
-
-async def live_feed_ping_generator() -> AsyncGenerator[str, None]:
-    """SSE ping wrapper expected by api/main.py."""
-    while True:
-        yield sse_event(
-            "ping",
-            {
-                "eventType": "LIVE_FEED_PING",
-                "status": "OK",
-                "providerPollSeconds": LIVE_FEED_PROVIDER_POLL_SECONDS,
-                "sseHeartbeatSeconds": LIVE_FEED_SSE_HEARTBEAT_SECONDS,
+            status_payload = {
+                "eventType": "LIVE_FEED_WAITING",
+                "status": "Waiting",
+                "symbol": normalized_symbol,
+                "timeframe": normalized_timeframe,
+                "providerCode": provider_symbol(normalized_symbol),
+                "wsStatus": _LIVE_STATUS.get("status", "Starting"),
+                "subscriptionCount": len(_DESIRED_SUBSCRIPTIONS),
+                "lastStatus": dict(_LIVE_STATUS),
                 "createdAt": now_iso(),
-                "source": "insightsentry_live_feed_shared_throttled",
-            },
-        )
-        await asyncio.sleep(max(1.0, LIVE_FEED_SSE_HEARTBEAT_SECONDS))
+            }
+            status_signature = json.dumps(status_payload, sort_keys=True)
 
+            if status_signature != last_status_signature:
+                last_status_signature = status_signature
+                yield sse_event("status", status_payload)
+            else:
+                yield sse_comment("waiting-for-websocket-candle")
 
-def refresh_insightsentry_websocket_key(force: bool = False) -> Dict[str, Any]:
-    """Synchronous websocket-key wrapper expected by api/main.py."""
-    try:
-        payload = http_get_json("/v2/websocket-key", None)
-        return {
-            "eventType": "INSIGHTSENTRY_WEBSOCKET_KEY",
-            "status": "OK",
-            "force": bool(force),
-            "payload": payload,
-            "createdAt": now_iso(),
-            "source": "insightsentry_rapidapi_websocket_key",
-        }
-    except Exception as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
+        await asyncio.sleep(heartbeat_seconds)
