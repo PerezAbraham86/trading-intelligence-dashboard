@@ -287,6 +287,7 @@ def load_memory() -> Dict[str, Any]:
             "closedProjections": [],
             "corrections": [],
             "sourceStats": {},
+            "targetLocks": {},
         }
 
     try:
@@ -303,6 +304,7 @@ def load_memory() -> Dict[str, Any]:
     data.setdefault("closedProjections", [])
     data.setdefault("corrections", [])
     data.setdefault("sourceStats", {})
+    data.setdefault("targetLocks", {})
 
     if not isinstance(data["openProjections"], list):
         data["openProjections"] = []
@@ -312,6 +314,8 @@ def load_memory() -> Dict[str, Any]:
         data["corrections"] = []
     if not isinstance(data["sourceStats"], dict):
         data["sourceStats"] = {}
+    if not isinstance(data["targetLocks"], dict):
+        data["targetLocks"] = {}
 
     return data
 
@@ -377,6 +381,194 @@ def summarize_projection_memory(symbol: Any = "", timeframe: Any = "") -> Dict[s
         "avgCorrectionPoints": round(avg_correction, 4),
         "memoryPath": str(MEMORY_PATH),
         "updatedAt": memory.get("updatedAt"),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TARGET SOURCE LOCK / SMOOTHING
+# ─────────────────────────────────────────────────────────────────────────────
+
+TARGET_LOCK_MAX_AGE_SECONDS = int(os.getenv("PROJECTION_ENGINE_TARGET_LOCK_MAX_AGE_SECONDS", "900"))
+TARGET_LOCK_SWITCH_BONUS = float(os.getenv("PROJECTION_ENGINE_TARGET_LOCK_SWITCH_BONUS", "10"))
+TARGET_LOCK_DROP_TOLERANCE = float(os.getenv("PROJECTION_ENGINE_TARGET_LOCK_DROP_TOLERANCE", "12"))
+
+
+def parse_iso_epoch(value: Any) -> float:
+    try:
+        if not value:
+            return 0.0
+        if isinstance(value, (int, float)):
+            numeric = float(value)
+            return numeric / 1000.0 if numeric > 1000000000000 else numeric
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except Exception:
+        return 0.0
+
+
+def lock_key(symbol: Any, timeframe: Any) -> str:
+    return f"{normalize_symbol(symbol)}|{normalize_timeframe(timeframe)}"
+
+
+def target_rank(target_type: Any) -> int:
+    raw = str(target_type or "").upper()
+    if raw == "REAL_TARGET_PRICE_ML":
+        return 100
+    if raw in {"LIQUIDITY", "LIQUIDITY_TARGET", "ORDER_BLOCK", "FVG", "FVG_REBALANCE", "PD_ZONE"}:
+        return 70
+    if raw == "EXTERNAL_TARGET_TABLE":
+        return 55
+    if raw == "GHOST_OVERLAY_TARGET":
+        return 40
+    if raw == "NONE":
+        return 0
+    return 45
+
+
+def target_is_usable(target: Dict[str, Any], current_price: float) -> bool:
+    if not target.get("available"):
+        return False
+    price = to_float(target.get("price"), 0.0)
+    if price <= 0 or current_price <= 0:
+        return False
+    if abs(price - current_price) / max(current_price, 0.000001) > 0.35:
+        return False
+    return True
+
+
+def get_target_lock(memory: Dict[str, Any], symbol: Any, timeframe: Any) -> Dict[str, Any]:
+    locks = safe_dict(memory.get("targetLocks"))
+    lock = safe_dict(locks.get(lock_key(symbol, timeframe)))
+    if not lock:
+        return {}
+    age = datetime.now(timezone.utc).timestamp() - parse_iso_epoch(lock.get("updatedAt"))
+    if age > TARGET_LOCK_MAX_AGE_SECONDS:
+        return {}
+    return lock
+
+
+def candidate_from_lock(lock: Dict[str, Any], current_price: float, atr: float) -> Dict[str, Any]:
+    price = to_float(lock.get("price"), 0.0)
+    direction = normalize_direction(lock.get("direction"))
+    if direction == "NEUTRAL" and price > 0 and current_price > 0:
+        direction = "BULLISH" if price > current_price else "BEARISH" if price < current_price else "NEUTRAL"
+    return {
+        "available": price > 0,
+        "price": price,
+        "direction": direction,
+        "source": str(lock.get("source") or "target_source_lock"),
+        "type": str(lock.get("type") or "LOCKED_TARGET"),
+        "confidence": to_float(lock.get("confidence"), 0.0),
+        "score": to_float(lock.get("score"), lock.get("confidence", 0.0)),
+        "distancePoints": round(abs(price - current_price), 4) if price > 0 and current_price > 0 else 0.0,
+        "distanceAtr": round(abs(price - current_price) / max(atr, 0.000001), 4) if price > 0 and current_price > 0 else 0.0,
+        "marketAgreement": lock.get("marketAgreement"),
+        "reason": f"Locked target source from previous stronger target: {lock.get('source')}.",
+        "sourceLockActive": True,
+        "lockedAt": lock.get("updatedAt"),
+        "liveConfidence": to_float(lock.get("lastLiveConfidence"), lock.get("confidence", 0.0)),
+        "lockedConfidence": to_float(lock.get("confidence"), 0.0),
+        "candidates": safe_list(lock.get("candidates"))[:10],
+    }
+
+
+def apply_target_source_lock(
+    *,
+    symbol: Any,
+    timeframe: Any,
+    current_price: float,
+    atr: float,
+    live_target: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Keep the best valid target stable so weak fallback sources do not whipsaw Target ML %.
+
+    Rules:
+    - Real Target Price ML outranks ghost overlay target.
+    - A weaker source must beat the locked source by TARGET_LOCK_SWITCH_BONUS to replace it.
+    - A confidence drop inside TARGET_LOCK_DROP_TOLERANCE keeps the previous confidence/source.
+    - Lock is short-lived and refreshed only with valid target prices.
+    """
+    if current_price <= 0:
+        return live_target
+
+    memory = load_memory()
+    locks = safe_dict(memory.get("targetLocks"))
+    key = lock_key(symbol, timeframe)
+    existing_lock = get_target_lock(memory, symbol, timeframe)
+
+    if not target_is_usable(live_target, current_price):
+        if existing_lock:
+            locked = candidate_from_lock(existing_lock, current_price, atr)
+            locked["reason"] = "Live target was unavailable; using locked target source."
+            return locked
+        return live_target
+
+    live_rank = target_rank(live_target.get("type"))
+    live_confidence = to_float(live_target.get("confidence"), 0.0)
+
+    if existing_lock:
+        locked_rank = target_rank(existing_lock.get("type"))
+        locked_confidence = to_float(existing_lock.get("confidence"), 0.0)
+        locked_price = to_float(existing_lock.get("price"), 0.0)
+        locked_is_valid = locked_price > 0 and abs(locked_price - current_price) / max(current_price, 0.000001) <= 0.35
+
+        # Keep Real Target ML over ghost overlay unless ghost is clearly superior.
+        should_keep_lock = False
+        if locked_is_valid and locked_rank > live_rank:
+            should_keep_lock = live_confidence < locked_confidence + TARGET_LOCK_SWITCH_BONUS
+        elif locked_is_valid and locked_rank == live_rank:
+            should_keep_lock = live_confidence < locked_confidence - TARGET_LOCK_DROP_TOLERANCE
+
+        if should_keep_lock:
+            locked = candidate_from_lock(existing_lock, current_price, atr)
+            locked["liveTargetSource"] = live_target.get("source")
+            locked["liveTargetType"] = live_target.get("type")
+            locked["liveConfidence"] = live_confidence
+            locked["reason"] = (
+                f"Target source lock kept {existing_lock.get('source')} "
+                f"over weaker live source {live_target.get('source')}."
+            )
+            locks[key] = {
+                **existing_lock,
+                "lastLiveSource": live_target.get("source"),
+                "lastLiveType": live_target.get("type"),
+                "lastLiveConfidence": live_confidence,
+                "lastLivePrice": live_target.get("price"),
+                "updatedAt": now_iso(),
+            }
+            memory["targetLocks"] = locks
+            save_memory(memory)
+            return locked
+
+    locked_row = {
+        "symbol": normalize_symbol(symbol),
+        "timeframe": normalize_timeframe(timeframe),
+        "price": live_target.get("price"),
+        "direction": live_target.get("direction"),
+        "source": live_target.get("source"),
+        "type": live_target.get("type"),
+        "confidence": live_confidence,
+        "score": live_target.get("score"),
+        "marketAgreement": live_target.get("marketAgreement"),
+        "candidates": safe_list(live_target.get("candidates"))[:10],
+        "lastLiveSource": live_target.get("source"),
+        "lastLiveType": live_target.get("type"),
+        "lastLiveConfidence": live_confidence,
+        "lastLivePrice": live_target.get("price"),
+        "updatedAt": now_iso(),
+    }
+    locks[key] = locked_row
+    memory["targetLocks"] = locks
+    save_memory(memory)
+
+    return {
+        **live_target,
+        "sourceLockActive": False,
+        "liveConfidence": live_confidence,
+        "lockedConfidence": live_confidence,
+        "lockedAt": locked_row["updatedAt"],
     }
 
 
@@ -1337,7 +1529,14 @@ def build_unified_projection_engine(
         signal=signal,
     )
 
-    target = choose_target_candidate(candidates, market_state, memory_summary)
+    live_target = choose_target_candidate(candidates, market_state, memory_summary)
+    target = apply_target_source_lock(
+        symbol=normalized_symbol,
+        timeframe=normalized_timeframe,
+        current_price=current_price,
+        atr=atr,
+        live_target=live_target,
+    )
     mode = determine_projection_mode(market_state, target)
 
     ghost_path = build_target_guided_ghost_path(
@@ -1389,6 +1588,12 @@ def build_unified_projection_engine(
         "activeTargetSource": target.get("source"),
         "activeTargetType": target.get("type"),
         "activeTargetConfidence": target.get("confidence"),
+        "targetSourceLockActive": bool(target.get("sourceLockActive")),
+        "targetLockedConfidence": target.get("lockedConfidence", target.get("confidence")),
+        "targetLiveConfidence": target.get("liveConfidence", target.get("confidence")),
+        "targetLiveSource": target.get("liveTargetSource", target.get("source")),
+        "targetLiveType": target.get("liveTargetType", target.get("type")),
+        "targetLockedAt": target.get("lockedAt"),
         "targetPrice": target.get("price"),
         "finalTargetPrice": target.get("price") if target_is_real_ml else None,
         "ghostOverlayTargetPrice": target.get("price") if not target_is_real_ml else None,
@@ -1454,6 +1659,7 @@ def reset_projection_engine_memory(symbol: Optional[Any] = None, timeframe: Opti
             "closedProjections": [],
             "corrections": [],
             "sourceStats": {},
+            "targetLocks": {},
         }
         save_memory(memory)
         return {
