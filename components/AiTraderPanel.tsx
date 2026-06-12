@@ -1137,6 +1137,11 @@ export default function AiTraderPanel({
     lockedTargetConfidence,
   )
   const aiSetupConfidence = aiConfidence
+  const rrTargetPlan = decision?.details?.rrTargetPlan ?? {}
+  const rrPlanMethod = String(rrTargetPlan?.method ?? 'original_target')
+  const rrPlanUpgraded = Boolean(rrTargetPlan?.upgraded)
+  const rrRequiredTarget = toFiniteNumber(rrTargetPlan?.requiredTarget, 0)
+  const originalRiskReward = toFiniteNumber(rrTargetPlan?.originalRiskReward, decision?.riskReward ?? 0)
   const aiMemorySamples = toFiniteNumber(decisionStats.samples, 0)
   const aiMemoryProgress = Math.min(100, (aiMemorySamples / 400) * 100)
   const aiLearnedReliability = Math.max(
@@ -1369,6 +1374,9 @@ export default function AiTraderPanel({
           <StatBox label="Entry ML" value={`${entryMlConfidence.toFixed(1)}%`} tone={getMlStrengthTone(entryMlConfidence)} />
           <StatBox label="Target" value={formatPrice(decision?.target)} />
           <StatBox label="RR" value={`${toFiniteNumber(decision?.riskReward, 0).toFixed(2)}R`} tone={toFiniteNumber(decision?.riskReward, 0) >= minRiskReward ? 'bull' : 'warn'} />
+          <StatBox label="Original RR" value={`${originalRiskReward.toFixed(2)}R`} tone={originalRiskReward >= minRiskReward ? 'bull' : 'warn'} />
+          <StatBox label="RR Plan" value={rrPlanUpgraded ? 'UPGRADED' : rrPlanMethod.replace(/_/g, ' ').toUpperCase()} tone={rrPlanUpgraded ? 'bull' : toFiniteNumber(decision?.riskReward, 0) >= minRiskReward ? 'bull' : 'warn'} />
+          <StatBox label="Required Target" value={formatPrice(rrRequiredTarget)} tone={rrRequiredTarget > 0 ? 'warn' : 'neutral'} />
           <StatBox label="Target Source" value={projectionSnapshot.source || '—'} />
           <StatBox label="Target Live Conf" value={`${liveTargetConfidence.toFixed(1)}%`} tone={getMlStrengthTone(liveTargetConfidence)} />
           <StatBox label="Target Locked Conf" value={`${lockedTargetConfidence.toFixed(1)}%`} tone={(projectionSnapshot as any).targetSourceLockActive ? 'bull' : getMlStrengthTone(lockedTargetConfidence)} />
@@ -1395,6 +1403,16 @@ export default function AiTraderPanel({
                   • {reason}
                 </div>
               ))}
+            </div>
+          ) : null}
+
+          {rrTargetPlan?.reason ? (
+            <div className={`mt-4 rounded-xl border px-3 py-2 text-xs ${rrPlanUpgraded ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200' : 'border-amber-400/30 bg-amber-400/10 text-amber-200'}`}>
+              <div className="font-black uppercase tracking-wide">RR Builder</div>
+              <div className="mt-1 leading-5">
+                {String(rrTargetPlan.reason)}
+                {rrRequiredTarget > 0 ? ` Required target: ${formatPrice(rrRequiredTarget)}.` : ''}
+              </div>
             </div>
           ) : null}
 
