@@ -869,6 +869,77 @@ function readSharedCandleCache(symbol: string, timeframe: string, limit: number)
   }
 }
 
+
+function liveCandleEpoch(value: DashboardCandle | null | undefined) {
+  if (!value) return 0
+
+  if (typeof value.time === 'number') return value.time
+
+  const parsed = Date.parse(String(value.time))
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0
+}
+
+function mergeLiveCandleIntoCandles(
+  currentCandles: DashboardCandle[],
+  rawCandle: any,
+  limit: number
+): DashboardCandle[] {
+  const liveCandle = normalizeCandlePayloadItem(rawCandle)
+  if (!liveCandle) return currentCandles
+
+  const liveEpoch = liveCandleEpoch(liveCandle)
+  if (liveEpoch <= 0) return currentCandles
+
+  let replaced = false
+  const merged = currentCandles.map((existing) => {
+    const existingEpoch = liveCandleEpoch(existing)
+    if (existingEpoch === liveEpoch) {
+      replaced = true
+      return {
+        ...existing,
+        ...liveCandle,
+        time: existing.time,
+      }
+    }
+    return existing
+  })
+
+  if (!replaced) {
+    merged.push(liveCandle)
+  }
+
+  merged.sort((a, b) => liveCandleEpoch(a) - liveCandleEpoch(b))
+  return merged.slice(-Math.max(1, limit))
+}
+
+function writeLiveCandleToSharedCache(
+  symbol: string,
+  timeframe: string,
+  limit: number,
+  rawCandle: any,
+  previousOverlayPayload: any | null,
+  previousUnifiedIntelligence: any | null
+) {
+  const key = sharedCandleKey(symbol, timeframe)
+  const previous = SHARED_CANDLE_CACHE.get(key)
+  const mergedCandles = mergeLiveCandleIntoCandles(previous?.candles ?? [], rawCandle, Math.max(limit, previous?.limit ?? 0, 700))
+
+  if (mergedCandles.length === 0) return null
+
+  const entry: SharedCandleCacheEntry = {
+    candles: mergedCandles,
+    overlayPayload: previous?.overlayPayload ?? previousOverlayPayload ?? null,
+    unifiedIntelligence: previous?.unifiedIntelligence ?? previousUnifiedIntelligence ?? null,
+    updatedAt: Date.now(),
+    limit: Math.max(limit, previous?.limit ?? 0, mergedCandles.length),
+    provider: 'insightsentry',
+    source: 'phase8_live_feed_sse',
+  }
+
+  SHARED_CANDLE_CACHE.set(key, entry)
+  return entry
+}
+
 async function fetchSharedCandlePayload(
   apiBaseUrl: string,
   symbol: string,
@@ -2998,6 +3069,7 @@ function useChartCandles(
     const activeApiBaseUrl = apiBaseUrl
     let cancelled = false
     let intervalId: ReturnType<typeof setInterval> | null = null
+    let liveEventSource: EventSource | null = null
 
     function applyCachedPayload() {
       const cached = readSharedCandleCache(symbol, timeframe, limit)
@@ -3069,9 +3141,61 @@ function useChartCandles(
     fetchCandles()
     intervalId = setInterval(fetchCandles, pollMs)
 
+    if (priority === 'main' && typeof window !== 'undefined' && typeof EventSource !== 'undefined') {
+      const params = new URLSearchParams({
+        symbol: normalizeSymbol(symbol),
+        timeframe: normalizeTimeframe(timeframe),
+        limit: String(Math.max(1, limit)),
+        pollSeconds: '1',
+      })
+
+      liveEventSource = new EventSource(`${activeApiBaseUrl}/api/live-feed/stream?${params.toString()}`)
+
+      liveEventSource.onmessage = (event) => {
+        if (cancelled || !event.data) return
+
+        try {
+          const payload = JSON.parse(event.data)
+          const liveCandle = payload?.candle ?? payload?.liveCandle ?? payload?.bar
+          if (!liveCandle) return
+
+          setCandles((previousCandles) => {
+            const merged = mergeLiveCandleIntoCandles(previousCandles, liveCandle, limit)
+            writeLiveCandleToSharedCache(symbol, timeframe, limit, liveCandle, overlayPayload, unifiedIntelligence)
+            return merged
+          })
+        } catch {
+          // Ignore malformed SSE heartbeat/data packets.
+        }
+      }
+
+      liveEventSource.addEventListener('candle', (event: MessageEvent) => {
+        if (cancelled || !event.data) return
+
+        try {
+          const payload = JSON.parse(event.data)
+          const liveCandle = payload?.candle ?? payload?.liveCandle ?? payload?.bar
+          if (!liveCandle) return
+
+          setCandles((previousCandles) => {
+            const merged = mergeLiveCandleIntoCandles(previousCandles, liveCandle, limit)
+            writeLiveCandleToSharedCache(symbol, timeframe, limit, liveCandle, overlayPayload, unifiedIntelligence)
+            return merged
+          })
+        } catch {
+          // Ignore malformed SSE heartbeat/data packets.
+        }
+      })
+
+      liveEventSource.onerror = () => {
+        // Keep REST candle polling as fallback if SSE disconnects.
+      }
+    }
+
     return () => {
       cancelled = true
       if (intervalId) clearInterval(intervalId)
+      if (liveEventSource) liveEventSource.close()
     }
   }, [apiBaseUrl, isClient, symbol, timeframe, limit, pollMs, enabled, priority])
 
