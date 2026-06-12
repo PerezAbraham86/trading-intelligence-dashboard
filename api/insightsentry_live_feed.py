@@ -517,6 +517,7 @@ async def api_live_feed_refresh_key() -> Dict[str, Any]:
 async def live_feed_event_generator(
     symbol: str = "MES1!",
     timeframe: str = "1m",
+    limit: int = 700,
     pollSeconds: Optional[float] = None,
 ) -> AsyncGenerator[str, None]:
     normalized_symbol = normalize_symbol(symbol)
@@ -604,3 +605,99 @@ async def api_live_feed_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMPATIBILITY ALIASES FOR CURRENT api/main.py
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Current api/main.py imports these older names:
+#   get_latest_live_snapshot
+#   live_feed_event_generator
+#   live_feed_ping_generator
+#   live_feed_status
+#   refresh_insightsentry_websocket_key
+#
+# Keep these wrappers so the module imports cleanly without needing another
+# main.py route rewrite.
+
+def live_feed_status() -> Dict[str, Any]:
+    """Synchronous status wrapper expected by api/main.py."""
+    status_rows = []
+
+    for key, candle in _LIVE_CANDLE_CACHE.items():
+        symbol, timeframe = key.split("::", 1)
+        status_rows.append(
+            {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "hasCandle": candle is not None,
+                "candle": candle,
+                "price": _LIVE_PRICE_CACHE.get(symbol_key(symbol)),
+                "lastError": _LIVE_LAST_ERROR.get(key),
+            }
+        )
+
+    return {
+        "eventType": "LIVE_FEED_STATUS",
+        "status": "Live" if status_rows else "Waiting",
+        "providerPollSeconds": LIVE_FEED_PROVIDER_POLL_SECONDS,
+        "sseHeartbeatSeconds": LIVE_FEED_SSE_HEARTBEAT_SECONDS,
+        "tracked": status_rows,
+        "createdAt": now_iso(),
+        "source": "insightsentry_live_feed_shared_throttled",
+    }
+
+
+def get_latest_live_snapshot(symbol: str = "MES1!", timeframe: str = "1m") -> Dict[str, Any]:
+    """Synchronous latest snapshot wrapper expected by api/main.py."""
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    key = cache_key(normalized_symbol, normalized_timeframe)
+
+    return {
+        "eventType": "LIVE_FEED_LATEST",
+        "status": "Live" if _LIVE_CANDLE_CACHE.get(key) or _LIVE_PRICE_CACHE.get(symbol_key(normalized_symbol)) else "Waiting",
+        "symbol": normalized_symbol,
+        "timeframe": normalized_timeframe,
+        "price": _LIVE_PRICE_CACHE.get(symbol_key(normalized_symbol)),
+        "candle": _LIVE_CANDLE_CACHE.get(key),
+        "history": _LIVE_CANDLE_HISTORY.get(key, [])[-20:],
+        "lastError": _LIVE_LAST_ERROR.get(key),
+        "providerPollSeconds": LIVE_FEED_PROVIDER_POLL_SECONDS,
+        "createdAt": now_iso(),
+        "source": "insightsentry_live_feed_shared_throttled",
+    }
+
+
+async def live_feed_ping_generator() -> AsyncGenerator[str, None]:
+    """SSE ping wrapper expected by api/main.py."""
+    while True:
+        yield sse_event(
+            "ping",
+            {
+                "eventType": "LIVE_FEED_PING",
+                "status": "OK",
+                "providerPollSeconds": LIVE_FEED_PROVIDER_POLL_SECONDS,
+                "sseHeartbeatSeconds": LIVE_FEED_SSE_HEARTBEAT_SECONDS,
+                "createdAt": now_iso(),
+                "source": "insightsentry_live_feed_shared_throttled",
+            },
+        )
+        await asyncio.sleep(max(1.0, LIVE_FEED_SSE_HEARTBEAT_SECONDS))
+
+
+def refresh_insightsentry_websocket_key(force: bool = False) -> Dict[str, Any]:
+    """Synchronous websocket-key wrapper expected by api/main.py."""
+    try:
+        payload = http_get_json("/v2/websocket-key", None)
+        return {
+            "eventType": "INSIGHTSENTRY_WEBSOCKET_KEY",
+            "status": "OK",
+            "force": bool(force),
+            "payload": payload,
+            "createdAt": now_iso(),
+            "source": "insightsentry_rapidapi_websocket_key",
+        }
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
