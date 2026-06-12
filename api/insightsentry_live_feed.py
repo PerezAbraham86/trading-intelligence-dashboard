@@ -148,6 +148,41 @@ def symbol_key(symbol: Any) -> str:
     return normalize_symbol(symbol)
 
 
+def insightsentry_symbol_variants(symbol: Any) -> list[str]:
+    """Try the symbol formats InsightSentry/RapidAPI may expect.
+
+    Dashboard-normalized symbol is MES1!, but the provider endpoints may expect
+    a venue-prefixed futures symbol like CME_MINI:MES1!. Do not strip the venue
+    when calling the provider; try both.
+    """
+    raw = str(symbol or "MES1!").strip().upper()
+    normalized = normalize_symbol(raw)
+
+    variants: list[str] = []
+
+    def add(value: Any) -> None:
+        text = str(value or "").strip().upper()
+        if text and text not in variants:
+            variants.append(text)
+
+    add(raw)
+
+    if normalized == "MES1!":
+        add("CME_MINI:MES1!")
+        add("CME:MES1!")
+        add("MES1!")
+        add("MES")
+    elif normalized == "ES1!":
+        add("CME_MINI:ES1!")
+        add("CME:ES1!")
+        add("ES1!")
+        add("ES")
+    else:
+        add(normalized)
+
+    return variants
+
+
 def bucket_epoch(timestamp: Optional[float] = None, timeframe: Any = "1m") -> int:
     ts = int(timestamp or time.time())
     seconds = timeframe_to_seconds(timeframe)
@@ -307,19 +342,42 @@ def sse_comment(message: str = "keepalive") -> str:
 
 def fetch_insightsentry_l1_quote(symbol: Any) -> Dict[str, Any]:
     normalized = normalize_symbol(symbol)
+    symbol_variants = insightsentry_symbol_variants(symbol)
 
-    # Try paths your existing backend has used successfully. Stop at first valid price.
-    paths = [
-        f"/v3/symbols/{quote(normalized, safe='')}/quotes/l1",
-        f"/v3/symbols/{quote(normalized, safe='')}/quote",
-        f"/v3/symbols/{quote(normalized, safe='')}/quotes",
-        "/v3/quotes/l1",
-    ]
+    # RapidAPI page is Version v2. The previous v3-only routes returned 404.
+    # Try v2 first, then v3 fallback, and try both query-style and path-style
+    # symbol endpoints.
+    candidate_requests: list[tuple[str, Optional[Dict[str, Any]], str]] = []
+
+    for provider_symbol in symbol_variants:
+        encoded_symbol = quote(provider_symbol, safe="")
+        candidate_requests.extend(
+            [
+                ("/v2/quotes/l1", {"symbol": provider_symbol}, provider_symbol),
+                ("/v2/quote/l1", {"symbol": provider_symbol}, provider_symbol),
+                ("/v2/quotes", {"symbol": provider_symbol}, provider_symbol),
+                ("/v2/quote", {"symbol": provider_symbol}, provider_symbol),
+                (f"/v2/symbols/{encoded_symbol}/quotes/l1", None, provider_symbol),
+                (f"/v2/symbols/{encoded_symbol}/quote", None, provider_symbol),
+                (f"/v2/symbols/{encoded_symbol}/quotes", None, provider_symbol),
+
+                # v3 fallback only after v2 candidates.
+                ("/v3/quotes/l1", {"symbol": provider_symbol}, provider_symbol),
+                ("/v3/quote/l1", {"symbol": provider_symbol}, provider_symbol),
+                ("/v3/quotes", {"symbol": provider_symbol}, provider_symbol),
+                ("/v3/quote", {"symbol": provider_symbol}, provider_symbol),
+                (f"/v3/symbols/{encoded_symbol}/quotes/l1", None, provider_symbol),
+                (f"/v3/symbols/{encoded_symbol}/quote", None, provider_symbol),
+                (f"/v3/symbols/{encoded_symbol}/quotes", None, provider_symbol),
+            ]
+        )
 
     errors: list[str] = []
+    tried: list[str] = []
 
-    for path in paths:
-        params = {"symbol": normalized} if path == "/v3/quotes/l1" else None
+    for path, params, provider_symbol in candidate_requests:
+        path_label = f"{path}?{urlencode(params)}" if params else path
+        tried.append(path_label)
 
         try:
             payload = http_get_json(path, params=params)
@@ -328,21 +386,32 @@ def fetch_insightsentry_l1_quote(symbol: Any) -> Dict[str, Any]:
             if price > 0:
                 return {
                     "symbol": normalized,
+                    "providerSymbol": provider_symbol,
                     "price": price,
                     "quote": quote_payload,
                     "providerPayload": payload,
                     "sourcePath": path,
+                    "sourceRequest": path_label,
                     "createdAt": now_iso(),
                 }
         except Exception as error:
-            errors.append(str(error))
+            error_text = str(error)
+            errors.append(f"{path_label} -> {error_text}")
 
-            # Important: if RapidAPI says 429, stop trying the other endpoints.
-            # Trying fallback paths makes the rate limit worse.
-            if "429" in str(error):
+            # 429 means provider rate limit is active. Stop fallback attempts.
+            if "429" in error_text or "Too Many Requests" in error_text:
                 raise
 
-    raise RuntimeError("; ".join(errors) if errors else "No valid InsightSentry live quote")
+            # Continue on 404 because endpoint/symbol format may be wrong.
+            continue
+
+    raise RuntimeError(
+        "No valid InsightSentry live quote. Tried: "
+        + " | ".join(tried[:16])
+        + (" ..." if len(tried) > 16 else "")
+        + " Errors: "
+        + " | ".join(errors[-8:])
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
