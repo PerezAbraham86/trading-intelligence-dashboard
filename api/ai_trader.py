@@ -1482,6 +1482,109 @@ def candle_high_low_close(candle: Any) -> Tuple[float, float, float]:
     return high, low, close
 
 
+
+def calculate_open_trade_live_pnl(trade: Dict[str, Any], current_price: Any) -> Dict[str, Any]:
+    """Recalculate an open dashboard paper trade from the latest live/chart price."""
+    live_price = to_float(current_price, 0.0)
+    if live_price <= 0:
+        live_price = to_float(
+            trade.get("currentPrice")
+            or trade.get("current")
+            or trade.get("lastPrice")
+            or trade.get("markPrice")
+            or trade.get("entry")
+            or trade.get("entryPrice"),
+            0.0,
+        )
+
+    entry = to_float(trade.get("entry") or trade.get("entryPrice"), 0.0)
+    side = str(trade.get("side") or trade.get("decision") or trade.get("rawDecision") or "BUY").upper()
+    qty = max(1.0, to_float(trade.get("quantity") or trade.get("qty") or trade.get("contracts"), 1.0))
+    symbol = normalize_symbol(str(trade.get("symbol") or ""))
+    point_multiplier = 5.0 if symbol.startswith("MES") else 50.0 if symbol.startswith("ES") else 1.0
+    point_value = max(1.0, to_float(trade.get("pointValue") or trade.get("dollarPerPoint") or trade.get("multiplier"), point_multiplier))
+
+    if entry <= 0 or live_price <= 0:
+        return {
+            **trade,
+            "currentPrice": live_price,
+            "currentPnl": to_float(trade.get("currentPnl") or trade.get("pnl"), 0.0),
+            "pnl": to_float(trade.get("currentPnl") or trade.get("pnl"), 0.0),
+            "pnlPercent": to_float(trade.get("pnlPercent") or trade.get("percent"), 0.0),
+            "percent": to_float(trade.get("pnlPercent") or trade.get("percent"), 0.0),
+            "rMultiple": to_float(trade.get("rMultiple") or trade.get("r"), 0.0),
+            "liveUpdatedAt": now_iso(),
+            "livePnlSource": "stored_trade_price",
+        }
+
+    points = (entry - live_price) if "SELL" in side or "SHORT" in side else (live_price - entry)
+    pnl = points * point_value * qty
+    pnl_percent = points / entry if entry else 0.0
+
+    stop = to_float(trade.get("stop") or trade.get("stopPrice"), 0.0)
+    risk_points = abs(entry - stop) if stop > 0 else 0.0
+    r_multiple = points / risk_points if risk_points > 0 else to_float(trade.get("rMultiple") or trade.get("r"), 0.0)
+
+    max_pnl = max(to_float(trade.get("maxPnl"), pnl), pnl)
+    min_pnl = min(to_float(trade.get("minPnl"), pnl), pnl)
+
+    updated = dict(trade)
+    updated.update(
+        {
+            "currentPrice": round(live_price, 8),
+            "markPrice": round(live_price, 8),
+            "currentPnl": round(pnl, 6),
+            "pnl": round(pnl, 6),
+            "pnlPercent": round(pnl_percent, 8),
+            "percent": round(pnl_percent, 8),
+            "livePoints": round(points, 8),
+            "rMultiple": round(r_multiple, 6),
+            "currentR": round(r_multiple, 6),
+            "maxPnl": round(max_pnl, 6),
+            "minPnl": round(min_pnl, 6),
+            "liveUpdatedAt": now_iso(),
+            "livePnlSource": "chart_live_price",
+        }
+    )
+    return updated
+
+
+def refresh_open_trades_with_live_price(memory: Dict[str, Any], symbol: Any = "", timeframe: Any = "", current_price: Any = None) -> Dict[str, Any]:
+    live_price = to_float(current_price, 0.0)
+    if live_price <= 0:
+        return memory
+
+    normalized_symbol = normalize_symbol(str(symbol or ""))
+    normalized_timeframe = normalize_timeframe(str(timeframe or ""))
+
+    refreshed = []
+    changed = False
+
+    for trade in safe_list(memory.get("openTrades")):
+        if not isinstance(trade, dict):
+            continue
+
+        trade_symbol = normalize_symbol(str(trade.get("symbol") or ""))
+        trade_tf = normalize_timeframe(str(trade.get("timeframe") or ""))
+
+        should_refresh = True
+        if normalized_symbol and trade_symbol and trade_symbol != normalized_symbol:
+            should_refresh = False
+        if normalized_timeframe and trade_tf and trade_tf != normalized_timeframe:
+            should_refresh = False
+
+        if should_refresh:
+            refreshed_trade = calculate_open_trade_live_pnl(trade, live_price)
+            refreshed.append(refreshed_trade)
+            changed = True
+        else:
+            refreshed.append(trade)
+
+    if changed:
+        memory["openTrades"] = refreshed
+
+    return memory
+
 def evaluate_ai_trades(
     *,
     symbol: Any = "MES1!",
