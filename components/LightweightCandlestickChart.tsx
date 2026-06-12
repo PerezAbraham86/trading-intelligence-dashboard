@@ -107,6 +107,35 @@ function timeToOverlayTime(time: Time): OverlayCandle["time"] {
   return `${time.year}-${String(time.month).padStart(2, "0")}-${String(time.day).padStart(2, "0")}`;
 }
 
+function chartTimeKey(time: Time | undefined): string {
+  if (time === undefined || time === null) return "";
+
+  if (typeof time === "number" || typeof time === "string") {
+    return String(time);
+  }
+
+  return `${time.year}-${time.month}-${time.day}`;
+}
+
+function hasRenderableOverlayPayload(
+  payload: ChartOverlayPayload | null | undefined
+): payload is ChartOverlayPayload {
+  if (!payload || typeof payload !== "object") return false;
+
+  const raw = payload as any;
+
+  return (
+    (Array.isArray(raw.zones) && raw.zones.length > 0) ||
+    (Array.isArray(raw.orderBlocks) && raw.orderBlocks.length > 0) ||
+    (Array.isArray(raw.markers) && raw.markers.length > 0) ||
+    (Array.isArray(raw.lines) && raw.lines.length > 0) ||
+    (Array.isArray(raw.smcEvents) && raw.smcEvents.length > 0) ||
+    (Array.isArray(raw.liquidityProfileBins) && raw.liquidityProfileBins.length > 0) ||
+    Boolean(raw.smc) ||
+    Boolean(raw.chartOverlays)
+  );
+}
+
 
 function normalizeChartUnixSeconds(value: unknown) {
   if (typeof value === "number") {
@@ -985,6 +1014,15 @@ export default function LightweightCandlestickChart({
   const ghostCandleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const hasFitContentRef = useRef(false);
+  const lastOverlayPayloadRef = useRef<ChartOverlayPayload | null>(null);
+  const lastDisplayMetaRef = useRef<{
+    symbol: string;
+    timeframe: string;
+    mode: ChartMode;
+    length: number;
+    firstTime: string;
+    lastTime: string;
+  } | null>(null);
   const [overlaySize, setOverlaySize] = useState({ width: 0, height });
   const [isNrtrStatsCollapsed, setIsNrtrStatsCollapsed] = useState(false);
 
@@ -1005,6 +1043,17 @@ export default function LightweightCandlestickChart({
   }, [candles]);
 
   const overlayCandles = useMemo(() => toOverlayCandles(candles), [candles]);
+
+  useEffect(() => {
+    if (hasRenderableOverlayPayload(overlayPayload)) {
+      lastOverlayPayloadRef.current = overlayPayload;
+    }
+  }, [overlayPayload]);
+
+  const stableOverlayPayload = hasRenderableOverlayPayload(overlayPayload)
+    ? overlayPayload
+    : lastOverlayPayloadRef.current;
+
   const displayData = mode === "heikinAshi" ? chartData.heikinAshi : chartData.regular;
 
   /**
@@ -1250,15 +1299,49 @@ export default function LightweightCandlestickChart({
   }, [height]);
 
   useEffect(() => {
-    if (!candleSeriesRef.current) return;
+    const candleSeries = candleSeriesRef.current;
+    if (!candleSeries) return;
 
-    candleSeriesRef.current.setData(displayData);
+    const first = displayData[0];
+    const last = displayData[displayData.length - 1];
+
+    const nextMeta = {
+      symbol,
+      timeframe,
+      mode,
+      length: displayData.length,
+      firstTime: chartTimeKey(first?.time),
+      lastTime: chartTimeKey(last?.time),
+    };
+
+    const previousMeta = lastDisplayMetaRef.current;
+
+    const shouldFullReset =
+      !previousMeta ||
+      previousMeta.symbol !== nextMeta.symbol ||
+      previousMeta.timeframe !== nextMeta.timeframe ||
+      previousMeta.mode !== nextMeta.mode ||
+      previousMeta.firstTime !== nextMeta.firstTime ||
+      displayData.length === 0 ||
+      displayData.length < previousMeta.length ||
+      displayData.length > previousMeta.length + 1;
+
+    if (shouldFullReset) {
+      candleSeries.setData(displayData);
+    } else if (last) {
+      // Live-feed fix:
+      // When only the current candle changes, update the last bar instead of
+      // rebuilding the full series. This keeps canvas overlays from blinking.
+      candleSeries.update(last);
+    }
+
+    lastDisplayMetaRef.current = nextMeta;
 
     if (autoFit && displayData.length > 0 && chartRef.current && !hasFitContentRef.current) {
       chartRef.current.timeScale().fitContent();
       hasFitContentRef.current = true;
     }
-  }, [displayData, autoFit]);
+  }, [displayData, autoFit, mode, symbol, timeframe]);
 
   useEffect(() => {
     if (!smmaSeriesRef.current) return;
@@ -1409,7 +1492,7 @@ export default function LightweightCandlestickChart({
               <span>{visibleOverlayLines.length} Levels</span>
             </>
           )}
-          {overlayPayload && showCanvasOverlay && (
+          {stableOverlayPayload && showCanvasOverlay && (
             <>
               <span className="text-slate-500">•</span>
               <span>Canvas Overlay</span>
@@ -1526,11 +1609,11 @@ export default function LightweightCandlestickChart({
         aria-hidden="true"
       />
 
-      {showCanvasOverlay && overlayPayload && chartRef.current && candleSeriesRef.current && (
+      {showCanvasOverlay && stableOverlayPayload && chartRef.current && candleSeriesRef.current && (
         <LightweightChartOverlayCanvas
           chart={chartRef.current}
           mainSeries={candleSeriesRef.current}
-          overlayPayload={overlayPayload}
+          overlayPayload={stableOverlayPayload}
           candles={overlayCandles}
           width={overlaySize.width}
           height={overlaySize.height}
