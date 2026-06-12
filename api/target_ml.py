@@ -29,8 +29,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 TARGET_ML_MEMORY: List[Dict[str, Any]] = []
+TARGET_ML_STATE: Dict[str, Any] = {}
 TARGET_ML_MAX_RECORDS = int(os.getenv("TARGET_ML_MAX_RECORDS", "5000"))
-TARGET_ML_STORE_FILE = Path(os.getenv("TARGET_ML_STORE_FILE", "/tmp/trading_dashboard_target_ml_memory.json"))
+TARGET_ML_STORE_FILE = Path(
+    os.getenv(
+        "TARGET_ML_STORE_FILE",
+        str(Path(__file__).with_name("target_ml_memory.json")),
+    )
+)
 TARGET_ML_MIN_EVALUATED_FOR_ADJUSTMENT = int(os.getenv("TARGET_ML_MIN_EVALUATED_FOR_ADJUSTMENT", "12"))
 
 
@@ -171,10 +177,11 @@ def target_record_key(symbol: str, timeframe: str, projection_time: str, directi
 
 
 def load_target_ml_memory() -> Dict[str, Any]:
-    global TARGET_ML_MEMORY
+    global TARGET_ML_MEMORY, TARGET_ML_STATE
     try:
         if not TARGET_ML_STORE_FILE.exists():
             TARGET_ML_MEMORY = []
+            TARGET_ML_STATE = {}
             return {"status": "empty", "loaded": 0, "path": str(TARGET_ML_STORE_FILE)}
         with TARGET_ML_STORE_FILE.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
@@ -183,10 +190,12 @@ def load_target_ml_memory() -> Dict[str, Any]:
             records = []
         cleaned = [record for record in records if isinstance(record, dict)]
         TARGET_ML_MEMORY = cleaned[-TARGET_ML_MAX_RECORDS:]
+        TARGET_ML_STATE = payload.get("state", {}) if isinstance(payload, dict) and isinstance(payload.get("state"), dict) else {}
         return {"status": "loaded", "loaded": len(TARGET_ML_MEMORY), "path": str(TARGET_ML_STORE_FILE)}
     except Exception as error:
         print(f"[Target ML] memory load failed: {error}")
         TARGET_ML_MEMORY = []
+        TARGET_ML_STATE = {}
         return {"status": "error", "loaded": 0, "path": str(TARGET_ML_STORE_FILE), "error": str(error)}
 
 
@@ -197,6 +206,7 @@ def save_target_ml_memory() -> Dict[str, Any]:
             "version": "target-ml-v1-smc-alpha-dlm-ob-ghost",
             "createdAt": now_iso(),
             "maxRecords": TARGET_ML_MAX_RECORDS,
+            "state": TARGET_ML_STATE,
             "records": TARGET_ML_MEMORY[-TARGET_ML_MAX_RECORDS:],
         }
         temp_path = TARGET_ML_STORE_FILE.with_suffix(TARGET_ML_STORE_FILE.suffix + ".tmp")
@@ -429,6 +439,87 @@ def empty_target_plan(symbol: str, timeframe: str, reason: str) -> Dict[str, Any
     }
 
 
+
+def target_ml_state_key(symbol: str, timeframe: str) -> str:
+    return f"{normalize_symbol(symbol)}::{normalize_timeframe(timeframe)}"
+
+
+def smooth_target_ml_plan(symbol: str, timeframe: str, plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist a short target confidence/source lock so live Target ML does not visually reset.
+
+    This does not fake a target. It only smooths the displayed confidence and learned
+    reliability for the latest valid Target ML plan. Weak drops are dampened; stronger
+    plans update the lock immediately.
+    """
+    global TARGET_ML_STATE
+
+    if not isinstance(plan, dict):
+        return plan
+
+    target_price = to_float(plan.get("targetPrice") or plan.get("target"), 0.0)
+    confidence = clamp(to_float(plan.get("targetConfidence"), 0.0), 0.0, 100.0)
+    source = str(plan.get("targetSource") or plan.get("source") or "unknown")
+    key = target_ml_state_key(symbol, timeframe)
+    state = TARGET_ML_STATE.get(key, {}) if isinstance(TARGET_ML_STATE.get(key), dict) else {}
+
+    if target_price <= 0:
+        if state:
+            return {
+                **plan,
+                "targetConfidence": to_float(state.get("smoothedConfidence"), confidence),
+                "liveTargetConfidence": confidence,
+                "smoothedTargetConfidence": to_float(state.get("smoothedConfidence"), confidence),
+                "learnedReliability": to_float(state.get("learnedReliability"), 50.0),
+                "targetSourceLockActive": True,
+                "targetSourceLocked": state.get("source"),
+                "targetMlReason": plan.get("targetMlReason") or "using_previous_target_confidence_lock",
+            }
+        return plan
+
+    previous_smoothed = to_float(state.get("smoothedConfidence"), confidence)
+    previous_source = str(state.get("source") or source)
+    previous_samples = int(state.get("observations") or 0)
+
+    # Faster rise, slower drop.
+    alpha = 0.60 if confidence >= previous_smoothed else 0.18
+    smoothed = clamp(previous_smoothed * (1.0 - alpha) + confidence * alpha, 0.0, 100.0)
+
+    # If source changes and new confidence is much weaker, keep previous confidence as a display lock.
+    lock_active = False
+    if previous_source != source and confidence < previous_smoothed - 10:
+        smoothed = previous_smoothed
+        lock_active = True
+
+    learned_reliability = clamp(smoothed * 0.55 + to_float(plan.get("targetMlHitRate"), 0.0) * 0.45, 0.0, 100.0)
+
+    TARGET_ML_STATE[key] = {
+        "symbol": normalize_symbol(symbol),
+        "timeframe": normalize_timeframe(timeframe),
+        "source": previous_source if lock_active else source,
+        "liveSource": source,
+        "targetPrice": target_price,
+        "liveConfidence": confidence,
+        "smoothedConfidence": round(smoothed, 4),
+        "learnedReliability": round(learned_reliability, 4),
+        "observations": previous_samples + 1,
+        "targetSourceLockActive": lock_active,
+        "updatedAt": now_iso(),
+    }
+    save_target_ml_memory()
+
+    return {
+        **plan,
+        "targetConfidence": round(smoothed, 2),
+        "liveTargetConfidence": round(confidence, 2),
+        "smoothedTargetConfidence": round(smoothed, 2),
+        "learnedReliability": round(learned_reliability, 2),
+        "targetSourceLockActive": lock_active,
+        "targetSourceLocked": TARGET_ML_STATE[key]["source"],
+        "targetMlStateSamples": previous_samples + 1,
+        "targetMlReason": plan.get("targetMlReason") or ("target_source_lock" if lock_active else "target_confidence_smoothed"),
+    }
+
+
 def build_target_ml_plan(symbol: str, timeframe: str, candles: List[Dict[str, Any]], overlays: Dict[str, Any], ghosts: Optional[List[Dict[str, Any]]] = None, signal: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
@@ -452,7 +543,7 @@ def build_target_ml_plan(symbol: str, timeframe: str, candles: List[Dict[str, An
     reward = abs(target_price - entry)
     risk_reward = reward / risk if risk > 0 else 0.0
     target_confidence = get_target_ml_confidence(normalized_symbol, normalized_timeframe, best, candidates)
-    return {
+    plan = {
         "eventType": "TARGET_ML_PLAN", "status": "Ready", "symbol": normalized_symbol, "timeframe": normalized_timeframe,
         "entry": round_price(normalized_symbol, entry), "entryPrice": round_price(normalized_symbol, entry),
         "target": round_price(normalized_symbol, target_price), "targetPrice": round_price(normalized_symbol, target_price), "takeProfitPrice": round_price(normalized_symbol, target_price), "tp1": round_price(normalized_symbol, target_price),
@@ -463,6 +554,7 @@ def build_target_ml_plan(symbol: str, timeframe: str, candles: List[Dict[str, An
         "riskReward": round(risk_reward, 3), "rewardDistance": round(reward, 5), "riskDistance": round(risk, 5), "candidates": candidates[:12],
         "mlHierarchy": "SMC_ALPHA_DLM_ORDERBLOCKS_TARGET_GHOST_ONLY", "nrtrUsedForMl": 0, "smmaUsedForMl": 0, "createdAt": now_iso(),
     }
+    return smooth_target_ml_plan(normalized_symbol, normalized_timeframe, plan)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -688,20 +780,21 @@ def target_ml_summary_from_candles(symbol: str, timeframe: str, candles: List[Di
         "eventType": "TARGET_ML_STATUS", "status": "Learning" if records else "Waiting", "symbol": normalized_symbol, "timeframe": normalized_timeframe,
         "memorySize": len(records), "evaluatedSamples": len(evaluated), "pendingSamples": len(pending), "evaluatedNow": eval_result.get("evaluatedNow", 0),
         "hitRate": overall["hitRate"], "firstTargetRate": overall["firstTargetRate"], "avgQualityScore": overall["avgQualityScore"], "avgFavorableRatio": overall["avgFavorableRatio"], "avgAdverseRatio": overall["avgAdverseRatio"], "avgBarsToTarget": overall["avgBarsToTarget"],
-        "readyForLiveTargetAdjustment": overall["samples"] >= TARGET_ML_MIN_EVALUATED_FOR_ADJUSTMENT, "sourceWeights": get_target_ml_source_weights(normalized_symbol, normalized_timeframe), "storeFile": str(TARGET_ML_STORE_FILE), "recent": records[-20:],
+        "readyForLiveTargetAdjustment": overall["samples"] >= TARGET_ML_MIN_EVALUATED_FOR_ADJUSTMENT, "sourceWeights": get_target_ml_source_weights(normalized_symbol, normalized_timeframe), "state": TARGET_ML_STATE.get(target_ml_state_key(normalized_symbol, normalized_timeframe), {}), "storeFile": str(TARGET_ML_STORE_FILE), "recent": records[-20:],
         "mlHierarchy": "SMC_ALPHA_DLM_ORDERBLOCKS_TARGET_GHOST_ONLY", "nrtrUsedForMl": 0, "smmaUsedForMl": 0, "createdAt": now_iso(),
     }
 
 
 def target_ml_export() -> Dict[str, Any]:
-    return {"eventType": "TARGET_ML_EXPORT", "version": "target-ml-v1-smc-alpha-dlm-ob-ghost", "createdAt": now_iso(), "memorySize": len(TARGET_ML_MEMORY), "records": TARGET_ML_MEMORY, "mlHierarchy": "SMC_ALPHA_DLM_ORDERBLOCKS_TARGET_GHOST_ONLY", "nrtrUsedForMl": 0, "smmaUsedForMl": 0}
+    return {"eventType": "TARGET_ML_EXPORT", "version": "target-ml-v1-smc-alpha-dlm-ob-ghost", "createdAt": now_iso(), "memorySize": len(TARGET_ML_MEMORY), "state": TARGET_ML_STATE, "records": TARGET_ML_MEMORY, "mlHierarchy": "SMC_ALPHA_DLM_ORDERBLOCKS_TARGET_GHOST_ONLY", "nrtrUsedForMl": 0, "smmaUsedForMl": 0}
 
 
 def reset_target_ml_memory(symbol: Optional[str] = None, timeframe: Optional[str] = None) -> Dict[str, Any]:
-    global TARGET_ML_MEMORY
+    global TARGET_ML_MEMORY, TARGET_ML_STATE
     if symbol is None and timeframe is None:
         removed = len(TARGET_ML_MEMORY)
         TARGET_ML_MEMORY = []
+        TARGET_ML_STATE = {}
         save_target_ml_memory()
         return {"status": "reset", "scope": "all", "removed": removed, "remaining": 0}
     normalized_symbol = normalize_symbol(symbol or "")
@@ -709,5 +802,7 @@ def reset_target_ml_memory(symbol: Optional[str] = None, timeframe: Optional[str
     before = len(TARGET_ML_MEMORY)
     TARGET_ML_MEMORY = [record for record in TARGET_ML_MEMORY if not ((not symbol or record.get("symbol") == normalized_symbol) and (not timeframe or record.get("timeframe") == normalized_timeframe))]
     removed = before - len(TARGET_ML_MEMORY)
+    state_key = target_ml_state_key(normalized_symbol, normalized_timeframe)
+    TARGET_ML_STATE.pop(state_key, None)
     save_target_ml_memory()
     return {"status": "reset", "scope": "filtered", "symbol": normalized_symbol if symbol else None, "timeframe": normalized_timeframe if timeframe else None, "removed": removed, "remaining": len(TARGET_ML_MEMORY)}
