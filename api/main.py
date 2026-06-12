@@ -196,6 +196,23 @@ except Exception:
 
 
 try:
+    from api.insightsentry_history import (
+        get_historical_ohlcv,
+        historical_ohlcv_status,
+    )
+except Exception:
+    try:
+        from insightsentry_history import (
+            get_historical_ohlcv,
+            historical_ohlcv_status,
+        )
+    except Exception:
+        get_historical_ohlcv = None
+        historical_ohlcv_status = None
+
+
+
+try:
     from api.ml_feature_store import (
         get_ml_feature_store_summary,
         get_recent_ml_feature_snapshots,
@@ -8072,4 +8089,68 @@ def api_live_feed_ping() -> StreamingResponse:
     if live_feed_ping_generator is None:
         raise HTTPException(status_code=503, detail="api.insightsentry_live_feed module unavailable")
     return StreamingResponse(live_feed_ping_generator(), media_type="text/event-stream")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INSIGHTSENTRY HISTORICAL TIME SERIES OHLCV — PHASE 8.6
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/insightsentry/history")
+def api_insightsentry_history(
+    symbol: str = "MES1!",
+    timeframe: str = "1m",
+    start_ym: str | None = None,
+    limit: int = 700,
+    extended: bool = True,
+    badj: bool = True,
+    dadj: bool = False,
+    force: bool = False,
+) -> Dict[str, Any]:
+    if get_historical_ohlcv is None:
+        raise HTTPException(status_code=503, detail="api.insightsentry_history module unavailable")
+    return get_historical_ohlcv(
+        symbol=symbol,
+        timeframe=timeframe,
+        start_ym=start_ym,
+        limit=limit,
+        extended=extended,
+        badj=badj,
+        dadj=dadj,
+        force=force,
+    )
+
+
+@app.get("/insightsentry/history")
+def api_insightsentry_history_alias(
+    symbol: str = "MES1!",
+    timeframe: str = "1m",
+    start_ym: str | None = None,
+    limit: int = 700,
+    extended: bool = True,
+    badj: bool = True,
+    dadj: bool = False,
+    force: bool = False,
+) -> Dict[str, Any]:
+    return api_insightsentry_history(
+        symbol=symbol,
+        timeframe=timeframe,
+        start_ym=start_ym,
+        limit=limit,
+        extended=extended,
+        badj=badj,
+        dadj=dadj,
+        force=force,
+    )
+
+
+@app.get("/api/insightsentry/history/status")
+def api_insightsentry_history_status() -> Dict[str, Any]:
+    if historical_ohlcv_status is None:
+        raise HTTPException(status_code=503, detail="api.insightsentry_history module unavailable")
+    return historical_ohlcv_status()
+
+
+@app.get("/insightsentry/history/status")
+def api_insightsentry_history_status_alias() -> Dict[str, Any]:
+    return api_insightsentry_history_status()
 
