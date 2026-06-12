@@ -211,6 +211,23 @@ except Exception:
         historical_ohlcv_status = None
 
 
+try:
+    from api.insightsentry_session import (
+        get_insightsentry_session,
+        insightsentry_session_status,
+    )
+except Exception:
+    try:
+        from insightsentry_session import (
+            get_insightsentry_session,
+            insightsentry_session_status,
+        )
+    except Exception:
+        get_insightsentry_session = None
+        insightsentry_session_status = None
+
+
+
 
 try:
     from api.ml_feature_store import (
@@ -8153,4 +8170,38 @@ def api_insightsentry_history_status() -> Dict[str, Any]:
 @app.get("/insightsentry/history/status")
 def api_insightsentry_history_status_alias() -> Dict[str, Any]:
     return api_insightsentry_history_status()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INSIGHTSENTRY SESSION INFORMATION — PHASE 8.7
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/insightsentry/session")
+def api_insightsentry_session(
+    symbol: str = "MES1!",
+    force: bool = False,
+) -> Dict[str, Any]:
+    if get_insightsentry_session is None:
+        raise HTTPException(status_code=503, detail="api.insightsentry_session module unavailable")
+    return get_insightsentry_session(symbol=symbol, force=force)
+
+
+@app.get("/insightsentry/session")
+def api_insightsentry_session_alias(
+    symbol: str = "MES1!",
+    force: bool = False,
+) -> Dict[str, Any]:
+    return api_insightsentry_session(symbol=symbol, force=force)
+
+
+@app.get("/api/insightsentry/session/status")
+def api_insightsentry_session_status() -> Dict[str, Any]:
+    if insightsentry_session_status is None:
+        raise HTTPException(status_code=503, detail="api.insightsentry_session module unavailable")
+    return insightsentry_session_status()
+
+
+@app.get("/insightsentry/session/status")
+def api_insightsentry_session_status_alias() -> Dict[str, Any]:
+    return api_insightsentry_session_status()
 
