@@ -144,6 +144,16 @@ type ChartSelection = {
   candleMode: 'Regular' | 'Heikin Ashi'
 }
 
+type LiveFeedSnapshot = {
+  symbol: string
+  price: number
+  bid?: number | null
+  ask?: number | null
+  last?: number | null
+  source?: string
+  updatedAt: number
+}
+
 type TechnicalIndicator = {
   name: string
   value: number
@@ -857,6 +867,87 @@ const SHARED_CANDLE_IN_FLIGHT = new Map<string, Promise<SharedCandleCacheEntry>>
 
 function sharedCandleKey(symbol: string, timeframe: string) {
   return `${normalizeSymbol(symbol)}::${normalizeTimeframe(timeframe)}`
+}
+
+const SHARED_LIVE_PRICE_CACHE = new Map<string, LiveFeedSnapshot>()
+
+function sharedLivePriceKey(symbol: string) {
+  return normalizeSymbol(symbol)
+}
+
+function extractLiveFeedPriceFromPayload(payload: any, liveCandle?: any): LiveFeedSnapshot | null {
+  const symbol = normalizeSymbol(
+    payload?.symbol ??
+      payload?.ticker ??
+      payload?.data?.symbol ??
+      payload?.quote?.symbol ??
+      liveCandle?.symbol ??
+      'MES1!'
+  )
+
+  const candidates = [
+    payload?.price,
+    payload?.livePrice,
+    payload?.currentPrice,
+    payload?.current,
+    payload?.last,
+    payload?.lastPrice,
+    payload?.markPrice,
+    payload?.quote?.last,
+    payload?.quote?.price,
+    payload?.quote?.mid,
+    payload?.quote?.bid,
+    payload?.quote?.ask,
+    payload?.data?.last,
+    payload?.data?.price,
+    liveCandle?.close,
+    liveCandle?.c,
+  ]
+
+  for (const candidate of candidates) {
+    const price = toFiniteNumber(candidate, NaN)
+
+    if (Number.isFinite(price) && price > 0) {
+      return {
+        symbol,
+        price,
+        bid: toFiniteNumber(payload?.bid ?? payload?.quote?.bid ?? payload?.data?.bid, NaN),
+        ask: toFiniteNumber(payload?.ask ?? payload?.quote?.ask ?? payload?.data?.ask, NaN),
+        last: toFiniteNumber(payload?.last ?? payload?.quote?.last ?? payload?.data?.last ?? price, price),
+        source: String(payload?.source ?? payload?.provider ?? 'phase8_live_feed_sse'),
+        updatedAt: Date.now(),
+      }
+    }
+  }
+
+  return null
+}
+
+function writeSharedLivePriceCache(snapshot: LiveFeedSnapshot | null) {
+  if (!snapshot || !Number.isFinite(snapshot.price) || snapshot.price <= 0) return null
+
+  const normalized: LiveFeedSnapshot = {
+    ...snapshot,
+    symbol: normalizeSymbol(snapshot.symbol),
+    updatedAt: snapshot.updatedAt || Date.now(),
+  }
+
+  SHARED_LIVE_PRICE_CACHE.set(sharedLivePriceKey(normalized.symbol), normalized)
+  return normalized
+}
+
+function readSharedLivePriceCache(symbol: string) {
+  return SHARED_LIVE_PRICE_CACHE.get(sharedLivePriceKey(symbol)) ?? null
+}
+
+function formatSharedLivePrice(value: any) {
+  const price = toFiniteNumber(value, NaN)
+  if (!Number.isFinite(price) || price <= 0) return '—'
+
+  return price.toLocaleString(undefined, {
+    minimumFractionDigits: price >= 100 ? 2 : 4,
+    maximumFractionDigits: price >= 100 ? 2 : 6,
+  })
 }
 
 function readSharedCandleCache(symbol: string, timeframe: string, limit: number) {
@@ -3055,7 +3146,8 @@ function useChartCandles(
   limit = 500,
   pollMs = 5000,
   enabled = true,
-  priority: 'main' | 'mini' = 'main'
+  priority: 'main' | 'mini' = 'main',
+  onLivePriceUpdate?: (snapshot: LiveFeedSnapshot) => void
 ) {
   const [candles, setCandles] = useState<DashboardCandle[]>([])
   const [overlayPayload, setOverlayPayload] = useState<any | null>(null)
@@ -3078,6 +3170,12 @@ function useChartCandles(
       setCandles(cached.candles)
       setOverlayPayload(cached.overlayPayload)
       setUnifiedIntelligence(cached.unifiedIntelligence)
+
+      const cachedLivePrice = readSharedLivePriceCache(symbol)
+      if (cachedLivePrice) {
+        onLivePriceUpdate?.(cachedLivePrice)
+      }
+
       setErrorText('')
       return cached.candles.length > 0
     }
@@ -3141,7 +3239,7 @@ function useChartCandles(
     fetchCandles()
     intervalId = setInterval(fetchCandles, pollMs)
 
-    if (priority === 'main' && typeof window !== 'undefined' && typeof EventSource !== 'undefined') {
+    if (typeof window !== 'undefined' && typeof EventSource !== 'undefined') {
       const params = new URLSearchParams({
         symbol: normalizeSymbol(symbol),
         timeframe: normalizeTimeframe(timeframe),
@@ -3158,6 +3256,13 @@ function useChartCandles(
           const payload = JSON.parse(event.data)
           const liveCandle = payload?.candle ?? payload?.liveCandle ?? payload?.bar
           if (!liveCandle) return
+
+          const livePriceSnapshot = writeSharedLivePriceCache(
+            extractLiveFeedPriceFromPayload(payload, liveCandle)
+          )
+          if (livePriceSnapshot) {
+            onLivePriceUpdate?.(livePriceSnapshot)
+          }
 
           setCandles((previousCandles) => {
             const merged = mergeLiveCandleIntoCandles(previousCandles, liveCandle, limit)
@@ -3176,6 +3281,13 @@ function useChartCandles(
           const payload = JSON.parse(event.data)
           const liveCandle = payload?.candle ?? payload?.liveCandle ?? payload?.bar
           if (!liveCandle) return
+
+          const livePriceSnapshot = writeSharedLivePriceCache(
+            extractLiveFeedPriceFromPayload(payload, liveCandle)
+          )
+          if (livePriceSnapshot) {
+            onLivePriceUpdate?.(livePriceSnapshot)
+          }
 
           setCandles((previousCandles) => {
             const merged = mergeLiveCandleIntoCandles(previousCandles, liveCandle, limit)
@@ -3197,7 +3309,7 @@ function useChartCandles(
       if (intervalId) clearInterval(intervalId)
       if (liveEventSource) liveEventSource.close()
     }
-  }, [apiBaseUrl, isClient, symbol, timeframe, limit, pollMs, enabled, priority])
+  }, [apiBaseUrl, isClient, symbol, timeframe, limit, pollMs, enabled, priority, onLivePriceUpdate, overlayPayload, unifiedIntelligence])
 
   return {
     candles,
@@ -3461,6 +3573,8 @@ type LightweightChartPanelProps = {
   onIndicatorSettingsChange?: (settings: ChartStrategySettings) => void
   onSaveConfig?: () => void
   saveStatus?: string
+  livePrice?: number | null
+  onLivePriceUpdate?: (snapshot: LiveFeedSnapshot) => void
 }
 
 function LightweightChartPanel({
@@ -3492,6 +3606,8 @@ function LightweightChartPanel({
   onIndicatorSettingsChange,
   onSaveConfig,
   saveStatus,
+  livePrice,
+  onLivePriceUpdate,
 }: LightweightChartPanelProps) {
   const normalizedSymbol = normalizeSymbol(symbol)
   const normalizedTimeframe = normalizeTimeframe(timeframe)
@@ -3503,7 +3619,8 @@ function LightweightChartPanel({
     compact ? 300 : 700,
     compact ? 10000 : 5000,
     enabled,
-    priority
+    priority,
+    onLivePriceUpdate
   )
 
   const updateIndicatorSettings = (patch: Partial<ChartStrategySettings>) => {
@@ -3693,6 +3810,11 @@ function LightweightChartPanel({
           <p className="text-xs text-gray-500">
             Lightweight Charts • Raw OHLC truth • HA visual toggle
           </p>
+          {livePrice && livePrice > 0 ? (
+            <div className="mt-1 text-[11px] font-black text-emerald-300">
+              Shared live price: {formatSharedLivePrice(livePrice)}
+            </div>
+          ) : null}
         </div>
 
         <div className="flex flex-wrap gap-2">
@@ -4066,6 +4188,7 @@ export default function Dashboard() {
   const [factorTechnicalSentiment, setFactorTechnicalSentiment] =
     useState<TechnicalSentiment | null>(null)
   const [activeChartPrice, setActiveChartPrice] = useState<number | null>(null)
+  const [sharedLivePrices, setSharedLivePrices] = useState<Record<string, LiveFeedSnapshot>>({})
   const [chartScorecards, setChartScorecards] = useState<any | null>(null)
   const [chartMlFeatures, setChartMlFeatures] = useState<any | null>(null)
   const [mainChartCandles, setMainChartCandles] = useState<DashboardCandle[]>([])
@@ -4199,6 +4322,16 @@ export default function Dashboard() {
     }
   }, [isClient])
 
+  const handleLivePriceUpdate = useCallback((snapshot: LiveFeedSnapshot) => {
+    const normalizedSnapshot = writeSharedLivePriceCache(snapshot)
+    if (!normalizedSnapshot) return
+
+    setSharedLivePrices((current) => ({
+      ...current,
+      [sharedLivePriceKey(normalizedSnapshot.symbol)]: normalizedSnapshot,
+    }))
+  }, [])
+
   useEffect(() => {
     setIsClient(true)
   }, [])
@@ -4209,6 +4342,10 @@ export default function Dashboard() {
   const miniTwoSymbol = normalizeSymbol(miniChartTwoSelection.symbol || 'MES1!')
   const miniOneTimeframe = normalizeTimeframe(miniChartOneSelection.timeframe || '5m')
   const miniTwoTimeframe = normalizeTimeframe(miniChartTwoSelection.timeframe || '15m')
+
+  const selectedLivePrice = sharedLivePrices[sharedLivePriceKey(selectedSymbol)]?.price ?? activeChartPrice ?? null
+  const miniOneLivePrice = sharedLivePrices[sharedLivePriceKey(miniOneSymbol)]?.price ?? selectedLivePrice
+  const miniTwoLivePrice = sharedLivePrices[sharedLivePriceKey(miniTwoSymbol)]?.price ?? selectedLivePrice
 
   const {
     latestSignal,
@@ -4235,6 +4372,12 @@ export default function Dashboard() {
   const mainOverlayReady = mainCandlesReady && Boolean(chartScorecards || chartMlFeatures)
 
   useEffect(() => {
+    const sharedLive = readSharedLivePriceCache(selectedSymbol)
+    if (sharedLive?.price && sharedLive.price > 0) {
+      setActiveChartPrice(sharedLive.price)
+      return
+    }
+
     const latestCandle = mainChartCandles[mainChartCandles.length - 1]
     const latestClose = toFiniteNumber(latestCandle?.close, NaN)
 
@@ -4243,7 +4386,7 @@ export default function Dashboard() {
     } else {
       setActiveChartPrice(null)
     }
-  }, [mainChartCandles])
+  }, [mainChartCandles, selectedSymbol, sharedLivePrices])
 
 
   useEffect(() => {
@@ -4437,11 +4580,11 @@ export default function Dashboard() {
       primaryTimeframe: selectedTimeframe,
       activeSymbol: selectedSymbol,
       activeTimeframe: selectedTimeframe,
-      price: activeChartPrice ?? latestSignal?.price ?? latestSignal?.current ?? latestSignal?.entry,
-      current: activeChartPrice ?? latestSignal?.current ?? latestSignal?.price ?? latestSignal?.entry,
+      price: selectedLivePrice ?? latestSignal?.price ?? latestSignal?.current ?? latestSignal?.entry,
+      current: selectedLivePrice ?? latestSignal?.current ?? latestSignal?.price ?? latestSignal?.entry,
       entry: isPriceNearActiveScale(latestSignal?.entry ?? latestSignal?.price, activeChartPrice)
         ? latestSignal?.entry ?? latestSignal?.price
-        : activeChartPrice ?? latestSignal?.entry ?? latestSignal?.price,
+        : selectedLivePrice ?? latestSignal?.entry ?? latestSignal?.price,
       miniTimeframes: [miniOneTimeframe, miniTwoTimeframe],
       analysisTimeframes: dashboardTimeframes,
       multiTimeframeMode: true,
@@ -4507,6 +4650,7 @@ export default function Dashboard() {
     miniTwoTimeframe,
     overallTimeframeLabel,
     activeChartPrice,
+    selectedLivePrice,
     mainChartSelection.candleMode,
     chartScorecards,
     chartMlFeatures,
@@ -4619,8 +4763,8 @@ export default function Dashboard() {
               ...(latestSignal ?? {}),
               symbol: selectedSymbol,
               timeframe: selectedTimeframe,
-              price: activeChartPrice ?? latestSignal?.price ?? latestSignal?.current,
-              current: activeChartPrice ?? latestSignal?.current ?? latestSignal?.price,
+              price: selectedLivePrice ?? activeChartPrice ?? latestSignal?.price ?? latestSignal?.current,
+              current: selectedLivePrice ?? activeChartPrice ?? latestSignal?.current ?? latestSignal?.price,
             },
             ghostCount: 3,
             autoRegister: true,
@@ -4654,6 +4798,7 @@ export default function Dashboard() {
     }
   }, [
     activeChartPrice,
+    selectedLivePrice,
     apiBaseUrl,
     isClient,
     latestSignal,
@@ -4696,7 +4841,7 @@ export default function Dashboard() {
       return (
         isSameActiveSymbol(candidateSymbol, selectedSymbol) &&
         isSameActiveTimeframe(candidateTimeframe, selectedTimeframe) &&
-        isPriceNearActiveScale(candidatePrice, activeChartPrice)
+        isPriceNearActiveScale(candidatePrice, selectedLivePrice ?? activeChartPrice)
       )
     })
     .slice(0, maxSignalsToShow)
@@ -4802,6 +4947,8 @@ export default function Dashboard() {
             isClient={isClient}
             enabled={chartConfigsHydrated}
             priority="main"
+            livePrice={selectedLivePrice}
+            onLivePriceUpdate={handleLivePriceUpdate}
             engineState={primaryEngineState}
             showOverlayLines
             onCandlesUpdate={setMainChartCandles}
@@ -4841,6 +4988,8 @@ export default function Dashboard() {
               isClient={isClient}
               enabled={chartConfigsHydrated && mainCandlesReady}
               priority="mini"
+              livePrice={miniOneLivePrice}
+              onLivePriceUpdate={handleLivePriceUpdate}
               onCandlesUpdate={setMiniChartOneCandles}
               onChange={(selection) => {
                 setMiniChartOneSelection({
@@ -4870,6 +5019,8 @@ export default function Dashboard() {
               isClient={isClient}
               enabled={chartConfigsHydrated && mainCandlesReady}
               priority="mini"
+              livePrice={miniTwoLivePrice}
+              onLivePriceUpdate={handleLivePriceUpdate}
               onCandlesUpdate={setMiniChartTwoCandles}
               onChange={(selection) => {
                 setMiniChartTwoSelection({
@@ -4928,7 +5079,7 @@ export default function Dashboard() {
                 technicalSentiment={sharedTechnicalSentiment as any}
                 activeSymbol={selectedSymbol}
                 activeTimeframe={selectedTimeframe}
-                activePrice={activeChartPrice ?? undefined}
+                activePrice={selectedLivePrice ?? activeChartPrice ?? undefined}
               />
             </div>
 
@@ -4936,7 +5087,7 @@ export default function Dashboard() {
               signal={augmentedLatestSignal}
               activeSymbol={selectedSymbol}
               activeTimeframe={selectedTimeframe}
-              activePrice={activeChartPrice ?? undefined}
+              activePrice={selectedLivePrice ?? activeChartPrice ?? undefined}
               overlayPayload={mainChartOverlayPayload}
               scorecards={chartScorecards}
               unifiedIntelligence={mergedUnifiedIntelligence}
@@ -4948,7 +5099,7 @@ export default function Dashboard() {
             latestSignal={augmentedLatestSignal}
             activeSymbol={selectedSymbol}
             activeTimeframe={selectedTimeframe}
-            activePrice={activeChartPrice ?? undefined}
+            activePrice={selectedLivePrice ?? activeChartPrice ?? undefined}
             chartCards={[
               {
                 label: 'Main Chart',
@@ -4956,7 +5107,7 @@ export default function Dashboard() {
                 timeframe: selectedTimeframe,
                 candles: mainChartCandles,
                 latestSignal: augmentedLatestSignal,
-                activePrice: activeChartPrice ?? undefined,
+                activePrice: selectedLivePrice ?? activeChartPrice ?? undefined,
                 settings: mainChartIndicatorSettings,
                 overlayPayload: mainChartOverlayPayload,
                 unifiedIntelligence: mergedUnifiedIntelligence,
@@ -5002,7 +5153,7 @@ export default function Dashboard() {
               apiBaseUrl={apiBaseUrl}
               symbol={selectedSymbol}
               timeframe={selectedTimeframe}
-              activePrice={activeChartPrice ?? undefined}
+              activePrice={selectedLivePrice ?? activeChartPrice ?? undefined}
               signal={augmentedLatestSignal}
               scorecards={matrixScorecards}
               overlayPayload={mainChartOverlayPayload}
