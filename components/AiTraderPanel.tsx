@@ -787,6 +787,60 @@ function getLiveAiCurrentPrice(activePrice: any, signal: any, candles: any[] | u
   return 0
 }
 
+
+function normalizeTradeSide(value: any): 'BUY' | 'SELL' {
+  const side = normalizeDecision(value)
+  return side === 'SELL' ? 'SELL' : 'BUY'
+}
+
+function getTradeLiveCurrentPrice(trade: any, livePrice: number) {
+  const live = toFiniteNumber(livePrice, 0)
+  if (live > 0) return live
+
+  return toFiniteNumber(
+    trade?.currentPrice ??
+      trade?.current ??
+      trade?.lastPrice ??
+      trade?.markPrice ??
+      trade?.entry,
+    0
+  )
+}
+
+function calculateLiveTradePnl(trade: any, livePrice: number) {
+  const current = getTradeLiveCurrentPrice(trade, livePrice)
+  const entry = toFiniteNumber(trade?.entry ?? trade?.entryPrice, 0)
+  const side = normalizeTradeSide(trade?.side ?? trade?.decision ?? trade?.rawDecision)
+  const quantity = Math.max(1, toFiniteNumber(trade?.quantity ?? trade?.qty ?? trade?.contracts, 1))
+  const pointValue = Math.max(1, toFiniteNumber(trade?.pointValue ?? trade?.dollarPerPoint ?? trade?.multiplier, String(trade?.symbol ?? '').toUpperCase().includes('MES') ? 5 : 1))
+
+  if (entry <= 0 || current <= 0) {
+    return {
+      current,
+      pnl: toFiniteNumber(trade?.currentPnl ?? trade?.pnl, 0),
+      pnlPercent: toFiniteNumber(trade?.pnlPercent ?? trade?.percent, 0),
+      points: 0,
+      rMultiple: toFiniteNumber(trade?.rMultiple ?? trade?.r, 0),
+    }
+  }
+
+  const points = side === 'SELL' ? entry - current : current - entry
+  const pnl = points * pointValue * quantity
+  const pnlPercent = entry > 0 ? points / entry : 0
+
+  const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0)
+  const riskPoints = stop > 0 ? Math.abs(entry - stop) : 0
+  const rMultiple = riskPoints > 0 ? points / riskPoints : toFiniteNumber(trade?.rMultiple ?? trade?.r, 0)
+
+  return {
+    current,
+    pnl,
+    pnlPercent,
+    points,
+    rMultiple,
+  }
+}
+
 function StatBox({
   label,
   value,
@@ -991,7 +1045,9 @@ export default function AiTraderPanel({
           symbol,
           timeframe,
           currentPrice: liveActivePrice,
-          candles: Array.isArray(candles) ? candles.slice(-25) : [],
+          livePrice: liveActivePrice,
+          markPrice: liveActivePrice,
+          candles: Array.isArray(candles) ? candles.slice(-120) : [],
         })),
       })
 
@@ -1156,6 +1212,23 @@ export default function AiTraderPanel({
       : Array.isArray(summary?.closedTrades)
         ? summary?.closedTrades ?? []
         : []
+
+  const liveOpenTrades = openTrades.map((trade: any) => {
+    const live = calculateLiveTradePnl(trade, liveActivePrice)
+
+    return {
+      ...trade,
+      currentPrice: live.current,
+      liveCurrentPrice: live.current,
+      currentPnl: live.pnl,
+      pnl: live.pnl,
+      pnlPercent: live.pnlPercent,
+      percent: live.pnlPercent,
+      livePoints: live.points,
+      rMultiple: live.rMultiple,
+      liveUpdatedFromChart: live.current > 0,
+    }
+  })
 
   return (
     <motion.div
@@ -1488,7 +1561,10 @@ export default function AiTraderPanel({
 
       {openTrades.length > 0 ? (
         <div className="mt-4 rounded-xl border border-dark-700 bg-dark-900/70 p-4">
-          <div className="mb-3 text-xs font-black uppercase tracking-wide text-gray-400">Open Dashboard AI Trades</div>
+          <div className="mb-1 text-xs font-black uppercase tracking-wide text-gray-400">Open Dashboard AI Trades</div>
+          <div className="mb-3 text-[11px] text-gray-500">
+            Open trade current price and P&amp;L are recalculated from the live chart price every refresh.
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[760px] text-left text-xs">
               <thead className="text-gray-500">
@@ -1499,12 +1575,14 @@ export default function AiTraderPanel({
                   <th className="pb-2">Stop</th>
                   <th className="pb-2">Current</th>
                   <th className="pb-2">P&L</th>
+                  <th className="pb-2">P&L %</th>
+                  <th className="pb-2">Live R</th>
                   <th className="pb-2">Confidence</th>
                   <th className="pb-2">Reason</th>
                 </tr>
               </thead>
               <tbody>
-                {openTrades.slice(-5).map((trade: any) => (
+                {liveOpenTrades.slice(-5).map((trade: any) => (
                   <tr key={trade.id ?? `${trade.side}-${trade.entryTime}`} className="border-t border-dark-700 text-gray-300">
                     <td className={`py-2 font-black ${normalizeDecision(trade.side) === 'BUY' ? 'text-emerald-300' : 'text-red-300'}`}>
                       {trade.side}
@@ -1515,6 +1593,12 @@ export default function AiTraderPanel({
                     <td className="py-2">{formatPrice(trade.currentPrice)}</td>
                     <td className={`py-2 font-bold ${toFiniteNumber(trade.currentPnl, 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
                       {formatMoney(trade.currentPnl)}
+                    </td>
+                    <td className={`py-2 font-bold ${toFiniteNumber(trade.pnlPercent, 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                      {formatPercent(trade.pnlPercent)}
+                    </td>
+                    <td className={`py-2 font-bold ${toFiniteNumber(trade.rMultiple, 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                      {toFiniteNumber(trade.rMultiple, 0).toFixed(2)}R
                     </td>
                     <td className="py-2">{toFiniteNumber(trade.confidence, 0).toFixed(1)}%</td>
                     <td className="max-w-[280px] truncate py-2 text-gray-500">{trade.reason}</td>
