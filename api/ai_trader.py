@@ -219,6 +219,279 @@ def infer_target(side: str, entry: float, target: Any = None, signal: Optional[D
     return 0.0
 
 
+
+def collect_rr_target_candidates(
+    *,
+    signal: Optional[Dict[str, Any]] = None,
+    target_ml: Optional[Dict[str, Any]] = None,
+    projection_engine: Optional[Dict[str, Any]] = None,
+    projection_engine_context: Optional[Dict[str, Any]] = None,
+    context: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Collect target candidates that can be used only by the AI trade planner.
+
+    This does not rewrite Target ML memory. It lets AI Trader select a farther
+    valid target when the live Target ML destination is too close to satisfy
+    the user's minimum RR.
+    """
+    signal = safe_dict(signal)
+    target_ml = safe_dict(target_ml)
+    projection_engine = safe_dict(projection_engine)
+    projection_engine_context = safe_dict(projection_engine_context)
+    context = safe_dict(context)
+
+    roots = [
+        projection_engine,
+        projection_engine_context,
+        safe_dict(context.get("projectionEngine")),
+        safe_dict(context.get("projectionEngineContext")),
+        safe_dict(signal.get("projectionEngine")),
+        safe_dict(signal.get("unifiedProjectionEngine")),
+        target_ml,
+        safe_dict(signal.get("targetMl")),
+        safe_dict(signal.get("targetPlan")),
+        signal,
+    ]
+
+    list_paths = [
+        "target.candidates",
+        "targetPlan.candidates",
+        "targetMl.candidates",
+        "candidates",
+        "ghostPath.candles",
+        "ghostCandles",
+        "ghosts",
+    ]
+
+    direct_paths = [
+        "activeTargetPrice",
+        "target.price",
+        "targetPrice",
+        "targetPlan.targetPrice",
+        "targetPlan.finalTargetPrice",
+        "targetMl.targetPrice",
+        "targetMl.finalTargetPrice",
+        "finalTargetPrice",
+        "overallTargetPrice",
+        "ghostOverlayTargetPrice",
+        "ghostPath.targetPrice",
+        "ghostPath.endPrice",
+    ]
+
+    rows: List[Dict[str, Any]] = []
+
+    def add_row(price: Any, source: Any = None, confidence: Any = 0, raw: Optional[Dict[str, Any]] = None) -> None:
+        parsed = to_float(price, 0.0)
+        if parsed <= 0:
+            return
+        rows.append(
+            {
+                "price": parsed,
+                "source": str(source or "unknown"),
+                "confidence": clamp(to_float(confidence, 0.0), 0.0, 100.0),
+                "raw": raw or {},
+            }
+        )
+
+    for root in roots:
+        if not root:
+            continue
+
+        for path in direct_paths:
+            price = read_path(root, path, fallback=None)
+            if price is not None:
+                add_row(
+                    price,
+                    read_path(root, "activeTargetSource", "target.source", "source", fallback=path),
+                    read_path(root, "activeTargetConfidence", "target.confidence", "targetConfidence", "confidence", fallback=0),
+                    {"path": path},
+                )
+
+        for path in list_paths:
+            items = safe_list(read_path(root, path, fallback=[]))
+            for item in items[:80]:
+                item = safe_dict(item)
+                if not item:
+                    continue
+                price = read_path(
+                    item,
+                    "price",
+                    "targetPrice",
+                    "target",
+                    "finalTargetPrice",
+                    "overallTargetPrice",
+                    "ghostTargetPrice",
+                    "projectedTargetPrice",
+                    "close",
+                    "c",
+                    fallback=0,
+                )
+                add_row(
+                    price,
+                    read_path(item, "source", "targetSource", "type", "label", fallback=path),
+                    read_path(item, "confidence", "targetConfidence", "score", "learnedQuality", "quality", fallback=0),
+                    item,
+                )
+
+    deduped: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        key = f"{round(to_float(row.get('price'), 0.0), 4)}::{row.get('source')}"
+        existing = deduped.get(key)
+        if existing is None or to_float(row.get("confidence"), 0.0) > to_float(existing.get("confidence"), 0.0):
+            deduped[key] = row
+
+    return list(deduped.values())
+
+
+def build_rr_qualified_trade_plan(
+    *,
+    symbol: str,
+    timeframe: str,
+    side: str,
+    entry: float,
+    target: float,
+    stop: float,
+    min_rr: float,
+    signal: Optional[Dict[str, Any]] = None,
+    target_ml: Optional[Dict[str, Any]] = None,
+    ghost_ml: Optional[Dict[str, Any]] = None,
+    projection_engine: Optional[Dict[str, Any]] = None,
+    projection_engine_context: Optional[Dict[str, Any]] = None,
+    context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Pick the closest valid AI trade target that satisfies minimum RR.
+
+    Target ML can correctly identify a near destination, but that can create a
+    trade plan with bad RR. This helper keeps the live Target ML destination
+    intact while allowing AI Trader to create a separate RR-qualified paper
+    trade target.
+    """
+    base_rr = calculate_rr(side, entry, target, stop)
+    risk_points = -signed_move(side, entry, stop) if side in {"BUY", "SELL"} else 0.0
+    reward_points = signed_move(side, entry, target) if side in {"BUY", "SELL"} else 0.0
+
+    required_reward = max(risk_points * max(min_rr, 0.01), 0.0)
+    required_target = 0.0
+    if side == "BUY" and entry > 0 and required_reward > 0:
+        required_target = entry + required_reward
+    elif side == "SELL" and entry > 0 and required_reward > 0:
+        required_target = entry - required_reward
+
+    plan = {
+        "used": False,
+        "upgraded": False,
+        "method": "original_target",
+        "originalTarget": round(target, 8),
+        "target": round(target, 8),
+        "stop": round(stop, 8),
+        "riskReward": round(base_rr, 4),
+        "originalRiskReward": round(base_rr, 4),
+        "riskPoints": round(risk_points, 8),
+        "rewardPoints": round(reward_points, 8),
+        "requiredTarget": round(required_target, 8) if required_target > 0 else None,
+        "requiredRewardPoints": round(required_reward, 8),
+        "source": "original_target",
+        "candidatesChecked": 0,
+        "reason": "Original target already satisfies minimum RR." if base_rr >= min_rr else "Original target is too close for minimum RR.",
+    }
+
+    if side not in {"BUY", "SELL"} or entry <= 0 or target <= 0 or stop <= 0 or risk_points <= 0:
+        plan["reason"] = "RR builder skipped because side, entry, target, or stop is invalid."
+        return plan
+
+    if base_rr >= min_rr:
+        return plan
+
+    candidates = collect_rr_target_candidates(
+        signal=signal,
+        target_ml=target_ml,
+        projection_engine=projection_engine,
+        projection_engine_context=projection_engine_context,
+        context=context,
+    )
+
+    valid: List[Dict[str, Any]] = []
+    for row in candidates:
+        candidate_price = to_float(row.get("price"), 0.0)
+        candidate_rr = calculate_rr(side, entry, candidate_price, stop)
+        candidate_reward = signed_move(side, entry, candidate_price)
+        if candidate_price <= 0 or candidate_reward <= 0:
+            continue
+        if candidate_rr < min_rr:
+            continue
+
+        confidence = to_float(row.get("confidence"), 0.0)
+        distance_over_required = abs(candidate_reward - required_reward)
+        closeness_penalty = distance_over_required / max(abs(entry) * 0.001, 0.01)
+        source_text = str(row.get("source") or "unknown").lower()
+        source_bonus = 10.0 if "real_target" in source_text or "target_ml" in source_text else 5.0 if "ghost" in source_text else 0.0
+
+        valid.append(
+            {
+                **row,
+                "riskReward": candidate_rr,
+                "rewardPoints": candidate_reward,
+                "rank": confidence + source_bonus - closeness_penalty,
+            }
+        )
+
+    plan["candidatesChecked"] = len(candidates)
+
+    if valid:
+        valid.sort(key=lambda row: to_float(row.get("rank"), 0.0), reverse=True)
+        best = valid[0]
+        upgraded_target = to_float(best.get("price"), target)
+        upgraded_rr = calculate_rr(side, entry, upgraded_target, stop)
+        upgraded_reward = signed_move(side, entry, upgraded_target)
+        return {
+            **plan,
+            "used": True,
+            "upgraded": True,
+            "method": "candidate_rr_target",
+            "target": round(upgraded_target, 8),
+            "riskReward": round(upgraded_rr, 4),
+            "rewardPoints": round(upgraded_reward, 8),
+            "source": str(best.get("source") or "candidate"),
+            "selectedCandidateConfidence": round(to_float(best.get("confidence"), 0.0), 4),
+            "reason": f"AI RR builder selected a farther candidate target to satisfy {min_rr:.2f}R.",
+        }
+
+    allow_constructed = str(os.getenv("AI_TRADER_ENABLE_RR_RESCUE_TARGET", "true")).lower() not in {"0", "false", "no", "off"}
+    target_conf = max(
+        extract_score(target_ml, "targetConfidence", "confidence"),
+        extract_score(signal, "targetConfidence", "targetMl.targetConfidence"),
+    )
+    ghost_conf = max(
+        extract_score(ghost_ml, "confidence", "ghostConfidence"),
+        extract_score(signal, "ghostConfidence", "confidence"),
+    )
+    max_constructed_move_pct = to_float(os.getenv("AI_TRADER_MAX_RR_RESCUE_MOVE_PCT", "0.004"), 0.004)
+    constructed_distance_pct = abs(required_target - entry) / max(entry, 0.000001) if required_target > 0 else 999.0
+
+    if allow_constructed and required_target > 0 and target_conf >= 55 and ghost_conf >= 55 and constructed_distance_pct <= max_constructed_move_pct:
+        upgraded_rr = calculate_rr(side, entry, required_target, stop)
+        return {
+            **plan,
+            "used": True,
+            "upgraded": True,
+            "method": "constructed_min_rr_target",
+            "target": round(required_target, 8),
+            "riskReward": round(upgraded_rr, 4),
+            "rewardPoints": round(required_reward, 8),
+            "source": "ai_rr_minimum_target",
+            "targetConfidence": round(target_conf, 4),
+            "ghostConfidence": round(ghost_conf, 4),
+            "reason": f"AI RR builder created a separate paper-trade target at the minimum {min_rr:.2f}R because live Target ML was too close.",
+        }
+
+    return {
+        **plan,
+        "reason": "No farther valid target candidate met minimum RR; AI should keep holding.",
+        "targetConfidence": round(target_conf, 4),
+        "ghostConfidence": round(ghost_conf, 4),
+    }
+
+
 def load_memory() -> Dict[str, Any]:
     if not MEMORY_PATH.exists():
         return {
@@ -876,10 +1149,30 @@ def get_ai_trader_decision(
     target = infer_target(normalize_side(side), entry, targetPrice, signal=signal)
     decision_side = choose_decision_side(entry=entry, target=target, side=side, signal=signal, scorecards=scorecards)
     stop = infer_stop(decision_side, entry, target, stopPrice)
-    rr = to_float(riskReward, 0.0) or calculate_rr(decision_side, entry, target, stop)
 
     min_confidence = to_float(minConfidence, DEFAULT_MIN_CONFIDENCE)
     min_rr = to_float(minRiskReward, DEFAULT_MIN_RR)
+
+    rr_plan = build_rr_qualified_trade_plan(
+        symbol=normalized_symbol,
+        timeframe=normalized_timeframe,
+        side=decision_side,
+        entry=entry,
+        target=target,
+        stop=stop,
+        min_rr=min_rr,
+        signal=signal,
+        target_ml=targetMl,
+        ghost_ml=ghostMl,
+        projection_engine=projectionEngine,
+        projection_engine_context=projectionEngineContext,
+        context=context,
+    )
+
+    if bool(rr_plan.get("upgraded")):
+        target = to_float(rr_plan.get("target"), target)
+
+    rr = to_float(riskReward, 0.0) or to_float(rr_plan.get("riskReward"), calculate_rr(decision_side, entry, target, stop))
 
     if decision_side not in {"BUY", "SELL"}:
         memory = load_memory()
@@ -948,6 +1241,9 @@ def get_ai_trader_decision(
     max_pnl = signed_move(decision_side, entry, target) * point_value(normalized_symbol) if target > 0 and entry > 0 else 0.0
     risk_pnl = -abs(signed_move(decision_side, entry, stop) * point_value(normalized_symbol)) if stop > 0 and entry > 0 else 0.0
 
+    if bool(rr_plan.get("upgraded")):
+        score["reasons"] = [str(rr_plan.get("reason"))] + list(score.get("reasons", []))
+
     if not allowed:
         reason = "AI HOLD: requirements not met. " + " | ".join(score["reasons"][:4])
     else:
@@ -987,6 +1283,7 @@ def get_ai_trader_decision(
             "memoryStatus": score["memoryStatus"],
             "directionalContext": score["directionalContext"],
             "projectionEngine": safe_dict(projectionEngine) or safe_dict(projectionEngineContext) or safe_dict(context.get("projectionEngine")),
+            "rrTargetPlan": rr_plan,
             "context": context,
         },
         "createdAt": now_iso(),
