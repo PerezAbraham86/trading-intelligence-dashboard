@@ -3488,77 +3488,168 @@ function isOrderBlockOverlayZone(zone: any) {
   )
 }
 
+function isSmcOverlayZone(zone: any) {
+  const label = String(zone?.label ?? zone?.fullLabel ?? '').toLowerCase()
+  const kind = String(zone?.kind ?? zone?.type ?? '').toLowerCase()
+  const sourceEvent = String(zone?.sourceEvent ?? '').toLowerCase()
+
+  return (
+    isOrderBlockOverlayZone(zone) ||
+    label.includes('bos') ||
+    label.includes('choch') ||
+    label.includes('mss') ||
+    label.includes('wick rejection') ||
+    kind.includes('bos') ||
+    kind.includes('choch') ||
+    kind.includes('mss') ||
+    sourceEvent === 'bos' ||
+    sourceEvent === 'choch' ||
+    sourceEvent === 'mss' ||
+    sourceEvent === 'ibos' ||
+    sourceEvent === 'ichoch'
+  )
+}
+
+function isSmcOverlayMarker(marker: any) {
+  const type = String(marker?.type ?? '').toLowerCase()
+  const label = String(marker?.label ?? marker?.text ?? marker?.tag ?? '').toLowerCase()
+  const sourceEvent = String(marker?.sourceEvent ?? '').toLowerCase()
+
+  return (
+    type.includes('bos') ||
+    type.includes('choch') ||
+    type.includes('mss') ||
+    label.includes('bos') ||
+    label.includes('choch') ||
+    label.includes('mss') ||
+    label.includes('wick rejection') ||
+    sourceEvent === 'bos' ||
+    sourceEvent === 'choch' ||
+    sourceEvent === 'mss' ||
+    sourceEvent === 'ibos' ||
+    sourceEvent === 'ichoch'
+  )
+}
+
+function roundedOverlayPriceKey(value: any) {
+  const price = Number(value)
+  if (!Number.isFinite(price)) return 'na'
+
+  // MES/ES run on quarter ticks. This fuzzy bucket also keeps stock/crypto
+  // overlays stable enough while preventing near-identical OB duplicates.
+  return String(Math.round(price * 4) / 4)
+}
+
 function mergeStableOverlayZones(fallbackPayload: any, backendPayload: any) {
   const fallbackZones = Array.isArray(fallbackPayload?.zones) ? fallbackPayload.zones : []
   const backendZones = Array.isArray(backendPayload?.zones) ? backendPayload.zones : []
   const backendOrderBlocks = Array.isArray(backendPayload?.orderBlocks) ? backendPayload.orderBlocks : []
 
   /**
-   * Stable rule:
-   * - Fallback/frontend SMC is the source of truth for active BOS/CHoCH OB boxes.
-   * - Backend is the source of truth for Premium / Equilibrium / Discount.
-   * - Backend orderBlocks are used only if fallback has no order blocks.
+   * Source-lock rule:
+   * Only ONE SMC zone source is allowed to draw.
+   *
+   * - Fallback/frontend SMC is preferred because it is built from the exact
+   *   candles currently on the chart.
+   * - Backend SMC zones/orderBlocks are used only when fallback has none.
+   * - Backend PD/profile/liquidity extras are still preserved.
    */
-  const fallbackOrderBlocks = fallbackZones.filter(isOrderBlockOverlayZone)
-  const fallbackOtherZones = fallbackZones.filter((zone: any) => !isOrderBlockOverlayZone(zone))
-
-  const backendPdZones = backendZones.filter(isPdOverlayZone)
-  const backendOtherNonOrderZones = backendZones.filter(
-    (zone: any) => !isPdOverlayZone(zone) && !isOrderBlockOverlayZone(zone)
-  )
-
-  const backendOrderBlockZones = [
-    ...backendZones.filter(isOrderBlockOverlayZone),
-    ...backendOrderBlocks,
+  const fallbackSmcZones = fallbackZones.filter(isSmcOverlayZone)
+  const backendSmcZones = [
+    ...backendZones.filter(isSmcOverlayZone),
+    ...backendOrderBlocks.filter(isSmcOverlayZone),
   ]
 
-  const orderBlockSource =
-    fallbackOrderBlocks.length > 0 ? fallbackOrderBlocks : backendOrderBlockZones
+  const fallbackPdZones = fallbackZones.filter(isPdOverlayZone)
+  const backendPdZones = backendZones.filter(isPdOverlayZone)
+
+  const backendExtraZones = backendZones.filter(
+    (zone: any) => !isSmcOverlayZone(zone) && !isPdOverlayZone(zone)
+  )
+
+  const fallbackExtraZones = fallbackZones.filter(
+    (zone: any) => !isSmcOverlayZone(zone) && !isPdOverlayZone(zone)
+  )
+
+  const smcZoneSource =
+    fallbackSmcZones.length > 0 ? fallbackSmcZones : backendSmcZones
+
+  // Prefer backend PD zones because backend/unified payload often owns
+  // Premium / Equilibrium / Discount and liquidity context.
+  const pdZoneSource =
+    backendPdZones.length > 0 ? backendPdZones : fallbackPdZones
 
   const merged: any[] = []
   const seen = new Set<string>()
 
   for (const zone of [
-    ...orderBlockSource,
-    ...backendPdZones,
-    ...backendOtherNonOrderZones,
-    ...fallbackOtherZones.filter((zone: any) => !isPdOverlayZone(zone)),
+    ...smcZoneSource,
+    ...pdZoneSource,
+    ...backendExtraZones,
+    ...fallbackExtraZones,
   ]) {
-    if (!zone) continue
+    if (!zone || typeof zone !== 'object') continue
 
     const high = Number(zone.high ?? zone.top)
     const low = Number(zone.low ?? zone.bottom)
 
     if (!Number.isFinite(high) || !Number.isFinite(low)) continue
 
+    const label = String(zone.label ?? zone.fullLabel ?? zone.kind ?? zone.type ?? '')
+    const kind = String(zone.kind ?? zone.type ?? '')
+    const direction = String(zone.direction ?? 'neutral')
+
     const key = [
-      zone.kind ?? zone.type,
-      zone.label ?? zone.fullLabel,
-      zone.direction,
-      Math.round(high * 100) / 100,
-      Math.round(low * 100) / 100,
-      zone.startIndex ?? zone.startTime,
-      zone.endIndex ?? zone.endTime,
+      kind.toLowerCase(),
+      label.toLowerCase(),
+      direction.toLowerCase(),
+      roundedOverlayPriceKey(high),
+      roundedOverlayPriceKey(low),
+      zone.startIndex ?? zone.startTime ?? '',
+      zone.endIndex ?? zone.endTime ?? '',
     ].join('|')
 
     if (seen.has(key)) continue
 
     seen.add(key)
-    merged.push(zone)
+    merged.push({
+      ...zone,
+      id: String(zone.id ?? key),
+      label,
+      kind,
+      type:
+        zone.type ??
+        (kind.toLowerCase().includes('ob')
+          ? direction === 'bearish'
+            ? 'supply'
+            : 'demand'
+          : 'neutralPressure'),
+      direction:
+        direction === 'bullish' || direction === 'bearish'
+          ? direction
+          : 'neutral',
+      high,
+      low,
+      top: high,
+      bottom: low,
+    })
   }
 
-  return merged
+  const nonPdZones = merged.filter((zone) => !isPdOverlayZone(zone))
+  const pdZones = merged.filter(isPdOverlayZone)
+
+  return [...nonPdZones, ...pdZones]
 }
+
 
 function mergeStableOverlayLines(fallbackPayload: any, backendPayload: any) {
   const fallbackLines = Array.isArray(fallbackPayload?.lines) ? fallbackPayload.lines : []
   const backendLines = Array.isArray(backendPayload?.lines) ? backendPayload.lines : []
 
   /**
-   * Stable rule:
-   * - Fallback/frontend SMC lines stay visible.
-   * - Backend structure lines are used only if fallback has none.
-   * - Backend non-structure lines can still come through later.
+   * Source-lock rule:
+   * BOS / CHoCH / MSS structure lines can come from fallback OR backend,
+   * never both. Backend non-structure extras can still pass through.
    */
   const fallbackStructureLines = fallbackLines.filter(isStructureOverlayLine)
   const backendStructureLines = backendLines.filter(isStructureOverlayLine)
@@ -3576,17 +3667,20 @@ function mergeStableOverlayLines(fallbackPayload: any, backendPayload: any) {
     ...backendOtherLines,
     ...fallbackOtherLines,
   ]) {
-    if (!line) continue
+    if (!line || typeof line !== 'object') continue
 
     const price = Number(line.price ?? line.brokenLevel)
     if (!Number.isFinite(price)) continue
 
+    const label = String(line.label ?? line.tag ?? line.type ?? '')
+    const type = String(line.type ?? '').toLowerCase()
+
     const key = [
-      line.type,
-      line.label ?? line.tag,
-      Math.round(price * 100) / 100,
-      line.fromIndex ?? line.pivotIndex ?? line.fromTime,
-      line.breakIndex ?? line.index ?? line.time,
+      type,
+      label.toLowerCase(),
+      roundedOverlayPriceKey(price),
+      line.fromIndex ?? line.pivotIndex ?? line.fromTime ?? '',
+      line.breakIndex ?? line.index ?? line.time ?? '',
     ].join('|')
 
     if (seen.has(key)) continue
@@ -3598,6 +3692,7 @@ function mergeStableOverlayLines(fallbackPayload: any, backendPayload: any) {
   return merged
 }
 
+
 function mergeStableOverlayPayloads(fallbackPayload: any, backendPayload: any) {
   if (!fallbackPayload && !backendPayload) return null
   if (!backendPayload) return fallbackPayload
@@ -3606,18 +3701,36 @@ function mergeStableOverlayPayloads(fallbackPayload: any, backendPayload: any) {
   const fallbackMarkers = Array.isArray(fallbackPayload.markers) ? fallbackPayload.markers : []
   const backendMarkers = Array.isArray(backendPayload.markers) ? backendPayload.markers : []
 
+  /**
+   * Source-lock markers too. Some BOS/CHoCH labels can be rendered as
+   * markers instead of structure lines, so marker merging must follow the
+   * same SMC one-source rule.
+   */
+  const fallbackSmcMarkers = fallbackMarkers.filter(isSmcOverlayMarker)
+  const backendSmcMarkers = backendMarkers.filter(isSmcOverlayMarker)
+  const backendOtherMarkers = backendMarkers.filter((marker: any) => !isSmcOverlayMarker(marker))
+  const fallbackOtherMarkers = fallbackMarkers.filter((marker: any) => !isSmcOverlayMarker(marker))
+
+  const smcMarkerSource =
+    fallbackSmcMarkers.length > 0 ? fallbackSmcMarkers : backendSmcMarkers
+
   const mergedMarkers: any[] = []
   const seenMarkers = new Set<string>()
 
-  for (const marker of [...fallbackMarkers, ...backendMarkers]) {
-    if (!marker) continue
+  for (const marker of [
+    ...smcMarkerSource,
+    ...backendOtherMarkers,
+    ...fallbackOtherMarkers,
+  ]) {
+    if (!marker || typeof marker !== 'object') continue
 
+    const price = Number(marker.price ?? marker.value ?? marker.y)
     const key = [
-      marker.type,
-      marker.label,
-      marker.price,
-      marker.time,
-      marker.index,
+      String(marker.type ?? '').toLowerCase(),
+      String(marker.label ?? marker.text ?? marker.tag ?? '').toLowerCase(),
+      Number.isFinite(price) ? roundedOverlayPriceKey(price) : 'na',
+      marker.time ?? '',
+      marker.index ?? '',
     ].join('|')
 
     if (seenMarkers.has(key)) continue
@@ -3660,7 +3773,7 @@ function mergeStableOverlayPayloads(fallbackPayload: any, backendPayload: any) {
       lineCount: lines.length,
       zoneCount: zones.length,
       markerCount: mergedMarkers.length,
-      overlayMergeMode: 'fallback-smc-plus-backend-pd-profile',
+      overlayMergeMode: 'source-locked-smc-plus-backend-pd-profile',
     },
   }
 }
