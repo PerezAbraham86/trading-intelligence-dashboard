@@ -12,6 +12,7 @@ type AiTraderPanelProps = {
   unifiedIntelligence?: any
   projectionEngine?: any
   candles?: any[]
+  strategyTesterResults?: any
 }
 
 type AiTraderDecision = {
@@ -932,6 +933,7 @@ export default function AiTraderPanel({
   unifiedIntelligence,
   projectionEngine: directProjectionEngine,
   candles,
+  strategyTesterResults,
 }: AiTraderPanelProps) {
   const [decision, setDecision] = useState<AiTraderDecision | null>(null)
   const [summary, setSummary] = useState<AiTraderSummary | null>(null)
@@ -996,6 +998,8 @@ export default function AiTraderPanel({
       },
       projectionEngine: activeProjectionEngine,
       projectionEngineContext: projectionSnapshot,
+      strategyTesterResults,
+      strategyTesterContext: strategyTesterResults,
       candles: Array.isArray(candles) ? candles.slice(-80) : [],
       context: {
         mode: 'dashboard_only_ai_paper_trader',
@@ -1005,6 +1009,10 @@ export default function AiTraderPanel({
         projectionEngineLabel: projectionSnapshot.projectionModeLabel,
         aiPermission: projectionSnapshot.aiPermission,
         targetGhostConflict: projectionSnapshot.conflict,
+        strategyTesterScope: strategyTesterResults?.scope ?? 'MAIN_CHART_ONLY',
+        strategyTesterMode: strategyTesterResults?.strategyMode,
+        strategyTesterBestSettings: strategyTesterResults?.bestSettings,
+        strategyTesterBestResult: strategyTesterResults?.bestResult,
       },
       minConfidence,
       minRiskReward,
@@ -1022,6 +1030,7 @@ export default function AiTraderPanel({
     activeProjectionEngine,
     projectionSnapshot,
     candles,
+    strategyTesterResults,
   ])
 
   const safePayload = useMemo(() => sanitizeAiTraderPayload(payload), [payload])
@@ -1465,6 +1474,11 @@ export default function AiTraderPanel({
             value={apiBaseUrl ? 'READY' : 'NO API'}
             tone={apiBaseUrl ? 'bull' : 'warn'}
           />
+          <StatBox
+            label="Strategy Tester"
+            value={strategyTesterResults?.bestResult ? 'BEST FOUND' : strategyTesterResults?.currentResult ? 'LIVE' : 'WAITING'}
+            tone={strategyTesterResults?.bestResult ? 'bull' : strategyTesterResults?.currentResult ? 'warn' : 'neutral'}
+          />
         </div>
 
         <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
@@ -1529,6 +1543,16 @@ export default function AiTraderPanel({
           <StatBox label="Target Locked Conf" value={`${lockedTargetConfidence.toFixed(1)}%`} tone={(projectionSnapshot as any).targetSourceLockActive ? 'bull' : getMlStrengthTone(lockedTargetConfidence)} />
           <StatBox label="Target Learned" value={`${targetLearnedReliability.toFixed(1)}%`} tone={getMlStrengthTone(targetLearnedReliability)} />
           <StatBox label="Source Lock" value={(projectionSnapshot as any).targetSourceLockActive ? 'ACTIVE' : 'STANDBY'} tone={(projectionSnapshot as any).targetSourceLockActive ? 'bull' : 'neutral'} />
+          <StatBox
+            label="Tester Mode"
+            value={strategyTesterResults?.strategyMode ?? '—'}
+            tone={strategyTesterResults?.currentResult ? 'bull' : 'neutral'}
+          />
+          <StatBox
+            label="Tester WR"
+            value={`${toFiniteNumber(strategyTesterResults?.bestResult?.winRate ?? strategyTesterResults?.currentResult?.winRate, 0).toFixed(1)}%`}
+            tone={toFiniteNumber(strategyTesterResults?.bestResult?.winRate ?? strategyTesterResults?.currentResult?.winRate, 0) >= 50 ? 'bull' : 'warn'}
+          />
           <StatBox label="AI Setup Conf" value={`${aiSetupConfidence.toFixed(1)}%`} tone={decision?.allowedToTrade ? 'bull' : aiSetupConfidence >= minConfidence ? 'warn' : 'neutral'} />
           <StatBox label="AI Memory Progress" value={`${aiMemoryProgress.toFixed(1)}%`} tone={aiMemorySamples >= 10 ? 'bull' : 'warn'} />
           <StatBox label="AI Learned" value={`${aiLearnedReliability.toFixed(1)}%`} tone={aiMemorySamples >= 10 ? 'bull' : 'neutral'} />
