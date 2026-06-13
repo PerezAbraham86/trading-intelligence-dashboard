@@ -923,6 +923,206 @@ def extract_directional_context(
     }
 
 
+
+def first_present_path(data: Any, *paths: str, fallback: Any = None) -> Any:
+    for path in paths:
+        value = read_path(data, path, fallback=None)
+        if value is not None:
+            return value
+    return fallback
+
+
+def normalize_percent_score(value: Any) -> float:
+    parsed = to_float(value, 0.0)
+    if parsed <= 0:
+        return 0.0
+    if parsed <= 1.0:
+        return parsed * 100.0
+    return parsed
+
+
+def extract_strategy_tester_context(strategy_tester_results: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Read main-chart Strategy Tester performance.
+
+    Strategy Tester is intentionally treated as a settings-performance layer only.
+    It does not replace SMC, AlphaX, DLM, Ghost, Target ML, or mini-chart context.
+    """
+    data = safe_dict(strategy_tester_results)
+
+    if not data:
+        return {
+            "available": False,
+            "mode": "UNKNOWN",
+            "message": "Strategy Tester results not available.",
+            "confidenceAdjustment": 0.0,
+            "reason": "Strategy Tester not connected yet",
+        }
+
+    best = (
+        safe_dict(data.get("best"))
+        or safe_dict(data.get("bestResult"))
+        or safe_dict(data.get("bestSettingsResult"))
+        or safe_dict(read_path(data, "optimizer.best", fallback={}))
+        or safe_dict(read_path(data, "nrtrOptimizer.best", fallback={}))
+    )
+
+    result = (
+        safe_dict(data.get("result"))
+        or safe_dict(data.get("backtestResult"))
+        or safe_dict(best.get("result"))
+        or data
+    )
+
+    settings = (
+        safe_dict(data.get("settings"))
+        or safe_dict(data.get("mainSettings"))
+        or safe_dict(best.get("settings"))
+        or safe_dict(best.get("mainSettings"))
+    )
+
+    mode = str(
+        first_present_path(
+            data,
+            "strategyMode",
+            "mode",
+            "selectedMode",
+            "testerMode",
+            fallback=first_present_path(best, "strategyMode", "mode", fallback="UNKNOWN"),
+        )
+    ).upper()
+
+    win_rate = normalize_percent_score(
+        first_present_path(
+            result,
+            "winRate",
+            "win_rate",
+            "profitableTrades",
+            fallback=first_present_path(best, "winRate", "result.winRate", fallback=0),
+        )
+    )
+
+    profit_factor = to_float(
+        first_present_path(
+            result,
+            "profitFactor",
+            "profit_factor",
+            fallback=first_present_path(best, "profitFactor", "result.profitFactor", fallback=0),
+        ),
+        0.0,
+    )
+
+    total_trades = to_int(
+        first_present_path(
+            result,
+            "totalTrades",
+            "closedTrades",
+            "samples",
+            fallback=first_present_path(best, "totalTrades", "result.totalTrades", fallback=0),
+        ),
+        0,
+    )
+
+    if isinstance(result.get("trades"), list):
+        total_trades = max(total_trades, len(result.get("trades", [])))
+
+    max_drawdown_percent = abs(
+        normalize_percent_score(
+            first_present_path(
+                result,
+                "maxDrawdownPercent",
+                "maxDrawdown",
+                "drawdown",
+                fallback=first_present_path(best, "maxDrawdownPercent", "result.maxDrawdownPercent", fallback=0),
+            )
+        )
+    )
+
+    total_pnl = to_float(
+        first_present_path(
+            result,
+            "totalPnl",
+            "totalPnL",
+            "pnl",
+            fallback=first_present_path(best, "totalPnl", "result.totalPnl", fallback=0),
+        ),
+        0.0,
+    )
+
+    total_pnl_percent = normalize_percent_score(
+        first_present_path(
+            result,
+            "totalPnlPercent",
+            "totalPnLPercent",
+            "pnlPercent",
+            fallback=first_present_path(best, "totalPnlPercent", "result.totalPnlPercent", fallback=0),
+        )
+    )
+
+    sample_weight = clamp(total_trades / 20.0, 0.0, 1.0)
+    adjustment = 0.0
+
+    if total_trades < 4:
+        adjustment -= 2.0
+    else:
+        if win_rate >= 70:
+            adjustment += 9.0
+        elif win_rate >= 62:
+            adjustment += 6.0
+        elif win_rate >= 55:
+            adjustment += 3.0
+        elif win_rate < 42:
+            adjustment -= 7.0
+        elif win_rate < 48:
+            adjustment -= 4.0
+
+        if profit_factor >= 2.0:
+            adjustment += 7.0
+        elif profit_factor >= 1.5:
+            adjustment += 5.0
+        elif profit_factor >= 1.1:
+            adjustment += 2.0
+        elif profit_factor > 0 and profit_factor < 0.85:
+            adjustment -= 6.0
+
+        if total_pnl > 0:
+            adjustment += 2.0
+        elif total_pnl < 0:
+            adjustment -= 3.0
+
+        if max_drawdown_percent >= 6:
+            adjustment -= 8.0
+        elif max_drawdown_percent >= 3:
+            adjustment -= 4.0
+
+    adjustment = clamp(adjustment * max(0.25, sample_weight), -15.0, 15.0)
+
+    if total_trades < 4:
+        reason = f"Strategy Tester learning only: {total_trades} main-chart trades is not enough for a strong setting edge"
+    elif adjustment > 0:
+        reason = f"Strategy Tester supports current main-chart {mode}: {win_rate:.1f}% WR, PF {profit_factor:.2f}, {total_trades} trades"
+    elif adjustment < 0:
+        reason = f"Strategy Tester warns on current main-chart {mode}: {win_rate:.1f}% WR, PF {profit_factor:.2f}, DD {max_drawdown_percent:.2f}%"
+    else:
+        reason = f"Strategy Tester neutral on current main-chart {mode}: {win_rate:.1f}% WR, PF {profit_factor:.2f}, {total_trades} trades"
+
+    return {
+        "available": True,
+        "mode": mode,
+        "winRate": round(win_rate, 4),
+        "profitFactor": round(profit_factor, 4),
+        "totalTrades": total_trades,
+        "maxDrawdownPercent": round(max_drawdown_percent, 4),
+        "totalPnl": round(total_pnl, 4),
+        "totalPnlPercent": round(total_pnl_percent, 4),
+        "confidenceAdjustment": round(adjustment, 4),
+        "sampleWeight": round(sample_weight, 4),
+        "settings": settings,
+        "best": best,
+        "reason": reason,
+        "message": reason,
+        "purpose": "main_chart_strategy_settings_performance_only",
+    }
+
 def score_ai_decision(
     *,
     symbol: str,
@@ -940,6 +1140,7 @@ def score_ai_decision(
     signal: Optional[Dict[str, Any]] = None,
     unified_intelligence: Optional[Dict[str, Any]] = None,
     context: Optional[Dict[str, Any]] = None,
+    strategy_tester_results: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     memory = load_memory()
     context = safe_dict(context)
@@ -954,6 +1155,7 @@ def score_ai_decision(
         signal=signal,
         unified_intelligence=unified_intelligence,
     )
+    strategy_tester_context = extract_strategy_tester_context(strategy_tester_results)
 
     base = 38.0
 
@@ -979,6 +1181,10 @@ def score_ai_decision(
 
     if entry <= 0 or target <= 0 or stop <= 0:
         base -= 25.0
+
+    # Strategy Tester is a main-chart settings-performance layer.
+    # It can boost or reduce confidence, but it does not replace SMC/AlphaX/DLM/Ghost logic.
+    base += to_float(strategy_tester_context.get("confidenceAdjustment"), 0.0)
 
     bucket = trade_bucket(symbol, timeframe, side, base, context)
     closed_source = combined_closed_trades(memory)
@@ -1023,6 +1229,9 @@ def score_ai_decision(
     if directional["nrtrConflictCount"]:
         reasons.append(f"NRTR strategy context conflicts on {directional['nrtrConflictCount']} chart(s)")
 
+    if strategy_tester_context.get("available"):
+        reasons.append(str(strategy_tester_context.get("reason")))
+
     memory_status = ai_memory_status(memory, bucket=bucket)
 
     if bucket_stats["samples"] >= 8:
@@ -1042,6 +1251,7 @@ def score_ai_decision(
         "overallStats": overall_stats,
         "memoryStatus": memory_status,
         "directionalContext": directional,
+        "strategyTesterContext": strategy_tester_context,
         "reasons": reasons,
     }
 
@@ -1120,12 +1330,16 @@ def get_ai_trader_decision(
     minRiskReward: Any = None,
     projectionEngine: Optional[Dict[str, Any]] = None,
     projectionEngineContext: Optional[Dict[str, Any]] = None,
+    strategyTesterResults: Optional[Dict[str, Any]] = None,
     **_: Any,
 ) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     signal = safe_dict(signal)
     context = safe_dict(context)
+
+    if strategyTesterResults is None:
+        strategyTesterResults = safe_dict(context.get("strategyTesterResults"))
 
     current_price = to_float(currentPrice, 0.0)
     entry = to_float(entryPrice, 0.0)
@@ -1226,6 +1440,7 @@ def get_ai_trader_decision(
         signal=signal,
         unified_intelligence=unifiedIntelligence,
         context=context,
+        strategy_tester_results=strategyTesterResults,
     )
 
     allowed = (
@@ -1284,6 +1499,7 @@ def get_ai_trader_decision(
             "directionalContext": score["directionalContext"],
             "projectionEngine": safe_dict(projectionEngine) or safe_dict(projectionEngineContext) or safe_dict(context.get("projectionEngine")),
             "rrTargetPlan": rr_plan,
+            "strategyTesterContext": score.get("strategyTesterContext"),
             "context": context,
         },
         "createdAt": now_iso(),
