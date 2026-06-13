@@ -793,6 +793,60 @@ function normalizeTradeSide(value: any): 'BUY' | 'SELL' {
   return side === 'SELL' ? 'SELL' : 'BUY'
 }
 
+type AiTradeCloseReason =
+  | 'TARGET_HIT'
+  | 'STOP_HIT'
+  | 'AI_REVERSAL_EXIT'
+  | 'AI_CONFIDENCE_EXIT'
+
+function getAiTradeSettlement(trade: any, livePrice: number): {
+  shouldClose: boolean
+  closePrice: number
+  closeReason?: AiTradeCloseReason
+  closeLabel?: string
+} {
+  const current = getTradeLiveCurrentPrice(trade, livePrice)
+  const side = normalizeTradeSide(trade?.side ?? trade?.decision ?? trade?.rawDecision)
+  const target = toFiniteNumber(trade?.target ?? trade?.targetPrice ?? trade?.takeProfitPrice ?? trade?.tp1, 0)
+  const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0)
+
+  if (current <= 0 || target <= 0 || stop <= 0) {
+    return {
+      shouldClose: false,
+      closePrice: current,
+    }
+  }
+
+  const buyTargetHit = side === 'BUY' && current >= target
+  const buyStopHit = side === 'BUY' && current <= stop
+
+  const sellTargetHit = side === 'SELL' && current <= target
+  const sellStopHit = side === 'SELL' && current >= stop
+
+  if (buyTargetHit || sellTargetHit) {
+    return {
+      shouldClose: true,
+      closePrice: target,
+      closeReason: 'TARGET_HIT',
+      closeLabel: 'Target hit',
+    }
+  }
+
+  if (buyStopHit || sellStopHit) {
+    return {
+      shouldClose: true,
+      closePrice: stop,
+      closeReason: 'STOP_HIT',
+      closeLabel: 'Stop hit',
+    }
+  }
+
+  return {
+    shouldClose: false,
+    closePrice: current,
+  }
+}
+
 function getTradeLiveCurrentPrice(trade: any, livePrice: number) {
   const live = toFiniteNumber(livePrice, 0)
   if (live > 0) return live
@@ -1214,7 +1268,11 @@ export default function AiTraderPanel({
         : []
 
   const liveOpenTrades = openTrades.map((trade: any) => {
-    const live = calculateLiveTradePnl(trade, liveActivePrice)
+    const settlement = getAiTradeSettlement(trade, liveActivePrice)
+    const live = calculateLiveTradePnl(
+      trade,
+      settlement.shouldClose ? settlement.closePrice : liveActivePrice
+    )
 
     return {
       ...trade,
@@ -1227,8 +1285,24 @@ export default function AiTraderPanel({
       livePoints: live.points,
       rMultiple: live.rMultiple,
       liveUpdatedFromChart: live.current > 0,
+
+      shouldCloseNow: settlement.shouldClose,
+      closePrice: settlement.shouldClose ? settlement.closePrice : trade.closePrice,
+      closeReason: settlement.shouldClose ? settlement.closeReason : trade.closeReason,
+      closeLabel: settlement.shouldClose ? settlement.closeLabel : trade.closeLabel,
     }
   })
+
+  const settlementAutoEvaluateKey = liveOpenTrades
+    .filter((trade: any) => trade.shouldCloseNow)
+    .map((trade: any) => `${trade.id ?? trade.entryTime ?? ''}:${trade.closeReason}:${trade.closePrice}`)
+    .join('|')
+
+  useEffect(() => {
+    if (!settlementAutoEvaluateKey) return
+
+    evaluateOpenTrades()
+  }, [settlementAutoEvaluateKey, evaluateOpenTrades])
 
   return (
     <motion.div
@@ -1563,7 +1637,7 @@ export default function AiTraderPanel({
         <div className="mt-4 rounded-xl border border-dark-700 bg-dark-900/70 p-4">
           <div className="mb-1 text-xs font-black uppercase tracking-wide text-gray-400">Open Dashboard AI Trades</div>
           <div className="mb-3 text-[11px] text-gray-500">
-            Open trade current price and P&amp;L are recalculated from the live chart price every refresh.
+            Open trade current price, P&amp;L, and target/stop settlement are checked from the live chart price every refresh.
           </div>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[760px] text-left text-xs">
@@ -1583,7 +1657,14 @@ export default function AiTraderPanel({
               </thead>
               <tbody>
                 {liveOpenTrades.slice(-5).map((trade: any) => (
-                  <tr key={trade.id ?? `${trade.side}-${trade.entryTime}`} className="border-t border-dark-700 text-gray-300">
+                  <tr
+                    key={trade.id ?? `${trade.side}-${trade.entryTime}`}
+                    className={`border-t text-gray-300 ${
+                      trade.shouldCloseNow
+                        ? 'border-amber-400/30 bg-amber-400/5'
+                        : 'border-dark-700'
+                    }`}
+                  >
                     <td className={`py-2 font-black ${normalizeDecision(trade.side) === 'BUY' ? 'text-emerald-300' : 'text-red-300'}`}>
                       {trade.side}
                     </td>
@@ -1601,7 +1682,11 @@ export default function AiTraderPanel({
                       {toFiniteNumber(trade.rMultiple, 0).toFixed(2)}R
                     </td>
                     <td className="py-2">{toFiniteNumber(trade.confidence, 0).toFixed(1)}%</td>
-                    <td className="max-w-[280px] truncate py-2 text-gray-500">{trade.reason}</td>
+                    <td className="max-w-[280px] truncate py-2 text-gray-500">
+                      {trade.shouldCloseNow
+                        ? `${trade.closeLabel} at ${formatPrice(trade.closePrice)}`
+                        : trade.reason}
+                    </td>
                   </tr>
                 ))}
               </tbody>
