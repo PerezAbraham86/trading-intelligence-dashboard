@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { buildNeuralBrainScorecard, NeuralBrainInput } from '@/lib/neuralBrain'
 import { saveNeuralBrainSnapshot } from '@/lib/neuralBrainMemory'
+import { applyOnlineBrainPrediction, getOnlineBrainStatus } from '@/lib/neuralBrainOnline'
 
 export const dynamic = 'force-dynamic'
 
 export async function POST(request: NextRequest) {
   try {
     const payload = (await request.json()) as NeuralBrainInput
-    const scorecard = buildNeuralBrainScorecard(payload || {})
+    const baseScorecard = buildNeuralBrainScorecard(payload || {})
+    const scorecard = applyOnlineBrainPrediction(baseScorecard)
 
     const memory = saveNeuralBrainSnapshot({
       ...scorecard,
@@ -18,20 +20,22 @@ export async function POST(request: NextRequest) {
       chopRisk: scorecard.chopRisk,
       bestDirection: scorecard.bestDirection,
       decision: scorecard.decision,
-      decisionStrength: Math.abs(scorecard.buyConfidence - scorecard.sellConfidence),
+      decisionStrength: scorecard.onlineLearning.blended.decisionStrength,
       riskStatus: scorecard.noTradeWarning ? 'Risk Watch' : 'Aligned',
       scorecardInputs: {
         inputs: scorecard.inputs,
         explain: scorecard.explain,
+        onlineLearning: scorecard.onlineLearning,
         request: payload || {},
       },
-      source: 'neural_brain_predict_route',
+      source: 'neural_brain_predict_route_phase3_online',
       timestamp: scorecard.createdAt,
     })
 
     return NextResponse.json({
       ...scorecard,
       memory,
+      onlineStatus: getOnlineBrainStatus(),
     })
   } catch (error) {
     return NextResponse.json(
@@ -52,13 +56,15 @@ export async function GET() {
     status: 'Ready',
     route: '/api/neural-brain/predict',
     method: 'POST',
-    phase: 'phase2_snapshot_memory',
-    note: 'Send candles, scorecards, mlFeatures, overlayPayload/chartOverlays, unifiedIntelligence, and externalData to receive Neural Brain probabilities. Each prediction is saved as a Neural Brain memory snapshot.',
+    phase: 'phase3_river_style_online_updates',
+    note: 'Send candles, scorecards, mlFeatures, overlayPayload/chartOverlays, unifiedIntelligence, and externalData to receive Neural Brain probabilities. Each prediction is saved as memory and blended with the online learner once enough labeled outcomes are available.',
     memoryRoutes: {
       snapshots: '/api/neural-brain/snapshots',
       outcomes: '/api/neural-brain/outcomes',
       status: '/api/neural-brain/status',
+      onlineStatus: '/api/neural-brain/online-status',
     },
+    online: getOnlineBrainStatus(),
     createdAt: new Date().toISOString(),
   })
 }
