@@ -4858,6 +4858,7 @@ export default function Dashboard() {
   const [sharedLivePrices, setSharedLivePrices] = useState<Record<string, LiveFeedSnapshot>>({})
   const [chartScorecards, setChartScorecards] = useState<any | null>(null)
   const [chartMlFeatures, setChartMlFeatures] = useState<any | null>(null)
+  const [strategyTesterResults, setStrategyTesterResults] = useState<any | null>(null)
   const [mainChartCandles, setMainChartCandles] = useState<DashboardCandle[]>([])
   const [miniChartOneCandles, setMiniChartOneCandles] = useState<DashboardCandle[]>([])
   const [miniChartTwoCandles, setMiniChartTwoCandles] = useState<DashboardCandle[]>([])
@@ -5060,6 +5061,7 @@ export default function Dashboard() {
     setFactorTechnicalSentiment(null)
     setChartScorecards(null)
     setChartMlFeatures(null)
+    setStrategyTesterResults(null)
     setPythonEngineState(null)
     setProjectionEngine(null)
     setTimeframeEngineStates({})
@@ -5828,6 +5830,7 @@ export default function Dashboard() {
               overlayPayload={mainChartOverlayPayload}
               unifiedIntelligence={mergedUnifiedIntelligence}
               candles={mainChartCandles}
+              strategyTesterResults={strategyTesterResults}
             />
           </div>
 
@@ -5840,6 +5843,11 @@ export default function Dashboard() {
             mainSettings={mainChartIndicatorSettings}
             miniOneSettings={miniChartOneIndicatorSettings}
             miniTwoSettings={miniChartTwoIndicatorSettings}
+            onResultsUpdate={setStrategyTesterResults}
+            onApplyMainSettings={(settings: ChartStrategySettings) => {
+              setMainChartIndicatorSettings(settings)
+              saveChartConfig('main', mainChartSelection, settings)
+            }}
           />
         </>
       ) : (
