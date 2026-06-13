@@ -6,22 +6,23 @@ import { getOnlineBrainStatus } from '@/lib/neuralBrainOnline'
 export const dynamic = 'force-dynamic'
 
 export async function GET() {
+  const online = getOnlineBrainStatus()
+
   return NextResponse.json({
     eventType: 'NEURAL_BRAIN_STATUS',
     status: 'Ready',
     engineVersion: NEURAL_BRAIN_VERSION,
     modelType: 'phase3_river_style_online_updates',
-    trainedModelReady: getOnlineBrainStatus().onlineReady,
+    trainedModelReady: online.onlineReady,
     phase: 'phase3_river_style_online_updates',
     routes: {
       predict: '/api/neural-brain/predict',
       status: '/api/neural-brain/status',
       snapshots: '/api/neural-brain/snapshots',
       outcomes: '/api/neural-brain/outcomes',
-      onlineStatus: '/api/neural-brain/online-status',
     },
     memory: getNeuralBrainMemoryStatus(),
-    online: getOnlineBrainStatus(),
+    online,
     scorecards: [
       'buyConfidence',
       'sellConfidence',
