@@ -475,6 +475,7 @@ export default function ScorecardsPanel({
   const hidden = activeScorecards.hiddenContext ?? {}
   const activeFactors = activeScorecards.activeFactors ?? {}
   const activeFeatureCount = activeMlFeatures ? Object.keys(activeMlFeatures).length : 0
+  const neuralDecision = neuralBrain?.decision ? neuralBrain.decision.replace(/_/g, ' ') : 'waiting'
 
   return (
     <div className="rounded-xl border border-slate-800 bg-[#0b1020] p-4 shadow-lg">
@@ -528,7 +529,7 @@ export default function ScorecardsPanel({
           <div className="mt-3 rounded-lg border border-slate-800 bg-black/20 p-3 text-[11px] text-slate-300">
             <span className="text-slate-500">Decision:</span>{' '}
             <span className={`font-semibold ${directionColor(neuralBrain.bestDirection)}`}>
-              {neuralBrain.decision.replaceAll('_', ' ')}
+              {neuralDecision}
             </span>
           </div>
         </div>
