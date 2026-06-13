@@ -284,6 +284,32 @@ except Exception:
     run_ghost_optimizer = None
 
 
+try:
+    from api.neural_brain_fastapi import (
+        label_neural_brain_outcome,
+        list_neural_brain_snapshots,
+        neural_brain_status,
+        predict_neural_brain,
+        save_neural_brain_snapshot,
+    )
+except Exception:
+    try:
+        from neural_brain_fastapi import (
+            label_neural_brain_outcome,
+            list_neural_brain_snapshots,
+            neural_brain_status,
+            predict_neural_brain,
+            save_neural_brain_snapshot,
+        )
+    except Exception:
+        label_neural_brain_outcome = None
+        list_neural_brain_snapshots = None
+        neural_brain_status = None
+        predict_neural_brain = None
+        save_neural_brain_snapshot = None
+
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # APP SETUP
 # ─────────────────────────────────────────────────────────────────────────────
@@ -8204,4 +8230,101 @@ def api_insightsentry_session_status() -> Dict[str, Any]:
 @app.get("/insightsentry/session/status")
 def api_insightsentry_session_status_alias() -> Dict[str, Any]:
     return api_insightsentry_session_status()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NEURAL BRAIN FASTAPI ROUTES — PHASE 2/3 RENDER BACKEND MIRROR
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/neural-brain/status")
+def api_neural_brain_status() -> Dict[str, Any]:
+    if neural_brain_status is None:
+        raise HTTPException(status_code=503, detail="api.neural_brain_fastapi module unavailable")
+    return neural_brain_status()
+
+
+@app.get("/neural-brain/status")
+def api_neural_brain_status_alias() -> Dict[str, Any]:
+    return api_neural_brain_status()
+
+
+@app.get("/api/neural-brain/snapshots")
+def api_neural_brain_snapshots(limit: int = 25) -> Dict[str, Any]:
+    if list_neural_brain_snapshots is None:
+        raise HTTPException(status_code=503, detail="api.neural_brain_fastapi module unavailable")
+    return list_neural_brain_snapshots(limit=limit)
+
+
+@app.get("/neural-brain/snapshots")
+def api_neural_brain_snapshots_alias(limit: int = 25) -> Dict[str, Any]:
+    return api_neural_brain_snapshots(limit=limit)
+
+
+@app.post("/api/neural-brain/snapshots")
+async def api_neural_brain_save_snapshot(request: FastAPIRequest) -> Dict[str, Any]:
+    if save_neural_brain_snapshot is None:
+        raise HTTPException(status_code=503, detail="api.neural_brain_fastapi module unavailable")
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    return save_neural_brain_snapshot(payload if isinstance(payload, dict) else {"raw": payload})
+
+
+@app.post("/neural-brain/snapshots")
+async def api_neural_brain_save_snapshot_alias(request: FastAPIRequest) -> Dict[str, Any]:
+    return await api_neural_brain_save_snapshot(request)
+
+
+@app.get("/api/neural-brain/predict")
+def api_neural_brain_predict_status() -> Dict[str, Any]:
+    if neural_brain_status is None:
+        raise HTTPException(status_code=503, detail="api.neural_brain_fastapi module unavailable")
+    status_payload = neural_brain_status()
+    return {
+        "eventType": "NEURAL_BRAIN_SCORECARD",
+        "status": "Ready",
+        "route": "/api/neural-brain/predict",
+        "method": "POST",
+        "phase": "phase3_river_style_online_updates",
+        "memoryRoutes": {
+            "snapshots": "/api/neural-brain/snapshots",
+            "outcomes": "/api/neural-brain/outcomes",
+            "status": "/api/neural-brain/status",
+        },
+        "online": status_payload.get("online"),
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.post("/api/neural-brain/predict")
+async def api_neural_brain_predict(request: FastAPIRequest) -> Dict[str, Any]:
+    if predict_neural_brain is None:
+        raise HTTPException(status_code=503, detail="api.neural_brain_fastapi module unavailable")
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    return predict_neural_brain(payload if isinstance(payload, dict) else {"raw": payload})
+
+
+@app.post("/neural-brain/predict")
+async def api_neural_brain_predict_alias(request: FastAPIRequest) -> Dict[str, Any]:
+    return await api_neural_brain_predict(request)
+
+
+@app.post("/api/neural-brain/outcomes")
+async def api_neural_brain_outcome(request: FastAPIRequest) -> Dict[str, Any]:
+    if label_neural_brain_outcome is None:
+        raise HTTPException(status_code=503, detail="api.neural_brain_fastapi module unavailable")
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    return label_neural_brain_outcome(payload if isinstance(payload, dict) else {"raw": payload})
+
+
+@app.post("/neural-brain/outcomes")
+async def api_neural_brain_outcome_alias(request: FastAPIRequest) -> Dict[str, Any]:
+    return await api_neural_brain_outcome(request)
 
