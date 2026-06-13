@@ -1,5 +1,6 @@
 'use client'
 
+import { useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
 
 type UnifiedIntelligenceMatrixProps = {
@@ -25,19 +26,27 @@ type MatrixRow = {
   details: string
 }
 
-function toNumber(value: unknown, fallback = 0) {
+type MatrixSummary = {
+  active: number
+  bullish: number
+  bearish: number
+  avgConfidence: number
+  bias: 'Bullish' | 'Bearish' | 'Neutral'
+}
+
+function toNumber(value: unknown, fallback = 0): number {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
-function clampPercent(value: unknown, fallback = 0) {
+function clampPercent(value: unknown, fallback = 0): number {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) return fallback
   const normalized = parsed > 0 && parsed <= 1 ? parsed * 100 : parsed
   return Math.max(0, Math.min(100, Math.round(normalized)))
 }
 
-function firstValue(...values: unknown[]) {
+function firstValue(...values: unknown[]): any {
   for (const value of values) {
     if (value !== undefined && value !== null && value !== '') return value
   }
@@ -45,7 +54,7 @@ function firstValue(...values: unknown[]) {
   return undefined
 }
 
-function getPath(source: any, path: string, fallback?: any) {
+function getPath(source: any, path: string, fallback?: any): any {
   const parts = path.split('.')
   let current = source
 
@@ -60,22 +69,16 @@ function getPath(source: any, path: string, fallback?: any) {
 function normalizeDirection(value: unknown): 'bullish' | 'bearish' | 'neutral' | 'active' | 'inactive' | 'pending' {
   const text = String(value ?? '').toLowerCase()
 
-  if (text.includes('bull') || text.includes('buy') || text.includes('long') || text.includes('demand')) {
-    return 'bullish'
-  }
-
-  if (text.includes('bear') || text.includes('sell') || text.includes('short') || text.includes('supply')) {
-    return 'bearish'
-  }
-
-  if (text.includes('active') || text.includes('open') || text.includes('live')) return 'active'
+  if (text.includes('bull') || text.includes('buy') || text.includes('long') || text.includes('demand')) return 'bullish'
+  if (text.includes('bear') || text.includes('sell') || text.includes('short') || text.includes('supply')) return 'bearish'
+  if (text.includes('active') || text.includes('open') || text.includes('live') || text === 'ready') return 'active'
   if (text.includes('inactive') || text.includes('disabled') || text.includes('unavailable')) return 'inactive'
-  if (text.includes('pending') || text.includes('waiting') || text.includes('not_wired') || text.includes('learning')) return 'pending'
+  if (text.includes('pending') || text.includes('waiting') || text.includes('not_wired') || text.includes('learning') || text.includes('wait')) return 'pending'
 
   return 'neutral'
 }
 
-function directionLabel(value: unknown) {
+function directionLabel(value: unknown): string {
   const direction = normalizeDirection(value)
 
   if (direction === 'bullish') return 'Bullish'
@@ -87,7 +90,7 @@ function directionLabel(value: unknown) {
   return 'Neutral'
 }
 
-function normalizeStatus(value: unknown) {
+function normalizeStatus(value: unknown): string {
   const text = String(value ?? '').trim()
   if (!text) return 'Active'
 
@@ -98,10 +101,10 @@ function normalizeStatus(value: unknown) {
       .join(' ')
   }
 
-  return text.charAt(0).toUpperCase() + text.slice(1)
+  return text.charAt(0).toUpperCase() + text.slice(1).toLowerCase()
 }
 
-function directionClass(value: unknown) {
+function directionClass(value: unknown): string {
   const direction = normalizeDirection(value)
 
   if (direction === 'bullish' || direction === 'active') return 'text-emerald-400'
@@ -111,25 +114,17 @@ function directionClass(value: unknown) {
   return 'text-gray-300'
 }
 
-function badgeClass(value: unknown) {
+function badgeClass(value: unknown): string {
   const direction = normalizeDirection(value)
 
-  if (direction === 'bullish' || direction === 'active') {
-    return 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300'
-  }
-
-  if (direction === 'bearish' || direction === 'inactive') {
-    return 'border-red-400/30 bg-red-400/10 text-red-300'
-  }
-
-  if (direction === 'pending') {
-    return 'border-yellow-400/30 bg-yellow-400/10 text-yellow-300'
-  }
+  if (direction === 'bullish' || direction === 'active') return 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300'
+  if (direction === 'bearish' || direction === 'inactive') return 'border-red-400/30 bg-red-400/10 text-red-300'
+  if (direction === 'pending') return 'border-yellow-400/30 bg-yellow-400/10 text-yellow-300'
 
   return 'border-dark-600 bg-dark-900/60 text-gray-300'
 }
 
-function scoreBarClass(value: unknown) {
+function scoreBarClass(value: unknown): string {
   const direction = normalizeDirection(value)
 
   if (direction === 'bullish' || direction === 'active') return 'bg-emerald-400'
@@ -139,7 +134,7 @@ function scoreBarClass(value: unknown) {
   return 'bg-blue-400'
 }
 
-function formatNumber(value: unknown, digits = 2) {
+function formatNumber(value: unknown, digits = 2): string {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) return '—'
 
@@ -150,14 +145,14 @@ function formatNumber(value: unknown, digits = 2) {
   return parsed.toFixed(digits)
 }
 
-function formatDetails(parts: Array<string | number | null | undefined | false>) {
+function formatDetails(parts: Array<string | number | null | undefined | false>): string {
   return parts
     .filter((part) => part !== null && part !== undefined && part !== false && String(part).trim() !== '')
     .map((part) => String(part))
     .join(' • ')
 }
 
-function getScore(...values: unknown[]) {
+function getScore(...values: unknown[]): number | null {
   for (const value of values) {
     const parsed = Number(value)
     if (Number.isFinite(parsed)) return clampPercent(parsed)
@@ -174,7 +169,12 @@ function getArrayPath(...values: unknown[]): any[] {
   return []
 }
 
-function readProjectionEngine(signal: any, unifiedIntelligence: any, overlayPayload: any) {
+function statusFromScore(score: number | null, active = false): string {
+  if (score !== null && score > 0) return active ? 'Active' : 'Learning'
+  return active ? 'Active' : 'Waiting'
+}
+
+function readProjectionEngine(signal: any, unifiedIntelligence: any, overlayPayload: any): any {
   const candidates = [
     unifiedIntelligence?.projectionEngine,
     unifiedIntelligence?.unifiedProjectionEngine,
@@ -209,7 +209,7 @@ function readProjectionEngine(signal: any, unifiedIntelligence: any, overlayPayl
   return null
 }
 
-function projectionTargetPrice(projectionEngine: any) {
+function projectionTargetPrice(projectionEngine: any): any {
   return firstValue(
     projectionEngine?.activeTargetPrice,
     projectionEngine?.target?.price,
@@ -223,7 +223,7 @@ function projectionTargetPrice(projectionEngine: any) {
   )
 }
 
-function projectionTargetConfidence(projectionEngine: any) {
+function projectionTargetConfidence(projectionEngine: any): number | null {
   return getScore(
     projectionEngine?.activeTargetConfidence,
     projectionEngine?.target?.confidence,
@@ -248,7 +248,48 @@ function projectionGhostCandles(projectionEngine: any): any[] {
   return []
 }
 
-function formatProjectionSource(value: unknown) {
+function averageGhostConfidence(ghostCandles: any[]): number | null {
+  const values = ghostCandles
+    .map((candle) => Number(candle?.confidence ?? candle?.targetConfidence ?? candle?.probability))
+    .filter((value) => Number.isFinite(value))
+
+  if (!values.length) return null
+
+  return clampPercent(values.reduce((sum, value) => sum + value, 0) / values.length)
+}
+
+function inferGhostDirection(ghostCandles: any[], fallback?: any): string {
+  const first = ghostCandles[0]
+  const last = ghostCandles[ghostCandles.length - 1]
+  const start = Number(first?.open ?? first?.o ?? first?.close ?? first?.c)
+  const end = Number(last?.close ?? last?.c)
+
+  if (Number.isFinite(start) && Number.isFinite(end) && start !== end) {
+    return end > start ? 'bullish' : 'bearish'
+  }
+
+  return directionLabel(fallback)
+}
+
+function getGhostCandles(unifiedIntelligence: any, overlayPayload: any, scorecards: any): any[] {
+  const candidates = [
+    unifiedIntelligence?.projectionEngine?.ghostPath?.candles,
+    unifiedIntelligence?.projectionEngine?.ghostCandles,
+    unifiedIntelligence?.ghostPath?.candles,
+    unifiedIntelligence?.ghostCandles,
+    overlayPayload?.projectionEngine?.ghostPath?.candles,
+    overlayPayload?.ghostCandles,
+    scorecards?.ghost?.candles,
+  ]
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate) && candidate.length > 0) return candidate
+  }
+
+  return []
+}
+
+function formatProjectionSource(value: unknown): string {
   const raw = String(value ?? '').trim()
   if (!raw) return 'Unified Projection Engine'
 
@@ -256,6 +297,17 @@ function formatProjectionSource(value: unknown) {
     .replace(/_/g, ' ')
     .replace(/:/g, ' • ')
     .replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function addRow(rows: MatrixRow[], row: MatrixRow): void {
+  rows.push({
+    ...row,
+    score: row.score === undefined ? null : row.score,
+    confidence: row.confidence === undefined ? null : row.confidence,
+    status: row.status || 'Waiting',
+    direction: row.direction || 'Neutral',
+    details: row.details || '—',
+  })
 }
 
 function getProjectionEngineRows(projectionEngine: any): MatrixRow[] {
@@ -268,7 +320,6 @@ function getProjectionEngineRows(projectionEngine: any): MatrixRow[] {
   const alignment = projectionEngine.alignment ?? {}
   const mode = projectionEngine.mode ?? {}
   const learning = projectionEngine.learning ?? {}
-
   const targetPrice = projectionTargetPrice(projectionEngine)
   const targetConfidence = projectionTargetConfidence(projectionEngine)
   const ghostCandles = projectionGhostCandles(projectionEngine)
@@ -276,37 +327,38 @@ function getProjectionEngineRows(projectionEngine: any): MatrixRow[] {
     ghostPath.confidence,
     projectionEngine.ghostConfidence,
     averageGhostConfidence(ghostCandles),
+    projectionEngine?.ghostProjection?.confidence,
   )
-  const alignmentScore = getScore(alignment.score)
+  const alignmentScore = getScore(alignment.score, projectionEngine.alignmentScore)
   const marketDirection = firstValue(marketState.direction, target.direction, ghostPath.direction, 'neutral')
   const aiPermission = firstValue(projectionEngine.aiPermission, 'WAIT')
   const targetSource = firstValue(projectionEngine.activeTargetSource, target.source, projectionEngine.targetPlan?.source, 'Unified Projection Engine')
   const targetType = firstValue(projectionEngine.activeTargetType, target.type, projectionEngine.targetPlan?.type, 'TARGET')
 
-  rows.push({
+  addRow(rows, {
     key: 'projection-engine',
     source: 'Unified Projection Engine',
     system: 'MASTER',
     direction: directionLabel(marketDirection),
     score: getScore(marketState.confidence, alignmentScore, targetConfidence),
     confidence: getScore(marketState.confidence, alignmentScore, targetConfidence),
-    status: normalizeStatus(projectionEngine.status ?? 'active'),
+    status: normalizeStatus(projectionEngine.status ?? 'ready'),
     details: formatDetails([
       mode.label ?? projectionEngine.projectionModeLabel ?? projectionEngine.projectionMode,
-      `Target ${formatNumber(targetPrice, 2)}`,
+      targetPrice !== undefined ? `Target ${formatNumber(targetPrice, 2)}` : 'No target',
       `AI ${aiPermission}`,
       alignment.label ? `Alignment ${alignment.label}` : null,
     ]),
   })
 
-  rows.push({
+  addRow(rows, {
     key: 'projection-target',
     source: 'Self-Learning Target',
     system: 'TARGET',
     direction: directionLabel(firstValue(target.direction, marketDirection)),
     score: targetConfidence,
     confidence: targetConfidence,
-    status: normalizeStatus(target.available === false ? 'waiting' : 'active'),
+    status: normalizeStatus(target.available === false ? 'waiting' : targetConfidence ? 'active' : 'waiting'),
     details: formatDetails([
       `Price ${formatNumber(targetPrice, 2)}`,
       formatProjectionSource(targetSource),
@@ -315,14 +367,14 @@ function getProjectionEngineRows(projectionEngine: any): MatrixRow[] {
     ]),
   })
 
-  rows.push({
+  addRow(rows, {
     key: 'projection-ghost-route',
     source: 'Target-Guided Ghost Route',
     system: 'GHOST',
     direction: directionLabel(firstValue(ghostPath.direction, target.direction)),
     score: ghostConfidence,
     confidence: ghostConfidence,
-    status: normalizeStatus(ghostPath.available === false ? 'waiting' : 'active'),
+    status: normalizeStatus(ghostPath.available === false ? 'waiting' : ghostConfidence ? 'active' : 'waiting'),
     details: formatDetails([
       `Candles ${ghostCandles.length}`,
       `End ${formatNumber(ghostPath.endPrice, 2)}`,
@@ -331,7 +383,7 @@ function getProjectionEngineRows(projectionEngine: any): MatrixRow[] {
     ]),
   })
 
-  rows.push({
+  addRow(rows, {
     key: 'projection-alignment',
     source: 'Target ↔ Ghost Alignment',
     system: 'SYNC',
@@ -346,7 +398,7 @@ function getProjectionEngineRows(projectionEngine: any): MatrixRow[] {
     ]),
   })
 
-  rows.push({
+  addRow(rows, {
     key: 'projection-ai-permission',
     source: 'AI Permission',
     system: 'AI',
@@ -364,264 +416,163 @@ function getProjectionEngineRows(projectionEngine: any): MatrixRow[] {
   return rows
 }
 
-function getProjectionSourceRow(source: any, fallbackKey: string, fallbackSource: string): MatrixRow | null {
-  if (!source || typeof source !== 'object') return null
-
-  return {
-    key: fallbackKey,
-    source: fallbackSource,
-    system: 'MARKET',
-    direction: directionLabel(firstValue(source.direction, 'neutral')),
-    score: getScore(source.score, source.confidence),
-    confidence: getScore(source.confidence, source.score),
-    status: normalizeStatus(firstValue(source.status, source.score ? 'active' : 'waiting')),
-    details: formatDetails([
-      source.name,
-      source.reason,
-      source.score !== undefined ? `Score ${formatNumber(source.score, 1)}` : null,
-    ]),
-  }
-}
-
-function getGhostCandles(unifiedIntelligence: any, overlayPayload: any, scorecards: any): any[] {
-  const projectionEngine = readProjectionEngine(undefined, unifiedIntelligence, overlayPayload)
-  const engineGhosts = projectionGhostCandles(projectionEngine)
-
-  if (engineGhosts.length > 0) return engineGhosts
-
-  const candidates = [
-    getPath(unifiedIntelligence, 'ghostPath.candles'),
-    getPath(unifiedIntelligence, 'ghostProjection.candles'),
-    getPath(unifiedIntelligence, 'ghostProjection.projections'),
-    getPath(unifiedIntelligence, 'components.ghost.candles'),
-    getPath(unifiedIntelligence, 'components.ghost.projections'),
-    unifiedIntelligence?.ghostCandles,
-    unifiedIntelligence?.ghostProjections,
-    unifiedIntelligence?.projections,
-    overlayPayload?.ghostCandles,
-    scorecards?.ghost?.ghostCandles,
-  ]
-
-  for (const candidate of candidates) {
-    if (Array.isArray(candidate) && candidate.length > 0) return candidate
-  }
-
-  return []
-}
-
-function inferGhostDirection(candles: any[], fallback: unknown) {
-  const text = String(fallback ?? '').toLowerCase()
-  if (text.includes('bull') || text.includes('buy') || text.includes('up')) return 'bullish'
-  if (text.includes('bear') || text.includes('sell') || text.includes('down')) return 'bearish'
-
-  let bullish = 0
-  let bearish = 0
-
-  for (const candle of candles) {
-    const open = Number(candle?.open ?? candle?.o)
-    const close = Number(candle?.close ?? candle?.c)
-    if (!Number.isFinite(open) || !Number.isFinite(close)) continue
-    if (close > open) bullish += 1
-    if (close < open) bearish += 1
-  }
-
-  if (bullish > bearish) return 'bullish'
-  if (bearish > bullish) return 'bearish'
-  return 'neutral'
-}
-
-function averageGhostConfidence(candles: any[]): number | null {
-  const values = candles
-    .map((candle: any) => Number(candle?.confidence ?? candle?.score ?? candle?.probability))
-    .filter((value: number) => Number.isFinite(value) && value > 0)
-
-  if (values.length === 0) return null
-
-  return clampPercent(values.reduce((sum: number, value: number) => sum + value, 0) / values.length)
-}
-
-function getSmcRow(signal: any, unifiedIntelligence: any, overlayPayload: any, scorecards: any): MatrixRow {
-  const components = unifiedIntelligence?.components ?? {}
-  const smcEvents = getArrayPath(
-    components.smc?.events,
-    components.smc?.smcEvents,
-    unifiedIntelligence?.smcEvents,
-    overlayPayload?.smcEvents,
-    overlayPayload?.lines,
-    scorecards?.smc?.events,
-    signal?.smcEvents
-  )
-
-  const latestEvent = smcEvents.length ? smcEvents[smcEvents.length - 1] : null
-  const direction = firstValue(
-    latestEvent?.direction,
-    latestEvent?.bias,
-    latestEvent?.side,
-    latestEvent?.label,
-    components.smc?.direction,
-    scorecards?.smc?.direction,
-    scorecards?.overall?.direction,
-    signal?.smc
-  )
-
-  const score = getScore(
-    components.smc?.score,
-    components.smc?.qualityScore,
-    scorecards?.smc?.qualityScore,
-    signal?.smcScore,
-    signal?.smcQuality
-  )
-
-  return {
-    key: 'smc',
-    source: 'SMC Structure',
-    system: 'MARKET',
-    direction: directionLabel(direction),
-    score,
-    confidence: getScore(components.smc?.confidence, scorecards?.smc?.qualityScore, score),
-    status: normalizeStatus(smcEvents.length || score ? 'active' : 'waiting'),
-    details: formatDetails([
-      latestEvent?.label ?? latestEvent?.type ?? latestEvent?.tag,
-      `Events ${smcEvents.length || scorecards?.activeFactors?.smcEvents || 0}`,
-      components.smc?.reason,
-    ]),
-  }
-}
-
 function getNrtrRows(scorecards: any, mlFeatures: any): MatrixRow[] {
-  const feeds =
-    getArrayPath(scorecards?.nrtrCharts, scorecards?.nrtrStrategyFeeds, mlFeatures?.nrtrStrategyFeeds)
+  const feeds = [
+    ['nrtr-main', 'NRTR Main', scorecards?.nrtr?.main ?? scorecards?.nrtrMain ?? mlFeatures?.nrtrMain],
+    ['nrtr-mini-1', 'NRTR Mini 1', scorecards?.nrtr?.miniOne ?? scorecards?.nrtrMiniOne ?? mlFeatures?.nrtrMiniOne],
+    ['nrtr-mini-2', 'NRTR Mini 2', scorecards?.nrtr?.miniTwo ?? scorecards?.nrtrMiniTwo ?? mlFeatures?.nrtrMiniTwo],
+  ] as const
 
-  if (feeds.length > 0) {
-    return feeds.map((feed: any, index: number) => {
-      const label =
-        feed?.source ??
-        feed?.label ??
-        (index === 0 ? 'NRTR Main' : index === 1 ? 'NRTR Mini 1' : 'NRTR Mini 2')
-
-      const direction = firstValue(feed?.direction, feed?.signal, feed?.side, 'neutral')
-      const score = getScore(feed?.score, feed?.confidence, feed?.distancePercent)
-      const confidence = getScore(feed?.confidence, feed?.score, feed?.distancePercent)
-
-      return {
-        key: String(feed?.key ?? `nrtr-feed-${index}`),
-        source: String(label),
-        system: 'STRATEGY',
-        direction: directionLabel(direction),
-        score,
-        confidence,
-        status: normalizeStatus(firstValue(feed?.status, feed?.state, score ? 'active' : 'waiting')),
-        details: formatDetails([
-          feed?.symbol && feed?.timeframe ? `${feed.symbol} • ${feed.timeframe}` : null,
-          feed?.details ?? feed?.detail,
-          feed?.candleCount ? `Candles ${feed.candleCount}` : null,
-          'Strategy context only',
-        ]),
-      }
-    })
-  }
-
-  const nrtr = scorecards?.nrtrMatrix ?? scorecards?.nrtrStrategy ?? scorecards?.nrtr ?? scorecards?.nrtrStrategyContext
-  const nrtrDirectionValue = toNumber(mlFeatures?.nrtrDirection, 0)
-  const nrtrDirectionFromFeatures =
-    nrtrDirectionValue > 0 ? 'bullish' : nrtrDirectionValue < 0 ? 'bearish' : undefined
-
-  return [
-    {
-      key: 'nrtr',
-      source: 'NRTR Main',
-      system: 'STRATEGY',
-      direction: directionLabel(firstValue(nrtr?.direction, nrtrDirectionFromFeatures, nrtr?.signal, 'neutral')),
-      score: getScore(nrtr?.score, nrtr?.confidence, nrtr?.distancePercent),
-      confidence: getScore(nrtr?.confidence, Math.abs(nrtrDirectionValue) * 100 || undefined, nrtr?.score),
-      status: normalizeStatus(firstValue(nrtr?.status, nrtr?.state, nrtr ? 'active' : 'waiting')),
-      details: formatDetails([
-        nrtr?.details ?? nrtr?.detail,
-        nrtr?.barsInTrend ? `Bars ${nrtr.barsInTrend}` : null,
-        nrtr?.distancePercent ? `Distance ${formatNumber(nrtr.distancePercent, 2)}%` : null,
-        'Strategy context only',
-      ]),
-    },
-  ]
+  return feeds.map(([key, source, item]) => ({
+    key,
+    source,
+    system: 'STRATEGY',
+    direction: directionLabel(firstValue(item?.direction, item?.signal, item?.side, 'neutral')),
+    score: getScore(item?.score, item?.confidence, item?.strength),
+    confidence: getScore(item?.confidence, item?.score, item?.strength),
+    status: normalizeStatus(firstValue(item?.status, item ? 'active' : 'waiting')),
+    details: formatDetails([
+      item?.reason,
+      item?.mode,
+      item?.settings,
+      item?.bars !== undefined ? `Bars ${item.bars}` : null,
+    ]) || 'NRTR strategy context only',
+  }))
 }
 
-function buildRows({
-  signal,
-  unifiedIntelligence,
-  overlayPayload,
-  scorecards,
-  mlFeatures,
-  technicalSentiment,
-}: UnifiedIntelligenceMatrixProps): MatrixRow[] {
+function buildRows(props: UnifiedIntelligenceMatrixProps): MatrixRow[] {
+  const { signal, unifiedIntelligence, overlayPayload, scorecards, mlFeatures, technicalSentiment } = props
   const rows: MatrixRow[] = []
-  const components = unifiedIntelligence?.components ?? {}
   const projectionEngine = readProjectionEngine(signal, unifiedIntelligence, overlayPayload)
+  const components = unifiedIntelligence?.components ?? signal?.components ?? {}
+  const activeFactors = scorecards?.activeFactors ?? {}
+  const ghostCandles = getGhostCandles(unifiedIntelligence, overlayPayload, scorecards)
+  const ghostConfidence = getScore(
+    ghostCandles[0]?.confidence,
+    getPath(unifiedIntelligence, 'projectionEngine.ghostPath.confidence'),
+    getPath(unifiedIntelligence, 'ghostProjection.confidence'),
+    averageGhostConfidence(ghostCandles),
+    scorecards?.ghost?.confidence,
+  )
+  const ghostDirection = inferGhostDirection(
+    ghostCandles,
+    firstValue(getPath(unifiedIntelligence, 'ghostProjection.direction'), getPath(unifiedIntelligence, 'components.ghost.direction'), scorecards?.ghost?.direction),
+  )
+  const targetConfidence = getScore(
+    getPath(unifiedIntelligence, 'projectionEngine.target.confidence'),
+    getPath(unifiedIntelligence, 'targetMl.confidence'),
+    scorecards?.target?.confidence,
+  )
+  const orderBullish = firstValue(scorecards?.orderBlocks?.bullishZones, activeFactors.orderBlocksBullish, overlayPayload?.orderBlocks?.bullish, 0)
+  const orderBearish = firstValue(scorecards?.orderBlocks?.bearishZones, activeFactors.orderBlocksBearish, overlayPayload?.orderBlocks?.bearish, 0)
 
   rows.push(...getProjectionEngineRows(projectionEngine))
-  rows.push(getSmcRow(signal, unifiedIntelligence, overlayPayload, scorecards))
 
-  const sourceMap = projectionEngine?.marketState?.sourceMap ?? {}
-  ;[
-    getProjectionSourceRow(sourceMap.alphaDlm, 'projection-alpha-dlm', 'AlphaX / DLM Feed'),
-    getProjectionSourceRow(sourceMap.orderBlocks, 'projection-order-blocks', 'Order Blocks Feed'),
-    getProjectionSourceRow(sourceMap.liquidity, 'projection-liquidity', 'Liquidity / Sweeps Feed'),
-    getProjectionSourceRow(sourceMap.fvgPdZones, 'projection-fvg-pd', 'FVG / PD Zones Feed'),
-    getProjectionSourceRow(sourceMap.metersGauges, 'projection-meters', 'Meters / Gauges Feed'),
-    getProjectionSourceRow(sourceMap.externalTables, 'projection-external-tables', 'External Tables Feed'),
-  ].forEach((row) => {
-    if (row) rows.push(row)
-  })
-
-  rows.push({
-    key: 'alphax',
-    source: 'AlphaX DLM / Profile',
+  addRow(rows, {
+    key: 'smc-structure',
+    source: 'SMC Structure',
     system: 'MARKET',
-    direction: directionLabel(firstValue(components.liquidity?.direction, scorecards?.liquidityProfile?.direction, signal?.alphaXBias)),
-    score: getScore(components.liquidity?.score, scorecards?.liquidityProfile?.qualityScore, signal?.liquidityProfileQuality),
-    confidence: getScore(components.liquidity?.confidence, scorecards?.liquidityProfile?.qualityScore),
-    status: normalizeStatus(firstValue(components.liquidity?.status, 'active')),
+    direction: directionLabel(firstValue(scorecards?.smc?.direction, components.smc?.direction, signal?.structureDirection, signal?.direction, 'neutral')),
+    score: getScore(scorecards?.smc?.score, components.smc?.score, signal?.smcScore),
+    confidence: getScore(scorecards?.smc?.confidence, components.smc?.confidence, signal?.smcConfidence),
+    status: normalizeStatus(firstValue(scorecards?.smc?.status, components.smc?.status, 'active')),
     details: formatDetails([
-      components.liquidity?.reason,
-      `Profile bins ${firstValue(components.liquidity?.liquidityProfileBinCount, scorecards?.liquidityProfile?.profileBinCount, 0)}`,
-      `DLM ${firstValue(components.liquidity?.dlmLevelCount, scorecards?.activeFactors?.profileBins, 0)}`,
+      `Events ${firstValue(scorecards?.smc?.events, activeFactors.smc, overlayPayload?.lines?.length, 0)}`,
+      scorecards?.smc?.reason,
     ]),
   })
 
-  rows.push({
+  addRow(rows, {
+    key: 'alphax-dlm-feed',
+    source: 'AlphaX / DLM Feed',
+    system: 'MARKET',
+    direction: directionLabel(firstValue(scorecards?.alphaDlm?.direction, components.alphaDlm?.direction, 'neutral')),
+    score: getScore(scorecards?.alphaDlm?.score, components.alphaDlm?.score),
+    confidence: getScore(scorecards?.alphaDlm?.confidence, components.alphaDlm?.confidence),
+    status: normalizeStatus(firstValue(scorecards?.alphaDlm?.status, components.alphaDlm?.status, 'waiting')),
+    details: formatDetails([`AlphaX / DLM Score ${formatNumber(firstValue(scorecards?.alphaDlm?.score, components.alphaDlm?.score, 0), 1)}`]),
+  })
+
+  addRow(rows, {
+    key: 'order-blocks-feed',
+    source: 'Order Blocks Feed',
+    system: 'MARKET',
+    direction: directionLabel(Number(orderBullish) > Number(orderBearish) ? 'bullish' : Number(orderBearish) > Number(orderBullish) ? 'bearish' : 'neutral'),
+    score: getScore(scorecards?.orderBlocks?.score, components.orderBlocks?.score),
+    confidence: getScore(scorecards?.orderBlocks?.confidence, components.orderBlocks?.confidence),
+    status: normalizeStatus(firstValue(scorecards?.orderBlocks?.status, Number(orderBullish) || Number(orderBearish) ? 'active' : 'waiting')),
+    details: formatDetails([`Bullish ${orderBullish}`, `Bearish ${orderBearish}`, `Zones ${firstValue(activeFactors.orderBlocks, overlayPayload?.zones?.length, 0)}`]),
+  })
+
+  addRow(rows, {
+    key: 'liquidity-sweeps-feed',
+    source: 'Liquidity / Sweeps Feed',
+    system: 'MARKET',
+    direction: directionLabel(firstValue(scorecards?.liquidity?.direction, components.liquidity?.direction, 'neutral')),
+    score: getScore(scorecards?.liquidity?.score, components.liquidity?.score),
+    confidence: getScore(scorecards?.liquidity?.confidence, components.liquidity?.confidence),
+    status: normalizeStatus(firstValue(scorecards?.liquidity?.status, 'waiting')),
+    details: formatDetails([`Liquidity / Sweeps Score ${formatNumber(firstValue(scorecards?.liquidity?.score, 0), 1)}`]),
+  })
+
+  addRow(rows, {
+    key: 'fvg-pd-zones-feed',
+    source: 'FVG / PD Zones Feed',
+    system: 'MARKET',
+    direction: directionLabel(firstValue(scorecards?.zones?.direction, components.zones?.direction, 'neutral')),
+    score: getScore(scorecards?.zones?.score, components.zones?.score),
+    confidence: getScore(scorecards?.zones?.confidence, components.zones?.confidence),
+    status: normalizeStatus(firstValue(scorecards?.zones?.status, 'waiting')),
+    details: formatDetails([`FVG / PD Zones Score ${formatNumber(firstValue(scorecards?.zones?.score, 0), 1)}`]),
+  })
+
+  addRow(rows, {
+    key: 'meters-gauges-feed',
+    source: 'Meters / Gauges Feed',
+    system: 'MARKET',
+    direction: directionLabel(firstValue(technicalSentiment?.sentimentStatus, signal?.technicalSentiment?.sentimentStatus, 'neutral')),
+    score: getScore(technicalSentiment?.sentiment, signal?.technicalSentiment?.sentiment, signal?.technicalScore),
+    confidence: getScore(technicalSentiment?.confidence, technicalSentiment?.sentiment, signal?.technicalScore),
+    status: normalizeStatus(firstValue(technicalSentiment ? 'active' : null, 'waiting')),
+    details: formatDetails([`Indicators ${firstValue(technicalSentiment?.activeCount, technicalSentiment?.indicators?.length, 0)}`, technicalSentiment?.sentimentLabel]),
+  })
+
+  addRow(rows, {
+    key: 'external-tables-feed',
+    source: 'External Tables Feed',
+    system: 'MARKET',
+    direction: directionLabel(firstValue(scorecards?.externalTables?.direction, components.externalTables?.direction, 'neutral')),
+    score: getScore(scorecards?.externalTables?.score, components.externalTables?.score, 25),
+    confidence: getScore(scorecards?.externalTables?.confidence, components.externalTables?.confidence, 25),
+    status: normalizeStatus(firstValue(scorecards?.externalTables?.status, 'learning')),
+    details: formatDetails([`External Tables Score ${formatNumber(firstValue(scorecards?.externalTables?.score, 25), 1)}`]),
+  })
+
+  addRow(rows, {
+    key: 'alphax-dlm-profile',
+    source: 'AlphaX DLM / Profile',
+    system: 'MARKET',
+    direction: directionLabel(firstValue(scorecards?.profile?.direction, components.profile?.direction, 'neutral')),
+    score: getScore(scorecards?.profile?.score, components.profile?.score, overlayPayload?.liquidityProfileBins?.length ? 5 : null),
+    confidence: getScore(scorecards?.profile?.confidence, components.profile?.confidence, overlayPayload?.liquidityProfileBins?.length ? 5 : null),
+    status: normalizeStatus(firstValue(scorecards?.profile?.status, overlayPayload?.liquidityProfileBins?.length ? 'active' : 'waiting')),
+    details: formatDetails([`Profile bins ${firstValue(overlayPayload?.liquidityProfileBins?.length, 0)}`, `DLM ${firstValue(scorecards?.profile?.dlmScore, components.profile?.dlmScore, 0)}`]),
+  })
+
+  addRow(rows, {
     key: 'order-blocks',
     source: 'Order Blocks',
     system: 'MARKET',
-    direction: directionLabel(firstValue(scorecards?.orderBlocks?.direction, scorecards?.overall?.direction, components.smc?.direction)),
-    score: getScore(scorecards?.orderBlocks?.qualityScore, signal?.orderBlockQuality),
-    confidence: getScore(scorecards?.orderBlocks?.qualityScore, signal?.orderBlockQuality),
-    status: normalizeStatus(firstValue(scorecards?.orderBlocks ? 'active' : null, 'active')),
-    details: formatDetails([
-      `Bullish ${firstValue(scorecards?.orderBlocks?.bullishZones, 0)}`,
-      `Bearish ${firstValue(scorecards?.orderBlocks?.bearishZones, 0)}`,
-      `Zones ${firstValue(scorecards?.activeFactors?.orderBlocks, 0)}`,
-    ]),
+    direction: directionLabel(Number(orderBullish) > Number(orderBearish) ? 'bullish' : Number(orderBearish) > Number(orderBullish) ? 'bearish' : 'neutral'),
+    score: getScore(scorecards?.orderBlocks?.confidence, scorecards?.orderBlocks?.score),
+    confidence: getScore(scorecards?.orderBlocks?.confidence, scorecards?.orderBlocks?.score),
+    status: normalizeStatus(Number(orderBullish) || Number(orderBearish) ? 'active' : 'waiting'),
+    details: formatDetails([`Bullish ${orderBullish}`, `Bearish ${orderBearish}`, `Zones ${firstValue(activeFactors.orderBlocks, overlayPayload?.zones?.length, 0)}`]),
   })
 
-  const ghostCandles = getGhostCandles(unifiedIntelligence, overlayPayload, scorecards)
-  const ghostDirection = inferGhostDirection(
-    ghostCandles,
-    firstValue(
-      getPath(unifiedIntelligence, 'ghostProjection.direction'),
-      getPath(unifiedIntelligence, 'components.ghost.direction'),
-      scorecards?.ghost?.direction
-    )
-  )
-  const ghostConfidence = getScore(
-    ghostCandles[0]?.confidence,
-    getPath(unifiedIntelligence, 'ghostProjection.confidence'),
-    averageGhostConfidence(ghostCandles),
-    getPath(unifiedIntelligence, 'components.ghost.confidence'),
-    scorecards?.ghost?.confidence
-  )
-
-  rows.push({
+  addRow(rows, {
     key: 'ghost',
-    source: readProjectionEngine(signal, unifiedIntelligence, overlayPayload) ? 'Projection Engine Ghost Candles' : 'Python Ghost Candles',
+    source: projectionEngine ? 'Projection Engine Ghost Candles' : 'Python Ghost Candles',
     system: 'ML',
     direction: directionLabel(ghostDirection),
     score: ghostConfidence,
@@ -639,7 +590,7 @@ function buildRows({
 
   rows.push(...getNrtrRows(scorecards, mlFeatures))
 
-  rows.push({
+  addRow(rows, {
     key: 'smma',
     source: 'SMMA',
     system: 'STRATEGY',
@@ -647,14 +598,10 @@ function buildRows({
     score: getScore(components.smma?.score, components.smma?.distancePercent),
     confidence: getScore(components.smma?.confidence, components.smma?.score),
     status: normalizeStatus(firstValue(components.smma?.status, 'active')),
-    details: formatDetails([
-      components.smma?.reason,
-      components.smma?.length ? `Length ${components.smma.length}` : null,
-      components.smma?.distancePercent ? `Distance ${formatNumber(components.smma.distancePercent, 2)}%` : null,
-    ]) || 'Chart-level SMMA direction is available on each chart',
+    details: formatDetails([components.smma?.reason, components.smma?.length ? `Length ${components.smma.length}` : null]) || 'Chart-level SMMA direction is available on each chart',
   })
 
-  rows.push({
+  addRow(rows, {
     key: 'session',
     source: 'Session',
     system: 'MARKET',
@@ -662,14 +609,10 @@ function buildRows({
     score: getScore(signal?.sessionScore, components.session?.score, 100),
     confidence: getScore(signal?.sessionScore, components.session?.confidence, 100),
     status: normalizeStatus(firstValue(components.session?.status, 'active')),
-    details: formatDetails([
-      components.session?.reason,
-      signal?.sessionName,
-      'Session filter active',
-    ]),
+    details: formatDetails([components.session?.reason, signal?.sessionName, 'Session filter active']),
   })
 
-  rows.push({
+  addRow(rows, {
     key: 'market-sentiment',
     source: 'Market Sentiment Gauge (12 Indicators)',
     system: 'MARKET',
@@ -677,98 +620,32 @@ function buildRows({
     score: getScore(technicalSentiment?.sentiment, signal?.technicalSentiment?.sentiment, signal?.technicalScore),
     confidence: getScore(technicalSentiment?.confidence, technicalSentiment?.sentiment, signal?.technicalScore),
     status: normalizeStatus(firstValue(technicalSentiment ? 'active' : null, 'waiting')),
-    details: formatDetails([
-      'Main chart only',
-      `Indicators ${firstValue(technicalSentiment?.activeCount, technicalSentiment?.indicators?.length, 0)}`,
-      technicalSentiment?.sentimentLabel,
-    ]),
+    details: formatDetails(['Main chart only', `Indicators ${firstValue(technicalSentiment?.activeCount, technicalSentiment?.indicators?.length, 0)}`, technicalSentiment?.sentimentLabel]),
   })
 
-  rows.push({
-    key: 'options-flow',
-    source: 'Options Flow',
-    system: 'EXTERNAL',
-    direction: directionLabel(firstValue(components.optionsFlow?.direction, signal?.optionsFlowDirection, 'active')),
-    score: getScore(components.optionsFlow?.score, signal?.optionsFlowScore),
-    confidence: getScore(components.optionsFlow?.confidence, signal?.optionsFlowConfidence),
-    status: normalizeStatus(firstValue(components.optionsFlow?.status, signal?.optionsFlowStatus, 'active')),
-    details: formatDetails([
-      components.optionsFlow?.reason,
-      signal?.optionsFlowDetail,
-    ]) || 'Options flow source available',
+  const externalRows = [
+    ['options-flow', 'Options Flow', components.optionsFlow, signal?.optionsFlowDirection, signal?.optionsFlowScore, 'Options flow source available'],
+    ['open-interest', 'Open Interest', components.openInterest, signal?.openInterestDirection, signal?.openInterestScore, 'Open interest unavailable'],
+    ['footprint-delta', 'Footprint Delta', components.footprint, signal?.footprintDirection, signal?.footprintScore, 'Footprint feed unavailable'],
+    ['fred-macro', 'FRED Macro', components.fred, signal?.fredDirection, signal?.fredScore, 'Macro context active'],
+    ['finra-short-volume', 'FINRA Short Volume', components.finra, signal?.finraDirection, signal?.finraScore, 'Short volume feed unavailable'],
+    ['cot', 'COT', components.cot, signal?.cotDirection, signal?.cotScore, 'COT feed unavailable'],
+  ] as const
+
+  externalRows.forEach(([key, source, item, fallbackDirection, fallbackScore, fallbackDetails]) => {
+    addRow(rows, {
+      key,
+      source,
+      system: 'EXTERNAL',
+      direction: directionLabel(firstValue(item?.direction, fallbackDirection, item ? 'active' : 'inactive')),
+      score: getScore(item?.score, fallbackScore),
+      confidence: getScore(item?.confidence, item?.score, fallbackScore),
+      status: normalizeStatus(firstValue(item?.status, item ? 'active' : 'unavailable')),
+      details: formatDetails([item?.reason, item?.detail, fallbackDetails]),
+    })
   })
 
-  rows.push({
-    key: 'open-interest',
-    source: 'Open Interest',
-    system: 'EXTERNAL',
-    direction: directionLabel(firstValue(components.openInterest?.direction, signal?.openInterestDirection, 'inactive')),
-    score: getScore(components.openInterest?.score, signal?.openInterestScore),
-    confidence: getScore(components.openInterest?.confidence, signal?.openInterestConfidence),
-    status: normalizeStatus(firstValue(components.openInterest?.status, signal?.openInterestStatus, 'unavailable')),
-    details: formatDetails([
-      components.openInterest?.reason,
-      signal?.openInterestDetail,
-    ]) || 'Open interest unavailable',
-  })
-
-  rows.push({
-    key: 'footprint-delta',
-    source: 'Footprint Delta',
-    system: 'EXTERNAL',
-    direction: directionLabel(firstValue(components.footprint?.direction, signal?.footprintDirection, 'inactive')),
-    score: getScore(components.footprint?.score, signal?.footprintScore),
-    confidence: getScore(components.footprint?.confidence, signal?.footprintConfidence),
-    status: normalizeStatus(firstValue(components.footprint?.status, signal?.footprintStatus, 'unavailable')),
-    details: formatDetails([
-      components.footprint?.reason,
-      signal?.footprintDetail,
-    ]) || 'Footprint feed unavailable',
-  })
-
-  rows.push({
-    key: 'fred-macro',
-    source: 'FRED Macro',
-    system: 'EXTERNAL',
-    direction: directionLabel(firstValue(components.fred?.direction, signal?.fredDirection, 'active')),
-    score: getScore(components.fred?.score, signal?.fredScore),
-    confidence: getScore(components.fred?.confidence, signal?.fredConfidence),
-    status: normalizeStatus(firstValue(components.fred?.status, signal?.fredStatus, 'active')),
-    details: formatDetails([
-      components.fred?.reason,
-      signal?.fredDetail,
-    ]) || 'Macro context active',
-  })
-
-  rows.push({
-    key: 'finra-short-volume',
-    source: 'FINRA Short Volume',
-    system: 'EXTERNAL',
-    direction: directionLabel(firstValue(components.finra?.direction, signal?.finraDirection, 'inactive')),
-    score: getScore(components.finra?.score, signal?.finraScore),
-    confidence: getScore(components.finra?.confidence, signal?.finraConfidence),
-    status: normalizeStatus(firstValue(components.finra?.status, signal?.finraStatus, 'unavailable')),
-    details: formatDetails([
-      components.finra?.reason,
-      signal?.finraDetail,
-    ]) || 'Short volume feed unavailable',
-  })
-
-  rows.push({
-    key: 'cot',
-    source: 'COT',
-    system: 'EXTERNAL',
-    direction: directionLabel(firstValue(components.cot?.direction, signal?.cotDirection, 'inactive')),
-    score: getScore(components.cot?.score, signal?.cotScore),
-    confidence: getScore(components.cot?.confidence, signal?.cotConfidence),
-    status: normalizeStatus(firstValue(components.cot?.status, signal?.cotStatus, 'unavailable')),
-    details: formatDetails([
-      components.cot?.reason,
-      signal?.cotDetail,
-    ]) || 'COT feed unavailable',
-  })
-
-  rows.push({
+  addRow(rows, {
     key: 'ml-features',
     source: 'ML Features',
     system: 'ML',
@@ -776,17 +653,13 @@ function buildRows({
     score: getScore(mlFeatures?.overallConfirmationScore, signal?.mlScore),
     confidence: getScore(mlFeatures?.confidence, mlFeatures?.overallConfirmationScore, signal?.mlConfidence),
     status: normalizeStatus(firstValue(mlFeatures ? 'active' : null, 'waiting')),
-    details: formatDetails([
-      `Features ${Object.keys(mlFeatures ?? {}).length}`,
-      mlFeatures?.mlHierarchy,
-      'NRTR strategy feeds are separated from ML hierarchy',
-    ]),
+    details: formatDetails([`Features ${Object.keys(mlFeatures ?? {}).length}`, mlFeatures?.mlHierarchy, 'NRTR strategy feeds are separated from ML hierarchy']),
   })
 
   return rows
 }
 
-function summarizeRows(rows: MatrixRow[]) {
+function summarizeRows(rows: MatrixRow[]): MatrixSummary {
   const active = rows.filter((row) => normalizeDirection(row.status) === 'active' || String(row.status).toLowerCase() === 'active').length
   const bullish = rows.filter((row) => normalizeDirection(row.direction) === 'bullish').length
   const bearish = rows.filter((row) => normalizeDirection(row.direction) === 'bearish').length
@@ -798,10 +671,7 @@ function summarizeRows(rows: MatrixRow[]) {
     ? Math.round(avgConfidenceValues.reduce((sum, value) => sum + Number(value), 0) / avgConfidenceValues.length)
     : 0
 
-  const bias =
-    bearish > bullish ? 'Bearish' :
-    bullish > bearish ? 'Bullish' :
-    'Neutral'
+  const bias = bearish > bullish ? 'Bearish' : bullish > bearish ? 'Bullish' : 'Neutral'
 
   return {
     active,
@@ -813,8 +683,10 @@ function summarizeRows(rows: MatrixRow[]) {
 }
 
 export default function UnifiedIntelligenceMatrix(props: UnifiedIntelligenceMatrixProps) {
-  const rows = buildRows(props)
-  const summary = summarizeRows(rows)
+  const [isExpanded, setIsExpanded] = useState(false)
+  const rows = useMemo(() => buildRows(props), [props.signal, props.unifiedIntelligence, props.overlayPayload, props.scorecards, props.mlFeatures, props.technicalSentiment])
+  const summary = useMemo(() => summarizeRows(rows), [rows])
+  const visibleRowCount = isExpanded ? rows.length : 0
 
   return (
     <motion.div
@@ -827,99 +699,113 @@ export default function UnifiedIntelligenceMatrix(props: UnifiedIntelligenceMatr
         <div>
           <h2 className="text-xl font-bold text-white">Unified Intelligence Matrix</h2>
           <p className="mt-1 text-xs text-gray-500">
-            Phase 6 unified projection engine • SMC, AlphaX, OB, Liquidity, FVG, Target, Ghost Route, AI Permission, NRTR strategy feeds •{' '}
+            Phase 6 unified projection engine • collapsed by default to prevent duplicate dashboard detail •{' '}
             {props.activeSymbol ?? props.signal?.symbol ?? 'MES1!'} • {props.activeTimeframe ?? props.signal?.activeTimeframe ?? props.signal?.timeframe ?? '1m'}
           </p>
         </div>
 
-        <div className="rounded-lg border border-dark-600 bg-dark-900/60 px-3 py-2 text-right">
-          <p className="text-[10px] uppercase tracking-[0.16em] text-gray-500">Overall Bias</p>
-          <p className={`text-sm font-bold ${directionClass(summary.bias)}`}>{summary.bias}</p>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setIsExpanded((value) => !value)}
+            className="rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-2 text-xs font-black uppercase tracking-wide text-cyan-200 transition hover:border-cyan-300 hover:bg-cyan-400/20"
+          >
+            {isExpanded ? 'Collapse technicals' : `Expand technicals (${rows.length})`}
+          </button>
+
+          <div className="rounded-lg border border-dark-600 bg-dark-900/60 px-3 py-2 text-right">
+            <p className="text-[10px] uppercase tracking-[0.16em] text-gray-500">Overall Bias</p>
+            <p className={`text-sm font-bold ${directionClass(summary.bias)}`}>{summary.bias}</p>
+          </div>
         </div>
       </div>
 
-      <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-5">
-        <div className="rounded-lg bg-dark-900/50 p-3">
-          <p className="text-[10px] uppercase tracking-[0.16em] text-gray-500">Avg Confidence</p>
-          <p className="mt-1 text-lg font-bold text-cyan-300">{summary.avgConfidence}%</p>
-        </div>
-        <div className="rounded-lg bg-dark-900/50 p-3">
-          <p className="text-[10px] uppercase tracking-[0.16em] text-gray-500">Active</p>
-          <p className="mt-1 text-lg font-bold text-emerald-300">{summary.active}</p>
-        </div>
-        <div className="rounded-lg bg-dark-900/50 p-3">
-          <p className="text-[10px] uppercase tracking-[0.16em] text-gray-500">Bullish</p>
-          <p className="mt-1 text-lg font-bold text-emerald-300">{summary.bullish}</p>
-        </div>
-        <div className="rounded-lg bg-dark-900/50 p-3">
-          <p className="text-[10px] uppercase tracking-[0.16em] text-gray-500">Bearish</p>
-          <p className="mt-1 text-lg font-bold text-red-300">{summary.bearish}</p>
-        </div>
-        <div className="rounded-lg bg-dark-900/50 p-3">
-          <p className="text-[10px] uppercase tracking-[0.16em] text-gray-500">Total Sources</p>
-          <p className="mt-1 text-lg font-bold text-white">{rows.length}</p>
-        </div>
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+        <SummaryCard label="Avg Confidence" value={`${summary.avgConfidence}%`} tone="cyan" />
+        <SummaryCard label="Active" value={summary.active} tone="emerald" />
+        <SummaryCard label="Bullish" value={summary.bullish} tone="emerald" />
+        <SummaryCard label="Bearish" value={summary.bearish} tone="red" />
+        <SummaryCard label="Total Sources" value={rows.length} tone="white" />
       </div>
 
-      <div className="overflow-hidden rounded-lg border border-dark-700">
-        <div className="grid grid-cols-[1.15fr_0.75fr_0.75fr_0.9fr_2.3fr] gap-0 border-b border-dark-700 bg-dark-900/70 px-4 py-3 text-[10px] uppercase tracking-[0.16em] text-gray-500">
-          <div>Source</div>
-          <div>Status</div>
-          <div>Score</div>
-          <div>Direction</div>
-          <div>Details</div>
+      {!isExpanded && (
+        <div className="mt-4 rounded-lg border border-dark-700 bg-dark-900/40 px-4 py-3 text-xs text-gray-400">
+          Technical/source details are collapsed. Expand only when you want to inspect every feed. This keeps the dashboard from repeating the same information already shown in the sentiment, brain, chart, ghost, and AI trader tables.
         </div>
+      )}
 
-        <div className="divide-y divide-dark-700">
-          {rows.map((row) => {
-            const score = row.score ?? row.confidence ?? 0
+      {isExpanded && (
+        <div className="mt-4 overflow-hidden rounded-lg border border-dark-700">
+          <div className="grid grid-cols-[1.15fr_0.75fr_0.75fr_0.9fr_2.3fr] gap-0 border-b border-dark-700 bg-dark-900/70 px-4 py-3 text-[10px] uppercase tracking-[0.16em] text-gray-500">
+            <div>Source</div>
+            <div>Status</div>
+            <div>Score</div>
+            <div>Direction</div>
+            <div>Details</div>
+          </div>
 
-            return (
-              <div
-                key={row.key}
-                className="grid grid-cols-[1.15fr_0.75fr_0.75fr_0.9fr_2.3fr] items-center gap-0 px-4 py-3 text-xs"
-              >
-                <div>
-                  <p className="font-semibold text-gray-100">{row.source}</p>
-                  {row.system && (
-                    <p className="mt-0.5 text-[10px] uppercase tracking-[0.16em] text-gray-600">{row.system}</p>
-                  )}
-                </div>
+          <div className="divide-y divide-dark-700">
+            {rows.slice(0, visibleRowCount).map((row) => {
+              const score = row.score ?? row.confidence ?? 0
 
-                <div>
-                  <span className={`rounded border px-2 py-1 text-[10px] font-bold ${badgeClass(row.status)}`}>
-                    {row.status}
-                  </span>
-                </div>
-
-                <div className="pr-4">
-                  <div className="flex items-center gap-2">
-                    <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-dark-600">
-                      <div
-                        className={`h-full rounded-full ${scoreBarClass(row.direction)}`}
-                        style={{ width: `${Math.max(0, Math.min(100, score))}%` }}
-                      />
-                    </div>
-                    <span className="w-8 text-right font-bold text-gray-200">{Math.round(score)}%</span>
+              return (
+                <div
+                  key={row.key}
+                  className="grid grid-cols-[1.15fr_0.75fr_0.75fr_0.9fr_2.3fr] items-center gap-0 px-4 py-3 text-xs"
+                >
+                  <div>
+                    <p className="font-semibold text-gray-100">{row.source}</p>
+                    {row.system && (
+                      <p className="mt-0.5 text-[10px] uppercase tracking-[0.16em] text-gray-600">{row.system}</p>
+                    )}
                   </div>
-                </div>
 
-                <div className={`font-bold ${directionClass(row.direction)}`}>
-                  {row.direction}
-                </div>
+                  <div>
+                    <span className={`rounded border px-2 py-1 text-[10px] font-bold ${badgeClass(row.status)}`}>
+                      {row.status}
+                    </span>
+                  </div>
 
-                <div className="truncate text-gray-400" title={row.details}>
-                  {row.details || '—'}
+                  <div className="pr-4">
+                    <div className="flex items-center gap-2">
+                      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-dark-600">
+                        <div
+                          className={`h-full rounded-full ${scoreBarClass(row.direction)}`}
+                          style={{ width: `${Math.max(0, Math.min(100, score))}%` }}
+                        />
+                      </div>
+                      <span className="w-8 text-right font-bold text-gray-200">{Math.round(score)}%</span>
+                    </div>
+                  </div>
+
+                  <div className={`font-bold ${directionClass(row.direction)}`}>{row.direction}</div>
+
+                  <div className="truncate text-gray-400" title={row.details}>{row.details || '—'}</div>
                 </div>
-              </div>
-            )
-          })}
+              )
+            })}
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="mt-4 rounded-lg border border-dark-700 bg-dark-900/50 px-3 py-2 text-xs text-gray-500">
-        Builder: MARKETBOS Phase 6 unified matrix. Projection Engine is the master context. NRTR Main, Mini 1, and Mini 2 remain separated strategy feeds and are not used inside Ghost ML or Target ML hierarchy.
+        Builder: MARKETBOS Phase 6 unified matrix. Top summary stays visible; technical feed rows are collapsible to reduce duplicated dashboard information.
       </div>
     </motion.div>
+  )
+}
+
+function SummaryCard({ label, value, tone }: { label: string; value: string | number; tone: 'cyan' | 'emerald' | 'red' | 'white' }) {
+  const toneClass =
+    tone === 'cyan' ? 'text-cyan-300' :
+    tone === 'emerald' ? 'text-emerald-300' :
+    tone === 'red' ? 'text-red-300' :
+    'text-white'
+
+  return (
+    <div className="rounded-lg bg-dark-900/50 p-3">
+      <p className="text-[10px] uppercase tracking-[0.16em] text-gray-500">{label}</p>
+      <p className={`mt-1 text-lg font-bold ${toneClass}`}>{value}</p>
+    </div>
   )
 }
