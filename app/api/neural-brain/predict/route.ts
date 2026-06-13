@@ -62,7 +62,6 @@ export async function GET() {
       snapshots: '/api/neural-brain/snapshots',
       outcomes: '/api/neural-brain/outcomes',
       status: '/api/neural-brain/status',
-      onlineStatus: '/api/neural-brain/online-status',
     },
     online: getOnlineBrainStatus(),
     createdAt: new Date().toISOString(),
