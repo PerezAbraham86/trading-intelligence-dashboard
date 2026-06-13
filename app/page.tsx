@@ -5835,6 +5835,7 @@ export default function Dashboard() {
           </div>
 
           <StrategyTesterPanel
+            apiBaseUrl={apiBaseUrl}
             symbol={selectedSymbol}
             timeframe={selectedTimeframe}
             mainCandles={mainChartCandles}
