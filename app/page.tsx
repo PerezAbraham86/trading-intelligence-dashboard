@@ -504,16 +504,45 @@ function buildOverallTechnicalSentiment(
   }
 }
 
+function isGhostCandleArray(value: unknown): value is PythonGhostCandle[] {
+  return Array.isArray(value) && value.length > 0
+}
+
 function getPythonGhostCandles(engineState: PythonEngineState | ProjectionEngineState | null | undefined) {
   if (!engineState) return []
 
   const raw = engineState as any
 
-  if (Array.isArray(raw.ghostPath?.candles)) return raw.ghostPath.candles
-  if (Array.isArray(raw.ghostCandles)) return raw.ghostCandles
-  if (Array.isArray(raw.ghosts)) return raw.ghosts
-  if (Array.isArray(raw.ghostProjections)) return raw.ghostProjections
-  if (Array.isArray(raw.projections)) return raw.projections
+  const candidates = [
+    raw.ghostPath?.candles,
+    raw.ghostPath?.ghostCandles,
+    raw.ghostProjection?.candles,
+    raw.ghostProjection?.ghostCandles,
+    raw.projectionEngine?.ghostPath?.candles,
+    raw.projectionEngine?.ghostPath?.ghostCandles,
+    raw.projectionEngine?.ghostProjection?.candles,
+    raw.projectionEngine?.ghostProjection?.ghostCandles,
+    raw.projectionEngine?.ghostCandles,
+    raw.projectionEngine?.ghosts,
+    raw.projectionEngine?.ghostProjections,
+    raw.projectionEngine?.projections,
+    raw.unifiedProjectionEngine?.ghostPath?.candles,
+    raw.unifiedProjectionEngine?.ghostPath?.ghostCandles,
+    raw.unifiedProjectionEngine?.ghostProjection?.candles,
+    raw.unifiedProjectionEngine?.ghostProjection?.ghostCandles,
+    raw.unifiedProjectionEngine?.ghostCandles,
+    raw.unifiedProjectionEngine?.ghosts,
+    raw.unifiedProjectionEngine?.ghostProjections,
+    raw.unifiedProjectionEngine?.projections,
+    raw.ghostCandles,
+    raw.ghosts,
+    raw.ghostProjections,
+    raw.projections,
+  ]
+
+  for (const candidate of candidates) {
+    if (isGhostCandleArray(candidate)) return candidate
+  }
 
   return []
 }
@@ -1338,16 +1367,36 @@ function getGhostCandlesFromUnifiedIntelligence(unifiedIntelligence: any | null 
   if (!unifiedIntelligence || typeof unifiedIntelligence !== 'object') return []
 
   const candidates = [
+    unifiedIntelligence.projectionEngine?.ghostPath?.candles,
+    unifiedIntelligence.projectionEngine?.ghostPath?.ghostCandles,
+    unifiedIntelligence.projectionEngine?.ghostProjection?.candles,
+    unifiedIntelligence.projectionEngine?.ghostProjection?.ghostCandles,
+    unifiedIntelligence.projectionEngine?.ghostCandles,
+    unifiedIntelligence.projectionEngine?.ghosts,
+    unifiedIntelligence.projectionEngine?.ghostProjections,
+    unifiedIntelligence.projectionEngine?.projections,
+    unifiedIntelligence.unifiedProjectionEngine?.ghostPath?.candles,
+    unifiedIntelligence.unifiedProjectionEngine?.ghostPath?.ghostCandles,
+    unifiedIntelligence.unifiedProjectionEngine?.ghostProjection?.candles,
+    unifiedIntelligence.unifiedProjectionEngine?.ghostProjection?.ghostCandles,
+    unifiedIntelligence.unifiedProjectionEngine?.ghostCandles,
+    unifiedIntelligence.unifiedProjectionEngine?.ghosts,
+    unifiedIntelligence.unifiedProjectionEngine?.ghostProjections,
+    unifiedIntelligence.unifiedProjectionEngine?.projections,
+    unifiedIntelligence.ghostPath?.candles,
+    unifiedIntelligence.ghostPath?.ghostCandles,
     unifiedIntelligence.ghostProjection?.candles,
     unifiedIntelligence.ghostProjection?.ghostCandles,
     unifiedIntelligence.components?.ghost?.candles,
     unifiedIntelligence.components?.ghost?.ghostCandles,
     unifiedIntelligence.ghostCandles,
+    unifiedIntelligence.ghosts,
+    unifiedIntelligence.ghostProjections,
     unifiedIntelligence.projections,
   ]
 
   for (const value of candidates) {
-    if (Array.isArray(value) && value.length > 0) return value as PythonGhostCandle[]
+    if (isGhostCandleArray(value)) return value
   }
 
   return []
@@ -1356,16 +1405,35 @@ function getGhostCandlesFromUnifiedIntelligence(unifiedIntelligence: any | null 
 function getGhostCandlesFromUnifiedOverlay(overlayPayload: any | null | undefined): PythonGhostCandle[] {
   if (!overlayPayload || typeof overlayPayload !== 'object') return []
 
-  if (Array.isArray(overlayPayload.ghostCandles)) {
-    return overlayPayload.ghostCandles as PythonGhostCandle[]
-  }
+  const candidates = [
+    overlayPayload.projectionEngine?.ghostPath?.candles,
+    overlayPayload.projectionEngine?.ghostPath?.ghostCandles,
+    overlayPayload.projectionEngine?.ghostProjection?.candles,
+    overlayPayload.projectionEngine?.ghostProjection?.ghostCandles,
+    overlayPayload.projectionEngine?.ghostCandles,
+    overlayPayload.projectionEngine?.ghosts,
+    overlayPayload.projectionEngine?.ghostProjections,
+    overlayPayload.projectionEngine?.projections,
+    overlayPayload.unifiedProjectionEngine?.ghostPath?.candles,
+    overlayPayload.unifiedProjectionEngine?.ghostPath?.ghostCandles,
+    overlayPayload.unifiedProjectionEngine?.ghostProjection?.candles,
+    overlayPayload.unifiedProjectionEngine?.ghostProjection?.ghostCandles,
+    overlayPayload.unifiedProjectionEngine?.ghostCandles,
+    overlayPayload.unifiedProjectionEngine?.ghosts,
+    overlayPayload.unifiedProjectionEngine?.ghostProjections,
+    overlayPayload.unifiedProjectionEngine?.projections,
+    overlayPayload.ghostPath?.candles,
+    overlayPayload.ghostPath?.ghostCandles,
+    overlayPayload.ghostProjection?.candles,
+    overlayPayload.ghostProjection?.ghostCandles,
+    overlayPayload.ghostCandles,
+    overlayPayload.ghosts,
+    overlayPayload.ghostProjections,
+    overlayPayload.projections,
+  ]
 
-  if (Array.isArray(overlayPayload.ghostProjections)) {
-    return overlayPayload.ghostProjections as PythonGhostCandle[]
-  }
-
-  if (Array.isArray(overlayPayload.projections)) {
-    return overlayPayload.projections as PythonGhostCandle[]
+  for (const value of candidates) {
+    if (isGhostCandleArray(value)) return value
   }
 
   return []
@@ -1376,9 +1444,20 @@ function getProjectionGhostCandles(projectionEngine: ProjectionEngineState | nul
 
   const raw = projectionEngine as any
 
-  if (Array.isArray(raw.ghostPath?.candles)) return raw.ghostPath.candles
-  if (Array.isArray(raw.ghostCandles)) return raw.ghostCandles
-  if (Array.isArray(raw.ghosts)) return raw.ghosts
+  const candidates = [
+    raw.ghostPath?.candles,
+    raw.ghostPath?.ghostCandles,
+    raw.ghostProjection?.candles,
+    raw.ghostProjection?.ghostCandles,
+    raw.ghostCandles,
+    raw.ghosts,
+    raw.ghostProjections,
+    raw.projections,
+  ]
+
+  for (const candidate of candidates) {
+    if (isGhostCandleArray(candidate)) return candidate
+  }
 
   return []
 }
@@ -1451,18 +1530,49 @@ function collectSharedGhostCandles(...sources: any[]) {
     if (!source || typeof source !== 'object') return
 
     const candidates = [
+      source.projectionEngine?.ghostPath?.candles,
+      source.projectionEngine?.ghostPath?.ghostCandles,
+      source.projectionEngine?.ghostProjection?.candles,
+      source.projectionEngine?.ghostProjection?.ghostCandles,
+      source.projectionEngine?.ghostCandles,
+      source.projectionEngine?.ghosts,
+      source.projectionEngine?.ghostProjections,
+      source.projectionEngine?.projections,
+      source.unifiedProjectionEngine?.ghostPath?.candles,
+      source.unifiedProjectionEngine?.ghostPath?.ghostCandles,
+      source.unifiedProjectionEngine?.ghostProjection?.candles,
+      source.unifiedProjectionEngine?.ghostProjection?.ghostCandles,
+      source.unifiedProjectionEngine?.ghostCandles,
+      source.unifiedProjectionEngine?.ghosts,
+      source.unifiedProjectionEngine?.ghostProjections,
+      source.unifiedProjectionEngine?.projections,
+      source.ghostPath?.candles,
+      source.ghostPath?.ghostCandles,
       source.ghostCandles,
+      source.ghosts,
       source.ghostProjections,
       source.projections,
       source.ghostProjection?.candles,
       source.ghostProjection?.ghostCandles,
       source.components?.ghost?.candles,
       source.components?.ghost?.ghostCandles,
+      source.overlayPayload?.projectionEngine?.ghostPath?.candles,
+      source.overlayPayload?.projectionEngine?.ghostCandles,
+      source.overlayPayload?.unifiedProjectionEngine?.ghostPath?.candles,
+      source.overlayPayload?.unifiedProjectionEngine?.ghostCandles,
+      source.overlayPayload?.ghostPath?.candles,
       source.overlayPayload?.ghostCandles,
       source.overlayPayload?.ghostProjections,
       source.overlayPayload?.projections,
+      source.chartOverlays?.projectionEngine?.ghostPath?.candles,
+      source.chartOverlays?.projectionEngine?.ghostCandles,
       source.chartOverlays?.ghostCandles,
       source.chartOverlays?.ghostProjections,
+      source.unifiedIntelligence?.projectionEngine?.ghostPath?.candles,
+      source.unifiedIntelligence?.projectionEngine?.ghostCandles,
+      source.unifiedIntelligence?.unifiedProjectionEngine?.ghostPath?.candles,
+      source.unifiedIntelligence?.unifiedProjectionEngine?.ghostCandles,
+      source.unifiedIntelligence?.ghostPath?.candles,
       source.unifiedIntelligence?.ghostCandles,
       source.unifiedIntelligence?.ghostProjection?.candles,
       source.unifiedIntelligence?.components?.ghost?.candles,
@@ -3943,6 +4053,12 @@ function LightweightChartPanel({
     if (ghostCandles.length > 0) return ghostCandles
     if (compact) return []
 
+    const engineGhostCandles = buildGhostCandlesForChart(engineState, candles, normalizedTimeframe)
+
+    if (engineGhostCandles.length > 0) {
+      return engineGhostCandles
+    }
+
     const unifiedGhostCandles = getGhostCandlesFromUnifiedIntelligence(unifiedIntelligence)
 
     if (unifiedGhostCandles.length > 0) {
@@ -3963,7 +4079,7 @@ function LightweightChartPanel({
       )
     }
 
-    return buildGhostCandlesForChart(engineState, candles, normalizedTimeframe)
+    return []
   }, [candles, compact, engineState, ghostCandles, normalizedTimeframe, unifiedIntelligence, unifiedOverlayPayload])
 
   const overlayStableCandleKey = useMemo(() => {
@@ -5261,6 +5377,7 @@ export default function Dashboard() {
             livePrice={selectedLivePrice}
             onLivePriceUpdate={handleLivePriceUpdate}
             engineState={primaryEngineState}
+            ghostCandles={buildGhostCandlesForChart(primaryEngineState, mainChartCandles, selectedTimeframe)}
             showOverlayLines
             onCandlesUpdate={setMainChartCandles}
             onOverlayPayloadUpdate={setMainChartOverlayPayload}
