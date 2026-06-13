@@ -1031,16 +1031,41 @@ function liveCandleEpoch(value: DashboardCandle | null | undefined) {
   return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0
 }
 
+function candleGapSeconds(currentCandles: DashboardCandle[], rawCandle: any) {
+  const liveCandle = normalizeCandlePayloadItem(rawCandle)
+  if (!liveCandle || currentCandles.length === 0) return 0
+
+  const liveEpoch = liveCandleEpoch(liveCandle)
+  const lastHistoricalEpoch = liveCandleEpoch(currentCandles[currentCandles.length - 1])
+
+  if (liveEpoch <= 0 || lastHistoricalEpoch <= 0) return 0
+
+  return liveEpoch - lastHistoricalEpoch
+}
+
 function mergeLiveCandleIntoCandles(
   currentCandles: DashboardCandle[],
   rawCandle: any,
-  limit: number
+  limit: number,
+  timeframeSeconds = 60
 ): DashboardCandle[] {
   const liveCandle = normalizeCandlePayloadItem(rawCandle)
   if (!liveCandle) return currentCandles
 
   const liveEpoch = liveCandleEpoch(liveCandle)
   if (liveEpoch <= 0) return currentCandles
+
+  if (currentCandles.length > 0) {
+    const lastHistoricalEpoch = liveCandleEpoch(currentCandles[currentCandles.length - 1])
+    const gapSeconds = liveEpoch - lastHistoricalEpoch
+
+    // Do not append a live candle far ahead of history.
+    // This prevents the chart jumping from midnight/last history candle
+    // directly to the login-time candle. The caller refreshes history first.
+    if (gapSeconds > timeframeSeconds * 2) {
+      return currentCandles
+    }
+  }
 
   let replaced = false
   const merged = currentCandles.map((existing) => {
@@ -1096,7 +1121,8 @@ async function fetchSharedCandlePayload(
   apiBaseUrl: string,
   symbol: string,
   timeframe: string,
-  limit: number
+  limit: number,
+  force = false
 ): Promise<SharedCandleCacheEntry> {
   const normalizedSymbol = normalizeSymbol(symbol)
   const normalizedTimeframe = normalizeTimeframe(timeframe)
@@ -1104,7 +1130,7 @@ async function fetchSharedCandlePayload(
   const requestedLimit = Math.max(1, limit)
 
   const activeRequest = SHARED_CANDLE_IN_FLIGHT.get(key)
-  if (activeRequest) {
+  if (activeRequest && !force) {
     const activeResult = await activeRequest
     return {
       ...activeResult,
@@ -1126,7 +1152,7 @@ async function fetchSharedCandlePayload(
       extended: 'true',
       badj: 'true',
       dadj: 'false',
-      force: 'false',
+      force: force ? 'true' : 'false',
     })
 
     const response = await fetch(`${apiBaseUrl}/api/insightsentry/history?${params.toString()}`, {
@@ -3262,7 +3288,7 @@ function useChartCandles(
       return cached.candles.length > 0
     }
 
-    async function fetchCandles() {
+    async function fetchCandles(force = false) {
       if (!enabled) {
         applyCachedPayload()
         setIsLoading(false)
@@ -3284,7 +3310,7 @@ function useChartCandles(
         setIsLoading(!cachedWasApplied)
         setErrorText('')
 
-        const nextPayload = await fetchSharedCandlePayload(activeApiBaseUrl, symbol, timeframe, limit)
+        const nextPayload = await fetchSharedCandlePayload(activeApiBaseUrl, symbol, timeframe, limit, force)
 
         if (!cancelled) {
           setCandles(nextPayload.candles)
@@ -3358,7 +3384,22 @@ function useChartCandles(
           }
 
           setCandles((previousCandles) => {
-            const merged = mergeLiveCandleIntoCandles(previousCandles, liveCandle, limit)
+            const timeframeSeconds = timeframeToSeconds(timeframe)
+            const gapSeconds = candleGapSeconds(previousCandles, liveCandle)
+
+            if (gapSeconds > timeframeSeconds * 2) {
+              // History/live gap detected. Do not append the live candle into a
+              // disconnected timeline. Force-refresh historical OHLCV first.
+              fetchCandles(true)
+              return previousCandles
+            }
+
+            const merged = mergeLiveCandleIntoCandles(
+              previousCandles,
+              liveCandle,
+              limit,
+              timeframeSeconds
+            )
             const cacheEntry = writeLiveCandleToSharedCache(
               symbol,
               timeframe,
@@ -3396,7 +3437,22 @@ function useChartCandles(
           }
 
           setCandles((previousCandles) => {
-            const merged = mergeLiveCandleIntoCandles(previousCandles, liveCandle, limit)
+            const timeframeSeconds = timeframeToSeconds(timeframe)
+            const gapSeconds = candleGapSeconds(previousCandles, liveCandle)
+
+            if (gapSeconds > timeframeSeconds * 2) {
+              // History/live gap detected. Do not append the live candle into a
+              // disconnected timeline. Force-refresh historical OHLCV first.
+              fetchCandles(true)
+              return previousCandles
+            }
+
+            const merged = mergeLiveCandleIntoCandles(
+              previousCandles,
+              liveCandle,
+              limit,
+              timeframeSeconds
+            )
             const cacheEntry = writeLiveCandleToSharedCache(
               symbol,
               timeframe,
