@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { labelNeuralBrainSnapshot } from '@/lib/neuralBrainMemory'
+import { getRecentNeuralBrainSnapshots, labelNeuralBrainSnapshot } from '@/lib/neuralBrainMemory'
+import { learnOnlineFromSnapshot } from '@/lib/neuralBrainOnline'
 
 export const dynamic = 'force-dynamic'
 
@@ -20,7 +21,23 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    return NextResponse.json(labelNeuralBrainSnapshot(id, payload || {}))
+    const outcome = labelNeuralBrainSnapshot(id, payload || {})
+    let onlineLearning: ReturnType<typeof learnOnlineFromSnapshot> | null = null
+
+    if (outcome.updated) {
+      const recent = getRecentNeuralBrainSnapshots({ limit: 5000 })
+      const snapshot = recent.snapshots.find((item) => item.id === id)
+
+      if (snapshot?.outcome) {
+        onlineLearning = learnOnlineFromSnapshot(snapshot)
+      }
+    }
+
+    return NextResponse.json({
+      ...outcome,
+      phase: 'phase3_river_style_online_updates',
+      onlineLearning,
+    })
   } catch (error) {
     return NextResponse.json(
       {
