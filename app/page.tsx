@@ -3269,6 +3269,217 @@ function buildFallbackGhostCandle(
   }
 }
 
+function readPositiveNumber(...values: unknown[]) {
+  for (const value of values) {
+    const number = toFiniteNumber(value, NaN)
+    if (Number.isFinite(number) && number > 0) return number
+  }
+
+  return NaN
+}
+
+function readTargetPriceFromSource(source: any): number {
+  if (!source || typeof source !== 'object') return NaN
+
+  return readPositiveNumber(
+    source.activeTargetPrice,
+    source.finalTargetPrice,
+    source.overallTargetPrice,
+    source.targetPrice,
+    source.takeProfitPrice,
+    source.tp1,
+    source.target,
+    source.ghostOverlayTargetPrice,
+    source.targetMl?.activeTargetPrice,
+    source.targetMl?.finalTargetPrice,
+    source.targetMl?.overallTargetPrice,
+    source.targetMl?.targetPrice,
+    source.targetPlan?.activeTargetPrice,
+    source.targetPlan?.finalTargetPrice,
+    source.targetPlan?.overallTargetPrice,
+    source.targetPlan?.targetPrice,
+    source.target?.activeTargetPrice,
+    source.target?.finalTargetPrice,
+    source.target?.overallTargetPrice,
+    source.target?.targetPrice,
+    source.target?.price,
+    source.alignment?.targetPrice,
+    source.mode?.targetPrice,
+    source.projectionEngine?.activeTargetPrice,
+    source.projectionEngine?.finalTargetPrice,
+    source.projectionEngine?.overallTargetPrice,
+    source.projectionEngine?.targetPrice,
+    source.unifiedProjectionEngine?.activeTargetPrice,
+    source.unifiedProjectionEngine?.finalTargetPrice,
+    source.unifiedProjectionEngine?.overallTargetPrice,
+    source.unifiedProjectionEngine?.targetPrice
+  )
+}
+
+function getProjectionTargetPrice(
+  engineState: PythonEngineState | ProjectionEngineState | null | undefined,
+  ghosts: PythonGhostCandle[]
+) {
+  const raw = engineState as any
+  const directTarget = readTargetPriceFromSource(raw)
+
+  if (Number.isFinite(directTarget) && directTarget > 0) {
+    return directTarget
+  }
+
+  for (let index = ghosts.length - 1; index >= 0; index -= 1) {
+    const ghost = ghosts[index] as any
+    const ghostTarget = readPositiveNumber(
+      ghost.finalTargetPrice,
+      ghost.overallTargetPrice,
+      ghost.targetPrice,
+      ghost.target,
+      ghost.targetMl?.finalTargetPrice,
+      ghost.targetMl?.overallTargetPrice,
+      ghost.targetMl?.targetPrice,
+      ghost.targetPlan?.finalTargetPrice,
+      ghost.targetPlan?.overallTargetPrice,
+      ghost.targetPlan?.targetPrice,
+      ghost.ghostTargetPrice,
+      ghost.projectedTargetPrice
+    )
+
+    if (Number.isFinite(ghostTarget) && ghostTarget > 0) {
+      return ghostTarget
+    }
+  }
+
+  const finalClose = readPositiveNumber(
+    (ghosts[ghosts.length - 1] as any)?.close,
+    (ghosts[ghosts.length - 1] as any)?.c
+  )
+
+  return Number.isFinite(finalClose) && finalClose > 0 ? finalClose : NaN
+}
+
+function getRecentCandleRange(candles: DashboardCandle[]) {
+  const recent = candles.slice(-14)
+  const ranges = recent
+    .map((candle) => Math.abs(toFiniteNumber(candle.high, 0) - toFiniteNumber(candle.low, 0)))
+    .filter((range) => Number.isFinite(range) && range > 0)
+
+  if (ranges.length === 0) {
+    const close = toFiniteNumber(candles[candles.length - 1]?.close, 0)
+    return Math.max(Math.abs(close * 0.001), 0.01)
+  }
+
+  return ranges.reduce((sum, range) => sum + range, 0) / ranges.length
+}
+
+function buildConnectedGhostCandle({
+  previousProjected,
+  ghost,
+  index,
+  count,
+  timeframeSeconds,
+  finalTargetPrice,
+  lastRealClose,
+  recentRange,
+}: {
+  previousProjected: DashboardCandle | GhostCandle
+  ghost: any
+  index: number
+  count: number
+  timeframeSeconds: number
+  finalTargetPrice: number
+  lastRealClose: number
+  recentRange: number
+}): GhostCandle {
+  const open = toFiniteNumber(previousProjected.close, lastRealClose)
+  const previousTime =
+    timeToUnixSeconds(previousProjected.time as DashboardCandle['time']) ??
+    Math.floor(Date.now() / 1000)
+
+  const rawOpen = readPositiveNumber(ghost.open, ghost.o)
+  const rawClose = readPositiveNumber(ghost.close, ghost.c)
+  const rawHigh = readPositiveNumber(ghost.high, ghost.h)
+  const rawLow = readPositiveNumber(ghost.low, ghost.l)
+  const rawRange =
+    Number.isFinite(rawHigh) && Number.isFinite(rawLow) && rawHigh > rawLow
+      ? rawHigh - rawLow
+      : recentRange
+
+  const hasTarget = Number.isFinite(finalTargetPrice) && finalTargetPrice > 0
+  const progress = Math.max(0, Math.min(1, (index + 1) / Math.max(1, count)))
+
+  let close: number
+
+  if (hasTarget) {
+    // Connected target path:
+    // The target can be far away, but ghost candle #1 must start from the current candle,
+    // and ghost candle #3 must reach the expected target level instead of teleporting away.
+    close = lastRealClose + (finalTargetPrice - lastRealClose) * progress
+  } else if (Number.isFinite(rawOpen) && Number.isFinite(rawClose)) {
+    close = open + (rawClose - rawOpen)
+  } else {
+    const fallback = buildFallbackGhostCandle(
+      previousProjected,
+      ghost.direction,
+      ghost.confidence,
+      index,
+      timeframeSeconds
+    )
+    close = fallback.close
+  }
+
+  const body = close - open
+  const wick = Math.max(
+    rawRange * 0.22,
+    Math.abs(body) * 0.18,
+    recentRange * 0.18,
+    Math.abs(lastRealClose) * 0.00015
+  )
+
+  return {
+    time: (previousTime + timeframeSeconds) as GhostCandle['time'],
+    open,
+    high: Math.max(open, close) + wick,
+    low: Math.min(open, close) - wick,
+    close,
+    confidence: ghost.confidence,
+    direction:
+      body > 0
+        ? 'bullish'
+        : body < 0
+          ? 'bearish'
+          : ghost.direction,
+    source: ghost.source ?? 'python-connected-target-path',
+    label: ghost.label ?? `PY #${index + 1}`,
+    reason: ghost.reason ?? 'Connected to current candle and stepped toward target',
+  }
+}
+
+function copyGhostMetadata(projected: GhostCandle, ghost: any, finalTargetPrice: number) {
+  // Preserve Target ML + Ghost ML metadata for projection tables/details.
+  ;(projected as any).targetMlAligned = Boolean(ghost.targetMlAligned)
+  ;(projected as any).targetPrice = Number.isFinite(finalTargetPrice)
+    ? finalTargetPrice
+    : toFiniteNumber(ghost.targetPrice, NaN)
+  ;(projected as any).targetSource = ghost.targetSource
+  ;(projected as any).targetConfidence = toFiniteNumber(ghost.targetConfidence, NaN)
+  ;(projected as any).targetMlReady = Boolean(ghost.targetMlReady)
+  ;(projected as any).ghostConfidenceBoost = toFiniteNumber(ghost.ghostConfidenceBoost, NaN)
+  ;(projected as any).mlAdjusted = Boolean(ghost.mlAdjusted)
+  ;(projected as any).mlReady = Boolean(ghost.mlReady)
+  ;(projected as any).mlReason = ghost.mlReason
+  ;(projected as any).mlConfidenceMultiplier = toFiniteNumber(ghost.mlConfidenceMultiplier, NaN)
+  ;(projected as any).mlConfidenceBonus = toFiniteNumber(ghost.mlConfidenceBonus, NaN)
+  ;(projected as any).mlProjectionMultiplier = toFiniteNumber(ghost.mlProjectionMultiplier, NaN)
+  ;(projected as any).mlHierarchy = ghost.mlHierarchy
+  ;(projected as any).nrtrUsedForMl = ghost.nrtrUsedForMl
+  ;(projected as any).smmaUsedForMl = ghost.smmaUsedForMl
+  ;(projected as any).connectedToCurrentCandle = true
+  ;(projected as any).targetLevelOverlay = Number.isFinite(finalTargetPrice) ? finalTargetPrice : null
+
+  return projected
+}
+
+
 function buildGhostCandlesForChart(
   engineState: PythonEngineState | null | undefined,
   chartCandles: DashboardCandle[],
@@ -3280,71 +3491,30 @@ function buildGhostCandlesForChart(
 
   const timeframeSeconds = timeframeToSeconds(timeframe)
   const lastRealCandle = chartCandles[chartCandles.length - 1]
-  const lastRealTime = timeToUnixSeconds(lastRealCandle.time)
+  const lastRealClose = toFiniteNumber(lastRealCandle.close, 0)
+  const recentRange = getRecentCandleRange(chartCandles)
+  const finalTargetPrice = getProjectionTargetPrice(engineState, pythonGhostCandles)
   let previousProjected: DashboardCandle | GhostCandle = lastRealCandle
 
-  return pythonGhostCandles.slice(0, 10).map((ghost: any, index: number) => {
-    const open = toFiniteNumber(ghost.open ?? ghost.o, NaN)
-    const high = toFiniteNumber(ghost.high ?? ghost.h, NaN)
-    const low = toFiniteNumber(ghost.low ?? ghost.l, NaN)
-    const close = toFiniteNumber(ghost.close ?? ghost.c, NaN)
-
-    const explicitTime = normalizeCandleTime(
-      ghost.time ?? ghost.timestamp ?? ghost.t ?? (
-        lastRealTime ? lastRealTime + timeframeSeconds * (index + 1) : undefined
-      )
-    )
-
-    if (
-      Number.isFinite(open) &&
-      Number.isFinite(high) &&
-      Number.isFinite(low) &&
-      Number.isFinite(close)
-    ) {
-      const projected: GhostCandle = {
-        time: explicitTime as GhostCandle['time'],
-        open,
-        high,
-        low,
-        close,
-        confidence: ghost.confidence,
-        direction: ghost.direction,
-        source: ghost.source ?? 'python',
-        label: ghost.label ?? `PY #${index + 1}`,
-        reason: ghost.reason,
-      }
-
-      // Preserve Target ML + Ghost ML metadata for projection tables/details.
-      ;(projected as any).targetMlAligned = Boolean(ghost.targetMlAligned)
-      ;(projected as any).targetPrice = toFiniteNumber(ghost.targetPrice, NaN)
-      ;(projected as any).targetSource = ghost.targetSource
-      ;(projected as any).targetConfidence = toFiniteNumber(ghost.targetConfidence, NaN)
-      ;(projected as any).targetMlReady = Boolean(ghost.targetMlReady)
-      ;(projected as any).ghostConfidenceBoost = toFiniteNumber(ghost.ghostConfidenceBoost, NaN)
-      ;(projected as any).mlAdjusted = Boolean(ghost.mlAdjusted)
-      ;(projected as any).mlReady = Boolean(ghost.mlReady)
-      ;(projected as any).mlReason = ghost.mlReason
-      ;(projected as any).mlConfidenceMultiplier = toFiniteNumber(ghost.mlConfidenceMultiplier, NaN)
-      ;(projected as any).mlConfidenceBonus = toFiniteNumber(ghost.mlConfidenceBonus, NaN)
-      ;(projected as any).mlProjectionMultiplier = toFiniteNumber(ghost.mlProjectionMultiplier, NaN)
-      ;(projected as any).mlHierarchy = ghost.mlHierarchy
-      ;(projected as any).nrtrUsedForMl = ghost.nrtrUsedForMl
-      ;(projected as any).smmaUsedForMl = ghost.smmaUsedForMl
-
-      previousProjected = projected
-      return projected
-    }
-
-    const fallback = buildFallbackGhostCandle(
+  // Only draw the user-selected 3 ghost path by default.
+  // The full backend can still return more, but the visible chart path should be a clean
+  // current-candle → ghost #1 → ghost #2 → ghost #3 sequence.
+  return pythonGhostCandles.slice(0, 3).map((ghost: any, index: number) => {
+    const projected = buildConnectedGhostCandle({
       previousProjected,
-      ghost.direction,
-      ghost.confidence,
+      ghost,
       index,
-      timeframeSeconds
-    )
+      count: Math.min(3, pythonGhostCandles.length),
+      timeframeSeconds,
+      finalTargetPrice,
+      lastRealClose,
+      recentRange,
+    })
 
-    previousProjected = fallback
-    return fallback
+    const withMetadata = copyGhostMetadata(projected, ghost, finalTargetPrice)
+
+    previousProjected = withMetadata
+    return withMetadata
   })
 }
 
