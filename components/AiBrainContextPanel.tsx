@@ -1,3 +1,5 @@
+'use client'
+
 import { motion } from 'framer-motion'
 
 type AiBrainContextPanelProps = {
@@ -14,16 +16,31 @@ type AiBrainContextPanelProps = {
   miniTwoSettings?: any
 }
 
+type BrainDirection = 'Bullish' | 'Bearish' | 'Neutral' | 'Mixed'
+type BrainStatus = 'Active' | 'Learning' | 'Waiting' | 'Conflict' | 'Unavailable'
+
 type BrainRow = {
   name: string
   group: string
-  status: 'Active' | 'Learning' | 'Waiting' | 'Conflict' | 'Unavailable'
-  direction: 'Bullish' | 'Bearish' | 'Neutral' | 'Mixed'
+  status: BrainStatus
+  direction: BrainDirection
   confidence: number
   usedByGhostMl: boolean
   usedByTargetMl: boolean
   usedByAiTrader: boolean
   reason: string
+}
+
+type NeuralBrainScorecard = {
+  brainBuyPct: number
+  brainSellPct: number
+  targetHitPct: number
+  reversalRiskPct: number
+  chopRiskPct: number
+  decisionStrengthPct: number
+  bestDirection: BrainDirection
+  decision: string
+  riskStatus: 'Aligned' | 'Risk Watch' | 'Mixed' | 'Waiting'
 }
 
 function toFiniteNumber(value: any, fallback = 0) {
@@ -53,7 +70,14 @@ function readNumber(source: any, paths: string[], fallback = 0) {
   return toFiniteNumber(readPath(source, paths), fallback)
 }
 
-function normalizeDirection(value: any): BrainRow['direction'] {
+function maxReadableNumber(sources: Array<[any, string[]]>, fallback = 0) {
+  return Math.max(
+    fallback,
+    ...sources.map(([source, paths]) => readNumber(source, paths, fallback))
+  )
+}
+
+function normalizeDirection(value: any): BrainDirection {
   const raw = String(value ?? '').toLowerCase()
 
   if (raw.includes('bull') || raw.includes('buy') || raw.includes('long') || raw === '1') return 'Bullish'
@@ -63,7 +87,7 @@ function normalizeDirection(value: any): BrainRow['direction'] {
   return 'Neutral'
 }
 
-function directionFromScores(bull: number, bear: number): BrainRow['direction'] {
+function directionFromScores(bull: number, bear: number): BrainDirection {
   if (bull > bear + 5) return 'Bullish'
   if (bear > bull + 5) return 'Bearish'
   if (bull > 0 || bear > 0) return 'Mixed'
@@ -71,7 +95,7 @@ function directionFromScores(bull: number, bear: number): BrainRow['direction'] 
   return 'Neutral'
 }
 
-function statusFromConfidence(confidence: number, active = false): BrainRow['status'] {
+function statusFromConfidence(confidence: number, active = false): BrainStatus {
   if (confidence >= 65) return 'Active'
   if (confidence > 0 || active) return 'Learning'
 
@@ -82,7 +106,7 @@ function formatConfidence(value: any) {
   return `${clamp(toFiniteNumber(value, 0)).toFixed(1)}%`
 }
 
-function getStatusClass(status: BrainRow['status']) {
+function getStatusClass(status: BrainStatus) {
   if (status === 'Active') return 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
   if (status === 'Learning') return 'border-amber-400/30 bg-amber-400/10 text-amber-200'
   if (status === 'Conflict') return 'border-red-400/30 bg-red-400/10 text-red-200'
@@ -91,7 +115,7 @@ function getStatusClass(status: BrainRow['status']) {
   return 'border-blue-400/30 bg-blue-400/10 text-blue-200'
 }
 
-function getDirectionClass(direction: BrainRow['direction']) {
+function getDirectionClass(direction: BrainDirection) {
   if (direction === 'Bullish') return 'text-emerald-300'
   if (direction === 'Bearish') return 'text-red-300'
   if (direction === 'Mixed') return 'text-amber-300'
@@ -116,6 +140,108 @@ function getNrtrDirectionFromSettings(settings: any) {
   return normalizeDirection(settings?.direction ?? settings?.side ?? settings?.bias ?? settings?.trend)
 }
 
+function buildNeuralBrainScorecard({
+  signal,
+  scorecards,
+  mlFeatures,
+  overlayPayload,
+  unifiedIntelligence,
+  aiDecision,
+}: Pick<AiBrainContextPanelProps, 'signal' | 'scorecards' | 'mlFeatures' | 'overlayPayload' | 'unifiedIntelligence' | 'aiDecision'>): NeuralBrainScorecard {
+  const brainBuyPct = clamp(maxReadableNumber([
+    [aiDecision, ['brainBuyPct', 'brainBuy', 'buyProbability', 'buyConfidence', 'details.neuralBrain.brainBuyPct', 'details.neuralBrain.buyPct', 'details.directionalContext.buyConfidence']],
+    [signal, ['brainBuyPct', 'brainBuy', 'buyConfidence', 'bullScore', 'bullishScore']],
+    [scorecards, ['brainBuyPct', 'brainBuy', 'buyConfidence', 'bullScore', 'overall.bullScore', 'main.bullScore']],
+    [mlFeatures, ['brainBuyPct', 'brainBuy', 'buyConfidence']],
+    [unifiedIntelligence, ['brainBuyPct', 'brainBuy', 'buyConfidence', 'bullScore', 'scorecards.bullScore', 'neuralBrain.brainBuyPct']],
+  ]))
+
+  const brainSellPct = clamp(maxReadableNumber([
+    [aiDecision, ['brainSellPct', 'brainSell', 'sellProbability', 'sellConfidence', 'details.neuralBrain.brainSellPct', 'details.neuralBrain.sellPct', 'details.directionalContext.sellConfidence']],
+    [signal, ['brainSellPct', 'brainSell', 'sellConfidence', 'bearScore', 'bearishScore']],
+    [scorecards, ['brainSellPct', 'brainSell', 'sellConfidence', 'bearScore', 'overall.bearScore', 'main.bearScore']],
+    [mlFeatures, ['brainSellPct', 'brainSell', 'sellConfidence']],
+    [unifiedIntelligence, ['brainSellPct', 'brainSell', 'sellConfidence', 'bearScore', 'scorecards.bearScore', 'neuralBrain.brainSellPct']],
+  ]))
+
+  const targetHitPct = clamp(maxReadableNumber([
+    [aiDecision, ['targetHitPct', 'targetHitProbability', 'targetConfidence', 'details.neuralBrain.targetHitPct', 'details.directionalContext.targetConfidence']],
+    [signal, ['targetHitPct', 'targetHitProbability', 'targetConfidence', 'targetMlConfidence', 'targetMl.targetConfidence', 'targetPlan.targetConfidence']],
+    [scorecards, ['targetHitPct', 'targetHitProbability', 'targetConfidence']],
+    [mlFeatures, ['targetHitPct', 'targetHitProbability', 'targetConfidence']],
+    [overlayPayload, ['targetHitPct', 'targetHitProbability', 'targetConfidence', 'targetMl.targetConfidence', 'targetPlan.targetConfidence']],
+    [unifiedIntelligence, ['targetHitPct', 'targetHitProbability', 'targetConfidence', 'targetMl.targetConfidence', 'neuralBrain.targetHitPct']],
+  ]))
+
+  const reversalRiskPct = clamp(maxReadableNumber([
+    [aiDecision, ['reversalRiskPct', 'reversalRisk', 'details.neuralBrain.reversalRiskPct', 'details.directionalContext.reversalRisk']],
+    [signal, ['reversalRiskPct', 'reversalRisk']],
+    [scorecards, ['reversalRiskPct', 'reversalRisk']],
+    [mlFeatures, ['reversalRiskPct', 'reversalRisk']],
+    [unifiedIntelligence, ['reversalRiskPct', 'reversalRisk', 'neuralBrain.reversalRiskPct']],
+  ]))
+
+  const chopRiskPct = clamp(maxReadableNumber([
+    [aiDecision, ['chopRiskPct', 'chopRisk', 'details.neuralBrain.chopRiskPct', 'details.directionalContext.chopRisk']],
+    [signal, ['chopRiskPct', 'chopRisk', 'chopProbability']],
+    [scorecards, ['chopRiskPct', 'chopRisk', 'chopProbability']],
+    [mlFeatures, ['chopRiskPct', 'chopRisk', 'chopProbability']],
+    [unifiedIntelligence, ['chopRiskPct', 'chopRisk', 'neuralBrain.chopRiskPct']],
+  ]))
+
+  const explicitDecisionStrength = clamp(maxReadableNumber([
+    [aiDecision, ['decisionStrengthPct', 'decisionStrength', 'confidence', 'details.neuralBrain.decisionStrengthPct']],
+    [signal, ['decisionStrengthPct', 'decisionStrength', 'confidence']],
+    [scorecards, ['decisionStrengthPct', 'decisionStrength', 'confidence']],
+    [unifiedIntelligence, ['decisionStrengthPct', 'decisionStrength', 'confidence', 'neuralBrain.decisionStrengthPct']],
+  ]))
+
+  const bestDirection = normalizeDirection(
+    readPath(aiDecision, ['bestDirection', 'direction', 'details.neuralBrain.bestDirection']) ??
+    readPath(signal, ['bestDirection', 'direction', 'signal']) ??
+    readPath(scorecards, ['bestDirection', 'direction']) ??
+    directionFromScores(brainBuyPct, brainSellPct)
+  )
+
+  const decision = String(
+    readPath(aiDecision, ['decision', 'finalDecision', 'action']) ??
+    readPath(signal, ['decision', 'signal', 'action']) ??
+    'HOLD'
+  ).toUpperCase()
+
+  const decisionStrengthPct = explicitDecisionStrength > 0
+    ? explicitDecisionStrength
+    : clamp(Math.abs(brainBuyPct - brainSellPct))
+
+  const isDecisionAligned =
+    decision === 'HOLD' ||
+    (decision === 'BUY' && bestDirection === 'Bullish') ||
+    (decision === 'SELL' && bestDirection === 'Bearish')
+
+  const riskStatus =
+    chopRiskPct >= 60 || reversalRiskPct >= 65
+      ? 'Risk Watch'
+      : bestDirection === 'Mixed'
+        ? 'Mixed'
+        : decisionStrengthPct <= 0
+          ? 'Waiting'
+          : isDecisionAligned
+            ? 'Aligned'
+            : 'Risk Watch'
+
+  return {
+    brainBuyPct,
+    brainSellPct,
+    targetHitPct,
+    reversalRiskPct,
+    chopRiskPct,
+    decisionStrengthPct,
+    bestDirection,
+    decision,
+    riskStatus,
+  }
+}
+
 function buildBrainRows({
   signal,
   scorecards,
@@ -127,6 +253,15 @@ function buildBrainRows({
   miniOneSettings,
   miniTwoSettings,
 }: Omit<AiBrainContextPanelProps, 'symbol' | 'timeframe'>): BrainRow[] {
+  const neuralBrain = buildNeuralBrainScorecard({
+    signal,
+    scorecards,
+    mlFeatures,
+    overlayPayload,
+    unifiedIntelligence,
+    aiDecision,
+  })
+
   const bullScore = Math.max(
     readNumber(signal, ['bullScore', 'bullishScore']),
     readNumber(scorecards, ['bullScore', 'overall.bullScore', 'main.bullScore']),
@@ -222,6 +357,17 @@ function buildBrainRows({
         : 'Mixed'
 
   const rows: BrainRow[] = [
+    {
+      name: 'Neural Brain Score',
+      group: 'Neural Brain',
+      status: statusFromConfidence(neuralBrain.decisionStrengthPct, neuralBrain.decisionStrengthPct > 0),
+      direction: neuralBrain.bestDirection,
+      confidence: clamp(neuralBrain.decisionStrengthPct),
+      usedByGhostMl: true,
+      usedByTargetMl: true,
+      usedByAiTrader: true,
+      reason: `Decision ${neuralBrain.decision}; risk status ${neuralBrain.riskStatus}. Buy ${formatConfidence(neuralBrain.brainBuyPct)}, sell ${formatConfidence(neuralBrain.brainSellPct)}, target hit ${formatConfidence(neuralBrain.targetHitPct)}.`,
+    },
     {
       name: 'SMC Structure',
       group: 'Market Structure',
@@ -374,6 +520,32 @@ function SummaryPill({
   )
 }
 
+function NeuralMetricCard({
+  label,
+  value,
+  tone = 'neutral',
+}: {
+  label: string
+  value: string
+  tone?: 'bull' | 'bear' | 'warn' | 'neutral'
+}) {
+  const className =
+    tone === 'bull'
+      ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
+      : tone === 'bear'
+        ? 'border-red-400/30 bg-red-400/10 text-red-200'
+        : tone === 'warn'
+          ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
+          : 'border-cyan-400/20 bg-cyan-400/5 text-cyan-100'
+
+  return (
+    <div className={`rounded-xl border px-4 py-3 ${className}`}>
+      <div className="text-[10px] font-black uppercase tracking-[0.18em] opacity-70">{label}</div>
+      <div className="mt-1 text-xl font-black">{value}</div>
+    </div>
+  )
+}
+
 export default function AiBrainContextPanel({
   symbol,
   timeframe,
@@ -387,6 +559,15 @@ export default function AiBrainContextPanel({
   miniOneSettings,
   miniTwoSettings,
 }: AiBrainContextPanelProps) {
+  const neuralBrain = buildNeuralBrainScorecard({
+    signal,
+    scorecards,
+    mlFeatures,
+    overlayPayload,
+    unifiedIntelligence,
+    aiDecision,
+  })
+
   const rows = buildBrainRows({
     signal,
     scorecards,
@@ -406,8 +587,9 @@ export default function AiBrainContextPanel({
   const targetUsed = rows.filter((row) => row.usedByTargetMl).length
   const traderUsed = rows.filter((row) => row.usedByAiTrader).length
 
-  const aiDecisionLabel = String(readPath(aiDecision, ['decision']) ?? 'HOLD').toUpperCase()
+  const aiDecisionLabel = neuralBrain.decision
   const aiTone = aiDecisionLabel === 'BUY' ? 'bull' : aiDecisionLabel === 'SELL' ? 'bear' : 'warn'
+  const riskTone = neuralBrain.riskStatus === 'Aligned' ? 'bull' : neuralBrain.riskStatus === 'Risk Watch' ? 'bear' : neuralBrain.riskStatus === 'Mixed' ? 'warn' : 'neutral'
 
   return (
     <motion.div
@@ -419,26 +601,54 @@ export default function AiBrainContextPanel({
       <div className="mb-4 flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
         <div>
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-xl font-black text-white">Unified AI Brain Context</h2>
+            <h2 className="text-xl font-black text-white">Neural Brain Table</h2>
             <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-cyan-200">
-              SMC + Alpha + Ghost + Liquidity
+              Unified AI Brain Context
+            </span>
+            <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-emerald-200">
+              Neural Brain Visible
             </span>
             <span className="rounded-full border border-purple-400/30 bg-purple-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-purple-200">
               {symbol} • {timeframe}
             </span>
           </div>
           <p className="mt-1 text-xs text-gray-400">
-            Shows exactly which market-structure, liquidity, zone, ghost, target, and strategy-context inputs are visible to the AI.
+            Shows neural brain scoring plus the market-structure, liquidity, zone, ghost, target, entry, and strategy-context inputs visible to the AI.
           </p>
         </div>
 
         <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:min-w-[520px]">
           <SummaryPill label="AI Decision" value={aiDecisionLabel} tone={aiTone as any} />
-          <SummaryPill label="Active Inputs" value={String(activeRows)} tone="bull" />
+          <SummaryPill label="Active Brain Rows" value={String(activeRows)} tone="bull" />
           <SummaryPill label="Learning" value={String(learningRows)} tone="warn" />
           <SummaryPill label="Conflicts" value={String(conflicts)} tone={conflicts ? 'bear' : 'neutral'} />
           <SummaryPill label="Ghost ML Inputs" value={String(ghostUsed)} />
           <SummaryPill label="Target ML Inputs" value={String(targetUsed)} />
+        </div>
+      </div>
+
+      <div className="mb-4 rounded-2xl border border-cyan-400/20 bg-cyan-950/10 p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="text-[10px] font-black uppercase tracking-[0.2em] text-cyan-300">Neural Brain</div>
+            <div className="text-sm font-bold text-white">Brain Buy / Sell / Risk / Decision Scorecard</div>
+          </div>
+          <span className={`rounded-full border px-3 py-1 text-[10px] font-black uppercase tracking-wide ${getDirectionClass(neuralBrain.bestDirection)}`}>
+            {neuralBrain.bestDirection}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 gap-2 md:grid-cols-3 xl:grid-cols-5">
+          <NeuralMetricCard label="Brain Buy %" value={formatConfidence(neuralBrain.brainBuyPct)} tone="bull" />
+          <NeuralMetricCard label="Brain Sell %" value={formatConfidence(neuralBrain.brainSellPct)} tone="bear" />
+          <NeuralMetricCard label="Target Hit %" value={formatConfidence(neuralBrain.targetHitPct)} tone="bull" />
+          <NeuralMetricCard label="Reversal Risk %" value={formatConfidence(neuralBrain.reversalRiskPct)} tone={neuralBrain.reversalRiskPct >= 60 ? 'bear' : 'neutral'} />
+          <NeuralMetricCard label="Chop Risk %" value={formatConfidence(neuralBrain.chopRiskPct)} tone={neuralBrain.chopRiskPct >= 60 ? 'bear' : 'neutral'} />
+          <NeuralMetricCard label="Decision Strength %" value={formatConfidence(neuralBrain.decisionStrengthPct)} tone={neuralBrain.decisionStrengthPct >= 65 ? 'bull' : 'warn'} />
+          <NeuralMetricCard label="Best Direction" value={neuralBrain.bestDirection} tone={neuralBrain.bestDirection === 'Bullish' ? 'bull' : neuralBrain.bestDirection === 'Bearish' ? 'bear' : neuralBrain.bestDirection === 'Mixed' ? 'warn' : 'neutral'} />
+          <NeuralMetricCard label="Decision" value={neuralBrain.decision} tone={aiTone as any} />
+          <NeuralMetricCard label="Risk Watch / Aligned" value={neuralBrain.riskStatus} tone={riskTone as any} />
+          <NeuralMetricCard label="Neural Source" value="Dashboard" tone="neutral" />
         </div>
       </div>
 
