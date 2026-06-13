@@ -3,6 +3,49 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 
+const RENDER_NEURAL_BRAIN_API_BASE = 'https://trading-intelligence-dashboard.onrender.com'
+
+function uniqueStrings(values: string[]) {
+  return Array.from(new Set(values.filter(Boolean)))
+}
+
+function neuralBrainSnapshotUrls() {
+  const envCandidates = [
+    process.env.NEXT_PUBLIC_FASTAPI_BASE_URL,
+    process.env.NEXT_PUBLIC_BACKEND_URL,
+    process.env.NEXT_PUBLIC_API_BASE_URL,
+    RENDER_NEURAL_BRAIN_API_BASE,
+  ]
+
+  const absoluteUrls = envCandidates
+    .filter((base): base is string => typeof base === 'string' && base.trim().length > 0)
+    .map((base) => `${base.replace(/\/$/, '')}/api/neural-brain/snapshots`)
+
+  // Important:
+  // Post to the Render FastAPI backend first. The previous version only posted to
+  // the relative Next.js route, so the Render route stayed at totalSnapshots: 0.
+  return uniqueStrings([
+    ...absoluteUrls,
+    '/api/neural-brain/snapshots',
+  ])
+}
+
+async function postNeuralBrainSnapshot(payload: any, signal: AbortSignal) {
+  const urls = neuralBrainSnapshotUrls()
+
+  await Promise.allSettled(
+    urls.map((url) =>
+      fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal,
+        mode: url.startsWith('http') ? 'cors' : 'same-origin',
+      })
+    )
+  )
+}
+
 type AiBrainContextPanelProps = {
   symbol: string
   timeframe: string
@@ -293,80 +336,69 @@ function buildBrainRows({
   )
 
   const fvgScore = Math.max(
-    readNumber(scorecards, ['fvg.score', 'FVG.score', 'pdZones.score']),
-    readNumber(mlFeatures, ['fvgScore', 'pdZoneScore']),
+    readNumber(scorecards, ['fvg.score', 'pdZones.score', 'FVG / PD Zones.score']),
+    readNumber(mlFeatures, ['fvgScore', 'pdScore', 'premiumDiscountScore']),
     readNumber(unifiedIntelligence, ['fvg.score', 'pdZones.score']),
   )
 
   const meterScore = Math.max(
-    readNumber(signal, ['confidence']),
-    readNumber(scorecards, ['meterScore', 'technicalMeter.score']),
-    readNumber(unifiedIntelligence, ['technicalMeter.score']),
-    Math.max(bullScore, bearScore),
+    readNumber(signal, ['technicalMeter', 'meter', 'sentiment']),
+    readNumber(scorecards, ['meters.score', 'technicalMeter.score', 'Meters / Gauges.score']),
+    readNumber(unifiedIntelligence, ['meters.score', 'sentiment.score']),
   )
 
   const ghostConfidence = Math.max(
-    readNumber(signal, ['ghostConfidence', 'confidence', 'mlConfidence']),
-    readNumber(overlayPayload, ['ghostConfidence', 'mlConfidence']),
-    readNumber(unifiedIntelligence, ['ghostConfidence', 'components.ghost.confidence']),
-    readNumber(aiDecision, ['details.directionalContext.ghostConfidence']),
+    readNumber(signal, ['ghostConfidence', 'ghost.confidence']),
+    readNumber(scorecards, ['ghost.confidence', 'ghostMl.confidence']),
+    readNumber(mlFeatures, ['ghostConfidence', 'ghostMlConfidence']),
+    readNumber(overlayPayload, ['ghostConfidence', 'ghostMl.confidence']),
+    readNumber(unifiedIntelligence, ['ghost.confidence', 'ghostMl.confidence']),
   )
 
   const targetConfidence = Math.max(
-    readNumber(signal, ['targetConfidence', 'targetMlConfidence', 'targetMl.targetConfidence', 'targetPlan.targetConfidence']),
-    readNumber(overlayPayload, ['targetConfidence', 'targetMl.targetConfidence', 'targetPlan.targetConfidence']),
-    readNumber(unifiedIntelligence, ['targetConfidence', 'targetMl.targetConfidence']),
-    readNumber(aiDecision, ['details.directionalContext.targetConfidence']),
+    readNumber(signal, ['targetConfidence', 'targetMlConfidence']),
+    readNumber(scorecards, ['target.confidence', 'targetMl.confidence']),
+    readNumber(mlFeatures, ['targetConfidence', 'targetMlConfidence']),
+    readNumber(overlayPayload, ['targetConfidence', 'targetMl.confidence', 'targetPlan.targetConfidence']),
+    readNumber(unifiedIntelligence, ['target.confidence', 'targetMl.confidence']),
   )
 
   const entryConfidence = Math.max(
+    readNumber(aiDecision, ['entryConfidence', 'entryMlConfidence', 'details.entryConfidence']),
     readNumber(signal, ['entryConfidence', 'entryMlConfidence']),
-    readNumber(aiDecision, ['details.directionalContext.entryConfidence']),
+    readNumber(scorecards, ['entry.confidence', 'entryMl.confidence']),
+    readNumber(mlFeatures, ['entryConfidence', 'entryMlConfidence']),
   )
 
-  const aiConfidence = readNumber(aiDecision, ['confidence'])
-  const aiRawDecision = normalizeDirection(readPath(aiDecision, ['rawDecision', 'decision']))
-  const aiFinalDecision = normalizeDirection(readPath(aiDecision, ['decision']))
+  const aiConfidence = Math.max(
+    readNumber(aiDecision, ['confidence', 'aiConfidence', 'decisionStrength', 'details.decisionStrength']),
+    readNumber(signal, ['aiConfidence', 'decisionStrength', 'confidence']),
+  )
 
-  const nrtrMain = normalizeDirection(
-    readPath(scorecards, ['nrtrStrategyFeeds.main.direction', 'nrtrCharts.main.direction', 'nrtrMain.direction']) ??
+  const nrtrDirection = normalizeDirection(
+    readPath(aiDecision, ['nrtrContext.direction']) ??
+    readPath(signal, ['nrtrDirection']) ??
     getNrtrDirectionFromSettings(mainSettings)
   )
-  const nrtrMini1 = normalizeDirection(
-    readPath(scorecards, ['nrtrStrategyFeeds.mini1.direction', 'nrtrCharts.mini1.direction', 'nrtrMini1.direction']) ??
-    getNrtrDirectionFromSettings(miniOneSettings)
-  )
-  const nrtrMini2 = normalizeDirection(
-    readPath(scorecards, ['nrtrStrategyFeeds.mini2.direction', 'nrtrCharts.mini2.direction', 'nrtrMini2.direction']) ??
-    getNrtrDirectionFromSettings(miniTwoSettings)
-  )
 
-  const nrtrDirections = [nrtrMain, nrtrMini1, nrtrMini2].filter((direction) => direction !== 'Neutral')
-  const nrtrDirection =
-    nrtrDirections.length === 0
-      ? 'Neutral'
-      : nrtrDirections.every((direction) => direction === nrtrDirections[0])
-        ? nrtrDirections[0]
-        : 'Mixed'
-
-  const rows: BrainRow[] = [
+  return [
     {
       name: 'Neural Brain Score',
       group: 'Neural Brain',
-      status: statusFromConfidence(neuralBrain.decisionStrengthPct, neuralBrain.decisionStrengthPct > 0),
+      status: statusFromConfidence(neuralBrain.decisionStrengthPct, true),
       direction: neuralBrain.bestDirection,
-      confidence: clamp(neuralBrain.decisionStrengthPct),
+      confidence: neuralBrain.decisionStrengthPct,
       usedByGhostMl: true,
       usedByTargetMl: true,
       usedByAiTrader: true,
-      reason: `Decision ${neuralBrain.decision}; risk status ${neuralBrain.riskStatus}. Buy ${formatConfidence(neuralBrain.brainBuyPct)}, sell ${formatConfidence(neuralBrain.brainSellPct)}, target hit ${formatConfidence(neuralBrain.targetHitPct)}.`,
+      reason: `Decision ${neuralBrain.decision}; risk status ${neuralBrain.riskStatus}. Buy ${neuralBrain.brainBuyPct.toFixed(1)}%, sell ${neuralBrain.brainSellPct.toFixed(1)}%, target hit ${neuralBrain.targetHitPct.toFixed(1)}%.`,
     },
     {
       name: 'SMC Structure',
       group: 'Market Structure',
       status: statusFromConfidence(Math.max(bullScore, bearScore), bullScore > 0 || bearScore > 0),
       direction: smcDirection,
-      confidence: clamp(Math.max(bullScore, bearScore)),
+      confidence: Math.max(bullScore, bearScore),
       usedByGhostMl: true,
       usedByTargetMl: true,
       usedByAiTrader: true,
@@ -375,9 +407,9 @@ function buildBrainRows({
     {
       name: 'AlphaX / DLM Pressure',
       group: 'Liquidity Pressure',
-      status: statusFromConfidence(alphaScore, alphaScore > 0),
-      direction: normalizeDirection(readPath(scorecards, ['alphaDirection', 'alphaDlm.direction']) ?? smcDirection),
-      confidence: clamp(alphaScore),
+      status: statusFromConfidence(alphaScore),
+      direction: normalizeDirection(readPath(scorecards, ['alphaX.direction', 'alphaDlm.direction']) ?? readPath(mlFeatures, ['alphaDirection']) ?? directionFromScores(alphaScore, 0)),
+      confidence: alphaScore,
       usedByGhostMl: true,
       usedByTargetMl: true,
       usedByAiTrader: true,
@@ -386,9 +418,9 @@ function buildBrainRows({
     {
       name: 'Order Blocks',
       group: 'Zones',
-      status: statusFromConfidence(orderBlockScore, orderBlockScore > 0),
-      direction: normalizeDirection(readPath(scorecards, ['orderBlocks.direction']) ?? smcDirection),
-      confidence: clamp(orderBlockScore),
+      status: statusFromConfidence(orderBlockScore),
+      direction: normalizeDirection(readPath(scorecards, ['orderBlocks.direction']) ?? readPath(mlFeatures, ['orderBlockDirection']) ?? directionFromScores(orderBlockScore, 0)),
+      confidence: orderBlockScore,
       usedByGhostMl: true,
       usedByTargetMl: true,
       usedByAiTrader: true,
@@ -397,9 +429,9 @@ function buildBrainRows({
     {
       name: 'Liquidity / Sweeps',
       group: 'Liquidity',
-      status: statusFromConfidence(liquidityScore, liquidityScore > 0),
-      direction: normalizeDirection(readPath(scorecards, ['liquidity.direction', 'sweeps.direction']) ?? smcDirection),
-      confidence: clamp(liquidityScore),
+      status: statusFromConfidence(liquidityScore),
+      direction: normalizeDirection(readPath(scorecards, ['liquidity.direction']) ?? readPath(mlFeatures, ['liquidityDirection']) ?? directionFromScores(liquidityScore, 0)),
+      confidence: liquidityScore,
       usedByGhostMl: true,
       usedByTargetMl: true,
       usedByAiTrader: true,
@@ -408,9 +440,9 @@ function buildBrainRows({
     {
       name: 'FVG / PD Zones',
       group: 'Zones',
-      status: statusFromConfidence(fvgScore, fvgScore > 0),
-      direction: normalizeDirection(readPath(scorecards, ['fvg.direction', 'pdZones.direction']) ?? smcDirection),
-      confidence: clamp(fvgScore),
+      status: statusFromConfidence(fvgScore),
+      direction: normalizeDirection(readPath(scorecards, ['fvg.direction', 'pdZones.direction']) ?? readPath(mlFeatures, ['pdDirection']) ?? directionFromScores(fvgScore, 0)),
+      confidence: fvgScore,
       usedByGhostMl: true,
       usedByTargetMl: true,
       usedByAiTrader: true,
@@ -420,8 +452,8 @@ function buildBrainRows({
       name: 'Meters / Gauges',
       group: 'Confirmation',
       status: statusFromConfidence(meterScore, meterScore > 0),
-      direction: directionFromScores(bullScore, bearScore),
-      confidence: clamp(meterScore),
+      direction: normalizeDirection(readPath(signal, ['technical', 'sentimentStatus']) ?? directionFromScores(meterScore, 100 - meterScore)),
+      confidence: meterScore,
       usedByGhostMl: true,
       usedByTargetMl: true,
       usedByAiTrader: true,
@@ -430,9 +462,9 @@ function buildBrainRows({
     {
       name: 'Ghost ML',
       group: 'ML Layer',
-      status: statusFromConfidence(ghostConfidence, ghostConfidence > 0),
-      direction: normalizeDirection(readPath(signal, ['ghostDirection', 'direction', 'signal']) ?? aiRawDecision),
-      confidence: clamp(ghostConfidence),
+      status: statusFromConfidence(ghostConfidence),
+      direction: normalizeDirection(readPath(signal, ['ghostDirection']) ?? readPath(scorecards, ['ghost.direction']) ?? readPath(mlFeatures, ['ghostDirection'])),
+      confidence: ghostConfidence,
       usedByGhostMl: true,
       usedByTargetMl: true,
       usedByAiTrader: true,
@@ -441,9 +473,9 @@ function buildBrainRows({
     {
       name: 'Target Price ML',
       group: 'ML Layer',
-      status: statusFromConfidence(targetConfidence, targetConfidence > 0),
-      direction: normalizeDirection(readPath(signal, ['targetDirection', 'targetMl.direction']) ?? aiRawDecision),
-      confidence: clamp(targetConfidence),
+      status: statusFromConfidence(targetConfidence),
+      direction: normalizeDirection(readPath(signal, ['targetDirection']) ?? readPath(scorecards, ['target.direction']) ?? readPath(mlFeatures, ['targetDirection'])),
+      confidence: targetConfidence,
       usedByGhostMl: false,
       usedByTargetMl: true,
       usedByAiTrader: true,
@@ -452,9 +484,9 @@ function buildBrainRows({
     {
       name: 'Entry ML',
       group: 'ML Layer',
-      status: statusFromConfidence(entryConfidence, entryConfidence > 0),
-      direction: aiRawDecision,
-      confidence: clamp(entryConfidence),
+      status: statusFromConfidence(entryConfidence),
+      direction: normalizeDirection(readPath(aiDecision, ['entryDirection']) ?? readPath(signal, ['entryDirection'])),
+      confidence: entryConfidence,
       usedByGhostMl: false,
       usedByTargetMl: false,
       usedByAiTrader: true,
@@ -463,9 +495,9 @@ function buildBrainRows({
     {
       name: 'NRTR Strategy Context',
       group: 'Strategy Context',
-      status: nrtrDirection === 'Neutral' ? 'Waiting' : nrtrDirection === 'Mixed' ? 'Conflict' : 'Active',
+      status: statusFromConfidence(Math.max(readNumber(mainSettings, ['nrtrConfidence']), nrtrDirection === 'Neutral' ? 0 : 70), nrtrDirection !== 'Neutral'),
       direction: nrtrDirection,
-      confidence: nrtrDirection === 'Neutral' ? 0 : nrtrDirection === 'Mixed' ? 50 : 70,
+      confidence: Math.max(readNumber(mainSettings, ['nrtrConfidence']), nrtrDirection === 'Neutral' ? 0 : 70),
       usedByGhostMl: false,
       usedByTargetMl: false,
       usedByAiTrader: true,
@@ -474,20 +506,18 @@ function buildBrainRows({
     {
       name: 'AI Trader Final Context',
       group: 'Decision Engine',
-      status: aiConfidence >= 62 ? 'Active' : aiConfidence > 0 ? 'Learning' : 'Waiting',
-      direction: aiFinalDecision === 'Neutral' ? aiRawDecision : aiFinalDecision,
-      confidence: clamp(aiConfidence),
+      status: statusFromConfidence(aiConfidence, Boolean(aiDecision)),
+      direction: normalizeDirection(readPath(aiDecision, ['decision', 'side', 'action']) ?? readPath(signal, ['decision', 'signal'])),
+      confidence: aiConfidence,
       usedByGhostMl: false,
       usedByTargetMl: false,
       usedByAiTrader: true,
-      reason: String(readPath(aiDecision, ['reason']) ?? 'AI trader combines all approved context into HOLD / BUY / SELL.'),
+      reason: 'AI trader combines all approved context into HOLD / BUY / SELL.',
     },
   ]
-
-  return rows
 }
 
-function SummaryPill({
+function NeuralMetricCard({
   label,
   value,
   tone = 'neutral',
@@ -498,22 +528,22 @@ function SummaryPill({
 }) {
   const className =
     tone === 'bull'
-      ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
+      ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-100'
       : tone === 'bear'
-        ? 'border-red-400/30 bg-red-400/10 text-red-200'
+        ? 'border-red-400/30 bg-red-400/10 text-red-100'
         : tone === 'warn'
-          ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
-          : 'border-dark-600 bg-dark-900 text-gray-300'
+          ? 'border-amber-400/30 bg-amber-400/10 text-amber-100'
+          : 'border-cyan-400/20 bg-cyan-400/5 text-cyan-100'
 
   return (
-    <div className={`rounded-xl border px-3 py-2 ${className}`}>
-      <div className="text-[10px] font-bold uppercase tracking-wide opacity-70">{label}</div>
-      <div className="mt-1 text-sm font-black">{value}</div>
+    <div className={`rounded-xl border px-4 py-3 ${className}`}>
+      <div className="text-[10px] font-black uppercase tracking-[0.22em] opacity-70">{label}</div>
+      <div className="mt-2 text-2xl font-black">{value}</div>
     </div>
   )
 }
 
-function NeuralMetricCard({
+function SummaryPill({
   label,
   value,
   tone = 'neutral',
@@ -641,14 +671,17 @@ export default function AiBrainContextPanel({
     if (snapshotKey === lastSnapshotKeyRef.current) return
     lastSnapshotKeyRef.current = snapshotKey
 
+    const snapshotId = `neural-brain-${symbol}-${timeframe}-${payload.timestamp.slice(0, 16)}-${payload.decision}-${payload.bestDirection}`
+    const snapshotPayload = {
+      ...payload,
+      id: snapshotId,
+      snapshotId,
+      renderBackendTarget: RENDER_NEURAL_BRAIN_API_BASE,
+    }
+
     const controller = new AbortController()
     const timeoutId = window.setTimeout(() => {
-      fetch('/api/neural-brain/snapshots', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      }).catch(() => {
+      postNeuralBrainSnapshot(snapshotPayload, controller.signal).catch(() => {
         // Snapshot memory is non-blocking. Never break chart rendering.
       })
     }, 800)
@@ -735,7 +768,7 @@ export default function AiBrainContextPanel({
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
         <div className="text-xs text-slate-400">
-          Phase 2 memory is recording one Neural Brain snapshot per changed minute/score state.
+          Phase 2 memory posts snapshots to the Render FastAPI backend first, then the local Next.js route as fallback.
         </div>
         <button
           type="button"
@@ -801,15 +834,30 @@ export default function AiBrainContextPanel({
                     <td className={`px-4 py-3 font-black ${getDirectionClass(row.direction)}`}>{row.direction}</td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
-                        <div className="h-2 w-24 overflow-hidden rounded-full bg-slate-800">
-                          <div className="h-full rounded-full bg-slate-200" style={{ width: `${clamp(row.confidence)}%` }} />
+                        <div className="h-2 w-24 overflow-hidden rounded-full bg-dark-700">
+                          <div
+                            className="h-full rounded-full bg-slate-200"
+                            style={{ width: `${clamp(row.confidence)}%` }}
+                          />
                         </div>
                         <span className="font-black text-white">{formatConfidence(row.confidence)}</span>
                       </div>
                     </td>
-                    <td className="px-4 py-3"><span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase ${boolClass(row.usedByGhostMl)}`}>{boolBadge(row.usedByGhostMl)}</span></td>
-                    <td className="px-4 py-3"><span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase ${boolClass(row.usedByTargetMl)}`}>{boolBadge(row.usedByTargetMl)}</span></td>
-                    <td className="px-4 py-3"><span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase ${boolClass(row.usedByAiTrader)}`}>{boolBadge(row.usedByAiTrader)}</span></td>
+                    <td className="px-4 py-3">
+                      <span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase ${boolClass(row.usedByGhostMl)}`}>
+                        {boolBadge(row.usedByGhostMl)}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase ${boolClass(row.usedByTargetMl)}`}>
+                        {boolBadge(row.usedByTargetMl)}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase ${boolClass(row.usedByAiTrader)}`}>
+                        {boolBadge(row.usedByAiTrader)}
+                      </span>
+                    </td>
                     <td className="px-4 py-3 text-slate-400">{row.reason}</td>
                   </tr>
                 ))}
@@ -817,7 +865,7 @@ export default function AiBrainContextPanel({
             </table>
           </div>
 
-          <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3 text-sm text-slate-400">
+          <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3 text-xs text-slate-400">
             <span className="font-black text-cyan-300">Rule:</span>{' '}
             SMC, AlphaX/DLM, order blocks, liquidity, FVG, meters, and ghost context can feed Ghost ML and Target Price ML.
             NRTR remains strategy context only. The AI Trader reads all approved ML/context layers but does not send orders outside the dashboard.
