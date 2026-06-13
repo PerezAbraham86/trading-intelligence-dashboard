@@ -1610,6 +1610,13 @@ def evaluate_ai_trades(
     if current <= 0:
         current = latest_close
 
+    # Settlement must respect the live chart/quote price, even when the last
+    # candle high/low is stale or has not merged the newest tick yet.
+    if current > 0:
+        latest_high = max(latest_high, current)
+        latest_low = min(latest_low, current)
+        latest_close = current
+
     def evaluate_trade_list(trades: List[Any], virtual: bool = False) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         closed_rows: List[Dict[str, Any]] = []
         still_rows: List[Dict[str, Any]] = []
@@ -1725,6 +1732,13 @@ def evaluate_ai_trades(
 
     if current <= 0:
         current = latest_close
+
+    # Settlement must respect the live chart/quote price, even when the last
+    # candle high/low is stale or has not merged the newest tick yet.
+    if current > 0:
+        latest_high = max(latest_high, current)
+        latest_low = min(latest_low, current)
+        latest_close = current
 
     closed: List[Dict[str, Any]] = []
     still_open: List[Dict[str, Any]] = []
