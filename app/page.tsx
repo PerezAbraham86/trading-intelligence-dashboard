@@ -1124,11 +1124,17 @@ function writeLiveCandleToSharedCache(
   limit: number,
   rawCandle: any,
   previousOverlayPayload: any | null,
-  previousUnifiedIntelligence: any | null
+  previousUnifiedIntelligence: any | null,
+  timeframeSeconds = timeframeToSeconds(timeframe)
 ) {
   const key = sharedCandleKey(symbol, timeframe)
   const previous = SHARED_CANDLE_CACHE.get(key)
-  const mergedCandles = mergeLiveCandleIntoCandles(previous?.candles ?? [], rawCandle, Math.max(limit, previous?.limit ?? 0, 700))
+  const mergedCandles = mergeLiveCandleIntoCandles(
+    previous?.candles ?? [],
+    rawCandle,
+    Math.max(limit, previous?.limit ?? 0, 700),
+    timeframeSeconds
+  )
 
   if (mergedCandles.length === 0) return null
 
@@ -3516,7 +3522,8 @@ function useChartCandles(
               limit,
               liveCandle,
               overlayPayload,
-              unifiedIntelligence
+              unifiedIntelligence,
+              timeframeSeconds
             )
 
             if (cacheEntry) {
@@ -3569,7 +3576,8 @@ function useChartCandles(
               limit,
               liveCandle,
               overlayPayload,
-              unifiedIntelligence
+              unifiedIntelligence,
+              timeframeSeconds
             )
 
             if (cacheEntry) {
