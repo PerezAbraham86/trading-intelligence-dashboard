@@ -16,6 +16,7 @@ export type ChartStrategySettings = {
 type StrategyMode = "NRTR" | "SMMA";
 
 type StrategyTesterPanelProps = {
+  apiBaseUrl?: string;
   symbol: string;
   timeframe: string;
   mainCandles: DashboardCandle[];
@@ -221,6 +222,128 @@ function toComparableCandles(candles: DashboardCandle[]) {
     }))
     .filter((candle) => candle.numericTime > 0 && Number.isFinite(candle.close))
     .sort((a, b) => a.numericTime - b.numericTime);
+}
+
+
+const testerTimeframeOptions = ["1m", "3m", "5m", "10m", "15m", "30m", "1h", "2h", "4h", "1d"];
+
+function normalizeTesterSymbol(value: unknown) {
+  const raw = String(value ?? "MES1!")
+    .trim()
+    .toUpperCase()
+    .replace("BINANCE:", "")
+    .replace("COINBASE:", "")
+    .replace("CRYPTO:", "")
+    .replace("CME_MINI:", "")
+    .replace("CME:", "");
+
+  if (raw === "MES1" || raw === "MES1!" || raw.includes("MES")) return "MES1!";
+  if (raw === "ES1" || raw === "ES1!" || raw.includes("/ES") || raw === "ES") return "ES1!";
+  if (raw.includes("BTC")) return "BTCUSD";
+  if (raw.includes("ETH")) return "ETHUSD";
+  if (raw.includes("SPY")) return "SPY";
+
+  return raw || "MES1!";
+}
+
+function normalizeTesterTimeframe(value: unknown) {
+  const tf = String(value ?? "1m").trim().toLowerCase();
+
+  if (tf === "1") return "1m";
+  if (tf === "3") return "3m";
+  if (tf === "5") return "5m";
+  if (tf === "10") return "10m";
+  if (tf === "15") return "15m";
+  if (tf === "30") return "30m";
+  if (tf === "60") return "1h";
+  if (tf === "120") return "2h";
+  if (tf === "240") return "4h";
+  if (tf === "d" || tf === "1d") return "1d";
+
+  return tf || "1m";
+}
+
+function isTesterCryptoSymbol(symbol: string) {
+  const normalized = normalizeTesterSymbol(symbol);
+  return normalized === "BTCUSD" || normalized === "ETHUSD";
+}
+
+function isTesterFuturesSymbol(symbol: string) {
+  return normalizeTesterSymbol(symbol) === "MES1!";
+}
+
+function getTesterCandleRoute(apiBaseUrl: string, symbol: string) {
+  const normalized = normalizeTesterSymbol(symbol);
+
+  if (isTesterFuturesSymbol(normalized)) {
+    return {
+      route: `${apiBaseUrl}/api/insightsentry/history`,
+      provider: "insightsentry",
+    };
+  }
+
+  return {
+    route: `${apiBaseUrl}/api/candles`,
+    provider: isTesterCryptoSymbol(normalized) ? "alpaca_crypto" : "dashboard_candles",
+  };
+}
+
+function extractTesterCandleArray(payload: any): any[] {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.candles)) return payload.candles;
+  if (Array.isArray(payload?.data)) return payload.data;
+  if (Array.isArray(payload?.results)) return payload.results;
+  if (Array.isArray(payload?.series)) return payload.series;
+  return [];
+}
+
+function normalizeTesterCandleTime(value: unknown): DashboardCandle["time"] {
+  if (typeof value === "number") return normalizeUnixSeconds(value) as DashboardCandle["time"];
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (/^\d+$/.test(trimmed)) return normalizeUnixSeconds(Number(trimmed)) as DashboardCandle["time"];
+
+    const parsed = Date.parse(trimmed);
+    if (Number.isFinite(parsed)) return Math.floor(parsed / 1000) as DashboardCandle["time"];
+
+    return trimmed as DashboardCandle["time"];
+  }
+
+  return Math.floor(Date.now() / 1000) as DashboardCandle["time"];
+}
+
+function normalizeTesterCandleItem(item: any): DashboardCandle | null {
+  if (!item || typeof item !== "object") return null;
+
+  const open = Number(item.open ?? item.o);
+  const high = Number(item.high ?? item.h);
+  const low = Number(item.low ?? item.l);
+  const close = Number(item.close ?? item.c);
+
+  if (!Number.isFinite(open) || !Number.isFinite(high) || !Number.isFinite(low) || !Number.isFinite(close)) {
+    return null;
+  }
+
+  return {
+    time: normalizeTesterCandleTime(item.time ?? item.timestamp ?? item.t ?? item.datetime ?? item.date),
+    open,
+    high,
+    low,
+    close,
+    volume: Number(item.volume ?? item.v ?? 0) || 0,
+  };
+}
+
+function normalizeTesterCandlePayload(payload: any): DashboardCandle[] {
+  return extractTesterCandleArray(payload)
+    .map(normalizeTesterCandleItem)
+    .filter((item): item is DashboardCandle => Boolean(item))
+    .sort((a, b) => {
+      const left = candleTimeToNumber(a.time);
+      const right = candleTimeToNumber(b.time);
+      return left - right;
+    });
 }
 
 function calculateAtr(
@@ -1333,6 +1456,7 @@ function OptimizerView({
 }
 
 export default function StrategyTesterPanel({
+  apiBaseUrl,
   symbol,
   timeframe,
   mainCandles,
@@ -1346,40 +1470,123 @@ export default function StrategyTesterPanel({
 }: StrategyTesterPanelProps) {
   const [strategyMode, setStrategyMode] = useState<StrategyMode>("NRTR");
   const [showOptimizer, setShowOptimizer] = useState(false);
+  const [testerTimeframe, setTesterTimeframe] = useState(() => normalizeTesterTimeframe(timeframe));
+  const [externalTesterCandles, setExternalTesterCandles] = useState<DashboardCandle[]>([]);
+  const [externalTesterStatus, setExternalTesterStatus] = useState("");
+  const [externalTesterError, setExternalTesterError] = useState("");
+
+  useEffect(() => {
+    setTesterTimeframe(normalizeTesterTimeframe(timeframe));
+    setShowOptimizer(false);
+  }, [timeframe, symbol]);
+
+  const normalizedTesterTimeframe = normalizeTesterTimeframe(testerTimeframe);
+  const normalizedMainTimeframe = normalizeTesterTimeframe(timeframe);
+  const usingCurrentMainCandles = normalizedTesterTimeframe === normalizedMainTimeframe;
+
+  useEffect(() => {
+    if (usingCurrentMainCandles) {
+      setExternalTesterCandles([]);
+      setExternalTesterStatus("");
+      setExternalTesterError("");
+      return;
+    }
+
+    if (!apiBaseUrl) {
+      setExternalTesterCandles([]);
+      setExternalTesterStatus("Waiting for API base URL");
+      setExternalTesterError("");
+      return;
+    }
+
+    let cancelled = false;
+
+    async function fetchTesterCandles() {
+      try {
+        setExternalTesterStatus(`Loading ${normalizedTesterTimeframe} tester candles...`);
+        setExternalTesterError("");
+
+        const routeConfig = getTesterCandleRoute(apiBaseUrl as string, symbol);
+        const params = new URLSearchParams({
+          symbol: normalizeTesterSymbol(symbol),
+          timeframe: normalizedTesterTimeframe,
+          limit: "700",
+          force: "false",
+        });
+
+        if (routeConfig.provider === "insightsentry") {
+          params.set("start_ym", new Date().toISOString().slice(0, 7));
+          params.set("extended", "true");
+          params.set("badj", "true");
+          params.set("dadj", "false");
+        }
+
+        const response = await fetch(`${routeConfig.route}?${params.toString()}`, {
+          cache: "no-store",
+        });
+
+        if (!response.ok) {
+          throw new Error(`Strategy Tester candle request failed: ${response.status}`);
+        }
+
+        const json = await response.json();
+        const candles = normalizeTesterCandlePayload(json).slice(-700);
+
+        if (!cancelled) {
+          setExternalTesterCandles(candles);
+          setExternalTesterStatus(candles.length > 0 ? `Loaded ${candles.length} ${normalizedTesterTimeframe} candles` : `No ${normalizedTesterTimeframe} candles returned`);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setExternalTesterCandles([]);
+          setExternalTesterStatus("");
+          setExternalTesterError(error instanceof Error ? error.message : "Strategy Tester candle load failed");
+        }
+      }
+    }
+
+    fetchTesterCandles();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBaseUrl, normalizedTesterTimeframe, symbol, usingCurrentMainCandles]);
+
+  const testerCandles = usingCurrentMainCandles ? mainCandles : externalTesterCandles;
 
   const result = useMemo(
     () =>
       calculateBacktest(
         symbol,
-        mainCandles,
+        testerCandles,
         mainSettings,
         strategyMode,
       ),
-    [mainCandles, mainSettings, strategyMode, symbol],
+    [testerCandles, mainSettings, strategyMode, symbol],
   );
 
   const optimizerRows = useMemo(() => {
     if (!showOptimizer) return [];
 
     if (strategyMode === "NRTR") {
-      return calculateNrtrOptimization(symbol, mainCandles, mainSettings);
+      return calculateNrtrOptimization(symbol, testerCandles, mainSettings);
     }
 
-    return calculateSmmaOptimization(symbol, mainCandles, mainSettings);
-  }, [mainCandles, mainSettings, showOptimizer, strategyMode, symbol]);
+    return calculateSmmaOptimization(symbol, testerCandles, mainSettings);
+  }, [testerCandles, mainSettings, showOptimizer, strategyMode, symbol]);
 
   const testerResults = useMemo(
     () =>
       buildStrategyTesterResults({
         symbol,
-        timeframe,
+        timeframe: normalizedTesterTimeframe,
         strategyMode,
         currentSettings: mainSettings,
         currentResult: result,
         optimizerRows,
         optimizerActive: showOptimizer,
       }),
-    [mainSettings, optimizerRows, result, showOptimizer, strategyMode, symbol, timeframe],
+    [mainSettings, optimizerRows, result, showOptimizer, strategyMode, symbol, normalizedTesterTimeframe],
   );
 
   useEffect(() => {
@@ -1403,7 +1610,7 @@ export default function StrategyTesterPanel({
           <div className="flex flex-wrap items-center gap-3">
             <h2 className="text-lg font-bold text-white">Strategy Tester</h2>
             <span className="rounded-lg border border-dark-600 bg-dark-900 px-2 py-1 text-xs text-gray-400">
-              {symbol} • {timeframe} main chart only
+              {symbol} • tester {normalizedTesterTimeframe} • main strategy only
             </span>
             <span className="rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-2 py-1 text-xs font-semibold text-cyan-300">
               Mini charts: AI context only
@@ -1426,6 +1633,18 @@ export default function StrategyTesterPanel({
             <option value="NRTR">NRTR flip</option>
             <option value="SMMA">SMMA cross</option>
           </select>
+          <select
+            value={normalizedTesterTimeframe}
+            onChange={(event) => {
+              setTesterTimeframe(normalizeTesterTimeframe(event.target.value));
+              setShowOptimizer(false);
+            }}
+            className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 text-xs font-semibold text-gray-200 outline-none focus:border-amber-400"
+          >
+            {testerTimeframeOptions.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
           <span className="rounded-lg bg-white px-3 py-2 text-xs font-semibold text-dark-900">
             {showOptimizer ? "Optimizer" : "Metrics"}
           </span>
@@ -1443,11 +1662,16 @@ export default function StrategyTesterPanel({
         </div>
       </div>
 
-      <div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-4">
+      <div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-5">
         <MetricCard
           label="Tester scope"
-          value="Main only"
+          value="Main strategy only"
           subValue="NRTR / SMMA settings"
+        />
+        <MetricCard
+          label="Tester timeframe"
+          value={normalizedTesterTimeframe}
+          subValue={usingCurrentMainCandles ? `Using main chart candles: ${mainCandles.length}` : externalTesterStatus || `Fetched candles: ${testerCandles.length}`}
         />
         <MetricCard
           label="Mini chart role"
@@ -1465,6 +1689,16 @@ export default function StrategyTesterPanel({
           subValue="SMC + AlphaX + DLM + Ghost remains outside this tester"
         />
       </div>
+
+      {externalTesterError ? (
+        <div className="mb-4 rounded-lg border border-red-400/30 bg-red-400/10 px-3 py-2 text-xs text-red-200">
+          {externalTesterError}
+        </div>
+      ) : !usingCurrentMainCandles && externalTesterStatus ? (
+        <div className="mb-4 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-2 text-xs text-cyan-200">
+          {externalTesterStatus}
+        </div>
+      ) : null}
 
       {showOptimizer ? (
         <OptimizerView
@@ -1539,7 +1773,7 @@ export default function StrategyTesterPanel({
                         className="px-3 py-8 text-center text-gray-500"
                         colSpan={13}
                       >
-                        No main-chart trades found with the current {strategyMode} settings.
+                        No {normalizedTesterTimeframe} main-strategy trades found with the current {strategyMode} settings.
                       </td>
                     </tr>
                   ) : (
