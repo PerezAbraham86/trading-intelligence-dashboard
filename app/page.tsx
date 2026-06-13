@@ -1076,28 +1076,39 @@ function mergeLiveCandleIntoCandles(
   currentCandles: DashboardCandle[],
   rawCandle: any,
   limit: number,
-  timeframeSeconds = 60
+  timeframeSeconds = 60,
+  fillContinuousMarketGap = false
 ): DashboardCandle[] {
-  const liveCandle = normalizeCandlePayloadItem(rawCandle)
+  const liveCandle = normalizeLiveCandleToTimeframeBucket(rawCandle, timeframeSeconds)
   if (!liveCandle) return currentCandles
 
   const liveEpoch = liveCandleEpoch(liveCandle)
   if (liveEpoch <= 0) return currentCandles
 
+  let candlesForMerge = currentCandles
+
   if (currentCandles.length > 0) {
     const lastHistoricalEpoch = liveCandleEpoch(currentCandles[currentCandles.length - 1])
     const gapSeconds = liveEpoch - lastHistoricalEpoch
 
-    // Do not append a live candle far ahead of history.
-    // This prevents the chart jumping from midnight/last history candle
-    // directly to the login-time candle. The caller refreshes history first.
+    // Futures/equities can have valid session gaps, so keep the original guard.
+    // Crypto trades 24/7. For BTCUSD/ETHUSD, bridge stale history to the current
+    // bucket with flat candles so the chart does not jump from midnight to login time.
     if (gapSeconds > timeframeSeconds * 2) {
-      return currentCandles
+      if (!fillContinuousMarketGap) {
+        return currentCandles
+      }
+
+      candlesForMerge = fillMissingContinuousMarketCandles(
+        currentCandles,
+        liveCandle,
+        timeframeSeconds
+      )
     }
   }
 
   let replaced = false
-  const merged = currentCandles.map((existing) => {
+  const merged = candlesForMerge.map((existing) => {
     const existingEpoch = liveCandleEpoch(existing)
     if (existingEpoch === liveEpoch) {
       replaced = true
@@ -1133,7 +1144,8 @@ function writeLiveCandleToSharedCache(
     previous?.candles ?? [],
     rawCandle,
     Math.max(limit, previous?.limit ?? 0, 700),
-    timeframeSeconds
+    timeframeSeconds,
+    isContinuousMarketSymbol(symbol)
   )
 
   if (mergedCandles.length === 0) return null
@@ -3221,6 +3233,73 @@ function timeframeToSeconds(timeframe: string): number {
   return 60
 }
 
+
+function isContinuousMarketSymbol(symbol: string) {
+  const normalized = normalizeSymbol(symbol)
+  return normalized === 'BTCUSD' || normalized === 'ETHUSD'
+}
+
+function normalizeLiveCandleToTimeframeBucket(rawCandle: any, timeframeSeconds: number) {
+  const liveCandle = normalizeCandlePayloadItem(rawCandle)
+  if (!liveCandle) return null
+
+  const liveEpoch = liveCandleEpoch(liveCandle)
+  if (liveEpoch <= 0 || timeframeSeconds <= 0) return liveCandle
+
+  // Put live crypto/24-7 candles into the active chart bucket.
+  // Example on 5m: 10:35:42 becomes the 10:35 candle.
+  const bucketEpoch = Math.floor(liveEpoch / timeframeSeconds) * timeframeSeconds
+
+  return {
+    ...liveCandle,
+    time: bucketEpoch as DashboardCandle['time'],
+  }
+}
+
+function buildFlatGapCandle(previous: DashboardCandle, nextEpoch: number): DashboardCandle {
+  const close = toFiniteNumber(previous.close, 0)
+
+  return {
+    time: nextEpoch as DashboardCandle['time'],
+    open: close,
+    high: close,
+    low: close,
+    close,
+    volume: 0,
+  }
+}
+
+function fillMissingContinuousMarketCandles(
+  currentCandles: DashboardCandle[],
+  liveCandle: DashboardCandle,
+  timeframeSeconds: number,
+  maxGapCandles = 500
+) {
+  if (currentCandles.length === 0) return currentCandles
+
+  const lastEpoch = liveCandleEpoch(currentCandles[currentCandles.length - 1])
+  const liveEpoch = liveCandleEpoch(liveCandle)
+
+  if (lastEpoch <= 0 || liveEpoch <= 0 || liveEpoch <= lastEpoch) {
+    return currentCandles
+  }
+
+  const filled = [...currentCandles]
+  let previous = filled[filled.length - 1]
+  let nextEpoch = lastEpoch + timeframeSeconds
+  let inserted = 0
+
+  while (nextEpoch < liveEpoch && inserted < maxGapCandles) {
+    const synthetic = buildFlatGapCandle(previous, nextEpoch)
+    filled.push(synthetic)
+    previous = synthetic
+    nextEpoch += timeframeSeconds
+    inserted += 1
+  }
+
+  return filled
+}
+
 function buildFallbackGhostCandle(
   previous: DashboardCandle | GhostCandle,
   direction: string | undefined,
@@ -3673,9 +3752,11 @@ function useChartCandles(
             const timeframeSeconds = timeframeToSeconds(timeframe)
             const gapSeconds = candleGapSeconds(previousCandles, liveCandle)
 
-            if (gapSeconds > timeframeSeconds * 2) {
-              // History/live gap detected. Do not append the live candle into a
-              // disconnected timeline. Force-refresh historical OHLCV first.
+            const isContinuousMarket = isContinuousMarketSymbol(symbol)
+
+            if (gapSeconds > timeframeSeconds * 2 && !isContinuousMarket) {
+              // History/live gap detected on a session-based market. Do not append
+              // the live candle into a disconnected timeline. Force-refresh history first.
               fetchCandles(true)
               return previousCandles
             }
@@ -3684,7 +3765,8 @@ function useChartCandles(
               previousCandles,
               liveCandle,
               limit,
-              timeframeSeconds
+              timeframeSeconds,
+              isContinuousMarket
             )
             const cacheEntry = writeLiveCandleToSharedCache(
               symbol,
@@ -3727,9 +3809,11 @@ function useChartCandles(
             const timeframeSeconds = timeframeToSeconds(timeframe)
             const gapSeconds = candleGapSeconds(previousCandles, liveCandle)
 
-            if (gapSeconds > timeframeSeconds * 2) {
-              // History/live gap detected. Do not append the live candle into a
-              // disconnected timeline. Force-refresh historical OHLCV first.
+            const isContinuousMarket = isContinuousMarketSymbol(symbol)
+
+            if (gapSeconds > timeframeSeconds * 2 && !isContinuousMarket) {
+              // History/live gap detected on a session-based market. Do not append
+              // the live candle into a disconnected timeline. Force-refresh history first.
               fetchCandles(true)
               return previousCandles
             }
@@ -3738,7 +3822,8 @@ function useChartCandles(
               previousCandles,
               liveCandle,
               limit,
-              timeframeSeconds
+              timeframeSeconds,
+              isContinuousMarket
             )
             const cacheEntry = writeLiveCandleToSharedCache(
               symbol,
