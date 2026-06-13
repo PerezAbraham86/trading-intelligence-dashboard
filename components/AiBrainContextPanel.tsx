@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 
 type AiBrainContextPanelProps = {
@@ -71,10 +71,7 @@ function readNumber(source: any, paths: string[], fallback = 0) {
 }
 
 function maxReadableNumber(sources: Array<[any, string[]]>, fallback = 0) {
-  return Math.max(
-    fallback,
-    ...sources.map(([source, paths]) => readNumber(source, paths, fallback))
-  )
+  return Math.max(fallback, ...sources.map(([source, paths]) => readNumber(source, paths, fallback)))
 }
 
 function normalizeDirection(value: any): BrainDirection {
@@ -556,17 +553,18 @@ export default function AiBrainContextPanel({
   miniTwoSettings,
 }: AiBrainContextPanelProps) {
   const [showDetails, setShowDetails] = useState(false)
+  const lastSnapshotKeyRef = useRef('')
 
-  const neuralBrain = buildNeuralBrainScorecard({
+  const neuralBrain = useMemo(() => buildNeuralBrainScorecard({
     signal,
     scorecards,
     mlFeatures,
     overlayPayload,
     unifiedIntelligence,
     aiDecision,
-  })
+  }), [signal, scorecards, mlFeatures, overlayPayload, unifiedIntelligence, aiDecision])
 
-  const rows = buildBrainRows({
+  const rows = useMemo(() => buildBrainRows({
     signal,
     scorecards,
     mlFeatures,
@@ -576,7 +574,7 @@ export default function AiBrainContextPanel({
     mainSettings,
     miniOneSettings,
     miniTwoSettings,
-  })
+  }), [signal, scorecards, mlFeatures, overlayPayload, unifiedIntelligence, aiDecision, mainSettings, miniOneSettings, miniTwoSettings])
 
   const activeRows = rows.filter((row) => row.status === 'Active').length
   const learningRows = rows.filter((row) => row.status === 'Learning').length
@@ -588,13 +586,98 @@ export default function AiBrainContextPanel({
   const aiDecisionLabel = neuralBrain.decision
   const aiTone = aiDecisionLabel === 'BUY' ? 'bull' : aiDecisionLabel === 'SELL' ? 'bear' : 'warn'
   const riskTone = neuralBrain.riskStatus === 'Aligned' ? 'bull' : neuralBrain.riskStatus === 'Risk Watch' ? 'bear' : neuralBrain.riskStatus === 'Mixed' ? 'warn' : 'neutral'
+  const targetSourceLabel = String(readPath(signal, ['targetSource']) ?? readPath(unifiedIntelligence, ['targetSource']) ?? 'target_unavailable')
+  const targetPriceLabel = (() => {
+    const value = readPath(signal, ['targetPrice']) ?? readPath(unifiedIntelligence, ['targetPrice'])
+    const numeric = Number(value)
+    return Number.isFinite(numeric) && numeric > 0 ? numeric.toFixed(5) : '—'
+  })()
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+
+    const payload = {
+      symbol,
+      timeframe,
+      buyConfidence: Number(neuralBrain.brainBuyPct.toFixed(2)),
+      sellConfidence: Number(neuralBrain.brainSellPct.toFixed(2)),
+      targetHitProbability: Number(neuralBrain.targetHitPct.toFixed(2)),
+      reversalRisk: Number(neuralBrain.reversalRiskPct.toFixed(2)),
+      chopRisk: Number(neuralBrain.chopRiskPct.toFixed(2)),
+      bestDirection: neuralBrain.bestDirection,
+      decision: neuralBrain.decision,
+      decisionStrength: Number(neuralBrain.decisionStrengthPct.toFixed(2)),
+      riskStatus: neuralBrain.riskStatus,
+      scorecardInputs: {
+        rows,
+        scorecards,
+        mlFeatures,
+        overlayPayload,
+        unifiedIntelligence,
+        aiDecision,
+        signal,
+        targetSource: targetSourceLabel,
+        targetPrice: targetPriceLabel,
+      },
+      timestamp: new Date().toISOString(),
+      source: 'AiBrainContextPanel',
+    }
+
+    const snapshotKey = JSON.stringify({
+      symbol,
+      timeframe,
+      buy: payload.buyConfidence,
+      sell: payload.sellConfidence,
+      target: payload.targetHitProbability,
+      reversal: payload.reversalRisk,
+      chop: payload.chopRisk,
+      decision: payload.decision,
+      direction: payload.bestDirection,
+      targetSource: targetSourceLabel,
+      targetPrice: targetPriceLabel,
+      minute: payload.timestamp.slice(0, 16),
+    })
+
+    if (snapshotKey === lastSnapshotKeyRef.current) return
+    lastSnapshotKeyRef.current = snapshotKey
+
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => {
+      fetch('/api/neural-brain/snapshots', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      }).catch(() => {
+        // Snapshot memory is non-blocking. Never break chart rendering.
+      })
+    }, 800)
+
+    return () => {
+      controller.abort()
+      window.clearTimeout(timeoutId)
+    }
+  }, [
+    symbol,
+    timeframe,
+    neuralBrain,
+    rows,
+    scorecards,
+    mlFeatures,
+    overlayPayload,
+    unifiedIntelligence,
+    aiDecision,
+    signal,
+    targetSourceLabel,
+    targetPriceLabel,
+  ])
 
   return (
     <motion.div
       initial={{ opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.35 }}
-      className="mb-6 rounded-2xl border border-cyan-400/20 bg-dark-800/90 p-5 shadow-xl"
+      className="rounded-2xl border border-cyan-400/30 bg-dark-900/80 p-4 shadow-xl"
     >
       <div className="mb-4 flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
         <div>
@@ -610,66 +693,89 @@ export default function AiBrainContextPanel({
               {symbol} • {timeframe}
             </span>
           </div>
-          <p className="mt-1 text-xs text-gray-400">
+          <p className="mt-1 text-xs text-slate-400">
             Shows neural brain scoring plus the market-structure, liquidity, zone, ghost, target, entry, and strategy-context inputs visible to the AI.
           </p>
         </div>
 
-        <div className="flex flex-col gap-2 xl:min-w-[520px]">
-          <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
-            <SummaryPill label="AI Decision" value={aiDecisionLabel} tone={aiTone as any} />
-            <SummaryPill label="Active Brain Rows" value={String(activeRows)} tone="bull" />
-            <SummaryPill label="Learning" value={String(learningRows)} tone="warn" />
-            <SummaryPill label="Conflicts" value={String(conflicts)} tone={conflicts ? 'bear' : 'neutral'} />
-            <SummaryPill label="Ghost ML Inputs" value={String(ghostUsed)} />
-            <SummaryPill label="Target ML Inputs" value={String(targetUsed)} />
-          </div>
-          <button
-            type="button"
-            onClick={() => setShowDetails((previous) => !previous)}
-            className="rounded-xl border border-cyan-400/30 bg-cyan-400/10 px-3 py-2 text-[10px] font-black uppercase tracking-[0.18em] text-cyan-200 transition hover:bg-cyan-400/20"
-          >
-            {showDetails ? `Collapse context details` : `Expand context details (${rows.length})`}
-          </button>
+        <div className="grid min-w-[260px] grid-cols-2 gap-2 sm:min-w-[360px] sm:grid-cols-3">
+          <SummaryPill label="AI Decision" value={aiDecisionLabel} tone={aiTone as any} />
+          <SummaryPill label="Active Brain Rows" value={String(activeRows)} tone="bull" />
+          <SummaryPill label="Learning" value={String(learningRows)} tone="warn" />
+          <SummaryPill label="Conflicts" value={String(conflicts)} tone={conflicts > 0 ? 'bear' : 'neutral'} />
+          <SummaryPill label="Ghost ML Inputs" value={String(ghostUsed)} />
+          <SummaryPill label="Target ML Inputs" value={String(targetUsed)} />
         </div>
       </div>
 
-      <div className="mb-4 rounded-2xl border border-cyan-400/20 bg-cyan-950/10 p-4">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+      <div className="rounded-2xl border border-cyan-400/30 bg-cyan-500/5 p-3">
+        <div className="mb-3 flex items-center justify-between gap-3">
           <div>
-            <div className="text-[10px] font-black uppercase tracking-[0.2em] text-cyan-300">Neural Brain</div>
-            <div className="text-sm font-bold text-white">Brain Buy / Sell / Risk / Decision Scorecard</div>
+            <div className="text-[10px] font-black uppercase tracking-[0.24em] text-cyan-300">Neural Brain</div>
+            <div className="text-sm font-black text-white">Brain Buy / Sell / Risk / Decision Scorecard</div>
           </div>
-          <span className={`rounded-full border px-3 py-1 text-[10px] font-black uppercase tracking-wide ${getDirectionClass(neuralBrain.bestDirection)}`}>
+          <span className={`rounded-full border px-3 py-1 text-[10px] font-black uppercase ${getDirectionClass(neuralBrain.bestDirection)}`}>
             {neuralBrain.bestDirection}
           </span>
         </div>
 
-        <div className="grid grid-cols-1 gap-2 md:grid-cols-3 xl:grid-cols-5">
+        <div className="grid gap-2 md:grid-cols-3 xl:grid-cols-5">
           <NeuralMetricCard label="Brain Buy %" value={formatConfidence(neuralBrain.brainBuyPct)} tone="bull" />
           <NeuralMetricCard label="Brain Sell %" value={formatConfidence(neuralBrain.brainSellPct)} tone="bear" />
           <NeuralMetricCard label="Target Hit %" value={formatConfidence(neuralBrain.targetHitPct)} tone="bull" />
-          <NeuralMetricCard label="Reversal Risk %" value={formatConfidence(neuralBrain.reversalRiskPct)} tone={neuralBrain.reversalRiskPct >= 60 ? 'bear' : 'neutral'} />
-          <NeuralMetricCard label="Chop Risk %" value={formatConfidence(neuralBrain.chopRiskPct)} tone={neuralBrain.chopRiskPct >= 60 ? 'bear' : 'neutral'} />
-          <NeuralMetricCard label="Decision Strength %" value={formatConfidence(neuralBrain.decisionStrengthPct)} tone={neuralBrain.decisionStrengthPct >= 65 ? 'bull' : 'warn'} />
-          <NeuralMetricCard label="Best Direction" value={neuralBrain.bestDirection} tone={neuralBrain.bestDirection === 'Bullish' ? 'bull' : neuralBrain.bestDirection === 'Bearish' ? 'bear' : neuralBrain.bestDirection === 'Mixed' ? 'warn' : 'neutral'} />
+          <NeuralMetricCard label="Reversal Risk %" value={formatConfidence(neuralBrain.reversalRiskPct)} />
+          <NeuralMetricCard label="Chop Risk %" value={formatConfidence(neuralBrain.chopRiskPct)} />
+          <NeuralMetricCard label="Decision Strength %" value={formatConfidence(neuralBrain.decisionStrengthPct)} tone={neuralBrain.decisionStrengthPct >= 62 ? 'bull' : neuralBrain.decisionStrengthPct > 0 ? 'warn' : 'neutral'} />
+          <NeuralMetricCard label="Best Direction" value={neuralBrain.bestDirection} />
           <NeuralMetricCard label="Decision" value={neuralBrain.decision} tone={aiTone as any} />
           <NeuralMetricCard label="Risk Watch / Aligned" value={neuralBrain.riskStatus} tone={riskTone as any} />
-          <NeuralMetricCard label="Neural Source" value="Dashboard" tone="neutral" />
+          <NeuralMetricCard label="Neural Source" value="Dashboard" />
         </div>
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+        <div className="text-xs text-slate-400">
+          Phase 2 memory is recording one Neural Brain snapshot per changed minute/score state.
+        </div>
+        <button
+          type="button"
+          onClick={() => setShowDetails((previous) => !previous)}
+          className="rounded-xl border border-cyan-400/30 bg-cyan-400/10 px-4 py-2 text-xs font-black uppercase tracking-wide text-cyan-200 transition hover:bg-cyan-400/20"
+        >
+          {showDetails ? 'Collapse context details' : `Expand context details (${rows.length})`}
+        </button>
       </div>
 
       {showDetails && (
         <>
-          <div className="mb-3 grid grid-cols-1 gap-2 md:grid-cols-3">
-            <SummaryPill label="Used By AI Trader" value={`${traderUsed} context rows`} tone="bull" />
-            <SummaryPill label="Target Source" value={String(readPath(signal, ['activeTargetSource', 'targetSource']) ?? 'waiting')} />
-            <SummaryPill label="Target Price" value={String(readPath(signal, ['activeTargetPrice', 'targetPrice', 'target']) ?? '—')} />
+          <div className="mt-4 grid gap-3 lg:grid-cols-[1.1fr_1fr_1fr]">
+            <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3">
+              <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-emerald-200/70">
+                Used by AI Trader
+              </div>
+              <div className="mt-1 text-2xl font-black text-emerald-100">
+                {traderUsed} context rows
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-indigo-500/20 bg-indigo-500/10 px-4 py-3">
+              <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400">
+                Target Source
+              </div>
+              <div className="mt-1 text-2xl font-black text-white">{targetSourceLabel}</div>
+            </div>
+
+            <div className="rounded-2xl border border-indigo-500/20 bg-indigo-500/10 px-4 py-3">
+              <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400">
+                Target Price
+              </div>
+              <div className="mt-1 text-2xl font-black text-white">{targetPriceLabel}</div>
+            </div>
           </div>
 
-          <div className="overflow-x-auto rounded-xl border border-dark-700">
-            <table className="w-full min-w-[1100px] text-left text-xs">
-              <thead className="bg-dark-900/80 text-[10px] uppercase tracking-wide text-gray-500">
+          <div className="mt-4 overflow-hidden rounded-2xl border border-white/10">
+            <table className="w-full min-w-[1000px] text-left text-xs">
+              <thead className="bg-slate-950/70 text-[10px] uppercase tracking-[0.18em] text-slate-500">
                 <tr>
                   <th className="px-4 py-3">Brain Source</th>
                   <th className="px-4 py-3">Group</th>
@@ -682,49 +788,38 @@ export default function AiBrainContextPanel({
                   <th className="px-4 py-3">Reason</th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="divide-y divide-white/5">
                 {rows.map((row) => (
-                  <tr key={`${row.group}-${row.name}`} className="border-t border-dark-700 text-gray-300">
+                  <tr key={`${row.group}-${row.name}`} className="bg-slate-950/20">
                     <td className="px-4 py-3 font-black text-white">{row.name}</td>
-                    <td className="px-4 py-3 text-gray-400">{row.group}</td>
+                    <td className="px-4 py-3 text-slate-400">{row.group}</td>
                     <td className="px-4 py-3">
-                      <span className={`rounded-full border px-2 py-1 text-[10px] font-black uppercase tracking-wide ${getStatusClass(row.status)}`}>
+                      <span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase ${getStatusClass(row.status)}`}>
                         {row.status}
                       </span>
                     </td>
                     <td className={`px-4 py-3 font-black ${getDirectionClass(row.direction)}`}>{row.direction}</td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
-                        <div className="h-2 w-24 overflow-hidden rounded-full bg-dark-700">
-                          <div className="h-full rounded-full bg-current" style={{ width: `${clamp(row.confidence)}%` }} />
+                        <div className="h-2 w-24 overflow-hidden rounded-full bg-slate-800">
+                          <div className="h-full rounded-full bg-slate-200" style={{ width: `${clamp(row.confidence)}%` }} />
                         </div>
                         <span className="font-black text-white">{formatConfidence(row.confidence)}</span>
                       </div>
                     </td>
-                    <td className="px-4 py-3">
-                      <span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase ${boolClass(row.usedByGhostMl)}`}>
-                        {boolBadge(row.usedByGhostMl)}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase ${boolClass(row.usedByTargetMl)}`}>
-                        {boolBadge(row.usedByTargetMl)}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase ${boolClass(row.usedByAiTrader)}`}>
-                        {boolBadge(row.usedByAiTrader)}
-                      </span>
-                    </td>
-                    <td className="max-w-[420px] px-4 py-3 text-gray-400">{row.reason}</td>
+                    <td className="px-4 py-3"><span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase ${boolClass(row.usedByGhostMl)}`}>{boolBadge(row.usedByGhostMl)}</span></td>
+                    <td className="px-4 py-3"><span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase ${boolClass(row.usedByTargetMl)}`}>{boolBadge(row.usedByTargetMl)}</span></td>
+                    <td className="px-4 py-3"><span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase ${boolClass(row.usedByAiTrader)}`}>{boolBadge(row.usedByAiTrader)}</span></td>
+                    <td className="px-4 py-3 text-slate-400">{row.reason}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
 
-          <div className="mt-3 rounded-xl border border-dark-700 bg-dark-900/60 px-4 py-3 text-xs leading-6 text-gray-400">
-            <span className="font-bold text-cyan-200">Rule:</span> SMC, AlphaX/DLM, order blocks, liquidity, FVG, meters, and ghost context can feed Ghost ML and Target Price ML.
+          <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3 text-sm text-slate-400">
+            <span className="font-black text-cyan-300">Rule:</span>{' '}
+            SMC, AlphaX/DLM, order blocks, liquidity, FVG, meters, and ghost context can feed Ghost ML and Target Price ML.
             NRTR remains strategy context only. The AI Trader reads all approved ML/context layers but does not send orders outside the dashboard.
           </div>
         </>
