@@ -314,6 +314,39 @@ function normalizeTimeframe(value: unknown) {
   return tf || '1m'
 }
 
+
+function isCryptoCandleSymbol(symbol: string) {
+  const normalized = normalizeSymbol(symbol)
+  return normalized === 'BTCUSD' || normalized === 'ETHUSD'
+}
+
+function isFuturesCandleSymbol(symbol: string) {
+  const normalized = normalizeSymbol(symbol)
+  return normalized === 'MES1!'
+}
+
+function getHistoricalCandleRouteForSymbol(apiBaseUrl: string, symbol: string) {
+  const normalized = normalizeSymbol(symbol)
+
+  // MES / futures use the verified InsightSentry historical route.
+  if (isFuturesCandleSymbol(normalized)) {
+    return {
+      route: `${apiBaseUrl}/api/insightsentry/history`,
+      provider: 'insightsentry',
+      source: 'insightsentry_v3_historical_ohlcv',
+    }
+  }
+
+  // BTCUSD / ETHUSD / SPY should keep the original backend candle router.
+  // api/main.py routes crypto through Alpaca crypto and SPY through Alpaca stock.
+  // This prevents BTCUSD from being incorrectly treated as an InsightSentry futures symbol.
+  return {
+    route: `${apiBaseUrl}/api/candles`,
+    provider: isCryptoCandleSymbol(normalized) ? 'alpaca_crypto' : 'dashboard_candles',
+    source: isCryptoCandleSymbol(normalized) ? 'alpaca_crypto_historical_ohlcv' : 'dashboard_candle_router',
+  }
+}
+
 function clampPercent(value: number) {
   if (!Number.isFinite(value)) return 0
   return Math.max(0, Math.min(100, Math.round(value)))
@@ -1177,25 +1210,28 @@ async function fetchSharedCandlePayload(
     const previous = SHARED_CANDLE_CACHE.get(key)
     const apiLimit = Math.max(requestedLimit, previous?.limit ?? 0)
 
-    const startYm = new Date().toISOString().slice(0, 7)
+    const routeConfig = getHistoricalCandleRouteForSymbol(apiBaseUrl, normalizedSymbol)
 
     const params = new URLSearchParams({
       symbol: normalizedSymbol,
       timeframe: normalizedTimeframe,
-      start_ym: startYm,
       limit: String(apiLimit),
-      extended: 'true',
-      badj: 'true',
-      dadj: 'false',
       force: force ? 'true' : 'false',
     })
 
-    const response = await fetch(`${apiBaseUrl}/api/insightsentry/history?${params.toString()}`, {
+    if (routeConfig.provider === 'insightsentry') {
+      params.set('start_ym', new Date().toISOString().slice(0, 7))
+      params.set('extended', 'true')
+      params.set('badj', 'true')
+      params.set('dadj', 'false')
+    }
+
+    const response = await fetch(`${routeConfig.route}?${params.toString()}`, {
       cache: 'no-store',
     })
 
     if (!response.ok) {
-      throw new Error(`InsightSentry historical OHLCV error ${response.status}`)
+      throw new Error(`${routeConfig.provider} candle history error ${response.status}`)
     }
 
     const json = await response.json()
@@ -1205,14 +1241,14 @@ async function fetchSharedCandlePayload(
 
     const entry: SharedCandleCacheEntry = {
       candles,
-      // Historical OHLCV is the candle source only. Preserve any previous
+      // Candle history is the candle source. Preserve any previous
       // overlay/intelligence payload so live refreshes do not blank the canvas.
       overlayPayload: overlayPayload ?? previous?.overlayPayload ?? null,
       unifiedIntelligence: unifiedIntelligence ?? previous?.unifiedIntelligence ?? null,
       updatedAt: Date.now(),
       limit: apiLimit,
-      provider: typeof json?.provider === 'string' ? json.provider : undefined,
-      source: typeof json?.source === 'string' ? json.source : 'insightsentry_v3_historical_ohlcv',
+      provider: typeof json?.provider === 'string' ? json.provider : routeConfig.provider,
+      source: typeof json?.source === 'string' ? json.source : routeConfig.source,
     }
 
     SHARED_CANDLE_CACHE.set(key, entry)
@@ -3699,8 +3735,8 @@ function useChartCandles(
 
             if (gapSeconds > timeframeSeconds * 2) {
               // History/live gap detected. Do not create fake bridge candles.
-              // Force-refresh InsightSentry historical OHLCV first so BTCUSD fills
-              // the missing area with real candles instead of invisible flat candles.
+              // Force-refresh the correct historical OHLCV provider first so BTCUSD fills
+              // the missing area with real Alpaca crypto candles instead of invisible flat candles.
               fetchCandles(true)
               return previousCandles
             }
@@ -3754,8 +3790,8 @@ function useChartCandles(
 
             if (gapSeconds > timeframeSeconds * 2) {
               // History/live gap detected. Do not create fake bridge candles.
-              // Force-refresh InsightSentry historical OHLCV first so BTCUSD fills
-              // the missing area with real candles instead of invisible flat candles.
+              // Force-refresh the correct historical OHLCV provider first so BTCUSD fills
+              // the missing area with real Alpaca crypto candles instead of invisible flat candles.
               fetchCandles(true)
               return previousCandles
             }
