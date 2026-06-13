@@ -5454,6 +5454,7 @@ export default function Dashboard() {
             mlFeatures={matrixMlFeatures}
             overlayPayload={mainChartOverlayPayload}
             unifiedIntelligence={mergedUnifiedIntelligence}
+            aiDecision={augmentedLatestSignal as any}
             mainSettings={mainChartIndicatorSettings}
             miniOneSettings={miniChartOneIndicatorSettings}
             miniTwoSettings={miniChartTwoIndicatorSettings}
