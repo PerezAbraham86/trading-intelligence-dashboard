@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { NEURAL_BRAIN_VERSION } from '@/lib/neuralBrain'
 import { getNeuralBrainMemoryStatus } from '@/lib/neuralBrainMemory'
+import { getOnlineBrainStatus } from '@/lib/neuralBrainOnline'
 
 export const dynamic = 'force-dynamic'
 
@@ -9,16 +10,18 @@ export async function GET() {
     eventType: 'NEURAL_BRAIN_STATUS',
     status: 'Ready',
     engineVersion: NEURAL_BRAIN_VERSION,
-    modelType: 'phase1_weighted_neural_scorecard',
-    trainedModelReady: false,
-    phase: 'phase2_snapshot_memory',
+    modelType: 'phase3_river_style_online_updates',
+    trainedModelReady: getOnlineBrainStatus().onlineReady,
+    phase: 'phase3_river_style_online_updates',
     routes: {
       predict: '/api/neural-brain/predict',
       status: '/api/neural-brain/status',
       snapshots: '/api/neural-brain/snapshots',
       outcomes: '/api/neural-brain/outcomes',
+      onlineStatus: '/api/neural-brain/online-status',
     },
     memory: getNeuralBrainMemoryStatus(),
+    online: getOnlineBrainStatus(),
     scorecards: [
       'buyConfidence',
       'sellConfidence',
@@ -36,7 +39,7 @@ export async function GET() {
       'candlesToResult',
       'maxDrawdownBeforeTarget',
     ],
-    note: 'Phase 2 saves Neural Brain snapshots for later outcome labeling and MLP/PyTorch training.',
+    note: 'Phase 3 adds River-style online logistic updates. The learner updates every time a saved Neural Brain snapshot receives an outcome label, then blends predictions once enough online examples are available.',
     createdAt: new Date().toISOString(),
   })
 }
