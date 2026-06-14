@@ -971,6 +971,140 @@ function BlockerBadge({ severity }: { severity: 'high' | 'medium' | 'low' }) {
   )
 }
 
+
+function normalizeAiDecisionStats(source: any) {
+  const samples = Math.max(0, Math.round(toFiniteNumber(source?.samples, 0)))
+  const buyBias = Math.max(0, Math.round(toFiniteNumber(source?.buyBias, 0)))
+  const sellBias = Math.max(0, Math.round(toFiniteNumber(source?.sellBias, 0)))
+  const holdCount = Math.max(0, Math.round(toFiniteNumber(source?.holdCount, 0)))
+  const tradeReadyCount = Math.max(0, Math.round(toFiniteNumber(source?.tradeReadyCount, 0)))
+  const confidenceSum = Math.max(
+    0,
+    toFiniteNumber(source?.confidenceSum, 0) || samples * toFiniteNumber(source?.avgConfidence, 0)
+  )
+  const avgConfidence = samples > 0 ? confidenceSum / samples : toFiniteNumber(source?.avgConfidence, 0)
+
+  return {
+    ...(source && typeof source === 'object' ? source : {}),
+    samples,
+    buyBias,
+    sellBias,
+    holdCount,
+    tradeReadyCount,
+    confidenceSum,
+    avgConfidence: Number.isFinite(avgConfidence) ? avgConfidence : 0,
+    observationKeys: Array.isArray(source?.observationKeys) ? source.observationKeys.slice(-1500) : [],
+    lastUpdatedAt: source?.lastUpdatedAt ?? null,
+  }
+}
+
+function mergeAiDecisionStats(current: any, incoming: any) {
+  const base = normalizeAiDecisionStats(current)
+  const next = normalizeAiDecisionStats(incoming)
+
+  if (next.samples <= 0) return base
+  if (base.samples <= 0) return next
+
+  const samples = Math.max(base.samples, next.samples)
+  const avgConfidence = Math.max(toFiniteNumber(base.avgConfidence, 0), toFiniteNumber(next.avgConfidence, 0))
+  const confidenceSum = Math.max(toFiniteNumber(base.confidenceSum, 0), toFiniteNumber(next.confidenceSum, 0), samples * avgConfidence)
+
+  const mergedKeys = Array.from(new Set([
+    ...(Array.isArray(base.observationKeys) ? base.observationKeys : []),
+    ...(Array.isArray(next.observationKeys) ? next.observationKeys : []),
+  ])).slice(-1500)
+
+  return {
+    ...base,
+    ...next,
+    samples,
+    buyBias: Math.max(base.buyBias, next.buyBias),
+    sellBias: Math.max(base.sellBias, next.sellBias),
+    holdCount: Math.max(base.holdCount, next.holdCount),
+    tradeReadyCount: Math.max(base.tradeReadyCount, next.tradeReadyCount),
+    confidenceSum,
+    avgConfidence,
+    observationKeys: mergedKeys,
+    lastUpdatedAt: new Date().toISOString(),
+  }
+}
+
+function readAiDecisionStatsFromMemoryStatus(memoryStatus: any) {
+  return (
+    memoryStatus?.overallDecisionStats ??
+    memoryStatus?.bucketDecisionStats ??
+    memoryStatus?.decisionStats ??
+    {}
+  )
+}
+
+function getAiDecisionStatsFromDecision(decision: any) {
+  return readAiDecisionStatsFromMemoryStatus(decision?.details?.memoryStatus)
+}
+
+function getAiDecisionStatsFromSummary(summary: any) {
+  return (
+    summary?.decisionStats ??
+    readAiDecisionStatsFromMemoryStatus(summary?.memoryStatus) ??
+    {}
+  )
+}
+
+function getDecisionObservationKey(decision: any, symbol: string, timeframe: string, candles: any[] | undefined) {
+  const candleTime = getLatestCandleTime(candles)
+  const side = normalizeDecision(decision?.rawDecision ?? decision?.decision)
+  const entry = toFiniteNumber(decision?.entry, 0).toFixed(4)
+  const target = toFiniteNumber(decision?.target, 0).toFixed(4)
+  const stop = toFiniteNumber(decision?.stop, 0).toFixed(4)
+
+  return [
+    String(symbol ?? 'UNKNOWN').toUpperCase(),
+    String(timeframe ?? 'UNKNOWN'),
+    candleTime,
+    side,
+    entry,
+    target,
+    stop,
+  ].join('|')
+}
+
+function addLiveDecisionObservation(current: any, decision: any, symbol: string, timeframe: string, candles: any[] | undefined) {
+  if (!decision || typeof decision !== 'object') return normalizeAiDecisionStats(current)
+
+  const base = normalizeAiDecisionStats(current)
+  const key = getDecisionObservationKey(decision, symbol, timeframe, candles)
+  const currentKeys = Array.isArray(base.observationKeys) ? base.observationKeys : []
+
+  if (currentKeys.includes(key)) {
+    return base
+  }
+
+  const side = normalizeDecision(decision?.rawDecision ?? decision?.decision)
+  const confidence = toFiniteNumber(decision?.confidence, 0)
+  const samples = base.samples + 1
+  const confidenceSum = toFiniteNumber(base.confidenceSum, 0) + confidence
+
+  return {
+    ...base,
+    samples,
+    buyBias: base.buyBias + (side === 'BUY' ? 1 : 0),
+    sellBias: base.sellBias + (side === 'SELL' ? 1 : 0),
+    holdCount: base.holdCount + (side === 'HOLD' ? 1 : 0),
+    tradeReadyCount: base.tradeReadyCount + (decision?.allowedToTrade ? 1 : 0),
+    confidenceSum,
+    avgConfidence: samples > 0 ? confidenceSum / samples : 0,
+    observationKeys: [...currentKeys, key].slice(-1500),
+    lastUpdatedAt: new Date().toISOString(),
+  }
+}
+
+function buildStableAiDecisionStats(persisted: any, summary: any, decision: any) {
+  let stable = normalizeAiDecisionStats(persisted)
+  stable = mergeAiDecisionStats(stable, getAiDecisionStatsFromSummary(summary))
+  stable = mergeAiDecisionStats(stable, getAiDecisionStatsFromDecision(decision))
+  return stable
+}
+
 export default function AiTraderPanel({
   apiBaseUrl,
   symbol,
@@ -995,9 +1129,15 @@ export default function AiTraderPanel({
   const [lastAutoOpenKey, setLastAutoOpenKey] = useState('')
   const [localClosedTrades, setLocalClosedTrades] = useState<any[]>([])
   const [hydratedLocalClosedTrades, setHydratedLocalClosedTrades] = useState(false)
+  const [persistentLearningStats, setPersistentLearningStats] = useState<any>(() => normalizeAiDecisionStats({}))
+  const [hydratedLearningStats, setHydratedLearningStats] = useState(false)
 
   const closedStorageKey = useMemo(() => {
     return `marketbos:ai-trader:closed:${String(symbol ?? 'ALL').toUpperCase()}:${String(timeframe ?? 'ALL')}`
+  }, [symbol, timeframe])
+
+  const learningStorageKey = useMemo(() => {
+    return `marketbos:ai-trader:learning:${String(symbol ?? 'ALL').toUpperCase()}:${String(timeframe ?? 'ALL')}`
   }, [symbol, timeframe])
 
   useEffect(() => {
@@ -1021,6 +1161,28 @@ export default function AiTraderPanel({
       // Browser storage can fail in private mode; the dashboard should continue.
     }
   }, [closedStorageKey, hydratedLocalClosedTrades, localClosedTrades])
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(learningStorageKey)
+      const parsed = raw ? JSON.parse(raw) : {}
+      setPersistentLearningStats(normalizeAiDecisionStats(parsed))
+    } catch {
+      setPersistentLearningStats(normalizeAiDecisionStats({}))
+    } finally {
+      setHydratedLearningStats(true)
+    }
+  }, [learningStorageKey])
+
+  useEffect(() => {
+    if (!hydratedLearningStats) return
+
+    try {
+      window.localStorage.setItem(learningStorageKey, JSON.stringify(normalizeAiDecisionStats(persistentLearningStats)))
+    } catch {
+      // Browser storage can fail in private mode; backend/Supabase memory still remains primary.
+    }
+  }, [hydratedLearningStats, learningStorageKey, persistentLearningStats])
 
   const liveActivePrice = useMemo(() => {
     return getLiveAiCurrentPrice(activePrice, signal, candles)
@@ -1147,12 +1309,16 @@ export default function AiTraderPanel({
 
       const json = await response.json()
       setDecision(json)
+      setPersistentLearningStats((current: any) => {
+        const withBackendStats = mergeAiDecisionStats(current, getAiDecisionStatsFromDecision(json))
+        return addLiveDecisionObservation(withBackendStats, json, symbol, timeframe, candles)
+      })
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : 'AI trader decision failed')
     } finally {
       setIsLoading(false)
     }
-  }, [apiBaseUrl, liveActivePrice, safePayload])
+  }, [apiBaseUrl, liveActivePrice, safePayload, symbol, timeframe, candles])
 
   const fetchSummary = useCallback(async () => {
     if (!apiBaseUrl) return
@@ -1171,6 +1337,7 @@ export default function AiTraderPanel({
 
       const json = await response.json()
       setSummary(json)
+      setPersistentLearningStats((current: any) => mergeAiDecisionStats(current, getAiDecisionStatsFromSummary(json)))
 
       const backendClosedTrades = [
         ...(Array.isArray(json?.closedTrades) ? json.closedTrades : []),
@@ -1211,6 +1378,7 @@ export default function AiTraderPanel({
       const json = await response.json()
       const nextSummary = json?.summary ?? null
       setSummary(nextSummary)
+      setPersistentLearningStats((current: any) => mergeAiDecisionStats(current, getAiDecisionStatsFromSummary(nextSummary)))
 
       const backendClosedTrades = [
         ...(Array.isArray(json?.closedTrades) ? json.closedTrades : []),
@@ -1245,13 +1413,20 @@ export default function AiTraderPanel({
       }
 
       const json = await response.json()
-      setDecision(json?.decision ?? decision)
-      setSummary(json?.summary ?? summary)
+      const nextDecision = json?.decision ?? decision
+      const nextSummary = json?.summary ?? summary
+      setDecision(nextDecision)
+      setSummary(nextSummary)
+      setPersistentLearningStats((current: any) => {
+        const withSummaryStats = mergeAiDecisionStats(current, getAiDecisionStatsFromSummary(nextSummary))
+        const withDecisionStats = mergeAiDecisionStats(withSummaryStats, getAiDecisionStatsFromDecision(nextDecision))
+        return addLiveDecisionObservation(withDecisionStats, nextDecision, symbol, timeframe, candles)
+      })
       setActionStatus(json?.opened ? 'Dashboard AI trade opened' : json?.message ?? 'AI trade not opened')
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : 'Open failed')
     }
-  }, [apiBaseUrl, safePayload, decision, summary])
+  }, [apiBaseUrl, safePayload, decision, summary, symbol, timeframe, candles])
 
   useEffect(() => {
     fetchDecision()
@@ -1305,15 +1480,13 @@ export default function AiTraderPanel({
           : 'neutral'
 
   const activeMemoryStatus =
-    decision?.details?.memoryStatus ??
     summary?.memoryStatus ??
+    decision?.details?.memoryStatus ??
     {}
 
-  const activeDecisionStats =
-    activeMemoryStatus?.bucketDecisionStats ??
-    activeMemoryStatus?.overallDecisionStats ??
-    summary?.decisionStats ??
-    {}
+  const activeDecisionStats = useMemo(() => {
+    return buildStableAiDecisionStats(persistentLearningStats, summary, decision)
+  }, [persistentLearningStats, summary, decision])
 
   const backendClosedTrades = useMemo(() => {
     return [
@@ -1722,7 +1895,7 @@ export default function AiTraderPanel({
           </div>
 
           <div className="mb-3 rounded-lg border border-dark-700 bg-dark-800/70 px-3 py-2 text-xs text-gray-300">
-            {String(memoryStatus.message ?? 'AI memory is collecting live decision observations.')}
+            {String(memoryStatus.message ?? 'AI memory is collecting and persisting live decision observations.')}
             {toFiniteNumber(decisionStats.samples, 0) > 0 ? (
               <span className="ml-2 font-black text-emerald-300">
                 • {formatCount(decisionStats.samples)} live observations loaded
@@ -1738,8 +1911,8 @@ export default function AiTraderPanel({
             />
             <StatBox
               label="Memory Source"
-              value={displayClosedCount > 0 ? 'CLOSED HISTORY' : decision?.details?.memoryStatus ? 'LIVE DECISION' : summary?.memoryStatus ? 'SUMMARY' : 'WAITING'}
-              tone={displayClosedCount > 0 || decision?.details?.memoryStatus ? 'bull' : 'warn'}
+              value={displayClosedCount > 0 ? 'CLOSED HISTORY' : toFiniteNumber(persistentLearningStats?.samples, 0) > 0 ? 'SAVED LIVE MEMORY' : summary?.memoryStatus ? 'SUMMARY' : decision?.details?.memoryStatus ? 'LIVE DECISION' : 'WAITING'}
+              tone={displayClosedCount > 0 || toFiniteNumber(activeDecisionStats?.samples, 0) > 0 ? 'bull' : 'warn'}
             />
           </div>
 
