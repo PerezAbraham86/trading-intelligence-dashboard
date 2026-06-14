@@ -133,6 +133,24 @@ function formatCount(value: any) {
   return Math.max(0, Math.round(parsed)).toLocaleString()
 }
 
+function formatTradeDateTime(value: any) {
+  if (!value) return '—'
+
+  const date = new Date(value)
+
+  if (Number.isNaN(date.getTime())) return '—'
+
+  return date.toLocaleString('en-US', {
+    month: '2-digit',
+    day: '2-digit',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  })
+}
+
 function formatAiStage(value: any) {
   const raw = String(value ?? 'WARMING_UP').replace(/_/g, ' ').toLowerCase()
   return raw.replace(/\b\w/g, (letter) => letter.toUpperCase())
@@ -2221,8 +2239,8 @@ export default function AiTraderPanel({
                     <td className={`py-2 font-black ${normalizeDecision(trade.side) === 'BUY' ? 'text-emerald-300' : 'text-red-300'}`}>
                       {trade.side}
                     </td>
-                    <td className="py-2 text-gray-500">{String(trade.entryTime ?? '—')}</td>
-                    <td className="py-2 text-gray-500">{String(trade.exitTime ?? trade.closedAt ?? '—')}</td>
+                    <td className="py-2 text-gray-500">{formatTradeDateTime(trade.entryTime)}</td>
+                    <td className="py-2 text-gray-500">{formatTradeDateTime(trade.exitTime ?? trade.closedAt)}</td>
                     <td className="py-2">{formatPrice(trade.entry ?? trade.entryPrice)}</td>
                     <td className="py-2">{formatPrice(trade.exit ?? trade.exitPrice)}</td>
                     <td className="py-2">{formatPrice(trade.target ?? trade.targetPrice)}</td>
