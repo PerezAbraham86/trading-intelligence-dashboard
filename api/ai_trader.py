@@ -16,7 +16,7 @@ MEMORY_PATH = Path(os.getenv("AI_TRADER_MEMORY_PATH", str(Path(__file__).with_na
 MAX_CLOSED_TRADES = int(os.getenv("AI_TRADER_MAX_CLOSED_TRADES", "2500"))
 DEFAULT_MIN_CONFIDENCE = float(os.getenv("AI_TRADER_MIN_CONFIDENCE", "62"))
 DEFAULT_MIN_RR = float(os.getenv("AI_TRADER_MIN_RR", "1.25"))
-MAX_DECISION_OBSERVATIONS = int(os.getenv("AI_TRADER_MAX_DECISION_OBSERVATIONS", "10000"))
+MAX_DECISION_OBSERVATIONS = int(os.getenv("AI_TRADER_MAX_DECISION_OBSERVATIONS", "1500"))
 VIRTUAL_TRADE_MAX_BARS = int(os.getenv("AI_TRADER_VIRTUAL_TRADE_MAX_BARS", "12"))
 PHASE6_BUCKET_MODE = "phase6_projection_engine"
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
@@ -25,6 +25,12 @@ SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
 AI_TRADER_STORAGE = os.getenv("AI_TRADER_STORAGE", "json").lower().strip()
 AI_TRADER_USER_KEY = os.getenv("AI_TRADER_USER_KEY", "default").strip() or "default"
 AI_TRADER_ALLOW_MULTIPLE_OPEN_TRADES = os.getenv("AI_TRADER_ALLOW_MULTIPLE_OPEN_TRADES", "false").lower().strip() in {"1", "true", "yes", "on"}
+AI_TRADER_OPEN_LOAD_LIMIT = int(os.getenv("AI_TRADER_OPEN_LOAD_LIMIT", "50"))
+AI_TRADER_CLOSED_LOAD_LIMIT = int(os.getenv("AI_TRADER_CLOSED_LOAD_LIMIT", "500"))
+AI_TRADER_DECISION_LOAD_LIMIT = int(os.getenv("AI_TRADER_DECISION_LOAD_LIMIT", "1200"))
+AI_TRADER_VIRTUAL_OPEN_LOAD_LIMIT = int(os.getenv("AI_TRADER_VIRTUAL_OPEN_LOAD_LIMIT", "120"))
+AI_TRADER_VIRTUAL_CLOSED_LOAD_LIMIT = int(os.getenv("AI_TRADER_VIRTUAL_CLOSED_LOAD_LIMIT", "500"))
+SUPABASE_BATCH_SIZE = int(os.getenv("AI_TRADER_SUPABASE_BATCH_SIZE", "250"))
 MEMORY_LOCK = threading.RLock()
 
 
@@ -750,23 +756,27 @@ def decision_to_row(decision: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def supabase_select_table(table: str, order_col: str = "created_at") -> List[Dict[str, Any]]:
+def supabase_select_table(table: str, order_col: str = "created_at", limit: int = 500) -> List[Dict[str, Any]]:
+    """Load a bounded recent slice from Supabase to prevent Render memory spikes."""
+    safe_limit = max(1, min(int(limit or 500), 2500))
     query = urllib.parse.urlencode({
         "select": "*",
         "user_key": f"eq.{AI_TRADER_USER_KEY}",
-        "order": f"{order_col}.asc",
-        "limit": "10000",
+        "order": f"{order_col}.desc",
+        "limit": str(safe_limit),
     })
     result = supabase_request("GET", table, query=query)
-    return result if isinstance(result, list) else []
+    rows = result if isinstance(result, list) else []
+    rows.reverse()
+    return rows
 
 
 def load_memory_from_supabase() -> Dict[str, Any]:
-    open_rows = supabase_select_table("ai_trader_open_trades", "created_at")
-    closed_rows = supabase_select_table("ai_trader_closed_trades", "created_at")
-    decision_rows = supabase_select_table("ai_trader_decision_log", "created_at")
-    virtual_open_rows = supabase_select_table("ai_trader_virtual_open_trades", "created_at")
-    virtual_closed_rows = supabase_select_table("ai_trader_virtual_closed_trades", "created_at")
+    open_rows = supabase_select_table("ai_trader_open_trades", "created_at", AI_TRADER_OPEN_LOAD_LIMIT)
+    closed_rows = supabase_select_table("ai_trader_closed_trades", "created_at", AI_TRADER_CLOSED_LOAD_LIMIT)
+    decision_rows = supabase_select_table("ai_trader_decision_log", "created_at", AI_TRADER_DECISION_LOAD_LIMIT)
+    virtual_open_rows = supabase_select_table("ai_trader_virtual_open_trades", "created_at", AI_TRADER_VIRTUAL_OPEN_LOAD_LIMIT)
+    virtual_closed_rows = supabase_select_table("ai_trader_virtual_closed_trades", "created_at", AI_TRADER_VIRTUAL_CLOSED_LOAD_LIMIT)
 
     return {
         "version": 3,
@@ -795,11 +805,11 @@ def supabase_upsert_rows(table: str, rows: List[Dict[str, Any]]) -> None:
     ]
     if not clean_rows:
         return
-    for index in range(0, len(clean_rows), 500):
+    for index in range(0, len(clean_rows), SUPABASE_BATCH_SIZE):
         supabase_request(
             "POST",
             table,
-            body=clean_rows[index:index + 500],
+            body=clean_rows[index:index + SUPABASE_BATCH_SIZE],
             prefer="resolution=merge-duplicates,return=minimal",
         )
 
@@ -2469,6 +2479,13 @@ def ai_trader_summary(symbol: Any = "", timeframe: Any = "") -> Dict[str, Any]:
         "storage": "supabase" if supabase_enabled() else "json",
         "supabaseEnabled": supabase_enabled(),
         "userKey": AI_TRADER_USER_KEY,
+        "memoryLoadLimits": {
+            "open": AI_TRADER_OPEN_LOAD_LIMIT,
+            "closed": AI_TRADER_CLOSED_LOAD_LIMIT,
+            "decisions": AI_TRADER_DECISION_LOAD_LIMIT,
+            "virtualOpen": AI_TRADER_VIRTUAL_OPEN_LOAD_LIMIT,
+            "virtualClosed": AI_TRADER_VIRTUAL_CLOSED_LOAD_LIMIT,
+        },
         "phase6MemoryFix": True,
         "createdAt": now_iso(),
     }
