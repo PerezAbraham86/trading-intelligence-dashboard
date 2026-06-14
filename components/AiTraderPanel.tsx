@@ -1127,10 +1127,16 @@ export default function AiTraderPanel({
   const [minConfidence, setMinConfidence] = useState(62)
   const [minRiskReward, setMinRiskReward] = useState(1.25)
   const [lastAutoOpenKey, setLastAutoOpenKey] = useState('')
+  const [localOpenTrades, setLocalOpenTrades] = useState<any[]>([])
+  const [hydratedLocalOpenTrades, setHydratedLocalOpenTrades] = useState(false)
   const [localClosedTrades, setLocalClosedTrades] = useState<any[]>([])
   const [hydratedLocalClosedTrades, setHydratedLocalClosedTrades] = useState(false)
   const [persistentLearningStats, setPersistentLearningStats] = useState<any>(() => normalizeAiDecisionStats({}))
   const [hydratedLearningStats, setHydratedLearningStats] = useState(false)
+
+  const openStorageKey = useMemo(() => {
+    return `marketbos:ai-trader:open:${String(symbol ?? 'ALL').toUpperCase()}:${String(timeframe ?? 'ALL')}`
+  }, [symbol, timeframe])
 
   const closedStorageKey = useMemo(() => {
     return `marketbos:ai-trader:closed:${String(symbol ?? 'ALL').toUpperCase()}:${String(timeframe ?? 'ALL')}`
@@ -1139,6 +1145,28 @@ export default function AiTraderPanel({
   const learningStorageKey = useMemo(() => {
     return `marketbos:ai-trader:learning:${String(symbol ?? 'ALL').toUpperCase()}:${String(timeframe ?? 'ALL')}`
   }, [symbol, timeframe])
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(openStorageKey)
+      const parsed = raw ? JSON.parse(raw) : []
+      setLocalOpenTrades(Array.isArray(parsed) ? parsed : [])
+    } catch {
+      setLocalOpenTrades([])
+    } finally {
+      setHydratedLocalOpenTrades(true)
+    }
+  }, [openStorageKey])
+
+  useEffect(() => {
+    if (!hydratedLocalOpenTrades) return
+
+    try {
+      window.localStorage.setItem(openStorageKey, JSON.stringify(localOpenTrades.slice(0, 100)))
+    } catch {
+      // Browser storage can fail in private mode; backend/Supabase memory still remains primary.
+    }
+  }, [openStorageKey, hydratedLocalOpenTrades, localOpenTrades])
 
   useEffect(() => {
     try {
@@ -1274,11 +1302,25 @@ export default function AiTraderPanel({
 
   const safePayload = useMemo(() => sanitizeAiTraderPayload(payload), [payload])
 
+  const saveOpenTrades = useCallback((incomingTrades: any[]) => {
+    if (!Array.isArray(incomingTrades) || incomingTrades.length === 0) return
+
+    setLocalOpenTrades((current) => mergeTrades(current, incomingTrades))
+  }, [])
+
+  const forgetOpenTrades = useCallback((closedOrRemovedTrades: any[]) => {
+    if (!Array.isArray(closedOrRemovedTrades) || closedOrRemovedTrades.length === 0) return
+
+    const closedKeys = new Set(closedOrRemovedTrades.map(getTradeKey))
+    setLocalOpenTrades((current) => current.filter((trade) => !closedKeys.has(getTradeKey(trade))))
+  }, [])
+
   const saveClosedTrades = useCallback((incomingTrades: any[]) => {
     if (!Array.isArray(incomingTrades) || incomingTrades.length === 0) return
 
     setLocalClosedTrades((current) => mergeTrades(current, incomingTrades))
-  }, [])
+    forgetOpenTrades(incomingTrades)
+  }, [forgetOpenTrades])
 
   const fetchDecision = useCallback(async () => {
     if (!apiBaseUrl) {
@@ -1339,6 +1381,10 @@ export default function AiTraderPanel({
       setSummary(json)
       setPersistentLearningStats((current: any) => mergeAiDecisionStats(current, getAiDecisionStatsFromSummary(json)))
 
+      if (Array.isArray(json?.openTrades) && json.openTrades.length > 0) {
+        saveOpenTrades(json.openTrades)
+      }
+
       const backendClosedTrades = [
         ...(Array.isArray(json?.closedTrades) ? json.closedTrades : []),
         ...(Array.isArray(json?.recentClosedTrades) ? json.recentClosedTrades : []),
@@ -1347,7 +1393,7 @@ export default function AiTraderPanel({
     } catch {
       // Keep the panel usable even if summary temporarily fails.
     }
-  }, [apiBaseUrl, saveClosedTrades, symbol, timeframe])
+  }, [apiBaseUrl, saveClosedTrades, saveOpenTrades, symbol, timeframe])
 
   const evaluateOpenTrades = useCallback(async () => {
     if (!apiBaseUrl) return
@@ -1380,6 +1426,13 @@ export default function AiTraderPanel({
       setSummary(nextSummary)
       setPersistentLearningStats((current: any) => mergeAiDecisionStats(current, getAiDecisionStatsFromSummary(nextSummary)))
 
+      if (Array.isArray(json?.openTrades) && json.openTrades.length > 0) {
+        saveOpenTrades(json.openTrades)
+      }
+      if (Array.isArray(nextSummary?.openTrades) && nextSummary.openTrades.length > 0) {
+        saveOpenTrades(nextSummary.openTrades)
+      }
+
       const backendClosedTrades = [
         ...(Array.isArray(json?.closedTrades) ? json.closedTrades : []),
         ...(Array.isArray(json?.recentClosedTrades) ? json.recentClosedTrades : []),
@@ -1392,7 +1445,7 @@ export default function AiTraderPanel({
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : 'Evaluate failed')
     }
-  }, [apiBaseUrl, candles, decision, liveActivePrice, saveClosedTrades, symbol, timeframe])
+  }, [apiBaseUrl, candles, decision, liveActivePrice, saveClosedTrades, saveOpenTrades, symbol, timeframe])
 
   const openDashboardTrade = useCallback(async () => {
     if (!apiBaseUrl) return
@@ -1417,6 +1470,12 @@ export default function AiTraderPanel({
       const nextSummary = json?.summary ?? summary
       setDecision(nextDecision)
       setSummary(nextSummary)
+      if (Array.isArray(nextSummary?.openTrades) && nextSummary.openTrades.length > 0) {
+        saveOpenTrades(nextSummary.openTrades)
+      }
+      if (json?.trade) {
+        saveOpenTrades([json.trade])
+      }
       setPersistentLearningStats((current: any) => {
         const withSummaryStats = mergeAiDecisionStats(current, getAiDecisionStatsFromSummary(nextSummary))
         const withDecisionStats = mergeAiDecisionStats(withSummaryStats, getAiDecisionStatsFromDecision(nextDecision))
@@ -1426,7 +1485,7 @@ export default function AiTraderPanel({
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : 'Open failed')
     }
-  }, [apiBaseUrl, safePayload, decision, summary, symbol, timeframe, candles])
+  }, [apiBaseUrl, safePayload, decision, summary, symbol, timeframe, candles, saveOpenTrades])
 
   useEffect(() => {
     fetchDecision()
@@ -1560,7 +1619,14 @@ export default function AiTraderPanel({
     aiMemorySamples > 0 ? Math.min(100, toFiniteNumber(decisionStats.avgConfidence, 0)) : 0,
   )
 
-  const rawOpenTrades = Array.isArray(summary?.openTrades) ? summary?.openTrades ?? [] : []
+  const backendOpenTrades = useMemo(() => {
+    return Array.isArray(summary?.openTrades) ? summary?.openTrades ?? [] : []
+  }, [summary])
+
+  const rawOpenTrades = useMemo(() => {
+    return mergeTrades(localOpenTrades, backendOpenTrades)
+  }, [localOpenTrades, backendOpenTrades])
+
   const locallyClosedKeys = useMemo(() => new Set(closedTrades.map(getTradeKey)), [closedTrades])
 
   const liveOpenTrades = rawOpenTrades
@@ -1611,11 +1677,13 @@ export default function AiTraderPanel({
       }))
 
     saveClosedTrades(tradesToClose)
+    forgetOpenTrades(tradesToClose)
     evaluateOpenTrades()
-  }, [settlementAutoEvaluateKey, saveClosedTrades, evaluateOpenTrades, liveOpenTrades, liveActivePrice, candles])
+  }, [settlementAutoEvaluateKey, saveClosedTrades, forgetOpenTrades, evaluateOpenTrades, liveOpenTrades, liveActivePrice, candles])
 
   const displayOpenCount = liveOpenTrades.length
   const displayClosedCount = closedTrades.length
+  const stableMemoryMessage = `AI memory warming up: ${formatCount(decisionStats.samples)} decision observations, ${formatCount(displayClosedCount)} closed/virtual outcomes`
 
   return (
     <motion.div
@@ -1639,7 +1707,7 @@ export default function AiTraderPanel({
             </span>
           </div>
           <p className="mt-1 text-xs text-gray-400">
-            Simulated AI trades only. Closed trades are merged from backend memory and browser localStorage so the table does not reset to 0.
+            Simulated AI trades only. Open and closed trades are merged from backend memory and browser localStorage so active trades do not disappear during a backend memory refresh.
           </p>
         </div>
 
@@ -1895,7 +1963,7 @@ export default function AiTraderPanel({
           </div>
 
           <div className="mb-3 rounded-lg border border-dark-700 bg-dark-800/70 px-3 py-2 text-xs text-gray-300">
-            {String(memoryStatus.message ?? 'AI memory is collecting and persisting live decision observations.')}
+            {stableMemoryMessage}
             {toFiniteNumber(decisionStats.samples, 0) > 0 ? (
               <span className="ml-2 font-black text-emerald-300">
                 • {formatCount(decisionStats.samples)} live observations loaded
