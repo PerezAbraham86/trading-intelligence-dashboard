@@ -774,7 +774,7 @@ def load_memory_from_supabase() -> Dict[str, Any]:
         "userKey": AI_TRADER_USER_KEY,
         "createdAt": now_iso(),
         "updatedAt": now_iso(),
-        "openTrades": [row_to_trade(row) for row in open_rows],
+        "openTrades": dedupe_open_trades([row_to_trade(row) for row in open_rows]),
         "closedTrades": [row_to_trade(row) for row in closed_rows],
         "decisionLog": [row_to_decision(row) for row in decision_rows],
         "virtualOpenTrades": [row_to_trade(row, virtual=True) for row in virtual_open_rows],
@@ -818,25 +818,94 @@ def save_memory_to_supabase(memory: Dict[str, Any]) -> None:
     for table, rows in table_rows.items():
         supabase_upsert_rows(table, rows)
 
+
+def empty_memory(storage: str = "json") -> Dict[str, Any]:
+    return {
+        "version": 3,
+        "storage": storage,
+        "userKey": AI_TRADER_USER_KEY,
+        "createdAt": now_iso(),
+        "updatedAt": now_iso(),
+        "openTrades": [],
+        "closedTrades": [],
+        "decisionLog": [],
+        "virtualOpenTrades": [],
+        "virtualClosedTrades": [],
+    }
+
+
+def open_trade_dedupe_key(trade: Dict[str, Any]) -> str:
+    if AI_TRADER_ALLOW_MULTIPLE_OPEN_TRADES:
+        return str(trade.get("id") or build_trade_id(trade.get("symbol"), trade.get("timeframe"), normalize_side(trade.get("side"))))
+
+    return "|".join([
+        normalize_symbol(trade.get("symbol")),
+        normalize_timeframe(trade.get("timeframe")),
+    ])
+
+
+def dedupe_open_trades(trades: List[Any]) -> List[Dict[str, Any]]:
+    """Keep one active open trade per symbol/timeframe unless multiple entries are explicitly enabled."""
+    if AI_TRADER_ALLOW_MULTIPLE_OPEN_TRADES:
+        return [trade for trade in safe_list(trades) if isinstance(trade, dict)]
+
+    by_key: Dict[str, Dict[str, Any]] = {}
+
+    for trade in safe_list(trades):
+        if not isinstance(trade, dict):
+            continue
+
+        key = open_trade_dedupe_key(trade)
+        existing = by_key.get(key)
+
+        # Keep the newest trade if duplicates already exist.
+        trade_time = DateParseSafe(trade.get("createdAt") or trade.get("entryTime") or trade.get("updatedAt"))
+        existing_time = DateParseSafe(existing.get("createdAt") or existing.get("entryTime") or existing.get("updatedAt")) if existing else -1
+
+        if existing is None or trade_time >= existing_time:
+            by_key[key] = trade
+
+    return list(by_key.values())
+
+
+def DateParseSafe(value: Any) -> float:
+    try:
+        if value is None:
+            return 0.0
+        text = str(value)
+        if not text:
+            return 0.0
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
 def load_memory() -> Dict[str, Any]:
+    """Load AI Trader memory.
+
+    Important:
+    When AI_TRADER_STORAGE=supabase, Supabase is the only source of truth.
+    We intentionally do NOT fall back to ai_trader_memory.json for open trades,
+    because old JSON fallback files were recreating duplicate open trades.
+    """
     if supabase_enabled():
         try:
-            return load_memory_from_supabase()
+            memory = load_memory_from_supabase()
+            memory["openTrades"] = dedupe_open_trades(memory.get("openTrades", []))
+            memory["storage"] = "supabase"
+            return memory
         except Exception as error:
-            print(f"AI Trader Supabase load failed; using JSON fallback: {error}")
+            print(f"AI Trader Supabase load failed; returning safe empty Supabase memory: {error}")
+            return empty_memory(storage="supabase_error")
+
+    if AI_TRADER_STORAGE == "supabase" and not supabase_enabled():
+        # Storage was requested as Supabase but env/config is incomplete.
+        # Do not read stale JSON open trades in this mode.
+        print("AI Trader Supabase requested but not enabled. Check SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.")
+        return empty_memory(storage="supabase_not_configured")
 
     if not MEMORY_PATH.exists():
-        return {
-            "version": 2,
-            "storage": "json",
-            "createdAt": now_iso(),
-            "updatedAt": now_iso(),
-            "openTrades": [],
-            "closedTrades": [],
-            "decisionLog": [],
-            "virtualOpenTrades": [],
-            "virtualClosedTrades": [],
-        }
+        return empty_memory(storage="json")
 
     try:
         data = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
@@ -845,8 +914,9 @@ def load_memory() -> Dict[str, Any]:
     except Exception:
         data = {}
 
-    data.setdefault("version", 2)
+    data.setdefault("version", 3)
     data.setdefault("storage", "json")
+    data.setdefault("userKey", AI_TRADER_USER_KEY)
     data.setdefault("createdAt", now_iso())
     data.setdefault("updatedAt", now_iso())
     data.setdefault("openTrades", [])
@@ -859,37 +929,50 @@ def load_memory() -> Dict[str, Any]:
         if not isinstance(data.get(key), list):
             data[key] = []
 
+    data["openTrades"] = dedupe_open_trades(data.get("openTrades", []))
     return data
 
 
 def save_memory(memory: Dict[str, Any]) -> Dict[str, Any]:
-    MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
     memory["version"] = max(to_int(memory.get("version"), 3), 3)
     memory["updatedAt"] = now_iso()
     memory["userKey"] = AI_TRADER_USER_KEY
     memory["closedTrades"] = safe_list(memory.get("closedTrades"))[-MAX_CLOSED_TRADES:]
     memory["virtualClosedTrades"] = safe_list(memory.get("virtualClosedTrades"))[-MAX_CLOSED_TRADES:]
     memory["decisionLog"] = safe_list(memory.get("decisionLog"))[-MAX_DECISION_OBSERVATIONS:]
-    memory["openTrades"] = safe_list(memory.get("openTrades"))
+    memory["openTrades"] = dedupe_open_trades(memory.get("openTrades", []))
     memory["virtualOpenTrades"] = safe_list(memory.get("virtualOpenTrades"))[-250:]
-
-    # Always keep a local JSON emergency fallback, even when Supabase is active.
-    fallback_memory = {**memory, "storage": "json_fallback"}
-    tmp_path = MEMORY_PATH.with_suffix(MEMORY_PATH.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(fallback_memory, indent=2, sort_keys=True, default=str), encoding="utf-8")
-    tmp_path.replace(MEMORY_PATH)
 
     if supabase_enabled():
         try:
             save_memory_to_supabase(memory)
             memory["storage"] = "supabase"
+            # Supabase mode must not recreate ai_trader_memory.json. That old
+            # fallback file was the source of ghost/duplicate open trades.
+            try:
+                if MEMORY_PATH.exists():
+                    MEMORY_PATH.unlink()
+            except Exception:
+                pass
+            return memory
         except Exception as error:
-            print(f"AI Trader Supabase save failed; JSON fallback preserved: {error}")
-            memory["storage"] = "json_fallback"
-    else:
-        memory["storage"] = "json"
+            print(f"AI Trader Supabase save failed; NOT writing JSON fallback in Supabase mode: {error}")
+            memory["storage"] = "supabase_error"
+            return memory
 
+    if AI_TRADER_STORAGE == "supabase":
+        # Supabase was requested but not configured. Stay safe and do not write
+        # JSON fallback that can later resurrect open trades.
+        memory["storage"] = "supabase_not_configured"
+        return memory
+
+    MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    memory["storage"] = "json"
+    tmp_path = MEMORY_PATH.with_suffix(MEMORY_PATH.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(memory, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    tmp_path.replace(MEMORY_PATH)
     return memory
+
 
 
 def trade_bucket(symbol: str, timeframe: str, side: str, confidence: float, context: Optional[Dict[str, Any]] = None) -> str:
@@ -1108,87 +1191,41 @@ def maybe_open_virtual_learning_trade(memory: Dict[str, Any], decision: Dict[str
 
 def remember_ai_decision(decision: Dict[str, Any]) -> None:
     try:
-        memory = load_memory()
-        decision_log = safe_list(memory.get("decisionLog"))
+        with MEMORY_LOCK:
+            memory = load_memory()
+            decision_log = safe_list(memory.get("decisionLog"))
 
-        bucket = str(read_path(decision, "details.bucket", fallback=decision.get("bucket") or ""))
-        created_at = decision.get("createdAt") or now_iso()
-        compact = {
-            "id": f"DECISION-{normalize_symbol(decision.get('symbol'))}-{normalize_timeframe(decision.get('timeframe'))}-{created_at}",
-            "observationKey": decision_observation_key(decision),
-            "symbol": normalize_symbol(decision.get("symbol")),
-            "timeframe": normalize_timeframe(decision.get("timeframe")),
-            "decision": decision.get("decision"),
-            "rawDecision": decision.get("rawDecision") or decision.get("decision"),
-            "allowedToTrade": bool(decision.get("allowedToTrade")),
-            "confidence": to_float(decision.get("confidence"), 0.0),
-            "confidenceGrade": decision.get("confidenceGrade"),
-            "entry": decision.get("entry"),
-            "target": decision.get("target"),
-            "stop": decision.get("stop"),
-            "riskReward": decision.get("riskReward"),
-            "bucket": bucket,
-            "reason": decision.get("reason"),
-            "projectionEngineMode": read_path(decision, "details.projectionEngine.mode", "details.context.projectionEngineMode", fallback=None),
-            "aiPermission": read_path(decision, "details.projectionEngine.aiPermission", "details.context.aiPermission", fallback=None),
-            "createdAt": created_at,
-        }
+            bucket = str(read_path(decision, "details.bucket", fallback=decision.get("bucket") or ""))
+            created_at = decision.get("createdAt") or now_iso()
+            compact = {
+                "id": f"DECISION-{normalize_symbol(decision.get('symbol'))}-{normalize_timeframe(decision.get('timeframe'))}-{created_at}",
+                "observationKey": decision_observation_key(decision),
+                "symbol": normalize_symbol(decision.get("symbol")),
+                "timeframe": normalize_timeframe(decision.get("timeframe")),
+                "decision": decision.get("decision"),
+                "rawDecision": decision.get("rawDecision") or decision.get("decision"),
+                "allowedToTrade": bool(decision.get("allowedToTrade")),
+                "confidence": to_float(decision.get("confidence"), 0.0),
+                "confidenceGrade": decision.get("confidenceGrade"),
+                "entry": decision.get("entry"),
+                "target": decision.get("target"),
+                "stop": decision.get("stop"),
+                "riskReward": decision.get("riskReward"),
+                "bucket": bucket,
+                "reason": decision.get("reason"),
+                "projectionEngineMode": read_path(decision, "details.projectionEngine.mode", "details.context.projectionEngineMode", fallback=None),
+                "aiPermission": read_path(decision, "details.projectionEngine.aiPermission", "details.context.aiPermission", fallback=None),
+                "createdAt": created_at,
+            }
 
-        # Phase 6 fix:
-        # Every decision call counts as an observation. We no longer collapse repeat
-        # refreshes into one row, because that made the UI appear stuck at 0/1 samples.
-        decision_log.append(compact)
-        memory["decisionLog"] = decision_log[-MAX_DECISION_OBSERVATIONS:]
-        maybe_open_virtual_learning_trade(memory, decision)
-        save_memory(memory)
-    except Exception:
-        # Decision memory should never break the dashboard.
-        return
-
-
-        bucket = str(read_path(decision, "details.bucket", fallback=decision.get("bucket") or ""))
-        compact = {
-            "id": f"DECISION-{normalize_symbol(decision.get('symbol'))}-{normalize_timeframe(decision.get('timeframe'))}-{decision.get('createdAt')}",
-            "symbol": normalize_symbol(decision.get("symbol")),
-            "timeframe": normalize_timeframe(decision.get("timeframe")),
-            "decision": decision.get("decision"),
-            "rawDecision": decision.get("rawDecision"),
-            "allowedToTrade": bool(decision.get("allowedToTrade")),
-            "confidence": to_float(decision.get("confidence"), 0.0),
-            "confidenceGrade": decision.get("confidenceGrade"),
-            "entry": decision.get("entry"),
-            "target": decision.get("target"),
-            "stop": decision.get("stop"),
-            "riskReward": decision.get("riskReward"),
-            "bucket": bucket,
-            "reason": decision.get("reason"),
-            "createdAt": decision.get("createdAt") or now_iso(),
-        }
-
-        # Avoid repeated identical observations from the 15-second refresh loop.
-        last = decision_log[-1] if decision_log and isinstance(decision_log[-1], dict) else {}
-        duplicate_key = (
-            last.get("symbol") == compact["symbol"]
-            and last.get("timeframe") == compact["timeframe"]
-            and last.get("decision") == compact["decision"]
-            and last.get("rawDecision") == compact["rawDecision"]
-            and round(to_float(last.get("entry"), 0.0), 2) == round(to_float(compact["entry"], 0.0), 2)
-            and round(to_float(last.get("target"), 0.0), 2) == round(to_float(compact["target"], 0.0), 2)
-            and round(to_float(last.get("confidence"), 0.0), 1) == round(to_float(compact["confidence"], 0.0), 1)
-        )
-
-        if duplicate_key:
-            last["updatedAt"] = now_iso()
-            last["repeatCount"] = to_int(last.get("repeatCount"), 1) + 1
-            decision_log[-1] = last
-        else:
             decision_log.append(compact)
-
-        memory["decisionLog"] = decision_log[-MAX_CLOSED_TRADES:]
-        save_memory(memory)
-    except Exception:
-        # Decision memory should never break the dashboard.
+            memory["decisionLog"] = decision_log[-MAX_DECISION_OBSERVATIONS:]
+            maybe_open_virtual_learning_trade(memory, decision)
+            save_memory(memory)
+    except Exception as error:
+        print(f"AI Trader decision memory skipped: {error}")
         return
+
 
 
 def extract_directional_context(
@@ -2467,6 +2504,45 @@ def ai_trader_summary(symbol: Any = "", timeframe: Any = "") -> Dict[str, Any]:
         "memoryPath": str(MEMORY_PATH),
         "createdAt": now_iso(),
     }
+
+
+
+def clear_ai_trader_open_trades(symbol: Optional[Any] = None, timeframe: Optional[Any] = None) -> Dict[str, Any]:
+    """Clear open real + virtual trades while preserving closed history and decision memory."""
+    with MEMORY_LOCK:
+        memory = load_memory()
+        normalized_symbol = normalize_symbol(symbol) if symbol else ""
+        normalized_timeframe = normalize_timeframe(timeframe) if timeframe else ""
+
+        def keep_open(trade: Any) -> bool:
+            if not isinstance(trade, dict):
+                return False
+            if normalized_symbol and normalize_symbol(trade.get("symbol")) != normalized_symbol:
+                return True
+            if normalized_timeframe and normalize_timeframe(trade.get("timeframe")) != normalized_timeframe:
+                return True
+            return False
+
+        before_open = len(safe_list(memory.get("openTrades")))
+        before_virtual = len(safe_list(memory.get("virtualOpenTrades")))
+
+        memory["openTrades"] = [trade for trade in safe_list(memory.get("openTrades")) if keep_open(trade)]
+        memory["virtualOpenTrades"] = [trade for trade in safe_list(memory.get("virtualOpenTrades")) if keep_open(trade)]
+        save_memory(memory)
+
+        return {
+            "eventType": "AI_TRADER_CLEAR_OPEN",
+            "status": "Cleared",
+            "dashboardOnly": True,
+            "brokerConnected": False,
+            "symbol": normalized_symbol or "ALL",
+            "timeframe": normalized_timeframe or "ALL",
+            "clearedOpenCount": before_open - len(memory["openTrades"]),
+            "clearedVirtualOpenCount": before_virtual - len(memory["virtualOpenTrades"]),
+            "summary": ai_trader_summary(symbol=normalized_symbol, timeframe=normalized_timeframe),
+            "createdAt": now_iso(),
+        }
+
 
 
 def ai_trader_export() -> Dict[str, Any]:
