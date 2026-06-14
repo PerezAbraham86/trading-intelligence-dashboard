@@ -366,8 +366,13 @@ RECENT_CANDLES: List[Dict[str, Any]] = []
 CHART_OVERLAY_CACHE: Dict[str, Any] = {}
 CHART_OVERLAY_RAW_CACHE: Dict[str, Any] = {}
 CANDLE_RESPONSE_CACHE: Dict[str, Any] = {}
+MAX_CANDLE_RESPONSE_CACHE_ITEMS = int(os.getenv("MAX_CANDLE_RESPONSE_CACHE_ITEMS", "40"))
+MAX_CHART_OVERLAY_CACHE_ITEMS = int(os.getenv("MAX_CHART_OVERLAY_CACHE_ITEMS", "30"))
+MAX_CHART_OVERLAY_RAW_CACHE_ITEMS = int(os.getenv("MAX_CHART_OVERLAY_RAW_CACHE_ITEMS", "12"))
+MAX_TICKER_NEWS_CACHE_ITEMS = int(os.getenv("MAX_TICKER_NEWS_CACHE_ITEMS", "30"))
+MAX_OPTIONS_PRESSURE_CACHE_ITEMS = int(os.getenv("MAX_OPTIONS_PRESSURE_CACHE_ITEMS", "30"))
 CANDLE_CACHE_FILE = Path(os.getenv("CANDLE_CACHE_FILE", "/tmp/trading_dashboard_candle_cache.json"))
-CANDLE_SITE_CACHE_MAX_AGE_SECONDS = int(os.getenv("CANDLE_SITE_CACHE_MAX_AGE_SECONDS", "86400"))
+CANDLE_SITE_CACHE_MAX_AGE_SECONDS = int(os.getenv("CANDLE_SITE_CACHE_MAX_AGE_SECONDS", "21600"))
 
 MAX_RECENT_SIGNALS = 50
 MAX_RECENT_CANDLES = 5000
@@ -723,6 +728,43 @@ def alpaca_timeframe(timeframe: str) -> str:
 
 
 
+
+
+def _cache_created_epoch(value: Any) -> float:
+    try:
+        if not isinstance(value, dict):
+            return 0.0
+        created_at = str(value.get("createdAt") or value.get("updatedAt") or "")
+        if not created_at:
+            return 0.0
+        parsed = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except Exception:
+        return 0.0
+
+
+def trim_in_memory_cache(cache: Dict[str, Any], max_items: int, label: str = "cache") -> None:
+    """Keep Render memory stable by pruning oldest in-process cache entries."""
+    try:
+        safe_max = max(1, int(max_items or 1))
+    except Exception:
+        safe_max = 20
+
+    if len(cache) <= safe_max:
+        return
+
+    ordered_keys = sorted(
+        list(cache.keys()),
+        key=lambda key: _cache_created_epoch(cache.get(key)),
+    )
+    remove_count = max(0, len(cache) - safe_max)
+    for key in ordered_keys[:remove_count]:
+        cache.pop(key, None)
+
+    if remove_count > 0:
+        print(f"[Memory Guard] trimmed {remove_count} {label} entries; remaining={len(cache)}")
 
 def is_crypto_symbol(symbol: str) -> bool:
     return normalize_symbol(symbol) in {"BTCUSD", "ETHUSD"}
@@ -1451,6 +1493,7 @@ def load_persistent_candle_cache() -> None:
             data = json.load(handle)
         if isinstance(data, dict):
             CANDLE_RESPONSE_CACHE.update({str(key): value for key, value in data.items() if isinstance(value, dict)})
+            trim_in_memory_cache(CANDLE_RESPONSE_CACHE, MAX_CANDLE_RESPONSE_CACHE_ITEMS, "candle response cache")
             print(f"[Candle Cache] loaded {len(CANDLE_RESPONSE_CACHE)} site-level candle payloads")
     except Exception as error:
         print(f"[Candle Cache] load failed: {error}")
@@ -1462,6 +1505,7 @@ def save_persistent_candle_cache() -> None:
         return
     try:
         CANDLE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        trim_in_memory_cache(CANDLE_RESPONSE_CACHE, MAX_CANDLE_RESPONSE_CACHE_ITEMS, "candle response cache")
         with CANDLE_CACHE_FILE.open("w", encoding="utf-8") as handle:
             json.dump(CANDLE_RESPONSE_CACHE, handle)
     except Exception as error:
@@ -1534,6 +1578,7 @@ def candle_cache_set(route: str, symbol: str, timeframe: str, limit: int, payloa
     stored["cache"] = "stored"
     stored["siteCache"] = True
     CANDLE_RESPONSE_CACHE[key] = stored
+    trim_in_memory_cache(CANDLE_RESPONSE_CACHE, MAX_CANDLE_RESPONSE_CACHE_ITEMS, "candle response cache")
     save_persistent_candle_cache()
     return stored
 
@@ -5040,6 +5085,7 @@ def ticker_news_cache_set(symbol: str, limit: int, payload: Dict[str, Any]) -> D
     stored["createdAt"] = now_iso()
     stored["cache"] = "stored"
     TICKER_NEWS_CACHE[key] = stored
+    trim_in_memory_cache(TICKER_NEWS_CACHE, MAX_TICKER_NEWS_CACHE_ITEMS, "ticker news cache")
     return stored
 
 
@@ -5801,6 +5847,7 @@ def build_options_pressure_context(symbol: str, underlying_override: str = "") -
             "createdAt": now_iso(),
         }
         OPTIONS_PRESSURE_CACHE[cache_key] = payload
+        trim_in_memory_cache(OPTIONS_PRESSURE_CACHE, MAX_OPTIONS_PRESSURE_CACHE_ITEMS, "options pressure cache")
         return payload
 
     call_volume = sum(to_float(row.get("volume"), 0) for row in rows if row.get("type") == "call")
@@ -5878,6 +5925,7 @@ def build_options_pressure_context(symbol: str, underlying_override: str = "") -
     }
 
     OPTIONS_PRESSURE_CACHE[cache_key] = payload
+    trim_in_memory_cache(OPTIONS_PRESSURE_CACHE, MAX_OPTIONS_PRESSURE_CACHE_ITEMS, "options pressure cache")
     return payload
 
 
@@ -5994,6 +6042,7 @@ def get_or_build_raw_chart_overlays(
         }
 
         CHART_OVERLAY_RAW_CACHE[raw_key] = payload
+        trim_in_memory_cache(CHART_OVERLAY_RAW_CACHE, MAX_CHART_OVERLAY_RAW_CACHE_ITEMS, "raw chart overlay cache")
         return payload
     except Exception as error:
         print(f"[Chart Overlay Raw Cache] build failed: {error}")
@@ -6254,6 +6303,7 @@ def build_fast_chart_overlay_payload(
         }
 
         CHART_OVERLAY_CACHE[cache_key] = payload
+        trim_in_memory_cache(CHART_OVERLAY_CACHE, MAX_CHART_OVERLAY_CACHE_ITEMS, "chart overlay cache")
         return payload
     except Exception as error:
         print(f"[Chart Overlays] build failed: {error}")
