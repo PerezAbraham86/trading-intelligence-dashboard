@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 
 type AiTraderPanelProps = {
@@ -194,6 +194,24 @@ async function readApiError(response: Response) {
   } catch {
     return `${response.status}: ${text.slice(0, 500)}`
   }
+}
+
+function createRequestTimeout(timeoutMs = 12000) {
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs)
+
+  return {
+    signal: controller.signal,
+    clear: () => window.clearTimeout(timeoutId),
+  }
+}
+
+function formatRequestError(error: any, fallback: string) {
+  if (error?.name === 'AbortError') {
+    return `${fallback}: request timed out. Backend may be busy; try again after the current refresh finishes.`
+  }
+
+  return error instanceof Error ? error.message : fallback
 }
 
 function readNumberPath(source: any, paths: string[]) {
@@ -1134,6 +1152,15 @@ export default function AiTraderPanel({
   const [persistentLearningStats, setPersistentLearningStats] = useState<any>(() => normalizeAiDecisionStats({}))
   const [hydratedLearningStats, setHydratedLearningStats] = useState(false)
 
+  const decisionRequestInFlightRef = useRef(false)
+  const summaryRequestInFlightRef = useRef(false)
+  const evaluateRequestInFlightRef = useRef(false)
+  const openRequestInFlightRef = useRef(false)
+  const lastDecisionRequestAtRef = useRef(0)
+  const lastSummaryRequestAtRef = useRef(0)
+  const lastEvaluateRequestAtRef = useRef(0)
+  const lastOpenRequestAtRef = useRef(0)
+
   const openStorageKey = useMemo(() => {
     return `marketbos:ai-trader:open:${String(symbol ?? 'ALL').toUpperCase()}:${String(timeframe ?? 'ALL')}`
   }, [symbol, timeframe])
@@ -1322,7 +1349,7 @@ export default function AiTraderPanel({
     forgetOpenTrades(incomingTrades)
   }, [forgetOpenTrades])
 
-  const fetchDecision = useCallback(async () => {
+  const fetchDecision = useCallback(async (force = false) => {
     if (!apiBaseUrl) {
       setErrorText('AI Trader is waiting for apiBaseUrl.')
       return
@@ -1332,6 +1359,21 @@ export default function AiTraderPanel({
       setErrorText('AI Trader is waiting for live price. Check mainChartCandles, activePrice, or latest signal price.')
       return
     }
+
+    const now = Date.now()
+
+    if (decisionRequestInFlightRef.current) {
+      if (force) setActionStatus('AI decision request already running...')
+      return
+    }
+
+    if (!force && now - lastDecisionRequestAtRef.current < 8000) {
+      return
+    }
+
+    decisionRequestInFlightRef.current = true
+    lastDecisionRequestAtRef.current = now
+    const timeout = createRequestTimeout(14000)
 
     try {
       setIsLoading(true)
@@ -1343,6 +1385,7 @@ export default function AiTraderPanel({
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(safePayload),
+        signal: timeout.signal,
       })
 
       if (!response.ok) {
@@ -1356,14 +1399,25 @@ export default function AiTraderPanel({
         return addLiveDecisionObservation(withBackendStats, json, symbol, timeframe, candles)
       })
     } catch (error) {
-      setErrorText(error instanceof Error ? error.message : 'AI trader decision failed')
+      setErrorText(formatRequestError(error, 'AI trader decision failed'))
     } finally {
+      timeout.clear()
+      decisionRequestInFlightRef.current = false
       setIsLoading(false)
     }
   }, [apiBaseUrl, liveActivePrice, safePayload, symbol, timeframe, candles])
 
-  const fetchSummary = useCallback(async () => {
+  const fetchSummary = useCallback(async (force = false) => {
     if (!apiBaseUrl) return
+
+    const now = Date.now()
+
+    if (summaryRequestInFlightRef.current) return
+    if (!force && now - lastSummaryRequestAtRef.current < 12000) return
+
+    summaryRequestInFlightRef.current = true
+    lastSummaryRequestAtRef.current = now
+    const timeout = createRequestTimeout(12000)
 
     try {
       const params = new URLSearchParams({
@@ -1373,6 +1427,7 @@ export default function AiTraderPanel({
 
       const response = await fetch(`${apiBaseUrl}/api/ai-trader/summary?${params.toString()}`, {
         cache: 'no-store',
+        signal: timeout.signal,
       })
 
       if (!response.ok) return
@@ -1392,14 +1447,26 @@ export default function AiTraderPanel({
       saveClosedTrades(backendClosedTrades)
     } catch {
       // Keep the panel usable even if summary temporarily fails.
+    } finally {
+      timeout.clear()
+      summaryRequestInFlightRef.current = false
     }
   }, [apiBaseUrl, saveClosedTrades, saveOpenTrades, symbol, timeframe])
 
-  const evaluateOpenTrades = useCallback(async () => {
+  const evaluateOpenTrades = useCallback(async (force = false) => {
     if (!apiBaseUrl) return
 
+    const now = Date.now()
+
+    if (evaluateRequestInFlightRef.current) return
+    if (!force && now - lastEvaluateRequestAtRef.current < 15000) return
+
+    evaluateRequestInFlightRef.current = true
+    lastEvaluateRequestAtRef.current = now
+    const timeout = createRequestTimeout(14000)
+
     try {
-      setActionStatus('Evaluating open AI trades...')
+      setActionStatus(force ? 'Evaluating open AI trades...' : '')
 
       const response = await fetch(`${apiBaseUrl}/api/ai-trader/evaluate`, {
         method: 'POST',
@@ -1415,6 +1482,7 @@ export default function AiTraderPanel({
           decision,
           candles: Array.isArray(candles) ? candles.slice(-120) : [],
         })),
+        signal: timeout.signal,
       })
 
       if (!response.ok) {
@@ -1441,17 +1509,55 @@ export default function AiTraderPanel({
       ]
       saveClosedTrades(backendClosedTrades)
 
-      setActionStatus(`Evaluated • Closed ${json?.closedCount ?? backendClosedTrades.length ?? 0} trade(s)`)
+      if (force || backendClosedTrades.length > 0) {
+        setActionStatus(`Evaluated • Closed ${json?.closedCount ?? backendClosedTrades.length ?? 0} trade(s)`)
+      }
     } catch (error) {
-      setActionStatus(error instanceof Error ? error.message : 'Evaluate failed')
+      setActionStatus(formatRequestError(error, 'Evaluate failed'))
+    } finally {
+      timeout.clear()
+      evaluateRequestInFlightRef.current = false
     }
   }, [apiBaseUrl, candles, decision, liveActivePrice, saveClosedTrades, saveOpenTrades, symbol, timeframe])
 
-  const openDashboardTrade = useCallback(async () => {
+  const openDashboardTrade = useCallback(async (source: 'manual' | 'auto' = 'manual') => {
     if (!apiBaseUrl) return
 
+    const now = Date.now()
+
+    if (openRequestInFlightRef.current) {
+      setActionStatus('Open trade request already running...')
+      return
+    }
+
+    if (now - lastOpenRequestAtRef.current < 20000) {
+      setActionStatus('Open trade cooldown active. Waiting before another open attempt.')
+      return
+    }
+
+    const existingOpenTrades = mergeTrades(localOpenTrades, Array.isArray(summary?.openTrades) ? summary?.openTrades : [])
+      .filter((trade: any) => {
+        const tradeSymbol = String(trade?.symbol ?? symbol).toUpperCase()
+        const tradeTimeframe = String(trade?.timeframe ?? timeframe)
+        return tradeSymbol === String(symbol).toUpperCase() && tradeTimeframe === String(timeframe)
+      })
+
+    if (existingOpenTrades.length > 0) {
+      setActionStatus('Open blocked: one AI paper trade is already active for this symbol/timeframe.')
+      return
+    }
+
+    if (decisionRequestInFlightRef.current || evaluateRequestInFlightRef.current) {
+      setActionStatus('Waiting for current AI refresh/evaluation to finish before opening trade.')
+      return
+    }
+
+    openRequestInFlightRef.current = true
+    lastOpenRequestAtRef.current = now
+    const timeout = createRequestTimeout(16000)
+
     try {
-      setActionStatus('Opening dashboard-only AI trade...')
+      setActionStatus(source === 'auto' ? 'Auto Paper opening dashboard-only AI trade...' : 'Opening dashboard-only AI trade...')
 
       const response = await fetch(`${apiBaseUrl}/api/ai-trader/open`, {
         method: 'POST',
@@ -1459,6 +1565,7 @@ export default function AiTraderPanel({
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(safePayload),
+        signal: timeout.signal,
       })
 
       if (!response.ok) {
@@ -1483,17 +1590,17 @@ export default function AiTraderPanel({
       })
       setActionStatus(json?.opened ? 'Dashboard AI trade opened' : json?.message ?? 'AI trade not opened')
     } catch (error) {
-      setActionStatus(error instanceof Error ? error.message : 'Open failed')
+      setActionStatus(formatRequestError(error, 'Open failed'))
+    } finally {
+      timeout.clear()
+      openRequestInFlightRef.current = false
     }
-  }, [apiBaseUrl, safePayload, decision, summary, symbol, timeframe, candles, saveOpenTrades])
+  }, [apiBaseUrl, safePayload, decision, summary, symbol, timeframe, candles, saveOpenTrades, localOpenTrades])
 
   useEffect(() => {
-    fetchDecision()
-  }, [fetchDecision])
-
-  useEffect(() => {
-    fetchSummary()
-  }, [fetchSummary])
+    fetchDecision(true)
+    fetchSummary(true)
+  }, [apiBaseUrl, symbol, timeframe])
 
   useEffect(() => {
     if (!autoPaperMode) return
@@ -1514,15 +1621,15 @@ export default function AiTraderPanel({
     if (key === lastAutoOpenKey) return
 
     setLastAutoOpenKey(key)
-    openDashboardTrade()
+    openDashboardTrade('auto')
   }, [autoPaperMode, decision, lastAutoOpenKey, openDashboardTrade, symbol, timeframe])
 
   useEffect(() => {
     const id = window.setInterval(() => {
-      fetchDecision()
-      fetchSummary()
-      evaluateOpenTrades()
-    }, 15000)
+      fetchDecision(false)
+      fetchSummary(false)
+      evaluateOpenTrades(false)
+    }, 20000)
 
     return () => window.clearInterval(id)
   }, [fetchDecision, fetchSummary, evaluateOpenTrades])
@@ -1678,7 +1785,7 @@ export default function AiTraderPanel({
 
     saveClosedTrades(tradesToClose)
     forgetOpenTrades(tradesToClose)
-    evaluateOpenTrades()
+    evaluateOpenTrades(true)
   }, [settlementAutoEvaluateKey, saveClosedTrades, forgetOpenTrades, evaluateOpenTrades, liveOpenTrades, liveActivePrice, candles])
 
   const displayOpenCount = liveOpenTrades.length
@@ -1754,21 +1861,21 @@ export default function AiTraderPanel({
 
           <button
             type="button"
-            onClick={fetchDecision}
+            onClick={() => fetchDecision(true)}
             className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 text-xs font-bold text-gray-200 hover:border-purple-300"
           >
             Refresh AI
           </button>
           <button
             type="button"
-            onClick={evaluateOpenTrades}
+            onClick={() => evaluateOpenTrades(true)}
             className="rounded-lg border border-blue-400/30 bg-blue-400/10 px-3 py-2 text-xs font-bold text-blue-200 hover:bg-blue-400/20"
           >
             Evaluate Open
           </button>
           <button
             type="button"
-            onClick={openDashboardTrade}
+            onClick={() => openDashboardTrade('manual')}
             disabled={!decision?.allowedToTrade}
             className={`rounded-lg px-3 py-2 text-xs font-black ${
               decision?.allowedToTrade
