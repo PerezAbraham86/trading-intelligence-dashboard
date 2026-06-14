@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,6 +24,8 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
 AI_TRADER_STORAGE = os.getenv("AI_TRADER_STORAGE", "json").lower().strip()
 AI_TRADER_USER_KEY = os.getenv("AI_TRADER_USER_KEY", "default").strip() or "default"
+AI_TRADER_ALLOW_MULTIPLE_OPEN_TRADES = os.getenv("AI_TRADER_ALLOW_MULTIPLE_OPEN_TRADES", "false").lower().strip() in {"1", "true", "yes", "on"}
+MEMORY_LOCK = threading.RLock()
 
 
 
@@ -1854,88 +1857,89 @@ def get_ai_trader_decision(
 
 
 def open_ai_trade(**payload: Any) -> Dict[str, Any]:
-    decision = get_ai_trader_decision(**payload)
+    with MEMORY_LOCK:
+        decision = get_ai_trader_decision(**payload)
 
-    if not decision.get("allowedToTrade"):
-        return {
-            **decision,
-            "eventType": "AI_TRADER_OPEN",
-            "status": "Rejected",
-            "opened": False,
-            "message": "AI trade was not opened because allowedToTrade is false.",
-        }
+        if not decision.get("allowedToTrade"):
+            return {
+                **decision,
+                "eventType": "AI_TRADER_OPEN",
+                "status": "Rejected",
+                "opened": False,
+                "message": "AI trade was not opened because allowedToTrade is false.",
+            }
 
-    memory = load_memory()
-    open_trades = safe_list(memory.get("openTrades"))
-    symbol = normalize_symbol(decision.get("symbol"))
-    timeframe = normalize_timeframe(decision.get("timeframe"))
-    side = normalize_side(decision.get("rawDecision") or decision.get("decision"))
-    entry_time = payload.get("entryTime") or decision.get("createdAt") or now_iso()
+        memory = load_memory()
+        open_trades = safe_list(memory.get("openTrades"))
+        symbol = normalize_symbol(decision.get("symbol"))
+        timeframe = normalize_timeframe(decision.get("timeframe"))
+        side = normalize_side(decision.get("rawDecision") or decision.get("decision"))
+        entry_time = payload.get("entryTime") or decision.get("createdAt") or now_iso()
 
-    existing = [
-        trade for trade in open_trades
-        if isinstance(trade, dict)
-        and normalize_symbol(trade.get("symbol")) == symbol
-        and normalize_timeframe(trade.get("timeframe")) == timeframe
-        and normalize_side(trade.get("side")) == side
-    ]
+        existing = [
+            trade for trade in open_trades
+            if isinstance(trade, dict)
+            and normalize_symbol(trade.get("symbol")) == symbol
+            and normalize_timeframe(trade.get("timeframe")) == timeframe
+            and (not AI_TRADER_ALLOW_MULTIPLE_OPEN_TRADES or normalize_side(trade.get("side")) == side)
+        ]
 
-    if existing:
-        return {
-            "eventType": "AI_TRADER_OPEN",
-            "status": "AlreadyOpen",
-            "opened": False,
+        if existing:
+            return {
+                "eventType": "AI_TRADER_OPEN",
+                "status": "AlreadyOpen",
+                "opened": False,
+                "dashboardOnly": True,
+                "brokerConnected": False,
+                "trade": existing[-1],
+                "decision": decision,
+                "createdAt": now_iso(),
+            }
+
+        trade = {
+            "id": build_trade_id(symbol, timeframe, side, entry_time),
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "side": side,
+            "entryTime": entry_time,
+            "entry": decision.get("entry"),
+            "target": decision.get("target"),
+            "stop": decision.get("stop"),
+            "riskReward": decision.get("riskReward"),
+            "confidence": decision.get("confidence"),
+            "confidenceGrade": decision.get("confidenceGrade"),
+            "currentPrice": decision.get("currentPrice"),
+            "currentPnl": decision.get("currentPnl"),
+            "maxPnl": decision.get("maxPnl"),
+            "riskPnl": decision.get("riskPnl"),
+            "bucket": read_path(decision, "details.bucket", fallback=""),
+            "reason": decision.get("reason"),
             "dashboardOnly": True,
             "brokerConnected": False,
-            "trade": existing[-1],
-            "decision": decision,
+            "status": "OPEN",
             "createdAt": now_iso(),
+            "updatedAt": now_iso(),
+            "sourceSnapshot": {
+                "decision": decision,
+                "payloadContext": safe_dict(payload.get("context")),
+            },
         }
 
-    trade = {
-        "id": build_trade_id(symbol, timeframe, side, entry_time),
-        "symbol": symbol,
-        "timeframe": timeframe,
-        "side": side,
-        "entryTime": entry_time,
-        "entry": decision.get("entry"),
-        "target": decision.get("target"),
-        "stop": decision.get("stop"),
-        "riskReward": decision.get("riskReward"),
-        "confidence": decision.get("confidence"),
-        "confidenceGrade": decision.get("confidenceGrade"),
-        "currentPrice": decision.get("currentPrice"),
-        "currentPnl": decision.get("currentPnl"),
-        "maxPnl": decision.get("maxPnl"),
-        "riskPnl": decision.get("riskPnl"),
-        "bucket": read_path(decision, "details.bucket", fallback=""),
-        "reason": decision.get("reason"),
-        "dashboardOnly": True,
-        "brokerConnected": False,
-        "status": "OPEN",
-        "createdAt": now_iso(),
-        "updatedAt": now_iso(),
-        "sourceSnapshot": {
+        open_trades.append(trade)
+        memory["openTrades"] = open_trades
+        save_memory(memory)
+
+        return {
+            "eventType": "AI_TRADER_OPEN",
+            "status": "Open",
+            "opened": True,
+            "dashboardOnly": True,
+            "brokerConnected": False,
+            "trade": trade,
             "decision": decision,
-            "payloadContext": safe_dict(payload.get("context")),
-        },
-    }
-
-    open_trades.append(trade)
-    memory["openTrades"] = open_trades
-    save_memory(memory)
-
-    return {
-        "eventType": "AI_TRADER_OPEN",
-        "status": "Open",
-        "opened": True,
-        "dashboardOnly": True,
-        "brokerConnected": False,
-        "trade": trade,
-        "decision": decision,
-        "summary": ai_trader_summary(symbol=symbol, timeframe=timeframe),
-        "createdAt": now_iso(),
-    }
+            "summary": ai_trader_summary(symbol=symbol, timeframe=timeframe),
+            "createdAt": now_iso(),
+        }
 
 
 def close_ai_trade(
@@ -1950,88 +1954,89 @@ def close_ai_trade(
     currentPrice: Any = None,
     **_: Any,
 ) -> Dict[str, Any]:
-    memory = load_memory()
-    symbol = normalize_symbol(symbol)
-    timeframe = normalize_timeframe(timeframe)
-    close_side = normalize_side(side)
-    price = to_float(exitPrice, 0.0) or to_float(currentPrice, 0.0)
+    with MEMORY_LOCK:
+        memory = load_memory()
+        symbol = normalize_symbol(symbol)
+        timeframe = normalize_timeframe(timeframe)
+        close_side = normalize_side(side)
+        price = to_float(exitPrice, 0.0) or to_float(currentPrice, 0.0)
 
-    if price <= 0:
-        return {
-            "eventType": "AI_TRADER_CLOSE",
-            "status": "Rejected",
-            "closed": False,
-            "message": "exitPrice/currentPrice is required to close an AI dashboard trade.",
-            "createdAt": now_iso(),
-        }
+        if price <= 0:
+            return {
+                "eventType": "AI_TRADER_CLOSE",
+                "status": "Rejected",
+                "closed": False,
+                "message": "exitPrice/currentPrice is required to close an AI dashboard trade.",
+                "createdAt": now_iso(),
+            }
 
-    open_trades = safe_list(memory.get("openTrades"))
-    match_index = -1
+        open_trades = safe_list(memory.get("openTrades"))
+        match_index = -1
 
-    for index, trade in enumerate(open_trades):
-        if not isinstance(trade, dict):
-            continue
+        for index, trade in enumerate(open_trades):
+            if not isinstance(trade, dict):
+                continue
 
-        if tradeId and trade.get("id") == tradeId:
+            if tradeId and trade.get("id") == tradeId:
+                match_index = index
+                break
+
+            if tradeId:
+                continue
+
+            if normalize_symbol(trade.get("symbol")) != symbol:
+                continue
+            if normalize_timeframe(trade.get("timeframe")) != timeframe:
+                continue
+            if close_side != "HOLD" and normalize_side(trade.get("side")) != close_side:
+                continue
+
             match_index = index
-            break
 
-        if tradeId:
-            continue
+        if match_index < 0:
+            return {
+                "eventType": "AI_TRADER_CLOSE",
+                "status": "NotFound",
+                "closed": False,
+                "message": "No matching open AI dashboard trade found.",
+                "createdAt": now_iso(),
+            }
 
-        if normalize_symbol(trade.get("symbol")) != symbol:
-            continue
-        if normalize_timeframe(trade.get("timeframe")) != timeframe:
-            continue
-        if close_side != "HOLD" and normalize_side(trade.get("side")) != close_side:
-            continue
+        trade = dict(open_trades.pop(match_index))
+        trade_side = normalize_side(trade.get("side"))
+        entry = to_float(trade.get("entry"), 0.0)
+        target = to_float(trade.get("target"), 0.0)
+        stop = to_float(trade.get("stop"), 0.0)
+        pnl = signed_move(trade_side, entry, price) * point_value(symbol) if entry > 0 else 0.0
+        risk_points = abs(signed_move(trade_side, entry, stop))
+        r_multiple = signed_move(trade_side, entry, price) / risk_points if risk_points > 0 else 0.0
 
-        match_index = index
+        trade.update({
+            "status": "CLOSED",
+            "exitTime": exitTime or now_iso(),
+            "exit": price,
+            "exitPrice": price,
+            "exitReason": exitReason or "manual_close",
+            "pnl": round(pnl, 4),
+            "rMultiple": round(r_multiple, 4),
+            "result": "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN"),
+            "updatedAt": now_iso(),
+        })
 
-    if match_index < 0:
+        memory["openTrades"] = open_trades
+        memory["closedTrades"] = safe_list(memory.get("closedTrades")) + [trade]
+        save_memory(memory)
+
         return {
             "eventType": "AI_TRADER_CLOSE",
-            "status": "NotFound",
-            "closed": False,
-            "message": "No matching open AI dashboard trade found.",
+            "status": "Closed",
+            "closed": True,
+            "dashboardOnly": True,
+            "brokerConnected": False,
+            "trade": trade,
+            "summary": ai_trader_summary(symbol=symbol, timeframe=timeframe),
             "createdAt": now_iso(),
         }
-
-    trade = dict(open_trades.pop(match_index))
-    trade_side = normalize_side(trade.get("side"))
-    entry = to_float(trade.get("entry"), 0.0)
-    target = to_float(trade.get("target"), 0.0)
-    stop = to_float(trade.get("stop"), 0.0)
-    pnl = signed_move(trade_side, entry, price) * point_value(symbol) if entry > 0 else 0.0
-    risk_points = abs(signed_move(trade_side, entry, stop))
-    r_multiple = signed_move(trade_side, entry, price) / risk_points if risk_points > 0 else 0.0
-
-    trade.update({
-        "status": "CLOSED",
-        "exitTime": exitTime or now_iso(),
-        "exit": price,
-        "exitPrice": price,
-        "exitReason": exitReason or "manual_close",
-        "pnl": round(pnl, 4),
-        "rMultiple": round(r_multiple, 4),
-        "result": "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN"),
-        "updatedAt": now_iso(),
-    })
-
-    memory["openTrades"] = open_trades
-    memory["closedTrades"] = safe_list(memory.get("closedTrades")) + [trade]
-    save_memory(memory)
-
-    return {
-        "eventType": "AI_TRADER_CLOSE",
-        "status": "Closed",
-        "closed": True,
-        "dashboardOnly": True,
-        "brokerConnected": False,
-        "trade": trade,
-        "summary": ai_trader_summary(symbol=symbol, timeframe=timeframe),
-        "createdAt": now_iso(),
-    }
 
 
 def candle_high_low_close(candle: Any) -> Tuple[float, float, float]:
@@ -2153,49 +2158,170 @@ def evaluate_ai_trades(
     candles: Optional[List[Any]] = None,
     **_: Any,
 ) -> Dict[str, Any]:
-    memory = load_memory()
-    symbol = normalize_symbol(symbol)
-    timeframe = normalize_timeframe(timeframe)
-    current = to_float(currentPrice, 0.0)
-    candles = safe_list(candles)
+    with MEMORY_LOCK:
+        memory = load_memory()
+        symbol = normalize_symbol(symbol)
+        timeframe = normalize_timeframe(timeframe)
+        current = to_float(currentPrice, 0.0)
+        candles = safe_list(candles)
 
-    latest_high = latest_low = latest_close = current
+        latest_high = latest_low = latest_close = current
 
-    if candles:
-        high, low, close = candle_high_low_close(candles[-1])
-        latest_high = high or current
-        latest_low = low or current
-        latest_close = close or current
+        if candles:
+            high, low, close = candle_high_low_close(candles[-1])
+            latest_high = high or current
+            latest_low = low or current
+            latest_close = close or current
 
-    if current <= 0:
-        current = latest_close
+        if current <= 0:
+            current = latest_close
 
-    # Settlement must respect the live chart/quote price, even when the last
-    # candle high/low is stale or has not merged the newest tick yet.
-    if current > 0:
-        latest_high = max(latest_high, current)
-        latest_low = min(latest_low, current)
-        latest_close = current
+        # Settlement must respect the live chart/quote price, even when the last
+        # candle high/low is stale or has not merged the newest tick yet.
+        if current > 0:
+            latest_high = max(latest_high, current)
+            latest_low = min(latest_low, current)
+            latest_close = current
 
-    def evaluate_trade_list(trades: List[Any], virtual: bool = False) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        closed_rows: List[Dict[str, Any]] = []
-        still_rows: List[Dict[str, Any]] = []
+        def evaluate_trade_list(trades: List[Any], virtual: bool = False) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+            closed_rows: List[Dict[str, Any]] = []
+            still_rows: List[Dict[str, Any]] = []
 
-        for trade in trades:
+            for trade in trades:
+                if not isinstance(trade, dict):
+                    continue
+
+                if normalize_symbol(trade.get("symbol")) != symbol or normalize_timeframe(trade.get("timeframe")) != timeframe:
+                    still_rows.append(trade)
+                    continue
+
+                side = normalize_side(trade.get("side"))
+                target = to_float(trade.get("target"), 0.0)
+                stop = to_float(trade.get("stop"), 0.0)
+                entry = to_float(trade.get("entry"), 0.0)
+                exit_price = 0.0
+                exit_reason = ""
+                bars_open = to_int(trade.get("barsOpen"), 0) + 1
+
+                if side == "BUY":
+                    if target > 0 and latest_high >= target:
+                        exit_price = target
+                        exit_reason = "target_hit"
+                    elif stop > 0 and latest_low <= stop:
+                        exit_price = stop
+                        exit_reason = "stop_hit"
+                elif side == "SELL":
+                    if target > 0 and latest_low <= target:
+                        exit_price = target
+                        exit_reason = "target_hit"
+                    elif stop > 0 and latest_high >= stop:
+                        exit_price = stop
+                        exit_reason = "stop_hit"
+
+                if virtual and exit_price <= 0 and bars_open >= VIRTUAL_TRADE_MAX_BARS and current > 0:
+                    exit_price = current
+                    exit_reason = "virtual_timeout"
+
+                if exit_price > 0:
+                    pnl = signed_move(side, entry, exit_price) * point_value(symbol) if entry > 0 else 0.0
+                    risk_points = abs(signed_move(side, entry, stop))
+                    r_multiple = signed_move(side, entry, exit_price) / risk_points if risk_points > 0 else 0.0
+                    trade.update({
+                        "status": "VIRTUAL_CLOSED" if virtual else "CLOSED",
+                        "exit": exit_price,
+                        "exitPrice": exit_price,
+                        "exitReason": exit_reason,
+                        "exitTime": now_iso(),
+                        "pnl": round(pnl, 4),
+                        "rMultiple": round(r_multiple, 4),
+                        "result": "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN"),
+                        "barsOpen": bars_open,
+                        "updatedAt": now_iso(),
+                        "virtualLearningOnly": bool(virtual),
+                    })
+                    closed_rows.append(trade)
+                else:
+                    trade["barsOpen"] = bars_open
+                    trade["currentPrice"] = current
+                    trade["currentPnl"] = round(signed_move(side, entry, current) * point_value(symbol), 4) if entry > 0 and current > 0 else 0.0
+                    trade["updatedAt"] = now_iso()
+                    still_rows.append(trade)
+
+            return closed_rows, still_rows
+
+        closed, still_open = evaluate_trade_list(safe_list(memory.get("openTrades")), virtual=False)
+        virtual_closed, virtual_still_open = evaluate_trade_list(safe_list(memory.get("virtualOpenTrades")), virtual=True)
+
+        memory["openTrades"] = still_open
+        memory["closedTrades"] = safe_list(memory.get("closedTrades")) + closed
+        memory["virtualOpenTrades"] = virtual_still_open
+        memory["virtualClosedTrades"] = safe_list(memory.get("virtualClosedTrades")) + virtual_closed
+        save_memory(memory)
+
+        return {
+            "eventType": "AI_TRADER_EVALUATE",
+            "status": "Evaluated",
+            "dashboardOnly": True,
+            "brokerConnected": False,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "closedCount": len(closed),
+            "virtualClosedCount": len(virtual_closed),
+            "openCount": len(still_open),
+            "virtualOpenCount": len(virtual_still_open),
+            "closedTrades": closed,
+            "virtualClosedTrades": virtual_closed,
+            "openTrades": [
+                trade for trade in still_open
+                if isinstance(trade, dict)
+                and normalize_symbol(trade.get("symbol")) == symbol
+                and normalize_timeframe(trade.get("timeframe")) == timeframe
+            ],
+            "virtualOpenTrades": [
+                trade for trade in virtual_still_open
+                if isinstance(trade, dict)
+                and normalize_symbol(trade.get("symbol")) == symbol
+                and normalize_timeframe(trade.get("timeframe")) == timeframe
+            ],
+            "summary": ai_trader_summary(symbol=symbol, timeframe=timeframe),
+            "createdAt": now_iso(),
+        }
+
+
+        latest_high = latest_low = latest_close = current
+
+        if candles:
+            high, low, close = candle_high_low_close(candles[-1])
+            latest_high = high or current
+            latest_low = low or current
+            latest_close = close or current
+
+        if current <= 0:
+            current = latest_close
+
+        # Settlement must respect the live chart/quote price, even when the last
+        # candle high/low is stale or has not merged the newest tick yet.
+        if current > 0:
+            latest_high = max(latest_high, current)
+            latest_low = min(latest_low, current)
+            latest_close = current
+
+        closed: List[Dict[str, Any]] = []
+        still_open: List[Dict[str, Any]] = []
+
+        for trade in safe_list(memory.get("openTrades")):
             if not isinstance(trade, dict):
                 continue
 
             if normalize_symbol(trade.get("symbol")) != symbol or normalize_timeframe(trade.get("timeframe")) != timeframe:
-                still_rows.append(trade)
+                still_open.append(trade)
                 continue
 
             side = normalize_side(trade.get("side"))
             target = to_float(trade.get("target"), 0.0)
             stop = to_float(trade.get("stop"), 0.0)
-            entry = to_float(trade.get("entry"), 0.0)
             exit_price = 0.0
             exit_reason = ""
-            bars_open = to_int(trade.get("barsOpen"), 0) + 1
 
             if side == "BUY":
                 if target > 0 and latest_high >= target:
@@ -2212,16 +2338,13 @@ def evaluate_ai_trades(
                     exit_price = stop
                     exit_reason = "stop_hit"
 
-            if virtual and exit_price <= 0 and bars_open >= VIRTUAL_TRADE_MAX_BARS and current > 0:
-                exit_price = current
-                exit_reason = "virtual_timeout"
-
             if exit_price > 0:
+                entry = to_float(trade.get("entry"), 0.0)
                 pnl = signed_move(side, entry, exit_price) * point_value(symbol) if entry > 0 else 0.0
                 risk_points = abs(signed_move(side, entry, stop))
                 r_multiple = signed_move(side, entry, exit_price) / risk_points if risk_points > 0 else 0.0
                 trade.update({
-                    "status": "VIRTUAL_CLOSED" if virtual else "CLOSED",
+                    "status": "CLOSED",
                     "exit": exit_price,
                     "exitPrice": exit_price,
                     "exitReason": exit_reason,
@@ -2229,156 +2352,39 @@ def evaluate_ai_trades(
                     "pnl": round(pnl, 4),
                     "rMultiple": round(r_multiple, 4),
                     "result": "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN"),
-                    "barsOpen": bars_open,
                     "updatedAt": now_iso(),
-                    "virtualLearningOnly": bool(virtual),
                 })
-                closed_rows.append(trade)
+                closed.append(trade)
             else:
-                trade["barsOpen"] = bars_open
+                entry = to_float(trade.get("entry"), 0.0)
                 trade["currentPrice"] = current
                 trade["currentPnl"] = round(signed_move(side, entry, current) * point_value(symbol), 4) if entry > 0 and current > 0 else 0.0
                 trade["updatedAt"] = now_iso()
-                still_rows.append(trade)
+                still_open.append(trade)
 
-        return closed_rows, still_rows
+        memory["openTrades"] = still_open
+        memory["closedTrades"] = safe_list(memory.get("closedTrades")) + closed
+        save_memory(memory)
 
-    closed, still_open = evaluate_trade_list(safe_list(memory.get("openTrades")), virtual=False)
-    virtual_closed, virtual_still_open = evaluate_trade_list(safe_list(memory.get("virtualOpenTrades")), virtual=True)
-
-    memory["openTrades"] = still_open
-    memory["closedTrades"] = safe_list(memory.get("closedTrades")) + closed
-    memory["virtualOpenTrades"] = virtual_still_open
-    memory["virtualClosedTrades"] = safe_list(memory.get("virtualClosedTrades")) + virtual_closed
-    save_memory(memory)
-
-    return {
-        "eventType": "AI_TRADER_EVALUATE",
-        "status": "Evaluated",
-        "dashboardOnly": True,
-        "brokerConnected": False,
-        "symbol": symbol,
-        "timeframe": timeframe,
-        "closedCount": len(closed),
-        "virtualClosedCount": len(virtual_closed),
-        "openCount": len(still_open),
-        "virtualOpenCount": len(virtual_still_open),
-        "closedTrades": closed,
-        "virtualClosedTrades": virtual_closed,
-        "openTrades": [
-            trade for trade in still_open
-            if isinstance(trade, dict)
-            and normalize_symbol(trade.get("symbol")) == symbol
-            and normalize_timeframe(trade.get("timeframe")) == timeframe
-        ],
-        "virtualOpenTrades": [
-            trade for trade in virtual_still_open
-            if isinstance(trade, dict)
-            and normalize_symbol(trade.get("symbol")) == symbol
-            and normalize_timeframe(trade.get("timeframe")) == timeframe
-        ],
-        "summary": ai_trader_summary(symbol=symbol, timeframe=timeframe),
-        "createdAt": now_iso(),
-    }
-
-
-    latest_high = latest_low = latest_close = current
-
-    if candles:
-        high, low, close = candle_high_low_close(candles[-1])
-        latest_high = high or current
-        latest_low = low or current
-        latest_close = close or current
-
-    if current <= 0:
-        current = latest_close
-
-    # Settlement must respect the live chart/quote price, even when the last
-    # candle high/low is stale or has not merged the newest tick yet.
-    if current > 0:
-        latest_high = max(latest_high, current)
-        latest_low = min(latest_low, current)
-        latest_close = current
-
-    closed: List[Dict[str, Any]] = []
-    still_open: List[Dict[str, Any]] = []
-
-    for trade in safe_list(memory.get("openTrades")):
-        if not isinstance(trade, dict):
-            continue
-
-        if normalize_symbol(trade.get("symbol")) != symbol or normalize_timeframe(trade.get("timeframe")) != timeframe:
-            still_open.append(trade)
-            continue
-
-        side = normalize_side(trade.get("side"))
-        target = to_float(trade.get("target"), 0.0)
-        stop = to_float(trade.get("stop"), 0.0)
-        exit_price = 0.0
-        exit_reason = ""
-
-        if side == "BUY":
-            if target > 0 and latest_high >= target:
-                exit_price = target
-                exit_reason = "target_hit"
-            elif stop > 0 and latest_low <= stop:
-                exit_price = stop
-                exit_reason = "stop_hit"
-        elif side == "SELL":
-            if target > 0 and latest_low <= target:
-                exit_price = target
-                exit_reason = "target_hit"
-            elif stop > 0 and latest_high >= stop:
-                exit_price = stop
-                exit_reason = "stop_hit"
-
-        if exit_price > 0:
-            entry = to_float(trade.get("entry"), 0.0)
-            pnl = signed_move(side, entry, exit_price) * point_value(symbol) if entry > 0 else 0.0
-            risk_points = abs(signed_move(side, entry, stop))
-            r_multiple = signed_move(side, entry, exit_price) / risk_points if risk_points > 0 else 0.0
-            trade.update({
-                "status": "CLOSED",
-                "exit": exit_price,
-                "exitPrice": exit_price,
-                "exitReason": exit_reason,
-                "exitTime": now_iso(),
-                "pnl": round(pnl, 4),
-                "rMultiple": round(r_multiple, 4),
-                "result": "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN"),
-                "updatedAt": now_iso(),
-            })
-            closed.append(trade)
-        else:
-            entry = to_float(trade.get("entry"), 0.0)
-            trade["currentPrice"] = current
-            trade["currentPnl"] = round(signed_move(side, entry, current) * point_value(symbol), 4) if entry > 0 and current > 0 else 0.0
-            trade["updatedAt"] = now_iso()
-            still_open.append(trade)
-
-    memory["openTrades"] = still_open
-    memory["closedTrades"] = safe_list(memory.get("closedTrades")) + closed
-    save_memory(memory)
-
-    return {
-        "eventType": "AI_TRADER_EVALUATE",
-        "status": "Evaluated",
-        "dashboardOnly": True,
-        "brokerConnected": False,
-        "symbol": symbol,
-        "timeframe": timeframe,
-        "closedCount": len(closed),
-        "openCount": len(still_open),
-        "closedTrades": closed,
-        "openTrades": [
-            trade for trade in still_open
-            if isinstance(trade, dict)
-            and normalize_symbol(trade.get("symbol")) == symbol
-            and normalize_timeframe(trade.get("timeframe")) == timeframe
-        ],
-        "summary": ai_trader_summary(symbol=symbol, timeframe=timeframe),
-        "createdAt": now_iso(),
-    }
+        return {
+            "eventType": "AI_TRADER_EVALUATE",
+            "status": "Evaluated",
+            "dashboardOnly": True,
+            "brokerConnected": False,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "closedCount": len(closed),
+            "openCount": len(still_open),
+            "closedTrades": closed,
+            "openTrades": [
+                trade for trade in still_open
+                if isinstance(trade, dict)
+                and normalize_symbol(trade.get("symbol")) == symbol
+                and normalize_timeframe(trade.get("timeframe")) == timeframe
+            ],
+            "summary": ai_trader_summary(symbol=symbol, timeframe=timeframe),
+            "createdAt": now_iso(),
+        }
 
 
 def ai_trader_summary(symbol: Any = "", timeframe: Any = "") -> Dict[str, Any]:
