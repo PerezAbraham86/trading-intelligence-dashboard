@@ -642,6 +642,51 @@ def normalize_timeframe(timeframe: str) -> str:
     return mapping.get(tf, tf)
 
 
+def round_price(symbol: str, price: Any) -> float:
+    """
+    Round prices by instrument tick/decimal style.
+
+    This helper is used by Target ML / Ghost alignment. Without it,
+    /api/recent-signals and /api/latest-signals can crash with:
+    NameError: name 'round_price' is not defined.
+    """
+    value = to_float(price, 0.0)
+
+    if value <= 0 or not math.isfinite(value):
+        return 0.0
+
+    normalized = normalize_symbol(str(symbol or ""))
+
+    # Futures-style tick rounding.
+    if normalized in {"ES", "ES1", "ES1!", "/ES", "MES", "MES1", "MES1!", "/MES"}:
+        tick = 0.25
+        return round(round(value / tick) * tick, 2)
+
+    if normalized in {"NQ", "NQ1", "NQ1!", "/NQ", "MNQ", "MNQ1", "MNQ1!", "/MNQ"}:
+        tick = 0.25
+        return round(round(value / tick) * tick, 2)
+
+    if normalized in {"YM", "YM1", "YM1!", "/YM", "MYM", "MYM1", "MYM1!", "/MYM"}:
+        tick = 1.0
+        return round(round(value / tick) * tick, 0)
+
+    if normalized in {"RTY", "RTY1", "RTY1!", "/RTY", "M2K", "M2K1", "M2K1!", "/M2K"}:
+        tick = 0.10
+        return round(round(value / tick) * tick, 2)
+
+    # Crypto and most liquid stocks/ETFs.
+    if "BTC" in normalized or "ETH" in normalized:
+        return round(value, 2)
+
+    if value >= 100:
+        return round(value, 2)
+
+    if value >= 1:
+        return round(value, 4)
+
+    return round(value, 8)
+
+
 def timeframe_seconds(timeframe: str) -> int:
     tf = normalize_timeframe(timeframe)
     mapping = {
@@ -8327,4 +8372,3 @@ async def api_neural_brain_outcome(request: FastAPIRequest) -> Dict[str, Any]:
 @app.post("/neural-brain/outcomes")
 async def api_neural_brain_outcome_alias(request: FastAPIRequest) -> Dict[str, Any]:
     return await api_neural_brain_outcome(request)
-
