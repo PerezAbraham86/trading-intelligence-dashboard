@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import math
 import os
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -15,6 +18,13 @@ DEFAULT_MIN_RR = float(os.getenv("AI_TRADER_MIN_RR", "1.25"))
 MAX_DECISION_OBSERVATIONS = int(os.getenv("AI_TRADER_MAX_DECISION_OBSERVATIONS", "10000"))
 VIRTUAL_TRADE_MAX_BARS = int(os.getenv("AI_TRADER_VIRTUAL_TRADE_MAX_BARS", "12"))
 PHASE6_BUCKET_MODE = "phase6_projection_engine"
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+AI_TRADER_STORAGE = os.getenv("AI_TRADER_STORAGE", "json").lower().strip()
+AI_TRADER_USER_KEY = os.getenv("AI_TRADER_USER_KEY", "default").strip() or "default"
+
+
 
 
 def now_iso() -> str:
@@ -492,10 +502,330 @@ def build_rr_qualified_trade_plan(
     }
 
 
+
+
+def supabase_enabled() -> bool:
+    return (
+        AI_TRADER_STORAGE == "supabase"
+        and bool(SUPABASE_URL)
+        and bool(SUPABASE_SERVICE_ROLE_KEY)
+    )
+
+
+def supabase_headers(prefer: Optional[str] = None) -> Dict[str, str]:
+    headers = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": "application/json",
+    }
+    if prefer:
+        headers["Prefer"] = prefer
+    return headers
+
+
+def supabase_url(table: str, query: str = "") -> str:
+    base = f"{SUPABASE_URL}/rest/v1/{table}"
+    return f"{base}?{query}" if query else base
+
+
+def supabase_request(method: str, table: str, query: str = "", body: Any = None, prefer: Optional[str] = None) -> Any:
+    if not supabase_enabled():
+        raise RuntimeError("Supabase storage is not enabled")
+
+    data = None
+    if body is not None:
+        data = json.dumps(body, default=str).encode("utf-8")
+
+    request = urllib.request.Request(
+        supabase_url(table, query),
+        data=data,
+        method=method.upper(),
+        headers=supabase_headers(prefer=prefer),
+    )
+
+    with urllib.request.urlopen(request, timeout=15) as response:
+        raw = response.read().decode("utf-8")
+        if not raw:
+            return None
+        return json.loads(raw)
+
+
+def iso_or_none(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def db_number(value: Any) -> Optional[float]:
+    number = to_float(value, float("nan"))
+    return number if math.isfinite(number) else None
+
+
+def db_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def row_to_trade(row: Dict[str, Any], virtual: bool = False) -> Dict[str, Any]:
+    trade = dict(row.get("source_snapshot") or {}) if isinstance(row.get("source_snapshot"), dict) else {}
+    trade.update({
+        "id": row.get("id"),
+        "symbol": row.get("symbol"),
+        "timeframe": row.get("timeframe"),
+        "side": row.get("side"),
+        "entry": to_float(row.get("entry"), 0.0),
+        "target": to_float(row.get("target"), 0.0),
+        "stop": to_float(row.get("stop"), 0.0),
+        "riskReward": to_float(row.get("risk_reward"), 0.0),
+        "confidence": to_float(row.get("confidence"), 0.0),
+        "confidenceGrade": row.get("confidence_grade"),
+        "currentPrice": to_float(row.get("current_price"), 0.0),
+        "currentPnl": to_float(row.get("current_pnl"), 0.0),
+        "maxPnl": to_float(row.get("max_pnl"), 0.0),
+        "minPnl": to_float(row.get("min_pnl"), 0.0),
+        "riskPnl": to_float(row.get("risk_pnl"), 0.0),
+        "bucket": row.get("bucket"),
+        "reason": row.get("reason"),
+        "status": row.get("status"),
+        "dashboardOnly": bool(row.get("dashboard_only", True)),
+        "brokerConnected": bool(row.get("broker_connected", False)),
+        "sourceSnapshot": row.get("source_snapshot") or {},
+        "entryTime": row.get("entry_time"),
+        "createdAt": row.get("created_at"),
+        "updatedAt": row.get("updated_at"),
+    })
+
+    if row.get("exit") is not None or row.get("exit_price") is not None:
+        trade.update({
+            "exit": to_float(row.get("exit"), 0.0),
+            "exitPrice": to_float(row.get("exit_price"), 0.0),
+            "exitReason": row.get("exit_reason"),
+            "exitTime": row.get("exit_time"),
+            "pnl": to_float(row.get("pnl"), 0.0),
+            "rMultiple": to_float(row.get("r_multiple"), 0.0),
+            "result": row.get("result"),
+        })
+
+    if virtual:
+        trade.update({
+            "barsOpen": to_int(row.get("bars_open"), 0),
+            "seenCount": to_int(row.get("seen_count"), 1),
+            "lastSeenAt": row.get("last_seen_at"),
+            "virtualLearningOnly": bool(row.get("virtual_learning_only", True)),
+        })
+
+    return {key: value for key, value in trade.items() if value is not None}
+
+
+def row_to_decision(row: Dict[str, Any]) -> Dict[str, Any]:
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    decision = dict(payload)
+    decision.update({
+        "id": row.get("id"),
+        "observationKey": row.get("observation_key"),
+        "symbol": row.get("symbol"),
+        "timeframe": row.get("timeframe"),
+        "decision": row.get("decision"),
+        "rawDecision": row.get("raw_decision"),
+        "allowedToTrade": bool(row.get("allowed_to_trade", False)),
+        "confidence": to_float(row.get("confidence"), 0.0),
+        "confidenceGrade": row.get("confidence_grade"),
+        "entry": to_float(row.get("entry"), 0.0),
+        "target": to_float(row.get("target"), 0.0),
+        "stop": to_float(row.get("stop"), 0.0),
+        "riskReward": to_float(row.get("risk_reward"), 0.0),
+        "bucket": row.get("bucket"),
+        "reason": row.get("reason"),
+        "projectionEngineMode": row.get("projection_engine_mode"),
+        "aiPermission": row.get("ai_permission"),
+        "createdAt": row.get("created_at"),
+    })
+    return {key: value for key, value in decision.items() if value is not None}
+
+
+def trade_to_open_row(trade: Dict[str, Any]) -> Dict[str, Any]:
+    side = normalize_side(trade.get("side"))
+    return {
+        "id": str(trade.get("id") or build_trade_id(trade.get("symbol"), trade.get("timeframe"), side)),
+        "user_key": AI_TRADER_USER_KEY,
+        "symbol": normalize_symbol(trade.get("symbol")),
+        "timeframe": normalize_timeframe(trade.get("timeframe")),
+        "side": side if side in {"BUY", "SELL"} else "BUY",
+        "entry": db_number(trade.get("entry") or trade.get("entryPrice")) or 0,
+        "target": db_number(trade.get("target") or trade.get("targetPrice")),
+        "stop": db_number(trade.get("stop") or trade.get("stopPrice")),
+        "risk_reward": db_number(trade.get("riskReward")),
+        "confidence": db_number(trade.get("confidence")),
+        "confidence_grade": trade.get("confidenceGrade"),
+        "current_price": db_number(trade.get("currentPrice")),
+        "current_pnl": db_number(trade.get("currentPnl") or trade.get("pnl")),
+        "max_pnl": db_number(trade.get("maxPnl")),
+        "min_pnl": db_number(trade.get("minPnl")),
+        "risk_pnl": db_number(trade.get("riskPnl")),
+        "bucket": trade.get("bucket"),
+        "reason": trade.get("reason"),
+        "status": trade.get("status") or "OPEN",
+        "dashboard_only": bool(trade.get("dashboardOnly", True)),
+        "broker_connected": bool(trade.get("brokerConnected", False)),
+        "source_snapshot": trade.get("sourceSnapshot") if isinstance(trade.get("sourceSnapshot"), dict) else trade,
+        "entry_time": iso_or_none(trade.get("entryTime")),
+        "created_at": iso_or_none(trade.get("createdAt")) or now_iso(),
+        "updated_at": iso_or_none(trade.get("updatedAt")) or now_iso(),
+    }
+
+
+def trade_to_closed_row(trade: Dict[str, Any], virtual: bool = False) -> Dict[str, Any]:
+    row = trade_to_open_row(trade)
+    row.update({
+        "exit": db_number(trade.get("exit") or trade.get("exitPrice")),
+        "exit_price": db_number(trade.get("exitPrice") or trade.get("exit")),
+        "exit_reason": trade.get("exitReason"),
+        "pnl": db_number(trade.get("pnl")),
+        "r_multiple": db_number(trade.get("rMultiple") or trade.get("r")),
+        "result": trade.get("result"),
+        "status": trade.get("status") or ("VIRTUAL_CLOSED" if virtual else "CLOSED"),
+        "exit_time": iso_or_none(trade.get("exitTime")) or now_iso(),
+    })
+    if "current_price" in row:
+        row.pop("current_price", None)
+    if "current_pnl" in row:
+        row.pop("current_pnl", None)
+    if "max_pnl" in row:
+        row.pop("max_pnl", None)
+    if "min_pnl" in row:
+        row.pop("min_pnl", None)
+    if "risk_pnl" in row:
+        row.pop("risk_pnl", None)
+    if virtual:
+        row["virtual_learning_only"] = True
+        row["bars_open"] = db_int(trade.get("barsOpen"))
+    return row
+
+
+def trade_to_virtual_open_row(trade: Dict[str, Any]) -> Dict[str, Any]:
+    row = trade_to_open_row(trade)
+    for key in ["current_price", "current_pnl", "max_pnl", "min_pnl", "risk_pnl", "source_snapshot", "broker_connected"]:
+        row.pop(key, None)
+    row.update({
+        "bars_open": to_int(trade.get("barsOpen"), 0),
+        "seen_count": to_int(trade.get("seenCount"), 1),
+        "status": trade.get("status") or "VIRTUAL_OPEN",
+        "virtual_learning_only": True,
+        "last_seen_at": iso_or_none(trade.get("lastSeenAt")) or now_iso(),
+    })
+    return row
+
+
+def decision_to_row(decision: Dict[str, Any]) -> Dict[str, Any]:
+    created_at = iso_or_none(decision.get("createdAt")) or now_iso()
+    return {
+        "id": str(decision.get("id") or f"DECISION-{normalize_symbol(decision.get('symbol'))}-{normalize_timeframe(decision.get('timeframe'))}-{created_at}"),
+        "user_key": AI_TRADER_USER_KEY,
+        "observation_key": decision.get("observationKey") or decision_observation_key(decision),
+        "symbol": normalize_symbol(decision.get("symbol")),
+        "timeframe": normalize_timeframe(decision.get("timeframe")),
+        "decision": decision.get("decision"),
+        "raw_decision": decision.get("rawDecision") or decision.get("decision"),
+        "allowed_to_trade": bool(decision.get("allowedToTrade", False)),
+        "confidence": db_number(decision.get("confidence")),
+        "confidence_grade": decision.get("confidenceGrade"),
+        "entry": db_number(decision.get("entry")),
+        "target": db_number(decision.get("target")),
+        "stop": db_number(decision.get("stop")),
+        "risk_reward": db_number(decision.get("riskReward")),
+        "bucket": decision.get("bucket"),
+        "reason": decision.get("reason"),
+        "projection_engine_mode": decision.get("projectionEngineMode"),
+        "ai_permission": decision.get("aiPermission"),
+        "payload": decision,
+        "created_at": created_at,
+    }
+
+
+def supabase_select_table(table: str, order_col: str = "created_at") -> List[Dict[str, Any]]:
+    query = urllib.parse.urlencode({
+        "select": "*",
+        "user_key": f"eq.{AI_TRADER_USER_KEY}",
+        "order": f"{order_col}.asc",
+        "limit": "10000",
+    })
+    result = supabase_request("GET", table, query=query)
+    return result if isinstance(result, list) else []
+
+
+def load_memory_from_supabase() -> Dict[str, Any]:
+    open_rows = supabase_select_table("ai_trader_open_trades", "created_at")
+    closed_rows = supabase_select_table("ai_trader_closed_trades", "created_at")
+    decision_rows = supabase_select_table("ai_trader_decision_log", "created_at")
+    virtual_open_rows = supabase_select_table("ai_trader_virtual_open_trades", "created_at")
+    virtual_closed_rows = supabase_select_table("ai_trader_virtual_closed_trades", "created_at")
+
+    return {
+        "version": 3,
+        "storage": "supabase",
+        "userKey": AI_TRADER_USER_KEY,
+        "createdAt": now_iso(),
+        "updatedAt": now_iso(),
+        "openTrades": [row_to_trade(row) for row in open_rows],
+        "closedTrades": [row_to_trade(row) for row in closed_rows],
+        "decisionLog": [row_to_decision(row) for row in decision_rows],
+        "virtualOpenTrades": [row_to_trade(row, virtual=True) for row in virtual_open_rows],
+        "virtualClosedTrades": [row_to_trade(row, virtual=True) for row in virtual_closed_rows],
+    }
+
+
+def supabase_delete_user_rows(table: str) -> None:
+    query = urllib.parse.urlencode({"user_key": f"eq.{AI_TRADER_USER_KEY}"})
+    supabase_request("DELETE", table, query=query, prefer="return=minimal")
+
+
+def supabase_upsert_rows(table: str, rows: List[Dict[str, Any]]) -> None:
+    clean_rows = [
+        {key: value for key, value in row.items() if value is not None}
+        for row in rows
+        if isinstance(row, dict)
+    ]
+    if not clean_rows:
+        return
+    for index in range(0, len(clean_rows), 500):
+        supabase_request(
+            "POST",
+            table,
+            body=clean_rows[index:index + 500],
+            prefer="resolution=merge-duplicates,return=minimal",
+        )
+
+
+def save_memory_to_supabase(memory: Dict[str, Any]) -> None:
+    table_rows = {
+        "ai_trader_open_trades": [trade_to_open_row(trade) for trade in safe_list(memory.get("openTrades")) if isinstance(trade, dict)],
+        "ai_trader_closed_trades": [trade_to_closed_row(trade) for trade in safe_list(memory.get("closedTrades")) if isinstance(trade, dict)],
+        "ai_trader_decision_log": [decision_to_row(decision) for decision in safe_list(memory.get("decisionLog")) if isinstance(decision, dict)],
+        "ai_trader_virtual_open_trades": [trade_to_virtual_open_row(trade) for trade in safe_list(memory.get("virtualOpenTrades")) if isinstance(trade, dict)],
+        "ai_trader_virtual_closed_trades": [trade_to_closed_row(trade, virtual=True) for trade in safe_list(memory.get("virtualClosedTrades")) if isinstance(trade, dict)],
+    }
+
+    for table in table_rows:
+        supabase_delete_user_rows(table)
+    for table, rows in table_rows.items():
+        supabase_upsert_rows(table, rows)
+
 def load_memory() -> Dict[str, Any]:
+    if supabase_enabled():
+        try:
+            return load_memory_from_supabase()
+        except Exception as error:
+            print(f"AI Trader Supabase load failed; using JSON fallback: {error}")
+
     if not MEMORY_PATH.exists():
         return {
             "version": 2,
+            "storage": "json",
             "createdAt": now_iso(),
             "updatedAt": now_iso(),
             "openTrades": [],
@@ -513,6 +843,7 @@ def load_memory() -> Dict[str, Any]:
         data = {}
 
     data.setdefault("version", 2)
+    data.setdefault("storage", "json")
     data.setdefault("createdAt", now_iso())
     data.setdefault("updatedAt", now_iso())
     data.setdefault("openTrades", [])
@@ -530,19 +861,32 @@ def load_memory() -> Dict[str, Any]:
 
 def save_memory(memory: Dict[str, Any]) -> Dict[str, Any]:
     MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    memory["version"] = max(to_int(memory.get("version"), 2), 2)
+    memory["version"] = max(to_int(memory.get("version"), 3), 3)
     memory["updatedAt"] = now_iso()
+    memory["userKey"] = AI_TRADER_USER_KEY
     memory["closedTrades"] = safe_list(memory.get("closedTrades"))[-MAX_CLOSED_TRADES:]
     memory["virtualClosedTrades"] = safe_list(memory.get("virtualClosedTrades"))[-MAX_CLOSED_TRADES:]
     memory["decisionLog"] = safe_list(memory.get("decisionLog"))[-MAX_DECISION_OBSERVATIONS:]
     memory["openTrades"] = safe_list(memory.get("openTrades"))
     memory["virtualOpenTrades"] = safe_list(memory.get("virtualOpenTrades"))[-250:]
 
+    # Always keep a local JSON emergency fallback, even when Supabase is active.
+    fallback_memory = {**memory, "storage": "json_fallback"}
     tmp_path = MEMORY_PATH.with_suffix(MEMORY_PATH.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(memory, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path.write_text(json.dumps(fallback_memory, indent=2, sort_keys=True, default=str), encoding="utf-8")
     tmp_path.replace(MEMORY_PATH)
-    return memory
 
+    if supabase_enabled():
+        try:
+            save_memory_to_supabase(memory)
+            memory["storage"] = "supabase"
+        except Exception as error:
+            print(f"AI Trader Supabase save failed; JSON fallback preserved: {error}")
+            memory["storage"] = "json_fallback"
+    else:
+        memory["storage"] = "json"
+
+    return memory
 
 
 def trade_bucket(symbol: str, timeframe: str, side: str, confidence: float, context: Optional[Dict[str, Any]] = None) -> str:
@@ -2079,6 +2423,9 @@ def ai_trader_summary(symbol: Any = "", timeframe: Any = "") -> Dict[str, Any]:
         "decisionStats": memory_status["overallDecisionStats"],
         "memoryStatus": memory_status,
         "memoryPath": str(MEMORY_PATH),
+        "storage": "supabase" if supabase_enabled() else "json",
+        "supabaseEnabled": supabase_enabled(),
+        "userKey": AI_TRADER_USER_KEY,
         "phase6MemoryFix": True,
         "createdAt": now_iso(),
     }
