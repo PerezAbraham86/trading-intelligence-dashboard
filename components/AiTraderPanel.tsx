@@ -1,3 +1,5 @@
+'use client'
+
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
 
@@ -80,9 +82,14 @@ type AiTraderSummary = {
   }
 }
 
+type AiTradeCloseReason =
+  | 'TARGET_HIT'
+  | 'STOP_HIT'
+  | 'AI_REVERSAL_EXIT'
+  | 'AI_CONFIDENCE_EXIT'
+
 function toFiniteNumber(value: any, fallback = 0) {
   const parsed = Number(value)
-
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
@@ -115,7 +122,7 @@ function formatPercent(value: any) {
 
   if (!Number.isFinite(parsed)) return '—'
 
-  return `${(parsed * 100).toFixed(1)}%`
+  return `${(parsed * 100).toFixed(2)}%`
 }
 
 function formatCount(value: any) {
@@ -123,18 +130,651 @@ function formatCount(value: any) {
 
   if (!Number.isFinite(parsed)) return '0'
 
-  return parsed.toLocaleString()
+  return Math.max(0, Math.round(parsed)).toLocaleString()
 }
 
 function formatAiStage(value: any) {
   const raw = String(value ?? 'WARMING_UP').replace(/_/g, ' ').toLowerCase()
-
   return raw.replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function normalizeDecision(value: any): 'BUY' | 'SELL' | 'HOLD' {
+  const raw = String(value ?? '').toUpperCase()
+
+  if (raw.includes('BUY') || raw.includes('LONG') || raw.includes('BULL')) return 'BUY'
+  if (raw.includes('SELL') || raw.includes('SHORT') || raw.includes('BEAR')) return 'SELL'
+
+  return 'HOLD'
+}
+
+function normalizeTradeSide(value: any): 'BUY' | 'SELL' {
+  const side = normalizeDecision(value)
+  return side === 'SELL' ? 'SELL' : 'BUY'
+}
+
+function sanitizeAiTraderPayload(value: any, depth = 0): any {
+  if (depth > 6) return null
+  if (value === undefined || value === null) return null
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null
+  }
+
+  if (typeof value === 'string' || typeof value === 'boolean') {
+    return value
+  }
+
+  if (Array.isArray(value)) {
+    return value.slice(0, 80).map((item) => sanitizeAiTraderPayload(item, depth + 1))
+  }
+
+  if (typeof value === 'object') {
+    const result: Record<string, any> = {}
+
+    Object.entries(value).forEach(([key, entry]) => {
+      if (typeof entry === 'function') return
+      if (typeof entry === 'symbol') return
+      result[key] = sanitizeAiTraderPayload(entry, depth + 1)
+    })
+
+    return result
+  }
+
+  return null
+}
+
+async function readApiError(response: Response) {
+  const text = await response.text().catch(() => '')
+
+  if (!text) return `${response.status}`
+
+  try {
+    const json = JSON.parse(text)
+    return `${response.status}: ${JSON.stringify(json).slice(0, 500)}`
+  } catch {
+    return `${response.status}: ${text.slice(0, 500)}`
+  }
+}
+
+function readNumberPath(source: any, paths: string[]) {
+  for (const path of paths) {
+    const value = path.split('.').reduce((current: any, key: string) => {
+      if (current && typeof current === 'object' && key in current) return current[key]
+      return undefined
+    }, source)
+
+    const parsed = Number(value)
+    if (Number.isFinite(parsed) && parsed > 0) return parsed
+  }
+
+  return undefined
+}
+
+function readProjectionEngine(signal: any, overlayPayload: any, unifiedIntelligence: any) {
+  const candidates = [
+    unifiedIntelligence?.projectionEngine,
+    unifiedIntelligence?.unifiedProjectionEngine,
+    unifiedIntelligence?.components?.projectionEngine,
+    unifiedIntelligence?.components?.unifiedProjectionEngine,
+    signal?.projectionEngine,
+    signal?.unifiedProjectionEngine,
+    overlayPayload?.projectionEngine,
+    overlayPayload?.unifiedProjectionEngine,
+    overlayPayload?.unifiedIntelligence?.projectionEngine,
+    overlayPayload?.unifiedIntelligence?.unifiedProjectionEngine,
+    unifiedIntelligence,
+  ]
+
+  for (const candidate of candidates) {
+    if (
+      candidate &&
+      typeof candidate === 'object' &&
+      (
+        candidate.eventType === 'UNIFIED_PROJECTION_ENGINE' ||
+        candidate.ghostPath ||
+        candidate.target ||
+        candidate.alignment ||
+        candidate.activeTargetPrice
+      )
+    ) {
+      return candidate
+    }
+  }
+
+  return null
+}
+
+function readProjectionTarget(projectionEngine: any) {
+  if (!projectionEngine || typeof projectionEngine !== 'object') return undefined
+
+  return readNumberPath(projectionEngine, [
+    'activeTargetPrice',
+    'target.price',
+    'targetPrice',
+    'targetPlan.targetPrice',
+    'targetPlan.finalTargetPrice',
+    'targetMl.targetPrice',
+    'finalTargetPrice',
+    'ghostOverlayTargetPrice',
+    'ghostPath.targetPrice',
+    'ghostPath.endPrice',
+  ])
+}
+
+function readProjectionGhostConfidence(projectionEngine: any) {
+  if (!projectionEngine || typeof projectionEngine !== 'object') return 0
+
+  return Math.max(
+    toFiniteNumber(projectionEngine?.ghostConfidence, 0),
+    toFiniteNumber(projectionEngine?.ghostPath?.confidence, 0),
+    toFiniteNumber(projectionEngine?.alignment?.score, 0),
+  )
+}
+
+function readProjectionTargetConfidence(projectionEngine: any) {
+  if (!projectionEngine || typeof projectionEngine !== 'object') return 0
+
+  const targetType = String(
+    projectionEngine?.activeTargetType ??
+      projectionEngine?.target?.type ??
+      projectionEngine?.targetPlan?.type ??
+      ''
+  )
+
+  if (targetType === 'GHOST_OVERLAY_TARGET') return 0
+
+  return Math.max(
+    toFiniteNumber(projectionEngine?.targetConfidence, 0),
+    toFiniteNumber(projectionEngine?.activeTargetConfidence, 0),
+    toFiniteNumber(projectionEngine?.target?.confidence, 0),
+    toFiniteNumber(projectionEngine?.targetPlan?.targetConfidence, 0),
+    toFiniteNumber(projectionEngine?.targetMl?.targetConfidence, 0),
+  )
+}
+
+function readProjectionSide(projectionEngine: any, fallback: any) {
+  const direction = String(
+    projectionEngine?.target?.direction ??
+      projectionEngine?.ghostPath?.direction ??
+      projectionEngine?.marketState?.direction ??
+      projectionEngine?.targetDirection ??
+      ''
+  ).toUpperCase()
+
+  if (direction.includes('BULL') || direction.includes('UP') || direction.includes('BUY')) return 'BUY'
+  if (direction.includes('BEAR') || direction.includes('DOWN') || direction.includes('SELL')) return 'SELL'
+
+  return normalizeDecision(fallback)
+}
+
+function buildProjectionEngineSnapshot(projectionEngine: any) {
+  if (!projectionEngine || typeof projectionEngine !== 'object') {
+    return {
+      available: false,
+      targetPrice: undefined,
+      targetConfidence: 0,
+      ghostConfidence: 0,
+      alignmentScore: 0,
+      alignmentLabel: 'Waiting',
+      projectionMode: 'WAITING',
+      projectionModeLabel: 'Waiting',
+      aiPermission: 'WAIT',
+      conflict: false,
+      source: 'Unified Projection Engine',
+    }
+  }
+
+  const targetPrice = readProjectionTarget(projectionEngine)
+  const targetConfidence = readProjectionTargetConfidence(projectionEngine)
+  const ghostConfidence = readProjectionGhostConfidence(projectionEngine)
+  const alignmentScore = toFiniteNumber(projectionEngine?.alignment?.score, 0)
+  const conflict = Boolean(projectionEngine?.alignment?.conflict || projectionEngine?.mode?.conflict)
+
+  return {
+    available: Boolean(targetPrice),
+    targetPrice,
+    targetConfidence,
+    ghostConfidence,
+    alignmentScore,
+    alignmentLabel: String(projectionEngine?.alignment?.label ?? 'Waiting'),
+    projectionMode: String(projectionEngine?.projectionMode ?? projectionEngine?.mode?.mode ?? 'WAITING'),
+    projectionModeLabel: String(projectionEngine?.projectionModeLabel ?? projectionEngine?.mode?.label ?? 'Waiting'),
+    aiPermission: String(projectionEngine?.aiPermission ?? 'WAIT'),
+    conflict,
+    source: String(projectionEngine?.activeTargetSource ?? projectionEngine?.target?.source ?? 'Unified Projection Engine'),
+    targetType: String(projectionEngine?.activeTargetType ?? projectionEngine?.target?.type ?? ''),
+    targetSourceLockActive: Boolean(projectionEngine?.targetSourceLockActive),
+    targetLockedConfidence: toFiniteNumber(projectionEngine?.targetLockedConfidence ?? projectionEngine?.target?.lockedConfidence ?? targetConfidence, targetConfidence),
+    targetLiveConfidence: toFiniteNumber(projectionEngine?.targetLiveConfidence ?? projectionEngine?.target?.liveConfidence ?? targetConfidence, targetConfidence),
+    learnedReliability: toFiniteNumber(projectionEngine?.targetMl?.learnedReliability ?? projectionEngine?.targetPlan?.learnedReliability ?? 0, 0),
+    marketState: projectionEngine?.marketState,
+    target: projectionEngine?.target,
+    ghostPath: projectionEngine?.ghostPath,
+    alignment: projectionEngine?.alignment,
+    mode: projectionEngine?.mode,
+    learning: projectionEngine?.learning,
+  }
+}
+
+function inferTargetFromSignal(signal: any) {
+  return readNumberPath(signal, [
+    'projectionEngine.activeTargetPrice',
+    'projectionEngine.target.price',
+    'projectionEngine.targetPrice',
+    'projectionEngine.targetPlan.targetPrice',
+    'projectionEngine.targetMl.targetPrice',
+    'projectionEngine.finalTargetPrice',
+    'projectionEngine.ghostOverlayTargetPrice',
+    'unifiedProjectionEngine.activeTargetPrice',
+    'unifiedProjectionEngine.target.price',
+    'unifiedProjectionEngine.targetPrice',
+    'unifiedProjectionEngine.targetPlan.targetPrice',
+    'unifiedProjectionEngine.targetMl.targetPrice',
+    'unifiedProjectionEngine.finalTargetPrice',
+    'unifiedProjectionEngine.ghostOverlayTargetPrice',
+    'finalTargetPrice',
+    'overallTargetPrice',
+    'targetMl.finalTargetPrice',
+    'targetMl.overallTargetPrice',
+    'targetMl.targetPrice',
+    'targetPlan.finalTargetPrice',
+    'targetPlan.overallTargetPrice',
+    'targetPlan.targetPrice',
+    'activeTargetPrice',
+    'ghostOverlayTargetPrice',
+    'targetMl.activeTargetPrice',
+    'targetMl.ghostOverlayTargetPrice',
+    'targetPlan.activeTargetPrice',
+    'targetPlan.ghostOverlayTargetPrice',
+    'overlayPayload.finalTargetPrice',
+    'overlayPayload.overallTargetPrice',
+    'overlayPayload.targetMl.finalTargetPrice',
+    'overlayPayload.targetMl.overallTargetPrice',
+    'overlayPayload.targetMl.targetPrice',
+    'overlayPayload.activeTargetPrice',
+    'overlayPayload.ghostOverlayTargetPrice',
+  ])
+}
+
+function inferEntryFromSignal(signal: any, activePrice?: number) {
+  return readNumberPath(signal, [
+    'entryPrice',
+    'entry',
+    'nrtrEntryPrice',
+    'strategyEntryPrice',
+    'price',
+    'close',
+  ]) ?? activePrice
+}
+
+function buildTargetMlSnapshot(signal: any, overlayPayload: any, unifiedIntelligence?: any) {
+  const projectionEngine = readProjectionEngine(signal, overlayPayload, unifiedIntelligence)
+  const projectionSnapshot = buildProjectionEngineSnapshot(projectionEngine)
+  const targetPrice =
+    projectionSnapshot.targetPrice ??
+    inferTargetFromSignal(signal) ??
+    readNumberPath(overlayPayload, [
+      'finalTargetPrice',
+      'overallTargetPrice',
+      'targetPrice',
+      'targetMl.targetPrice',
+      'targetPlan.targetPrice',
+    ])
+
+  const targetConfidence = Math.max(
+    toFiniteNumber(projectionSnapshot.targetConfidence, 0),
+    toFiniteNumber(
+      signal?.targetConfidence ??
+      signal?.targetMl?.targetConfidence ??
+      overlayPayload?.targetConfidence ??
+      overlayPayload?.targetMl?.targetConfidence,
+      0,
+    ),
+  )
+
+  const targetMlAligned = Boolean(
+    projectionSnapshot.available ||
+      signal?.targetMlAligned ||
+      signal?.targetMl?.targetMlAligned ||
+      overlayPayload?.targetMlAligned ||
+      overlayPayload?.targetMl?.targetMlAligned
+  )
+
+  return {
+    targetConfidence,
+    targetMlReady: Boolean(targetPrice || targetConfidence > 0 || targetMlAligned),
+    targetMlAligned,
+    targetPrice,
+    source:
+      projectionSnapshot.source ??
+      signal?.targetSource ??
+      signal?.targetMl?.source ??
+      overlayPayload?.targetSource ??
+      overlayPayload?.targetMl?.source ??
+      'ghost_target_ml_context',
+    projectionEngine: projectionSnapshot,
+  }
+}
+
+function buildGhostMlSnapshot(signal: any, overlayPayload: any, unifiedIntelligence?: any) {
+  const projectionEngine = readProjectionEngine(signal, overlayPayload, unifiedIntelligence)
+  const projectionSnapshot = buildProjectionEngineSnapshot(projectionEngine)
+
+  return {
+    confidence: Math.max(
+      toFiniteNumber(projectionSnapshot.ghostConfidence, 0),
+      toFiniteNumber(
+        signal?.ghostConfidence ??
+          signal?.confidence ??
+          signal?.mlConfidence ??
+          overlayPayload?.ghostConfidence,
+        0,
+      )
+    ),
+    mlReady: Boolean(
+      projectionSnapshot.available ||
+        Boolean(signal?.mlReady ?? signal?.ghostMlReady ?? overlayPayload?.mlReady)
+    ),
+    ghostConfidenceBoost: toFiniteNumber(signal?.ghostConfidenceBoost ?? overlayPayload?.ghostConfidenceBoost, 0),
+  }
+}
+
+function buildEntryMlSnapshot(signal: any) {
+  return {
+    entryConfidence: toFiniteNumber(signal?.entryConfidence ?? signal?.entryMlConfidence, 0),
+    confidence: toFiniteNumber(signal?.entryConfidence ?? signal?.entryMlConfidence, 0),
+  }
+}
+
+function getLatestCandleClose(candles: any[] | undefined) {
+  if (!Array.isArray(candles) || candles.length === 0) return undefined
+
+  for (let index = candles.length - 1; index >= 0; index -= 1) {
+    const candle = candles[index]
+    const close = toFiniteNumber(candle?.close ?? candle?.c, 0)
+
+    if (close > 0) return close
+  }
+
+  return undefined
+}
+
+function getLatestCandleTime(candles: any[] | undefined) {
+  if (!Array.isArray(candles) || candles.length === 0) return new Date().toISOString()
+
+  const candle = candles[candles.length - 1]
+  const raw = candle?.time ?? candle?.timestamp ?? candle?.t ?? candle?.datetime ?? candle?.date
+
+  if (typeof raw === 'number') {
+    return new Date(raw > 10_000_000_000 ? raw : raw * 1000).toISOString()
+  }
+
+  if (typeof raw === 'string') {
+    const parsed = Date.parse(raw)
+    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : raw
+  }
+
+  return new Date().toISOString()
+}
+
+function getLiveAiCurrentPrice(activePrice: any, signal: any, candles: any[] | undefined) {
+  const candidates = [
+    activePrice,
+    getLatestCandleClose(candles),
+    signal?.current,
+    signal?.price,
+    signal?.entry,
+    signal?.close,
+    signal?.last,
+  ]
+
+  for (const candidate of candidates) {
+    const value = toFiniteNumber(candidate, 0)
+    if (value > 0) return value
+  }
+
+  return 0
+}
+
+function getTradeLiveCurrentPrice(trade: any, livePrice: number) {
+  const live = toFiniteNumber(livePrice, 0)
+  if (live > 0) return live
+
+  return toFiniteNumber(
+    trade?.currentPrice ??
+      trade?.current ??
+      trade?.lastPrice ??
+      trade?.markPrice ??
+      trade?.entry,
+    0
+  )
+}
+
+function calculateLiveTradePnl(trade: any, livePrice: number) {
+  const current = getTradeLiveCurrentPrice(trade, livePrice)
+  const entry = toFiniteNumber(trade?.entry ?? trade?.entryPrice, 0)
+  const side = normalizeTradeSide(trade?.side ?? trade?.decision ?? trade?.rawDecision)
+  const quantity = Math.max(1, toFiniteNumber(trade?.quantity ?? trade?.qty ?? trade?.contracts, 1))
+  const pointValue = Math.max(1, toFiniteNumber(trade?.pointValue ?? trade?.dollarPerPoint ?? trade?.multiplier, String(trade?.symbol ?? '').toUpperCase().includes('MES') ? 5 : 1))
+
+  if (entry <= 0 || current <= 0) {
+    return {
+      current,
+      pnl: toFiniteNumber(trade?.currentPnl ?? trade?.pnl, 0),
+      pnlPercent: toFiniteNumber(trade?.pnlPercent ?? trade?.percent, 0),
+      points: 0,
+      rMultiple: toFiniteNumber(trade?.rMultiple ?? trade?.r, 0),
+    }
+  }
+
+  const points = side === 'SELL' ? entry - current : current - entry
+  const pnl = points * pointValue * quantity
+  const pnlPercent = entry > 0 ? points / entry : 0
+
+  const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0)
+  const riskPoints = stop > 0 ? Math.abs(entry - stop) : 0
+  const rMultiple = riskPoints > 0 ? points / riskPoints : toFiniteNumber(trade?.rMultiple ?? trade?.r, 0)
+
+  return {
+    current,
+    pnl,
+    pnlPercent,
+    points,
+    rMultiple,
+  }
+}
+
+function getTradeKey(trade: any) {
+  return String(
+    trade?.id ??
+      trade?.tradeId ??
+      trade?.entryId ??
+      [
+        trade?.symbol,
+        trade?.timeframe,
+        trade?.side,
+        trade?.entryTime,
+        trade?.entry,
+        trade?.target,
+        trade?.stop,
+      ].join('|')
+  )
+}
+
+function mergeTrades(existing: any[], incoming: any[]) {
+  const map = new Map<string, any>()
+
+  existing.forEach((trade) => {
+    if (!trade || typeof trade !== 'object') return
+    map.set(getTradeKey(trade), trade)
+  })
+
+  incoming.forEach((trade) => {
+    if (!trade || typeof trade !== 'object') return
+    const key = getTradeKey(trade)
+    map.set(key, {
+      ...(map.get(key) ?? {}),
+      ...trade,
+    })
+  })
+
+  return Array.from(map.values())
+    .sort((left, right) => {
+      const leftTime = Date.parse(String(left.exitTime ?? left.closedAt ?? left.updatedAt ?? left.entryTime ?? 0))
+      const rightTime = Date.parse(String(right.exitTime ?? right.closedAt ?? right.updatedAt ?? right.entryTime ?? 0))
+      return rightTime - leftTime
+    })
+    .slice(0, 500)
+}
+
+function getAiTradeSettlement(
+  trade: any,
+  livePrice: number,
+  decision: AiTraderDecision | null,
+  minConfidence: number
+): {
+  shouldClose: boolean
+  closePrice: number
+  closeReason?: AiTradeCloseReason
+  closeLabel?: string
+} {
+  const current = getTradeLiveCurrentPrice(trade, livePrice)
+  const side = normalizeTradeSide(trade?.side ?? trade?.decision ?? trade?.rawDecision)
+  const target = toFiniteNumber(trade?.target ?? trade?.targetPrice ?? trade?.takeProfitPrice ?? trade?.tp1, 0)
+  const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0)
+
+  if (current <= 0) {
+    return {
+      shouldClose: false,
+      closePrice: current,
+    }
+  }
+
+  const buyTargetHit = target > 0 && side === 'BUY' && current >= target
+  const buyStopHit = stop > 0 && side === 'BUY' && current <= stop
+
+  const sellTargetHit = target > 0 && side === 'SELL' && current <= target
+  const sellStopHit = stop > 0 && side === 'SELL' && current >= stop
+
+  if (buyTargetHit || sellTargetHit) {
+    return {
+      shouldClose: true,
+      closePrice: target,
+      closeReason: 'TARGET_HIT',
+      closeLabel: 'Target hit',
+    }
+  }
+
+  if (buyStopHit || sellStopHit) {
+    return {
+      shouldClose: true,
+      closePrice: stop,
+      closeReason: 'STOP_HIT',
+      closeLabel: 'Stop hit',
+    }
+  }
+
+  const nextDecision = normalizeDecision(decision?.rawDecision ?? decision?.decision)
+  const confidence = toFiniteNumber(decision?.confidence, 0)
+
+  if (
+    nextDecision !== 'HOLD' &&
+    confidence >= minConfidence &&
+    ((side === 'BUY' && nextDecision === 'SELL') || (side === 'SELL' && nextDecision === 'BUY'))
+  ) {
+    return {
+      shouldClose: true,
+      closePrice: current,
+      closeReason: 'AI_REVERSAL_EXIT',
+      closeLabel: 'AI reversal exit',
+    }
+  }
+
+  return {
+    shouldClose: false,
+    closePrice: current,
+  }
+}
+
+function buildClosedTradeFromOpenTrade({
+  trade,
+  livePrice,
+  closePrice,
+  closeReason,
+  closeLabel,
+  candles,
+}: {
+  trade: any
+  livePrice: number
+  closePrice: number
+  closeReason?: AiTradeCloseReason
+  closeLabel?: string
+  candles?: any[]
+}) {
+  const live = calculateLiveTradePnl(trade, closePrice || livePrice)
+  const closedAt = getLatestCandleTime(candles)
+  const result = live.pnl > 0 ? 'WIN' : live.pnl < 0 ? 'LOSS' : 'BREAKEVEN'
+
+  return {
+    ...trade,
+    id: getTradeKey(trade),
+    status: 'CLOSED',
+    result,
+    exit: closePrice || live.current,
+    exitPrice: closePrice || live.current,
+    exitTime: closedAt,
+    closedAt,
+    exitReason: closeLabel ?? closeReason ?? 'Closed from live chart settlement',
+    closeReason,
+    closeLabel,
+    currentPrice: closePrice || live.current,
+    pnl: live.pnl,
+    pnlDollar: live.pnl,
+    currentPnl: live.pnl,
+    pnlPercent: live.pnlPercent,
+    percent: live.pnlPercent,
+    livePoints: live.points,
+    rMultiple: live.rMultiple,
+    r: live.rMultiple,
+    frontendSaved: true,
+  }
+}
+
+function calculateClosedTradeStats(closedTrades: any[]) {
+  const closed = closedTrades.filter((trade) => trade && typeof trade === 'object')
+  const samples = closed.length
+  const wins = closed.filter((trade) => toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0) > 0).length
+  const losses = closed.filter((trade) => toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0) < 0).length
+  const grossProfit = closed
+    .filter((trade) => toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0) > 0)
+    .reduce((sum, trade) => sum + toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0), 0)
+  const grossLoss = Math.abs(
+    closed
+      .filter((trade) => toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0) < 0)
+      .reduce((sum, trade) => sum + toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0), 0)
+  )
+  const avgPnl =
+    samples > 0
+      ? closed.reduce((sum, trade) => sum + toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0), 0) / samples
+      : 0
+  const avgR =
+    samples > 0
+      ? closed.reduce((sum, trade) => sum + toFiniteNumber(trade.rMultiple ?? trade.r, 0), 0) / samples
+      : 0
+
+  return {
+    samples,
+    wins,
+    losses,
+    winRate: samples > 0 ? wins / samples : 0,
+    profitFactor: grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? grossProfit : 0,
+    avgPnl,
+    avgR,
+  }
 }
 
 function getBlockerAnalysis(decision: AiTraderDecision | null, summary: AiTraderSummary | null, minConfidence: number, minRiskReward: number) {
   const blockers: Array<{ label: string; detail: string; severity: 'high' | 'medium' | 'low' }> = []
-
   const confidence = toFiniteNumber(decision?.confidence, 0)
   const riskReward = toFiniteNumber(decision?.riskReward, 0)
   const directional = decision?.details?.directionalContext ?? {}
@@ -226,21 +866,6 @@ function getBlockerAnalysis(decision: AiTraderDecision | null, summary: AiTrader
   return blockers
 }
 
-function BlockerBadge({ severity }: { severity: 'high' | 'medium' | 'low' }) {
-  const className =
-    severity === 'high'
-      ? 'border-red-400/30 bg-red-400/10 text-red-200'
-      : severity === 'medium'
-        ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
-        : 'border-blue-400/30 bg-blue-400/10 text-blue-200'
-
-  return (
-    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-black uppercase tracking-wide ${className}`}>
-      {severity}
-    </span>
-  )
-}
-
 function getMlStrengthLabel(value: any) {
   const score = toFiniteNumber(value, 0)
 
@@ -258,6 +883,32 @@ function getMlStrengthTone(value: any): 'neutral' | 'bull' | 'bear' | 'warn' {
   if (score > 0) return 'warn'
 
   return 'neutral'
+}
+
+function StatBox({
+  label,
+  value,
+  tone = 'neutral',
+}: {
+  label: string
+  value: string
+  tone?: 'neutral' | 'bull' | 'bear' | 'warn'
+}) {
+  const toneClass =
+    tone === 'bull'
+      ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
+      : tone === 'bear'
+        ? 'border-red-400/30 bg-red-400/10 text-red-200'
+        : tone === 'warn'
+          ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
+          : 'border-dark-600 bg-dark-800/80 text-gray-200'
+
+  return (
+    <div className={`rounded-xl border px-3 py-2 ${toneClass}`}>
+      <div className="text-[10px] uppercase tracking-wide text-gray-400">{label}</div>
+      <div className="mt-1 text-sm font-black">{value}</div>
+    </div>
+  )
 }
 
 function MlStatusCard({
@@ -305,620 +956,18 @@ function MlStatusCard({
   )
 }
 
-function readNumberPath(source: any, paths: string[]) {
-  for (const path of paths) {
-    const value = path.split('.').reduce((current: any, key: string) => {
-      if (current && typeof current === 'object' && key in current) return current[key]
-      return undefined
-    }, source)
-
-    const parsed = Number(value)
-
-    if (Number.isFinite(parsed) && parsed > 0) return parsed
-  }
-
-  return undefined
-}
-
-function normalizeDecision(value: any): 'BUY' | 'SELL' | 'HOLD' {
-  const raw = String(value ?? '').toUpperCase()
-
-  if (raw.includes('BUY') || raw.includes('LONG') || raw.includes('BULL')) return 'BUY'
-  if (raw.includes('SELL') || raw.includes('SHORT') || raw.includes('BEAR')) return 'SELL'
-
-  return 'HOLD'
-}
-
-function sanitizeAiTraderPayload(value: any, depth = 0): any {
-  if (depth > 6) return null
-
-  if (value === undefined) return null
-  if (value === null) return null
-
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : null
-  }
-
-  if (typeof value === 'string' || typeof value === 'boolean') {
-    return value
-  }
-
-  if (Array.isArray(value)) {
-    return value.slice(0, 50).map((item) => sanitizeAiTraderPayload(item, depth + 1))
-  }
-
-  if (typeof value === 'object') {
-    const result: Record<string, any> = {}
-
-    Object.entries(value).forEach(([key, entry]) => {
-      if (typeof entry === 'function') return
-      if (typeof entry === 'symbol') return
-      result[key] = sanitizeAiTraderPayload(entry, depth + 1)
-    })
-
-    return result
-  }
-
-  return null
-}
-
-async function readApiError(response: Response) {
-  const text = await response.text().catch(() => '')
-
-  if (!text) return `${response.status}`
-
-  try {
-    const json = JSON.parse(text)
-    return `${response.status}: ${JSON.stringify(json).slice(0, 500)}`
-  } catch {
-    return `${response.status}: ${text.slice(0, 500)}`
-  }
-}
-
-function readProjectionEngine(signal: any, overlayPayload: any, unifiedIntelligence: any) {
-  const candidates = [
-    unifiedIntelligence?.projectionEngine,
-    unifiedIntelligence?.unifiedProjectionEngine,
-    unifiedIntelligence?.components?.projectionEngine,
-    unifiedIntelligence?.components?.unifiedProjectionEngine,
-    signal?.projectionEngine,
-    signal?.unifiedProjectionEngine,
-    overlayPayload?.projectionEngine,
-    overlayPayload?.unifiedProjectionEngine,
-    overlayPayload?.unifiedIntelligence?.projectionEngine,
-    overlayPayload?.unifiedIntelligence?.unifiedProjectionEngine,
-    unifiedIntelligence,
-  ]
-
-  for (const candidate of candidates) {
-    if (
-      candidate &&
-      typeof candidate === 'object' &&
-      (
-        candidate.eventType === 'UNIFIED_PROJECTION_ENGINE' ||
-        candidate.ghostPath ||
-        candidate.target ||
-        candidate.alignment ||
-        candidate.activeTargetPrice
-      )
-    ) {
-      return candidate
-    }
-  }
-
-  return null
-}
-
-function readProjectionTarget(projectionEngine: any) {
-  if (!projectionEngine || typeof projectionEngine !== 'object') return undefined
-
-  return readNumberPath(projectionEngine, [
-    'activeTargetPrice',
-    'target.price',
-    'targetPrice',
-    'targetPlan.targetPrice',
-    'targetPlan.finalTargetPrice',
-    'targetMl.targetPrice',
-    'finalTargetPrice',
-    'ghostOverlayTargetPrice',
-    'ghostPath.targetPrice',
-    'ghostPath.endPrice',
-  ])
-}
-
-function readProjectionGhostConfidence(projectionEngine: any) {
-  if (!projectionEngine || typeof projectionEngine !== 'object') return 0
-
-  return Math.max(
-    toFiniteNumber(projectionEngine?.ghostConfidence, 0),
-    toFiniteNumber(projectionEngine?.ghostPath?.confidence, 0),
-    toFiniteNumber(projectionEngine?.alignment?.score, 0),
-  )
-}
-
-function readProjectionTargetConfidence(projectionEngine: any) {
-  if (!projectionEngine || typeof projectionEngine !== 'object') return 0
-
-  const targetType = String(
-    projectionEngine?.activeTargetType ??
-      projectionEngine?.target?.type ??
-      projectionEngine?.targetPlan?.type ??
-      ''
-  )
-
-  const isGhostOverlay = targetType === 'GHOST_OVERLAY_TARGET'
-
-  if (isGhostOverlay) {
-    return 0
-  }
-
-  return Math.max(
-    toFiniteNumber(projectionEngine?.targetConfidence, 0),
-    toFiniteNumber(projectionEngine?.activeTargetConfidence, 0),
-    toFiniteNumber(projectionEngine?.target?.confidence, 0),
-    toFiniteNumber(projectionEngine?.targetPlan?.targetConfidence, 0),
-    toFiniteNumber(projectionEngine?.targetMl?.targetConfidence, 0),
-  )
-}
-
-function readProjectionSide(projectionEngine: any, fallback: any) {
-  const direction = String(
-    projectionEngine?.target?.direction ??
-      projectionEngine?.ghostPath?.direction ??
-      projectionEngine?.marketState?.direction ??
-      projectionEngine?.targetDirection ??
-      ''
-  ).toUpperCase()
-
-  if (direction.includes('BULL') || direction.includes('UP') || direction.includes('BUY')) return 'BUY'
-  if (direction.includes('BEAR') || direction.includes('DOWN') || direction.includes('SELL')) return 'SELL'
-
-  return normalizeDecision(fallback)
-}
-
-function buildProjectionEngineSnapshot(projectionEngine: any) {
-  if (!projectionEngine || typeof projectionEngine !== 'object') {
-    return {
-      available: false,
-      targetPrice: undefined,
-      targetConfidence: 0,
-      ghostConfidence: 0,
-      alignmentScore: 0,
-      alignmentLabel: 'Waiting',
-      projectionMode: 'WAITING',
-      projectionModeLabel: 'Waiting',
-      aiPermission: 'WAIT',
-      conflict: false,
-    }
-  }
-
-  const targetPrice = readProjectionTarget(projectionEngine)
-  const targetConfidence = readProjectionTargetConfidence(projectionEngine)
-  const ghostConfidence = readProjectionGhostConfidence(projectionEngine)
-  const alignmentScore = toFiniteNumber(projectionEngine?.alignment?.score, 0)
-  const conflict = Boolean(projectionEngine?.alignment?.conflict || projectionEngine?.mode?.conflict)
-
-  return {
-    available: Boolean(targetPrice),
-    targetPrice,
-    targetConfidence,
-    ghostConfidence,
-    alignmentScore,
-    alignmentLabel: String(projectionEngine?.alignment?.label ?? 'Waiting'),
-    projectionMode: String(projectionEngine?.projectionMode ?? projectionEngine?.mode?.mode ?? 'WAITING'),
-    projectionModeLabel: String(projectionEngine?.projectionModeLabel ?? projectionEngine?.mode?.label ?? 'Waiting'),
-    aiPermission: String(projectionEngine?.aiPermission ?? 'WAIT'),
-    conflict,
-    source: String(projectionEngine?.activeTargetSource ?? projectionEngine?.target?.source ?? 'Unified Projection Engine'),
-    targetType: String(projectionEngine?.activeTargetType ?? projectionEngine?.target?.type ?? ''),
-    targetSourceLockActive: Boolean(projectionEngine?.targetSourceLockActive),
-    targetLockedConfidence: toFiniteNumber(projectionEngine?.targetLockedConfidence ?? projectionEngine?.target?.lockedConfidence ?? targetConfidence, targetConfidence),
-    targetLiveConfidence: toFiniteNumber(projectionEngine?.targetLiveConfidence ?? projectionEngine?.target?.liveConfidence ?? targetConfidence, targetConfidence),
-    targetLiveSource: String(projectionEngine?.targetLiveSource ?? projectionEngine?.target?.liveTargetSource ?? projectionEngine?.activeTargetSource ?? projectionEngine?.target?.source ?? 'Unified Projection Engine'),
-    targetLockedAt: String(projectionEngine?.targetLockedAt ?? projectionEngine?.target?.lockedAt ?? ''),
-    learnedReliability: toFiniteNumber(projectionEngine?.targetMl?.learnedReliability ?? projectionEngine?.targetPlan?.learnedReliability ?? 0, 0),
-    marketState: projectionEngine?.marketState,
-    target: projectionEngine?.target,
-    ghostPath: projectionEngine?.ghostPath,
-    alignment: projectionEngine?.alignment,
-    mode: projectionEngine?.mode,
-    learning: projectionEngine?.learning,
-  }
-}
-
-function inferTargetFromSignal(signal: any) {
-  // Real Target Price ML first, then only chart ghost overlay target fallback.
-  return readNumberPath(signal, [
-    'projectionEngine.activeTargetPrice',
-    'projectionEngine.target.price',
-    'projectionEngine.targetPrice',
-    'projectionEngine.targetPlan.targetPrice',
-    'projectionEngine.targetMl.targetPrice',
-    'projectionEngine.finalTargetPrice',
-    'projectionEngine.ghostOverlayTargetPrice',
-    'unifiedProjectionEngine.activeTargetPrice',
-    'unifiedProjectionEngine.target.price',
-    'unifiedProjectionEngine.targetPrice',
-    'unifiedProjectionEngine.targetPlan.targetPrice',
-    'unifiedProjectionEngine.targetMl.targetPrice',
-    'unifiedProjectionEngine.finalTargetPrice',
-    'unifiedProjectionEngine.ghostOverlayTargetPrice',
-    'finalTargetPrice',
-    'overallTargetPrice',
-    'targetMl.finalTargetPrice',
-    'targetMl.overallTargetPrice',
-    'targetMl.targetPrice',
-    'targetPlan.finalTargetPrice',
-    'targetPlan.overallTargetPrice',
-    'targetPlan.targetPrice',
-    'activeTargetPrice',
-    'ghostOverlayTargetPrice',
-    'targetMl.activeTargetPrice',
-    'targetMl.ghostOverlayTargetPrice',
-    'targetPlan.activeTargetPrice',
-    'targetPlan.ghostOverlayTargetPrice',
-    'overlayPayload.finalTargetPrice',
-    'overlayPayload.overallTargetPrice',
-    'overlayPayload.targetMl.finalTargetPrice',
-    'overlayPayload.targetMl.overallTargetPrice',
-    'overlayPayload.targetMl.targetPrice',
-    'overlayPayload.activeTargetPrice',
-    'overlayPayload.ghostOverlayTargetPrice',
-  ])
-}
-
-
-function inferEntryFromSignal(signal: any, activePrice?: number) {
-  return readNumberPath(signal, [
-    'entryPrice',
-    'entry',
-    'nrtrEntryPrice',
-    'strategyEntryPrice',
-    'price',
-    'close',
-  ]) ?? activePrice
-}
-
-function readGhostTargetMlContext(source: any) {
-  const ghostSources = [
-    source?.projectionEngine?.ghostPath?.candles,
-    source?.unifiedProjectionEngine?.ghostPath?.candles,
-    source?.ghostPath?.candles,
-    source?.ghostCandles,
-    source?.ghosts,
-    source?.projection,
-    source?.ghostProjection,
-    source?.ghostCandleProjection,
-    source?.overlayPayload?.projectionEngine?.ghostPath?.candles,
-    source?.overlayPayload?.unifiedProjectionEngine?.ghostPath?.candles,
-    source?.overlayPayload?.ghostCandles,
-    source?.overlayPayload?.ghosts,
-  ]
-
-  let bestTarget = readNumberPath(source, [
-    'finalTargetPrice',
-    'overallTargetPrice',
-    'targetMl.finalTargetPrice',
-    'targetMl.overallTargetPrice',
-    'targetMl.targetPrice',
-    'targetPlan.finalTargetPrice',
-    'targetPlan.overallTargetPrice',
-    'targetPlan.targetPrice',
-  ])
-  let bestConfidence = toFiniteNumber(
-    source?.targetConfidence ??
-    source?.targetMl?.targetConfidence ??
-    source?.targetPlan?.targetConfidence,
-    0,
-  )
-  let aligned = Boolean(source?.targetMlAligned ?? source?.targetMl?.targetMlAligned)
-  let ready = Boolean(source?.targetMlReady ?? source?.targetMl?.targetMlReady)
-
-  ghostSources.forEach((ghostList) => {
-    if (!Array.isArray(ghostList)) return
-
-    ghostList.forEach((ghost: any) => {
-      const ghostTarget = readNumberPath(ghost, [
-        'finalTargetPrice',
-        'overallTargetPrice',
-        'ghostTargetPrice',
-        'projectedTargetPrice',
-        'targetPrice',
-        'close',
-      ])
-
-      const ghostConfidence = toFiniteNumber(
-        ghost?.targetConfidence ??
-        ghost?.targetMlConfidence ??
-        ghost?.confidence,
-        0,
-      )
-
-      if (!bestTarget && ghostTarget && ghostTarget > 0) {
-        bestTarget = ghostTarget
-      }
-
-      if (ghostConfidence > bestConfidence) {
-        bestConfidence = ghostConfidence
-      }
-
-      aligned = aligned || Boolean(ghost?.targetMlAligned)
-      ready = ready || Boolean(ghost?.targetMlReady) || Boolean(ghost?.targetMlAligned) || ghostConfidence > 0
-    })
-  })
-
-  return {
-    targetPrice: bestTarget,
-    targetConfidence: bestConfidence,
-    targetMlAligned: aligned,
-    targetMlReady: ready || aligned || bestConfidence > 0 || Boolean(bestTarget),
-  }
-}
-
-function buildTargetMlSnapshot(signal: any, overlayPayload: any, unifiedIntelligence?: any) {
-  const projectionEngine = readProjectionEngine(signal, overlayPayload, unifiedIntelligence)
-  const projectionSnapshot = buildProjectionEngineSnapshot(projectionEngine)
-  const signalContext = readGhostTargetMlContext(signal)
-  const overlayContext = readGhostTargetMlContext(overlayPayload)
-
-  const targetConfidence = Math.max(
-    toFiniteNumber(projectionSnapshot.targetConfidence, 0),
-    toFiniteNumber(
-      signal?.targetConfidence ??
-      signal?.targetMl?.targetConfidence ??
-      overlayPayload?.targetConfidence ??
-      overlayPayload?.targetMl?.targetConfidence,
-      0,
-    ),
-    toFiniteNumber(signalContext.targetConfidence, 0),
-    toFiniteNumber(overlayContext.targetConfidence, 0),
-  )
-
-  const targetPrice =
-    projectionSnapshot.targetPrice ??
-    inferTargetFromSignal(signal) ??
-    signalContext.targetPrice ??
-    overlayContext.targetPrice ??
-    readNumberPath(overlayPayload, [
-      'finalTargetPrice',
-      'overallTargetPrice',
-      'targetPrice',
-      'targetMl.targetPrice',
-      'targetPlan.targetPrice',
-    ])
-
-  const targetMlAligned = Boolean(
-    projectionSnapshot.available ||
-      Boolean(
-        signal?.targetMlAligned ??
-          signal?.targetMl?.targetMlAligned ??
-          overlayPayload?.targetMlAligned ??
-          overlayPayload?.targetMl?.targetMlAligned ??
-          signalContext.targetMlAligned ??
-          overlayContext.targetMlAligned
-      )
-  )
-
-  const targetMlReady = Boolean(
-    signal?.targetMlReady ||
-    signal?.targetMl?.targetMlReady ||
-    overlayPayload?.targetMlReady ||
-    overlayPayload?.targetMl?.targetMlReady ||
-    signalContext.targetMlReady ||
-    overlayContext.targetMlReady ||
-    targetMlAligned ||
-    targetConfidence > 0
-  )
-
-  return {
-    targetConfidence,
-    targetMlReady,
-    targetMlAligned,
-    targetPrice,
-    source:
-      projectionSnapshot.source ??
-      signal?.targetSource ??
-      signal?.targetMl?.source ??
-      overlayPayload?.targetSource ??
-      overlayPayload?.targetMl?.source ??
-      'ghost_target_ml_context',
-    projectionEngine: projectionSnapshot,
-  }
-}
-
-function buildGhostMlSnapshot(signal: any, overlayPayload: any, unifiedIntelligence?: any) {
-  const projectionEngine = readProjectionEngine(signal, overlayPayload, unifiedIntelligence)
-  const projectionSnapshot = buildProjectionEngineSnapshot(projectionEngine)
-
-  return {
-    confidence: Math.max(
-      toFiniteNumber(projectionSnapshot.ghostConfidence, 0),
-      toFiniteNumber(
-        signal?.ghostConfidence ??
-      signal?.confidence ??
-      signal?.mlConfidence ??
-        overlayPayload?.ghostConfidence,
-        0,
-      )
-    ),
-    mlReady: Boolean(
-      projectionSnapshot.available ||
-        Boolean(signal?.mlReady ?? signal?.ghostMlReady ?? overlayPayload?.mlReady)
-    ),
-    ghostConfidenceBoost: toFiniteNumber(signal?.ghostConfidenceBoost ?? overlayPayload?.ghostConfidenceBoost, 0),
-  }
-}
-
-function buildEntryMlSnapshot(signal: any) {
-  return {
-    entryConfidence: toFiniteNumber(signal?.entryConfidence ?? signal?.entryMlConfidence, 0),
-    confidence: toFiniteNumber(signal?.entryConfidence ?? signal?.entryMlConfidence, 0),
-  }
-}
-
-function getLatestCandleClose(candles: any[] | undefined) {
-  if (!Array.isArray(candles) || candles.length === 0) return undefined
-
-  for (let index = candles.length - 1; index >= 0; index -= 1) {
-    const candle = candles[index]
-    const close = toFiniteNumber(candle?.close ?? candle?.c, 0)
-
-    if (close > 0) return close
-  }
-
-  return undefined
-}
-
-function getLiveAiCurrentPrice(activePrice: any, signal: any, candles: any[] | undefined) {
-  const candidates = [
-    activePrice,
-    getLatestCandleClose(candles),
-    signal?.current,
-    signal?.price,
-    signal?.entry,
-    signal?.close,
-    signal?.last,
-  ]
-
-  for (const candidate of candidates) {
-    const value = toFiniteNumber(candidate, 0)
-    if (value > 0) return value
-  }
-
-  return 0
-}
-
-
-function normalizeTradeSide(value: any): 'BUY' | 'SELL' {
-  const side = normalizeDecision(value)
-  return side === 'SELL' ? 'SELL' : 'BUY'
-}
-
-type AiTradeCloseReason =
-  | 'TARGET_HIT'
-  | 'STOP_HIT'
-  | 'AI_REVERSAL_EXIT'
-  | 'AI_CONFIDENCE_EXIT'
-
-function getAiTradeSettlement(trade: any, livePrice: number): {
-  shouldClose: boolean
-  closePrice: number
-  closeReason?: AiTradeCloseReason
-  closeLabel?: string
-} {
-  const current = getTradeLiveCurrentPrice(trade, livePrice)
-  const side = normalizeTradeSide(trade?.side ?? trade?.decision ?? trade?.rawDecision)
-  const target = toFiniteNumber(trade?.target ?? trade?.targetPrice ?? trade?.takeProfitPrice ?? trade?.tp1, 0)
-  const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0)
-
-  if (current <= 0 || target <= 0 || stop <= 0) {
-    return {
-      shouldClose: false,
-      closePrice: current,
-    }
-  }
-
-  const buyTargetHit = side === 'BUY' && current >= target
-  const buyStopHit = side === 'BUY' && current <= stop
-
-  const sellTargetHit = side === 'SELL' && current <= target
-  const sellStopHit = side === 'SELL' && current >= stop
-
-  if (buyTargetHit || sellTargetHit) {
-    return {
-      shouldClose: true,
-      closePrice: target,
-      closeReason: 'TARGET_HIT',
-      closeLabel: 'Target hit',
-    }
-  }
-
-  if (buyStopHit || sellStopHit) {
-    return {
-      shouldClose: true,
-      closePrice: stop,
-      closeReason: 'STOP_HIT',
-      closeLabel: 'Stop hit',
-    }
-  }
-
-  return {
-    shouldClose: false,
-    closePrice: current,
-  }
-}
-
-function getTradeLiveCurrentPrice(trade: any, livePrice: number) {
-  const live = toFiniteNumber(livePrice, 0)
-  if (live > 0) return live
-
-  return toFiniteNumber(
-    trade?.currentPrice ??
-      trade?.current ??
-      trade?.lastPrice ??
-      trade?.markPrice ??
-      trade?.entry,
-    0
-  )
-}
-
-function calculateLiveTradePnl(trade: any, livePrice: number) {
-  const current = getTradeLiveCurrentPrice(trade, livePrice)
-  const entry = toFiniteNumber(trade?.entry ?? trade?.entryPrice, 0)
-  const side = normalizeTradeSide(trade?.side ?? trade?.decision ?? trade?.rawDecision)
-  const quantity = Math.max(1, toFiniteNumber(trade?.quantity ?? trade?.qty ?? trade?.contracts, 1))
-  const pointValue = Math.max(1, toFiniteNumber(trade?.pointValue ?? trade?.dollarPerPoint ?? trade?.multiplier, String(trade?.symbol ?? '').toUpperCase().includes('MES') ? 5 : 1))
-
-  if (entry <= 0 || current <= 0) {
-    return {
-      current,
-      pnl: toFiniteNumber(trade?.currentPnl ?? trade?.pnl, 0),
-      pnlPercent: toFiniteNumber(trade?.pnlPercent ?? trade?.percent, 0),
-      points: 0,
-      rMultiple: toFiniteNumber(trade?.rMultiple ?? trade?.r, 0),
-    }
-  }
-
-  const points = side === 'SELL' ? entry - current : current - entry
-  const pnl = points * pointValue * quantity
-  const pnlPercent = entry > 0 ? points / entry : 0
-
-  const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0)
-  const riskPoints = stop > 0 ? Math.abs(entry - stop) : 0
-  const rMultiple = riskPoints > 0 ? points / riskPoints : toFiniteNumber(trade?.rMultiple ?? trade?.r, 0)
-
-  return {
-    current,
-    pnl,
-    pnlPercent,
-    points,
-    rMultiple,
-  }
-}
-
-function StatBox({
-  label,
-  value,
-  tone = 'neutral',
-}: {
-  label: string
-  value: string
-  tone?: 'neutral' | 'bull' | 'bear' | 'warn'
-}) {
-  const toneClass =
-    tone === 'bull'
-      ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
-      : tone === 'bear'
-        ? 'border-red-400/30 bg-red-400/10 text-red-200'
-        : tone === 'warn'
-          ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
-          : 'border-dark-600 bg-dark-800/80 text-gray-200'
+function BlockerBadge({ severity }: { severity: 'high' | 'medium' | 'low' }) {
+  const className =
+    severity === 'high'
+      ? 'border-red-400/30 bg-red-400/10 text-red-200'
+      : severity === 'medium'
+        ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
+        : 'border-blue-400/30 bg-blue-400/10 text-blue-200'
 
   return (
-    <div className={`rounded-xl border px-3 py-2 ${toneClass}`}>
-      <div className="text-[10px] uppercase tracking-wide text-gray-400">{label}</div>
-      <div className="mt-1 text-sm font-black">{value}</div>
-    </div>
+    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-black uppercase tracking-wide ${className}`}>
+      {severity}
+    </span>
   )
 }
 
@@ -944,6 +993,34 @@ export default function AiTraderPanel({
   const [minConfidence, setMinConfidence] = useState(62)
   const [minRiskReward, setMinRiskReward] = useState(1.25)
   const [lastAutoOpenKey, setLastAutoOpenKey] = useState('')
+  const [localClosedTrades, setLocalClosedTrades] = useState<any[]>([])
+  const [hydratedLocalClosedTrades, setHydratedLocalClosedTrades] = useState(false)
+
+  const closedStorageKey = useMemo(() => {
+    return `marketbos:ai-trader:closed:${String(symbol ?? 'ALL').toUpperCase()}:${String(timeframe ?? 'ALL')}`
+  }, [symbol, timeframe])
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(closedStorageKey)
+      const parsed = raw ? JSON.parse(raw) : []
+      setLocalClosedTrades(Array.isArray(parsed) ? parsed : [])
+    } catch {
+      setLocalClosedTrades([])
+    } finally {
+      setHydratedLocalClosedTrades(true)
+    }
+  }, [closedStorageKey])
+
+  useEffect(() => {
+    if (!hydratedLocalClosedTrades) return
+
+    try {
+      window.localStorage.setItem(closedStorageKey, JSON.stringify(localClosedTrades.slice(0, 500)))
+    } catch {
+      // Browser storage can fail in private mode; the dashboard should continue.
+    }
+  }, [closedStorageKey, hydratedLocalClosedTrades, localClosedTrades])
 
   const liveActivePrice = useMemo(() => {
     return getLiveAiCurrentPrice(activePrice, signal, candles)
@@ -1035,6 +1112,12 @@ export default function AiTraderPanel({
 
   const safePayload = useMemo(() => sanitizeAiTraderPayload(payload), [payload])
 
+  const saveClosedTrades = useCallback((incomingTrades: any[]) => {
+    if (!Array.isArray(incomingTrades) || incomingTrades.length === 0) return
+
+    setLocalClosedTrades((current) => mergeTrades(current, incomingTrades))
+  }, [])
+
   const fetchDecision = useCallback(async () => {
     if (!apiBaseUrl) {
       setErrorText('AI Trader is waiting for apiBaseUrl.')
@@ -1088,10 +1171,16 @@ export default function AiTraderPanel({
 
       const json = await response.json()
       setSummary(json)
+
+      const backendClosedTrades = [
+        ...(Array.isArray(json?.closedTrades) ? json.closedTrades : []),
+        ...(Array.isArray(json?.recentClosedTrades) ? json.recentClosedTrades : []),
+      ]
+      saveClosedTrades(backendClosedTrades)
     } catch {
       // Keep the panel usable even if summary temporarily fails.
     }
-  }, [apiBaseUrl, symbol, timeframe])
+  }, [apiBaseUrl, saveClosedTrades, symbol, timeframe])
 
   const evaluateOpenTrades = useCallback(async () => {
     if (!apiBaseUrl) return
@@ -1110,6 +1199,7 @@ export default function AiTraderPanel({
           currentPrice: liveActivePrice,
           livePrice: liveActivePrice,
           markPrice: liveActivePrice,
+          decision,
           candles: Array.isArray(candles) ? candles.slice(-120) : [],
         })),
       })
@@ -1119,12 +1209,22 @@ export default function AiTraderPanel({
       }
 
       const json = await response.json()
-      setSummary(json?.summary ?? null)
-      setActionStatus(`Evaluated • Closed ${json?.closedCount ?? 0} trade(s)`)
+      const nextSummary = json?.summary ?? null
+      setSummary(nextSummary)
+
+      const backendClosedTrades = [
+        ...(Array.isArray(json?.closedTrades) ? json.closedTrades : []),
+        ...(Array.isArray(json?.recentClosedTrades) ? json.recentClosedTrades : []),
+        ...(Array.isArray(nextSummary?.closedTrades) ? nextSummary.closedTrades : []),
+        ...(Array.isArray(nextSummary?.recentClosedTrades) ? nextSummary.recentClosedTrades : []),
+      ]
+      saveClosedTrades(backendClosedTrades)
+
+      setActionStatus(`Evaluated • Closed ${json?.closedCount ?? backendClosedTrades.length ?? 0} trade(s)`)
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : 'Evaluate failed')
     }
-  }, [apiBaseUrl, liveActivePrice, candles, symbol, timeframe])
+  }, [apiBaseUrl, candles, decision, liveActivePrice, saveClosedTrades, symbol, timeframe])
 
   const openDashboardTrade = useCallback(async () => {
     if (!apiBaseUrl) return
@@ -1215,24 +1315,43 @@ export default function AiTraderPanel({
     summary?.decisionStats ??
     {}
 
+  const backendClosedTrades = useMemo(() => {
+    return [
+      ...(Array.isArray(summary?.closedTrades) ? summary?.closedTrades ?? [] : []),
+      ...(Array.isArray(summary?.recentClosedTrades) ? summary?.recentClosedTrades ?? [] : []),
+    ]
+  }, [summary])
+
+  const closedTrades = useMemo(() => {
+    return mergeTrades(localClosedTrades, backendClosedTrades)
+  }, [backendClosedTrades, localClosedTrades])
+
+  const frontendClosedStats = useMemo(() => {
+    return calculateClosedTradeStats(closedTrades)
+  }, [closedTrades])
+
   const activeClosedStats =
-    activeMemoryStatus?.bucketClosedStats ??
-    activeMemoryStatus?.overallClosedStats ??
-    summary?.stats ??
-    {}
+    closedTrades.length > 0
+      ? frontendClosedStats
+      : activeMemoryStatus?.bucketClosedStats ??
+        activeMemoryStatus?.overallClosedStats ??
+        summary?.stats ??
+        {}
 
   const stats = activeClosedStats
   const decisionStats = activeDecisionStats
   const memoryStatus = activeMemoryStatus
+  const mergedSummaryForStats: AiTraderSummary = {
+    ...(summary ?? {}),
+    memoryStatus: activeMemoryStatus,
+    decisionStats: activeDecisionStats,
+    stats: activeClosedStats,
+    closedCount: closedTrades.length,
+  }
+
   const blockers = getBlockerAnalysis(
     decision,
-    {
-      ...(summary ?? {}),
-      memoryStatus: activeMemoryStatus,
-      decisionStats: activeDecisionStats,
-      stats: activeClosedStats,
-      closedCount: summary?.closedCount ?? activeClosedStats?.samples ?? 0,
-    },
+    mergedSummaryForStats,
     minConfidence,
     minRiskReward
   )
@@ -1268,50 +1387,62 @@ export default function AiTraderPanel({
     aiMemorySamples > 0 ? Math.min(100, toFiniteNumber(decisionStats.avgConfidence, 0)) : 0,
   )
 
-  const openTrades = Array.isArray(summary?.openTrades) ? summary?.openTrades ?? [] : []
-  const closedTrades =
-    Array.isArray(summary?.recentClosedTrades)
-      ? summary?.recentClosedTrades ?? []
-      : Array.isArray(summary?.closedTrades)
-        ? summary?.closedTrades ?? []
-        : []
+  const rawOpenTrades = Array.isArray(summary?.openTrades) ? summary?.openTrades ?? [] : []
+  const locallyClosedKeys = useMemo(() => new Set(closedTrades.map(getTradeKey)), [closedTrades])
 
-  const liveOpenTrades = openTrades.map((trade: any) => {
-    const settlement = getAiTradeSettlement(trade, liveActivePrice)
-    const live = calculateLiveTradePnl(
-      trade,
-      settlement.shouldClose ? settlement.closePrice : liveActivePrice
-    )
+  const liveOpenTrades = rawOpenTrades
+    .filter((trade: any) => !locallyClosedKeys.has(getTradeKey(trade)))
+    .map((trade: any) => {
+      const settlement = getAiTradeSettlement(trade, liveActivePrice, decision, minConfidence)
+      const live = calculateLiveTradePnl(
+        trade,
+        settlement.shouldClose ? settlement.closePrice : liveActivePrice
+      )
 
-    return {
-      ...trade,
-      currentPrice: live.current,
-      liveCurrentPrice: live.current,
-      currentPnl: live.pnl,
-      pnl: live.pnl,
-      pnlPercent: live.pnlPercent,
-      percent: live.pnlPercent,
-      livePoints: live.points,
-      rMultiple: live.rMultiple,
-      liveUpdatedFromChart: live.current > 0,
+      return {
+        ...trade,
+        currentPrice: live.current,
+        liveCurrentPrice: live.current,
+        currentPnl: live.pnl,
+        pnl: live.pnl,
+        pnlPercent: live.pnlPercent,
+        percent: live.pnlPercent,
+        livePoints: live.points,
+        rMultiple: live.rMultiple,
+        liveUpdatedFromChart: live.current > 0,
 
-      shouldCloseNow: settlement.shouldClose,
-      closePrice: settlement.shouldClose ? settlement.closePrice : trade.closePrice,
-      closeReason: settlement.shouldClose ? settlement.closeReason : trade.closeReason,
-      closeLabel: settlement.shouldClose ? settlement.closeLabel : trade.closeLabel,
-    }
-  })
+        shouldCloseNow: settlement.shouldClose,
+        closePrice: settlement.shouldClose ? settlement.closePrice : trade.closePrice,
+        closeReason: settlement.shouldClose ? settlement.closeReason : trade.closeReason,
+        closeLabel: settlement.shouldClose ? settlement.closeLabel : trade.closeLabel,
+      }
+    })
 
   const settlementAutoEvaluateKey = liveOpenTrades
     .filter((trade: any) => trade.shouldCloseNow)
-    .map((trade: any) => `${trade.id ?? trade.entryTime ?? ''}:${trade.closeReason}:${trade.closePrice}`)
+    .map((trade: any) => `${getTradeKey(trade)}:${trade.closeReason}:${trade.closePrice}`)
     .join('|')
 
   useEffect(() => {
     if (!settlementAutoEvaluateKey) return
 
+    const tradesToClose = liveOpenTrades
+      .filter((trade: any) => trade.shouldCloseNow)
+      .map((trade: any) => buildClosedTradeFromOpenTrade({
+        trade,
+        livePrice: liveActivePrice,
+        closePrice: toFiniteNumber(trade.closePrice, liveActivePrice),
+        closeReason: trade.closeReason,
+        closeLabel: trade.closeLabel,
+        candles,
+      }))
+
+    saveClosedTrades(tradesToClose)
     evaluateOpenTrades()
-  }, [settlementAutoEvaluateKey, evaluateOpenTrades])
+  }, [settlementAutoEvaluateKey, saveClosedTrades, evaluateOpenTrades, liveOpenTrades, liveActivePrice, candles])
+
+  const displayOpenCount = liveOpenTrades.length
+  const displayClosedCount = closedTrades.length
 
   return (
     <motion.div
@@ -1330,9 +1461,12 @@ export default function AiTraderPanel({
             <span className="rounded-full border border-red-400/30 bg-red-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-red-200">
               No Broker
             </span>
+            <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-emerald-200">
+              Closed History Saved
+            </span>
           </div>
           <p className="mt-1 text-xs text-gray-400">
-            Simulated AI trades only. Learns from dashboard entries, targets, stops, P&amp;L, and closed outcomes.
+            Simulated AI trades only. Closed trades are merged from backend memory and browser localStorage so the table does not reset to 0.
           </p>
         </div>
 
@@ -1429,7 +1563,7 @@ export default function AiTraderPanel({
           value={decision?.rawDecision ?? '—'}
           tone={rawDecision === 'BUY' ? 'bull' : rawDecision === 'SELL' ? 'bear' : 'neutral'}
         />
-        <StatBox label="Confidence" value={`${toFiniteNumber(decision?.confidence, 0).toFixed(1)}% ${decision?.confidenceGrade ?? ''}`} tone="neutral" />
+        <StatBox label="Confidence" value={`${toFiniteNumber(decision?.confidence, 0).toFixed(1)}% ${decision?.confidenceGrade ?? ''}`} />
         <StatBox label="Auto Paper" value={autoPaperMode ? 'ARMED' : 'OFF'} tone={autoPaperMode ? 'bull' : 'neutral'} />
         <StatBox label="Entry" value={formatPrice(decision?.entry)} />
         <StatBox label="Target" value={formatPrice(decision?.target)} />
@@ -1454,26 +1588,10 @@ export default function AiTraderPanel({
         </div>
 
         <div className="mb-3 grid grid-cols-2 gap-2 md:grid-cols-4">
-          <StatBox
-            label="Live Price"
-            value={formatPrice(liveActivePrice)}
-            tone={liveActivePrice > 0 ? 'bull' : 'warn'}
-          />
-          <StatBox
-            label="Candles"
-            value={formatCount(Array.isArray(candles) ? candles.length : 0)}
-            tone={Array.isArray(candles) && candles.length > 0 ? 'bull' : 'warn'}
-          />
-          <StatBox
-            label="Payload"
-            value={liveActivePrice > 0 ? 'READY' : 'WAITING'}
-            tone={liveActivePrice > 0 ? 'bull' : 'warn'}
-          />
-          <StatBox
-            label="Decision Route"
-            value={apiBaseUrl ? 'READY' : 'NO API'}
-            tone={apiBaseUrl ? 'bull' : 'warn'}
-          />
+          <StatBox label="Live Price" value={formatPrice(liveActivePrice)} tone={liveActivePrice > 0 ? 'bull' : 'warn'} />
+          <StatBox label="Candles" value={formatCount(Array.isArray(candles) ? candles.length : 0)} tone={Array.isArray(candles) && candles.length > 0 ? 'bull' : 'warn'} />
+          <StatBox label="Payload" value={liveActivePrice > 0 ? 'READY' : 'WAITING'} tone={liveActivePrice > 0 ? 'bull' : 'warn'} />
+          <StatBox label="Decision Route" value={apiBaseUrl ? 'READY' : 'NO API'} tone={apiBaseUrl ? 'bull' : 'warn'} />
           <StatBox
             label="Strategy Tester"
             value={strategyTesterResults?.bestResult ? 'BEST FOUND' : strategyTesterResults?.currentResult ? 'LIVE' : 'WAITING'}
@@ -1543,19 +1661,11 @@ export default function AiTraderPanel({
           <StatBox label="Target Locked Conf" value={`${lockedTargetConfidence.toFixed(1)}%`} tone={(projectionSnapshot as any).targetSourceLockActive ? 'bull' : getMlStrengthTone(lockedTargetConfidence)} />
           <StatBox label="Target Learned" value={`${targetLearnedReliability.toFixed(1)}%`} tone={getMlStrengthTone(targetLearnedReliability)} />
           <StatBox label="Source Lock" value={(projectionSnapshot as any).targetSourceLockActive ? 'ACTIVE' : 'STANDBY'} tone={(projectionSnapshot as any).targetSourceLockActive ? 'bull' : 'neutral'} />
-          <StatBox
-            label="Tester Mode"
-            value={strategyTesterResults?.strategyMode ?? '—'}
-            tone={strategyTesterResults?.currentResult ? 'bull' : 'neutral'}
-          />
-          <StatBox
-            label="Tester WR"
-            value={`${toFiniteNumber(strategyTesterResults?.bestResult?.winRate ?? strategyTesterResults?.currentResult?.winRate, 0).toFixed(1)}%`}
-            tone={toFiniteNumber(strategyTesterResults?.bestResult?.winRate ?? strategyTesterResults?.currentResult?.winRate, 0) >= 50 ? 'bull' : 'warn'}
-          />
+          <StatBox label="Tester Mode" value={strategyTesterResults?.strategyMode ?? '—'} tone={strategyTesterResults?.currentResult ? 'bull' : 'neutral'} />
+          <StatBox label="Tester WR" value={`${toFiniteNumber(strategyTesterResults?.bestResult?.winRate ?? strategyTesterResults?.currentResult?.winRate, 0).toFixed(1)}%`} tone={toFiniteNumber(strategyTesterResults?.bestResult?.winRate ?? strategyTesterResults?.currentResult?.winRate, 0) >= 50 ? 'bull' : 'warn'} />
           <StatBox label="AI Setup Conf" value={`${aiSetupConfidence.toFixed(1)}%`} tone={decision?.allowedToTrade ? 'bull' : aiSetupConfidence >= minConfidence ? 'warn' : 'neutral'} />
           <StatBox label="AI Memory Progress" value={`${aiMemoryProgress.toFixed(1)}%`} tone={aiMemorySamples >= 10 ? 'bull' : 'warn'} />
-          <StatBox label="AI Learned" value={`${aiLearnedReliability.toFixed(1)}%`} tone={aiMemorySamples >= 10 ? 'bull' : 'neutral'} />
+          <StatBox label="AI Learned" value={`${aiLearnedReliability.toFixed(1)}%`} tone={aiMemorySamples >= 10 || displayClosedCount > 0 ? 'bull' : 'neutral'} />
           <StatBox label="Alignment" value={`${toFiniteNumber(projectionSnapshot.alignmentScore, 0).toFixed(1)}%`} tone={projectionSnapshot.conflict ? 'warn' : toFiniteNumber(projectionSnapshot.alignmentScore, 0) >= 60 ? 'bull' : 'neutral'} />
         </div>
       </div>
@@ -1628,15 +1738,15 @@ export default function AiTraderPanel({
             />
             <StatBox
               label="Memory Source"
-              value={decision?.details?.memoryStatus ? 'LIVE DECISION' : summary?.memoryStatus ? 'SUMMARY' : 'WAITING'}
-              tone={decision?.details?.memoryStatus ? 'bull' : 'warn'}
+              value={displayClosedCount > 0 ? 'CLOSED HISTORY' : decision?.details?.memoryStatus ? 'LIVE DECISION' : summary?.memoryStatus ? 'SUMMARY' : 'WAITING'}
+              tone={displayClosedCount > 0 || decision?.details?.memoryStatus ? 'bull' : 'warn'}
             />
           </div>
 
           <div className="mb-3 grid grid-cols-2 gap-2">
             <StatBox label="Setup Confidence" value={`${aiSetupConfidence.toFixed(1)}%`} tone={decision?.allowedToTrade ? 'bull' : aiSetupConfidence >= minConfidence ? 'warn' : 'neutral'} />
             <StatBox label="Memory Progress" value={`${aiMemoryProgress.toFixed(1)}%`} tone={aiMemorySamples >= 10 ? 'bull' : 'warn'} />
-            <StatBox label="Learned Reliability" value={`${aiLearnedReliability.toFixed(1)}%`} tone={aiMemorySamples >= 10 ? 'bull' : 'neutral'} />
+            <StatBox label="Learned Reliability" value={`${aiLearnedReliability.toFixed(1)}%`} tone={aiMemorySamples >= 10 || displayClosedCount > 0 ? 'bull' : 'neutral'} />
             <StatBox label="Target Lock" value={(projectionSnapshot as any).targetSourceLockActive ? 'ACTIVE' : 'STANDBY'} tone={(projectionSnapshot as any).targetSourceLockActive ? 'bull' : 'neutral'} />
           </div>
 
@@ -1647,21 +1757,21 @@ export default function AiTraderPanel({
             <StatBox label="Avg AI Conf" value={`${toFiniteNumber(decisionStats.avgConfidence, 0).toFixed(1)}%`} />
             <StatBox label="BUY Bias" value={formatCount(decisionStats.buyBias)} tone="bull" />
             <StatBox label="SELL Bias" value={formatCount(decisionStats.sellBias)} tone="bear" />
-            <StatBox label="Open" value={String(summary?.openCount ?? 0)} />
-            <StatBox label="Closed" value={String(summary?.closedCount ?? 0)} />
-            <StatBox label="Win Rate" value={formatPercent(stats.winRate)} tone="bull" />
+            <StatBox label="Open" value={String(displayOpenCount)} />
+            <StatBox label="Closed" value={String(displayClosedCount)} tone={displayClosedCount > 0 ? 'bull' : 'neutral'} />
+            <StatBox label="Win Rate" value={formatPercent(stats.winRate)} tone={toFiniteNumber(stats.winRate, 0) >= 0.5 ? 'bull' : 'warn'} />
             <StatBox label="Profit Factor" value={toFiniteNumber(stats.profitFactor, 0).toFixed(2)} />
-            <StatBox label="Avg P&L" value={formatMoney(stats.avgPnl)} />
+            <StatBox label="Avg P&L" value={formatMoney(stats.avgPnl)} tone={toFiniteNumber(stats.avgPnl, 0) >= 0 ? 'bull' : 'bear'} />
             <StatBox label="Avg R" value={toFiniteNumber(stats.avgR, 0).toFixed(2)} />
           </div>
         </div>
       </div>
 
-      {openTrades.length > 0 ? (
+      {liveOpenTrades.length > 0 ? (
         <div className="mt-4 rounded-xl border border-dark-700 bg-dark-900/70 p-4">
           <div className="mb-1 text-xs font-black uppercase tracking-wide text-gray-400">Open Dashboard AI Trades</div>
           <div className="mb-3 text-[11px] text-gray-500">
-            Open trade current price, P&amp;L, and target/stop settlement are checked from the live chart price every refresh.
+            Open trade current price, P&amp;L, and target/stop/opposite-decision settlement are checked from the live chart price every refresh.
           </div>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[760px] text-left text-xs">
@@ -1680,9 +1790,9 @@ export default function AiTraderPanel({
                 </tr>
               </thead>
               <tbody>
-                {liveOpenTrades.slice(-5).map((trade: any) => (
+                {liveOpenTrades.slice(-8).map((trade: any) => (
                   <tr
-                    key={trade.id ?? `${trade.side}-${trade.entryTime}`}
+                    key={getTradeKey(trade)}
                     className={`border-t text-gray-300 ${
                       trade.shouldCloseNow
                         ? 'border-amber-400/30 bg-amber-400/5'
@@ -1718,50 +1828,79 @@ export default function AiTraderPanel({
           </div>
         </div>
       ) : null}
+
       {closedTrades.length > 0 ? (
         <div className="mt-4 rounded-xl border border-dark-700 bg-dark-900/70 p-4">
-          <div className="mb-3 text-xs font-black uppercase tracking-wide text-gray-400">Recent Closed AI Trades</div>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[760px] text-left text-xs">
+          <div className="mb-1 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="text-xs font-black uppercase tracking-wide text-gray-400">Saved Closed AI Trades</div>
+              <div className="mt-1 text-[11px] text-gray-500">
+                Shows backend closed trades plus locally saved frontend closures. This keeps Closed above 0 after target/stop/reversal exits.
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setLocalClosedTrades([])}
+              className="rounded-lg border border-red-400/30 bg-red-400/10 px-3 py-2 text-[10px] font-black uppercase tracking-wide text-red-200 hover:bg-red-400/20"
+            >
+              Clear Local History
+            </button>
+          </div>
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full min-w-[880px] text-left text-xs">
               <thead className="text-gray-500">
                 <tr>
                   <th className="pb-2">Result</th>
                   <th className="pb-2">Side</th>
+                  <th className="pb-2">Entry Time</th>
+                  <th className="pb-2">Exit Time</th>
                   <th className="pb-2">Entry</th>
                   <th className="pb-2">Exit</th>
                   <th className="pb-2">Target</th>
                   <th className="pb-2">Stop</th>
                   <th className="pb-2">P&L</th>
+                  <th className="pb-2">P&L %</th>
                   <th className="pb-2">R</th>
                   <th className="pb-2">Exit Reason</th>
                 </tr>
               </thead>
               <tbody>
-                {closedTrades.slice(-5).reverse().map((trade: any) => (
-                  <tr key={trade.id ?? `${trade.side}-${trade.exitTime}`} className="border-t border-dark-700 text-gray-300">
-                    <td className={`py-2 font-black ${String(trade.result).toUpperCase() === 'WIN' ? 'text-emerald-300' : 'text-red-300'}`}>
+                {closedTrades.slice(0, 50).map((trade: any) => (
+                  <tr key={getTradeKey(trade)} className="border-t border-dark-700 text-gray-300">
+                    <td className={`py-2 font-black ${String(trade.result).toUpperCase() === 'WIN' ? 'text-emerald-300' : String(trade.result).toUpperCase() === 'LOSS' ? 'text-red-300' : 'text-amber-300'}`}>
                       {trade.result ?? 'CLOSED'}
                     </td>
                     <td className={`py-2 font-black ${normalizeDecision(trade.side) === 'BUY' ? 'text-emerald-300' : 'text-red-300'}`}>
                       {trade.side}
                     </td>
-                    <td className="py-2">{formatPrice(trade.entry)}</td>
+                    <td className="py-2 text-gray-500">{String(trade.entryTime ?? '—')}</td>
+                    <td className="py-2 text-gray-500">{String(trade.exitTime ?? trade.closedAt ?? '—')}</td>
+                    <td className="py-2">{formatPrice(trade.entry ?? trade.entryPrice)}</td>
                     <td className="py-2">{formatPrice(trade.exit ?? trade.exitPrice)}</td>
-                    <td className="py-2">{formatPrice(trade.target)}</td>
-                    <td className="py-2">{formatPrice(trade.stop)}</td>
-                    <td className={`py-2 font-bold ${toFiniteNumber(trade.pnl, 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
-                      {formatMoney(trade.pnl)}
+                    <td className="py-2">{formatPrice(trade.target ?? trade.targetPrice)}</td>
+                    <td className="py-2">{formatPrice(trade.stop ?? trade.stopPrice)}</td>
+                    <td className={`py-2 font-bold ${toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                      {formatMoney(trade.pnl ?? trade.pnlDollar)}
                     </td>
-                    <td className="py-2">{toFiniteNumber(trade.rMultiple, 0).toFixed(2)}</td>
-                    <td className="py-2 text-gray-500">{trade.exitReason ?? '—'}</td>
+                    <td className={`py-2 font-bold ${toFiniteNumber(trade.pnlPercent ?? trade.percent, 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                      {formatPercent(trade.pnlPercent ?? trade.percent)}
+                    </td>
+                    <td className="py-2">{toFiniteNumber(trade.rMultiple ?? trade.r, 0).toFixed(2)}</td>
+                    <td className="max-w-[260px] truncate py-2 text-gray-500">{trade.exitReason ?? trade.closeLabel ?? trade.closeReason ?? '—'}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         </div>
-      ) : null}
-
+      ) : (
+        <div className="mt-4 rounded-xl border border-dark-700 bg-dark-900/70 p-4">
+          <div className="text-xs font-black uppercase tracking-wide text-gray-400">Saved Closed AI Trades</div>
+          <div className="mt-2 text-xs text-gray-500">
+            No closed trades saved yet. The first target, stop, or opposite-decision exit will be stored here and counted in Learning Memory.
+          </div>
+        </div>
+      )}
     </motion.div>
   )
 }
