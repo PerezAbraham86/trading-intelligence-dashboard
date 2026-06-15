@@ -568,6 +568,42 @@ function getLatestCandleAutoKey(candles: any[] | undefined) {
   )
 }
 
+function buildAiTradeSetupKey({
+  symbol,
+  timeframe,
+  candles,
+  side,
+  entry,
+  target,
+  stop,
+}: {
+  symbol: string
+  timeframe: string
+  candles?: any[]
+  side: any
+  entry: any
+  target: any
+  stop: any
+}) {
+  return [
+    String(symbol ?? 'UNKNOWN').toUpperCase(),
+    String(timeframe ?? 'UNKNOWN'),
+    getLatestCandleAutoKey(candles),
+    normalizeDecision(side),
+    Number(entry ?? 0).toFixed(4),
+    Number(target ?? 0).toFixed(4),
+    Number(stop ?? 0).toFixed(4),
+  ].join('|')
+}
+
+function pruneRecentSetupKeys(map: Map<string, number>, now = Date.now(), ttlMs = 5 * 60 * 1000) {
+  Array.from(map.entries()).forEach(([key, timestamp]) => {
+    if (!Number.isFinite(timestamp) || now - timestamp > ttlMs) {
+      map.delete(key)
+    }
+  })
+}
+
 function getLiveAiCurrentPrice(activePrice: any, signal: any, candles: any[] | undefined) {
   const candidates = [
     activePrice,
@@ -1194,6 +1230,7 @@ export default function AiTraderPanel({
   const summaryRequestInFlightRef = useRef(false)
   const evaluateRequestInFlightRef = useRef(false)
   const openRequestInFlightRef = useRef(false)
+  const recentOpenSetupKeysRef = useRef<Map<string, number>>(new Map())
   const lastDecisionRequestAtRef = useRef(0)
   const lastSummaryRequestAtRef = useRef(0)
   const lastEvaluateRequestAtRef = useRef(0)
@@ -1294,10 +1331,22 @@ export default function AiTraderPanel({
     const target = projectionSnapshot.targetPrice ?? targetSnapshot.targetPrice
     const entry = inferEntryFromSignal(signal, liveActivePrice)
     const side = readProjectionSide(activeProjectionEngine, signal?.signal ?? signal?.type ?? signal?.direction)
+    const entryTime = getLatestCandleTime(candles)
+    const setupKey = buildAiTradeSetupKey({
+      symbol,
+      timeframe,
+      candles,
+      side,
+      entry,
+      target,
+      stop: signal?.stop ?? signal?.stopPrice ?? signal?.nrtrStopPrice ?? undefined,
+    })
 
     return {
       symbol,
       timeframe,
+      setupKey,
+      entryTime,
       currentPrice: liveActivePrice,
       entryPrice: entry,
       targetPrice: target,
@@ -1573,6 +1622,14 @@ export default function AiTraderPanel({
       return
     }
 
+    const openSetupKey = String((safePayload as any)?.setupKey ?? '')
+    pruneRecentSetupKeys(recentOpenSetupKeysRef.current, now)
+
+    if (openSetupKey && recentOpenSetupKeysRef.current.has(openSetupKey)) {
+      setActionStatus('Open blocked: this exact AI setup was already sent recently. Waiting for a fresh candle/setup.')
+      return
+    }
+
     const trustedBackendOpenTrades = (Array.isArray(summary?.openTrades) ? summary.openTrades : [])
       .filter((trade: any) => {
         const tradeSymbol = String(trade?.symbol ?? symbol).toUpperCase()
@@ -1595,6 +1652,10 @@ export default function AiTraderPanel({
     if (decisionRequestInFlightRef.current || evaluateRequestInFlightRef.current) {
       setActionStatus('Waiting for current AI refresh/evaluation to finish before opening trade.')
       return
+    }
+
+    if (openSetupKey) {
+      recentOpenSetupKeysRef.current.set(openSetupKey, now)
     }
 
     openRequestInFlightRef.current = true
@@ -1654,15 +1715,15 @@ export default function AiTraderPanel({
     const side = normalizeDecision(decision.rawDecision ?? decision.decision)
     if (side === 'HOLD') return
 
-    const key = [
+    const key = buildAiTradeSetupKey({
       symbol,
       timeframe,
-      getLatestCandleAutoKey(candles),
+      candles,
       side,
-      Number(decision.entry ?? 0).toFixed(4),
-      Number(decision.target ?? 0).toFixed(4),
-      Number(decision.stop ?? 0).toFixed(4),
-    ].join('|')
+      entry: decision.entry,
+      target: decision.target,
+      stop: decision.stop,
+    })
 
     if (key === lastAutoOpenKey) return
 
@@ -1811,10 +1872,9 @@ export default function AiTraderPanel({
     })
 
   useEffect(() => {
-    if (liveOpenTrades.length === 0 && lastAutoOpenKey) {
-      setLastAutoOpenKey('')
-    }
-  }, [liveOpenTrades.length, lastAutoOpenKey])
+    setLastAutoOpenKey('')
+    recentOpenSetupKeysRef.current.clear()
+  }, [symbol, timeframe])
 
   const settlementAutoEvaluateKey = liveOpenTrades
     .filter((trade: any) => trade.shouldCloseNow)
