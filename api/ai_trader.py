@@ -16,6 +16,10 @@ MEMORY_PATH = Path(os.getenv("AI_TRADER_MEMORY_PATH", str(Path(__file__).with_na
 MAX_CLOSED_TRADES = int(os.getenv("AI_TRADER_MAX_CLOSED_TRADES", "2500"))
 DEFAULT_MIN_CONFIDENCE = float(os.getenv("AI_TRADER_MIN_CONFIDENCE", "62"))
 DEFAULT_MIN_RR = float(os.getenv("AI_TRADER_MIN_RR", "1.25"))
+AI_TRADER_LEARNING_MODE = os.getenv("AI_TRADER_LEARNING_MODE", "true").lower().strip() in {"1", "true", "yes", "on"}
+AI_TRADER_REQUIRE_CONFIDENCE_IN_LEARNING_MODE = os.getenv("AI_TRADER_REQUIRE_CONFIDENCE_IN_LEARNING_MODE", "false").lower().strip() in {"1", "true", "yes", "on"}
+AI_TRADER_REQUIRE_RR_IN_LEARNING_MODE = os.getenv("AI_TRADER_REQUIRE_RR_IN_LEARNING_MODE", "false").lower().strip() in {"1", "true", "yes", "on"}
+AI_TRADER_REQUIRE_TARGET_STOP_IN_LEARNING_MODE = os.getenv("AI_TRADER_REQUIRE_TARGET_STOP_IN_LEARNING_MODE", "false").lower().strip() in {"1", "true", "yes", "on"}
 MAX_DECISION_OBSERVATIONS = int(os.getenv("AI_TRADER_MAX_DECISION_OBSERVATIONS", "1500"))
 VIRTUAL_TRADE_MAX_BARS = int(os.getenv("AI_TRADER_VIRTUAL_TRADE_MAX_BARS", "12"))
 PHASE6_BUCKET_MODE = "phase6_projection_engine"
@@ -797,6 +801,27 @@ def supabase_delete_user_rows(table: str) -> None:
     supabase_request("DELETE", table, query=query, prefer="return=minimal")
 
 
+def supabase_delete_missing_open_rows(table: str, keep_ids: List[Any]) -> None:
+    """Delete only stale open rows after a successful upsert.
+
+    Closed history and decision history must never be wiped during a normal save.
+    This prevents the old delete-all/rewrite-all Supabase flow from causing
+    disappearing trades when Render restarts or Supabase has a transient error.
+    """
+    clean_ids = [
+        str(value).replace('"', "").replace("'", "").replace("(", "").replace(")", "").replace(",", "")
+        for value in keep_ids
+        if value is not None and str(value).strip()
+    ]
+
+    query_params = {"user_key": f"eq.{AI_TRADER_USER_KEY}"}
+    if clean_ids:
+        query_params["id"] = f"not.in.({','.join(clean_ids)})"
+
+    query = urllib.parse.urlencode(query_params)
+    supabase_request("DELETE", table, query=query, prefer="return=minimal")
+
+
 def supabase_upsert_rows(table: str, rows: List[Dict[str, Any]]) -> None:
     clean_rows = [
         {key: value for key, value in row.items() if value is not None}
@@ -815,6 +840,10 @@ def supabase_upsert_rows(table: str, rows: List[Dict[str, Any]]) -> None:
 
 
 def save_memory_to_supabase(memory: Dict[str, Any]) -> None:
+    storage_state = str(memory.get("storage") or "").lower().strip()
+    if storage_state == "supabase_error":
+        raise RuntimeError("Refusing to overwrite Supabase AI Trader tables after a failed Supabase load.")
+
     table_rows = {
         "ai_trader_open_trades": [trade_to_open_row(trade) for trade in safe_list(memory.get("openTrades")) if isinstance(trade, dict)],
         "ai_trader_closed_trades": [trade_to_closed_row(trade) for trade in safe_list(memory.get("closedTrades")) if isinstance(trade, dict)],
@@ -823,10 +852,20 @@ def save_memory_to_supabase(memory: Dict[str, Any]) -> None:
         "ai_trader_virtual_closed_trades": [trade_to_closed_row(trade, virtual=True) for trade in safe_list(memory.get("virtualClosedTrades")) if isinstance(trade, dict)],
     }
 
-    for table in table_rows:
-        supabase_delete_user_rows(table)
+    # Upsert first so a partial failure cannot wipe history.
     for table, rows in table_rows.items():
         supabase_upsert_rows(table, rows)
+
+    # Only open tables need stale-row cleanup. Closed history and decision log
+    # are append/merge history and should not be deleted during normal saves.
+    supabase_delete_missing_open_rows(
+        "ai_trader_open_trades",
+        [row.get("id") for row in table_rows["ai_trader_open_trades"]],
+    )
+    supabase_delete_missing_open_rows(
+        "ai_trader_virtual_open_trades",
+        [row.get("id") for row in table_rows["ai_trader_virtual_open_trades"]],
+    )
 
 
 def empty_memory(storage: str = "json") -> Dict[str, Any]:
@@ -1702,6 +1741,149 @@ def build_trade_id(symbol: str, timeframe: str, side: str, entry_time: Optional[
     return f"AI-{normalize_symbol(symbol)}-{normalize_timeframe(timeframe)}-{side}-{stamp}"
 
 
+def has_nrtr_entry_trigger(side: str, nrtr_context: Optional[Dict[str, Any]] = None, signal: Optional[Dict[str, Any]] = None) -> bool:
+    nrtr_context = safe_dict(nrtr_context)
+    signal = safe_dict(signal)
+
+    directions = [
+        normalize_side(read_path(nrtr_context, "main.direction", "nrtrMain.direction", "direction", fallback="")),
+        normalize_side(read_path(nrtr_context, "mini1.direction", "nrtrMini1.direction", fallback="")),
+        normalize_side(read_path(nrtr_context, "mini2.direction", "nrtrMini2.direction", fallback="")),
+        normalize_side(read_path(signal, "nrtrDirection", "nrtr.direction", "strategyDirection", fallback="")),
+    ]
+
+    if any(direction == side for direction in directions):
+        return True
+
+    trigger_text = str(
+        read_path(
+            signal,
+            "nrtrSignal",
+            "nrtrEntry",
+            "strategyEntry",
+            "entryTrigger",
+            "signal",
+            "type",
+            "direction",
+            fallback="",
+        )
+    ).upper()
+
+    if side == "BUY" and any(token in trigger_text for token in ["BUY", "LONG", "BULL"]):
+        return True
+    if side == "SELL" and any(token in trigger_text for token in ["SELL", "SHORT", "BEAR"]):
+        return True
+
+    return False
+
+
+def has_strategy_tester_context(strategy_tester_results: Optional[Dict[str, Any]] = None) -> bool:
+    data = safe_dict(strategy_tester_results)
+    if not data:
+        return False
+
+    mode = str(data.get("strategyMode") or data.get("mode") or data.get("selectedMode") or "").upper()
+    if "NRTR" in mode or "SMMA" in mode:
+        return True
+
+    return bool(data.get("best") or data.get("bestResult") or data.get("bestSettings") or data.get("result"))
+
+
+def build_learning_entry_permission(
+    *,
+    side: str,
+    entry: float,
+    target: float,
+    stop: float,
+    rr: float,
+    min_rr: float,
+    confidence: float,
+    min_confidence: float,
+    nrtr_context: Optional[Dict[str, Any]] = None,
+    signal: Optional[Dict[str, Any]] = None,
+    strategy_tester_results: Optional[Dict[str, Any]] = None,
+    projection_engine: Optional[Dict[str, Any]] = None,
+    projection_engine_context: Optional[Dict[str, Any]] = None,
+    context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    projection_engine = safe_dict(projection_engine)
+    projection_engine_context = safe_dict(projection_engine_context)
+    context = safe_dict(context)
+
+    nrtr_trigger = has_nrtr_entry_trigger(side, nrtr_context, signal)
+    strategy_context = has_strategy_tester_context(strategy_tester_results)
+    projection_context = bool(
+        projection_engine
+        or projection_engine_context
+        or context.get("projectionEngine")
+        or context.get("projectionEngineContext")
+        or context.get("aiPermission")
+    )
+
+    target_stop_exit = target > 0 and stop > 0
+    managed_exit = bool(nrtr_trigger or strategy_context or projection_context)
+    has_exit_plan = target_stop_exit or managed_exit
+    has_trade_trigger = side in {"BUY", "SELL"} and entry > 0 and (nrtr_trigger or target > 0 or projection_context or strategy_context)
+
+    confidence_ok = confidence >= min_confidence
+    rr_ok = rr >= min_rr if rr > 0 else False
+
+    if AI_TRADER_LEARNING_MODE:
+        allowed = (
+            side in {"BUY", "SELL"}
+            and entry > 0
+            and has_trade_trigger
+            and has_exit_plan
+            and (not AI_TRADER_REQUIRE_TARGET_STOP_IN_LEARNING_MODE or target_stop_exit)
+            and (not AI_TRADER_REQUIRE_RR_IN_LEARNING_MODE or rr_ok)
+            and (not AI_TRADER_REQUIRE_CONFIDENCE_IN_LEARNING_MODE or confidence_ok)
+        )
+        mode = "LEARNING_MODE"
+    else:
+        allowed = (
+            side in {"BUY", "SELL"}
+            and entry > 0
+            and target > 0
+            and stop > 0
+            and rr_ok
+            and confidence_ok
+        )
+        mode = "CONFIDENCE_GATED_MODE"
+
+    blockers: List[str] = []
+    if side not in {"BUY", "SELL"}:
+        blockers.append("No BUY or SELL side")
+    if entry <= 0:
+        blockers.append("Entry price missing")
+    if not has_trade_trigger:
+        blockers.append("No NRTR/projection/target entry trigger")
+    if not has_exit_plan:
+        blockers.append("No target/stop, NRTR, internal, or projection exit plan")
+    if not AI_TRADER_LEARNING_MODE and not rr_ok:
+        blockers.append(f"Risk/reward below {min_rr:.2f}R")
+    if not AI_TRADER_LEARNING_MODE and not confidence_ok:
+        blockers.append(f"Confidence below {min_confidence:.1f}%")
+
+    return {
+        "allowed": bool(allowed),
+        "mode": mode,
+        "learningMode": AI_TRADER_LEARNING_MODE,
+        "confidenceBlocksEntry": (not AI_TRADER_LEARNING_MODE) or AI_TRADER_REQUIRE_CONFIDENCE_IN_LEARNING_MODE,
+        "rrBlocksEntry": (not AI_TRADER_LEARNING_MODE) or AI_TRADER_REQUIRE_RR_IN_LEARNING_MODE,
+        "targetStopBlocksEntry": (not AI_TRADER_LEARNING_MODE) or AI_TRADER_REQUIRE_TARGET_STOP_IN_LEARNING_MODE,
+        "hasTradeTrigger": bool(has_trade_trigger),
+        "hasExitPlan": bool(has_exit_plan),
+        "targetStopExit": bool(target_stop_exit),
+        "managedExit": bool(managed_exit),
+        "nrtrTrigger": bool(nrtr_trigger),
+        "strategyTesterContext": bool(strategy_context),
+        "projectionContext": bool(projection_context),
+        "confidenceOk": bool(confidence_ok),
+        "riskRewardOk": bool(rr_ok),
+        "blockers": blockers,
+    }
+
+
 def get_ai_trader_decision(
     *,
     symbol: Any = "MES1!",
@@ -1837,14 +2019,23 @@ def get_ai_trader_decision(
         strategy_tester_results=strategyTesterResults,
     )
 
-    allowed = (
-        decision_side in {"BUY", "SELL"}
-        and entry > 0
-        and target > 0
-        and stop > 0
-        and rr >= min_rr
-        and score["confidence"] >= min_confidence
+    permission = build_learning_entry_permission(
+        side=decision_side,
+        entry=entry,
+        target=target,
+        stop=stop,
+        rr=rr,
+        min_rr=min_rr,
+        confidence=score["confidence"],
+        min_confidence=min_confidence,
+        nrtr_context=nrtrContext,
+        signal=signal,
+        strategy_tester_results=strategyTesterResults,
+        projection_engine=projectionEngine,
+        projection_engine_context=projectionEngineContext,
+        context=context,
     )
+    allowed = bool(permission.get("allowed"))
 
     current_pnl = signed_move(decision_side, entry, current_price) * point_value(normalized_symbol) if current_price > 0 and entry > 0 else 0.0
     max_pnl = signed_move(decision_side, entry, target) * point_value(normalized_symbol) if target > 0 and entry > 0 else 0.0
@@ -1854,7 +2045,10 @@ def get_ai_trader_decision(
         score["reasons"] = [str(rr_plan.get("reason"))] + list(score.get("reasons", []))
 
     if not allowed:
-        reason = "AI HOLD: requirements not met. " + " | ".join(score["reasons"][:4])
+        blocker_text = " | ".join(permission.get("blockers") or [])
+        reason = "AI HOLD: learning entry requirements not met. " + (blocker_text or " | ".join(score["reasons"][:4]))
+    elif AI_TRADER_LEARNING_MODE:
+        reason = f"AI {decision_side}: Learning-mode paper trade. Confidence/RR are saved as labels, not entry blockers. " + " | ".join(score["reasons"][:3])
     else:
         reason = f"AI {decision_side}: " + " | ".join(score["reasons"][:4])
 
@@ -1893,6 +2087,8 @@ def get_ai_trader_decision(
             "directionalContext": score["directionalContext"],
             "projectionEngine": safe_dict(projectionEngine) or safe_dict(projectionEngineContext) or safe_dict(context.get("projectionEngine")),
             "rrTargetPlan": rr_plan,
+            "entryPermission": permission,
+            "learningMode": AI_TRADER_LEARNING_MODE,
             "strategyTesterContext": score.get("strategyTesterContext"),
             "context": context,
         },
