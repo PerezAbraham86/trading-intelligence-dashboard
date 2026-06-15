@@ -3893,6 +3893,14 @@ function useChartCandles(
       const cached = readSharedCandleCache(symbol, timeframe, limit)
       if (!cached || cancelled) return false
 
+      // Do not let mini charts reuse a one-candle live-only cache as if it were
+      // historical data. When a mini timeframe is changed, this forces a real
+      // historical candle request for that symbol/timeframe.
+      const minimumReusableCandles = priority === 'mini' ? 20 : 10
+      if (!Array.isArray(cached.candles) || cached.candles.length < minimumReusableCandles) {
+        return false
+      }
+
       const cachedLivePrice = readSharedLivePriceCache(symbol)
       if (cachedLivePrice) {
         const syntheticLiveCandle = {
@@ -5280,15 +5288,17 @@ export default function Dashboard() {
 
   const [miniChartOneSelection, setMiniChartOneSelection] = useState<ChartSelection>({
     symbol: 'MES1!',
-    timeframe: '5m',
+    timeframe: '1m',
     candleMode: 'Heikin Ashi',
   })
 
   const [miniChartTwoSelection, setMiniChartTwoSelection] = useState<ChartSelection>({
     symbol: 'MES1!',
-    timeframe: '15m',
+    timeframe: '1m',
     candleMode: 'Heikin Ashi',
   })
+  const [miniChartOneManualTimeframe, setMiniChartOneManualTimeframe] = useState(false)
+  const [miniChartTwoManualTimeframe, setMiniChartTwoManualTimeframe] = useState(false)
 
 
   useEffect(() => {
@@ -5305,12 +5315,16 @@ export default function Dashboard() {
       }
 
       if (key === 'mini1') {
-        setMiniChartOneSelection(config.selection)
+        // Mini charts default to the main chart symbol/timeframe. Only keep saved
+        // indicator settings here so stale saved mini symbols/timeframes cannot
+        // override the active main-chart context on page load.
         setMiniChartOneIndicatorSettings(config.settings)
       }
 
       if (key === 'mini2') {
-        setMiniChartTwoSelection(config.selection)
+        // Mini charts default to the main chart symbol/timeframe. Only keep saved
+        // indicator settings here so stale saved mini symbols/timeframes cannot
+        // override the active main-chart context on page load.
         setMiniChartTwoIndicatorSettings(config.settings)
       }
     }
@@ -5400,14 +5414,45 @@ export default function Dashboard() {
 
   const selectedSymbol = normalizeSymbol(mainChartSelection.symbol || 'MES1!')
   const selectedTimeframe = normalizeTimeframe(mainChartSelection.timeframe || '1m')
-  const miniOneSymbol = normalizeSymbol(miniChartOneSelection.symbol || 'MES1!')
-  const miniTwoSymbol = normalizeSymbol(miniChartTwoSelection.symbol || 'MES1!')
-  const miniOneTimeframe = normalizeTimeframe(miniChartOneSelection.timeframe || '5m')
-  const miniTwoTimeframe = normalizeTimeframe(miniChartTwoSelection.timeframe || '15m')
+
+  // Mini charts always inherit the active main-chart symbol. Their timeframe
+  // defaults to the main chart timeframe, then can be changed manually from each
+  // mini chart dropdown to request a fresh historical candle set for that TF.
+  const miniOneSymbol = selectedSymbol
+  const miniTwoSymbol = selectedSymbol
+  const miniOneTimeframe = normalizeTimeframe(miniChartOneSelection.timeframe || selectedTimeframe)
+  const miniTwoTimeframe = normalizeTimeframe(miniChartTwoSelection.timeframe || selectedTimeframe)
 
   const selectedLivePrice = sharedLivePrices[sharedLivePriceKey(selectedSymbol)]?.price ?? activeChartPrice ?? null
   const miniOneLivePrice = sharedLivePrices[sharedLivePriceKey(miniOneSymbol)]?.price ?? selectedLivePrice
   const miniTwoLivePrice = sharedLivePrices[sharedLivePriceKey(miniTwoSymbol)]?.price ?? selectedLivePrice
+
+  useEffect(() => {
+    // Keep mini symbols locked to the main chart and keep timeframe synced until
+    // the user manually selects another mini timeframe. This makes every mini
+    // chart load with the same symbol/timeframe as the main chart by default.
+    setMiniChartOneSelection((current) => ({
+      symbol: selectedSymbol,
+      timeframe: miniChartOneManualTimeframe
+        ? normalizeTimeframe(current.timeframe || selectedTimeframe)
+        : selectedTimeframe,
+      candleMode: current.candleMode || mainChartSelection.candleMode,
+    }))
+
+    setMiniChartTwoSelection((current) => ({
+      symbol: selectedSymbol,
+      timeframe: miniChartTwoManualTimeframe
+        ? normalizeTimeframe(current.timeframe || selectedTimeframe)
+        : selectedTimeframe,
+      candleMode: current.candleMode || mainChartSelection.candleMode,
+    }))
+  }, [
+    selectedSymbol,
+    selectedTimeframe,
+    mainChartSelection.candleMode,
+    miniChartOneManualTimeframe,
+    miniChartTwoManualTimeframe,
+  ])
 
   const {
     latestSignal,
@@ -6094,6 +6139,8 @@ export default function Dashboard() {
               setChartMlFeatures(nextMlFeatures ?? null)
             }}
             onChange={(selection) => {
+              setMiniChartOneManualTimeframe(false)
+              setMiniChartTwoManualTimeframe(false)
               setMainChartSelection({
                 symbol: normalizeSymbol(selection.symbol),
                 timeframe: normalizeTimeframe(selection.timeframe),
@@ -6117,7 +6164,7 @@ export default function Dashboard() {
               nrtrAtrMultiplier={miniChartOneIndicatorSettings.nrtrAtrMultiplier}
               nrtrPercent={miniChartOneIndicatorSettings.nrtrPercent}
               onIndicatorSettingsChange={setMiniChartOneIndicatorSettings}
-              onSaveConfig={() => saveChartConfig('mini1', miniChartOneSelection, miniChartOneIndicatorSettings)}
+              onSaveConfig={() => saveChartConfig('mini1', { ...miniChartOneSelection, symbol: selectedSymbol }, miniChartOneIndicatorSettings)}
               saveStatus={lastSavedChartKey === 'mini1' ? 'Saved' : ''}
               apiBaseUrl={apiBaseUrl}
               isClient={isClient}
@@ -6127,9 +6174,11 @@ export default function Dashboard() {
               onLivePriceUpdate={handleLivePriceUpdate}
               onCandlesUpdate={setMiniChartOneCandles}
               onChange={(selection) => {
+                const nextTimeframe = normalizeTimeframe(selection.timeframe || miniOneTimeframe)
+                setMiniChartOneManualTimeframe(nextTimeframe !== selectedTimeframe)
                 setMiniChartOneSelection({
-                  symbol: normalizeSymbol(selection.symbol || miniOneSymbol),
-                  timeframe: normalizeTimeframe(selection.timeframe || miniOneTimeframe),
+                  symbol: selectedSymbol,
+                  timeframe: nextTimeframe,
                   candleMode: selection.candleMode,
                 })
               }}
@@ -6148,7 +6197,7 @@ export default function Dashboard() {
               nrtrAtrMultiplier={miniChartTwoIndicatorSettings.nrtrAtrMultiplier}
               nrtrPercent={miniChartTwoIndicatorSettings.nrtrPercent}
               onIndicatorSettingsChange={setMiniChartTwoIndicatorSettings}
-              onSaveConfig={() => saveChartConfig('mini2', miniChartTwoSelection, miniChartTwoIndicatorSettings)}
+              onSaveConfig={() => saveChartConfig('mini2', { ...miniChartTwoSelection, symbol: selectedSymbol }, miniChartTwoIndicatorSettings)}
               saveStatus={lastSavedChartKey === 'mini2' ? 'Saved' : ''}
               apiBaseUrl={apiBaseUrl}
               isClient={isClient}
@@ -6158,9 +6207,11 @@ export default function Dashboard() {
               onLivePriceUpdate={handleLivePriceUpdate}
               onCandlesUpdate={setMiniChartTwoCandles}
               onChange={(selection) => {
+                const nextTimeframe = normalizeTimeframe(selection.timeframe || miniTwoTimeframe)
+                setMiniChartTwoManualTimeframe(nextTimeframe !== selectedTimeframe)
                 setMiniChartTwoSelection({
-                  symbol: normalizeSymbol(selection.symbol || miniTwoSymbol),
-                  timeframe: normalizeTimeframe(selection.timeframe || miniTwoTimeframe),
+                  symbol: selectedSymbol,
+                  timeframe: nextTimeframe,
                   candleMode: selection.candleMode,
                 })
               }}
