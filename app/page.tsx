@@ -3990,6 +3990,9 @@ function useChartCandles(
     let lastLiveGapRepairFetchAt = 0
     let lastLiveGapRepairRequestedAt = 0
     let lastLiveGapRepairSkipLoggedAt = 0
+    let initialHistoricalReady = false
+    let lastInitialHistoryRetryAt = 0
+    let lastInitialHistoryWaitLoggedAt = 0
 
     setDebugLog([])
     addCandleDebugLog('mount', { enabled, limit, pollMs })
@@ -4006,6 +4009,51 @@ function useChartCandles(
       intervalId = setInterval(fetchCandles, pollMs)
     }
 
+    function minimumHistoricalCandles() {
+      return priority === 'mini' ? 20 : 10
+    }
+
+    function getFullSharedCacheEntry() {
+      return SHARED_CANDLE_CACHE.get(sharedCandleKey(symbol, timeframe)) ?? null
+    }
+
+    function fullSharedCacheHasHistorical() {
+      const fullCache = getFullSharedCacheEntry()
+      return Boolean(
+        fullCache &&
+        Array.isArray(fullCache.candles) &&
+        fullCache.candles.length >= minimumHistoricalCandles()
+      )
+    }
+
+    function maybeStopPollingAfterHistoryReady() {
+      if (!liveSourceConnected) return
+      if (!initialHistoricalReady && !fullSharedCacheHasHistorical()) return
+      stopPolling()
+    }
+
+    function requestInitialHistoryAfterLive(streamSource: string, previousCount: number) {
+      const now = Date.now()
+
+      if (now - lastInitialHistoryWaitLoggedAt >= LIVE_GAP_REPAIR_LOG_THROTTLE_MS) {
+        lastInitialHistoryWaitLoggedAt = now
+        addCandleDebugLog('live-held-until-history', {
+          streamSource,
+          previousCount,
+          required: minimumHistoricalCandles(),
+          priority,
+        }, 'warn')
+      }
+
+      // Do not allow an early SSE tick to become the only candle on a fresh mini
+      // timeframe. Keep asking for real history until at least 20 mini candles
+      // are loaded, then live candles can safely merge into that history.
+      if (now - lastInitialHistoryRetryAt >= 5000) {
+        lastInitialHistoryRetryAt = now
+        fetchCandles(false, 'initial-history-after-live')
+      }
+    }
+
     function applyCachedPayload(reason = 'cache-check') {
       const cached = readSharedCandleCache(symbol, timeframe, limit)
       if (!cached || cancelled) {
@@ -4016,7 +4064,7 @@ function useChartCandles(
       // Do not let mini charts reuse a one-candle live-only cache as if it were
       // historical data. When a mini timeframe is changed, this forces a real
       // historical candle request for that symbol/timeframe.
-      const minimumReusableCandles = priority === 'mini' ? 20 : 10
+      const minimumReusableCandles = minimumHistoricalCandles()
       if (!Array.isArray(cached.candles) || cached.candles.length < minimumReusableCandles) {
         addCandleDebugLog('cache-skip-too-few-candles', {
           reason,
@@ -4065,12 +4113,10 @@ function useChartCandles(
         onLivePriceUpdate?.(cachedLivePrice)
       }
 
+      initialHistoricalReady = true
+      maybeStopPollingAfterHistoryReady()
       setErrorText('')
       return cached.candles.length > 0
-    }
-
-    function getFullSharedCacheEntry() {
-      return SHARED_CANDLE_CACHE.get(sharedCandleKey(symbol, timeframe)) ?? null
     }
 
     function getHistoricalRefreshMs() {
@@ -4083,7 +4129,7 @@ function useChartCandles(
       const fullCache = getFullSharedCacheEntry()
       if (!fullCache || !Array.isArray(fullCache.candles) || fullCache.candles.length === 0) return false
 
-      const minimumReusableCandles = priority === 'mini' ? 20 : 10
+      const minimumReusableCandles = minimumHistoricalCandles()
       if (fullCache.candles.length < minimumReusableCandles) return false
 
       const now = Date.now()
@@ -4167,6 +4213,10 @@ function useChartCandles(
         if (!cancelled) {
           const fullCacheAfterFetch = getFullSharedCacheEntry()
           lastHistoricalFetchSucceededAt = Date.now()
+          if (nextPayload.candles.length >= minimumHistoricalCandles()) {
+            initialHistoricalReady = true
+          }
+          maybeStopPollingAfterHistoryReady()
 
           addCandleDebugLog('plot-candles-from-fetch', {
             ...describeCandleRange(nextPayload.candles),
@@ -4281,9 +4331,22 @@ function useChartCandles(
 
       liveEventSource.onopen = () => {
         liveSourceConnected = true
-        // Once WebSocket/SSE live candles are active, stop the historical
-        // polling loop so old refreshes do not fight live candles or overlays.
-        stopPolling()
+        if (fullSharedCacheHasHistorical()) {
+          initialHistoricalReady = true
+          // Once WebSocket/SSE live candles are active AND real history is loaded,
+          // stop the historical polling loop so old refreshes do not fight live
+          // candles or overlays.
+          stopPolling()
+        } else {
+          // Keep historical polling alive on fresh mini timeframe changes.
+          // Otherwise the live stream can connect first, stop polling, and leave
+          // the mini chart with only a single live candle.
+          addCandleDebugLog('live-stream-waiting-for-history', {
+            priority,
+            required: minimumHistoricalCandles(),
+          }, 'warn')
+          startPolling()
+        }
       }
 
       liveEventSource.onmessage = (event) => {
@@ -4303,6 +4366,11 @@ function useChartCandles(
 
           setCandles((previousCandles) => {
             const timeframeSeconds = timeframeToSeconds(timeframe)
+
+            if (!initialHistoricalReady && previousCandles.length < minimumHistoricalCandles()) {
+              requestInitialHistoryAfterLive('message', previousCandles.length)
+              return previousCandles
+            }
 
             if (requestLiveGapRepairOnce(previousCandles, liveCandle, 'message')) {
               return previousCandles
@@ -4353,6 +4421,11 @@ function useChartCandles(
 
           setCandles((previousCandles) => {
             const timeframeSeconds = timeframeToSeconds(timeframe)
+
+            if (!initialHistoricalReady && previousCandles.length < minimumHistoricalCandles()) {
+              requestInitialHistoryAfterLive('candle', previousCandles.length)
+              return previousCandles
+            }
 
             if (requestLiveGapRepairOnce(previousCandles, liveCandle, 'candle')) {
               return previousCandles
