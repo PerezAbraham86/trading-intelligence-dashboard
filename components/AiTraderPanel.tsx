@@ -553,6 +553,21 @@ function getLatestCandleTime(candles: any[] | undefined) {
   return new Date().toISOString()
 }
 
+function getLatestCandleAutoKey(candles: any[] | undefined) {
+  if (!Array.isArray(candles) || candles.length === 0) return 'no-candle'
+
+  const candle = candles[candles.length - 1]
+  return String(
+    candle?.time ??
+      candle?.timestamp ??
+      candle?.t ??
+      candle?.datetime ??
+      candle?.date ??
+      candle?.epoch ??
+      'no-candle'
+  )
+}
+
 function getLiveAiCurrentPrice(activePrice: any, signal: any, candles: any[] | undefined) {
   const candidates = [
     activePrice,
@@ -715,7 +730,6 @@ function getAiTradeSettlement(
 
   if (
     nextDecision !== 'HOLD' &&
-    confidence >= minConfidence &&
     ((side === 'BUY' && nextDecision === 'SELL') || (side === 'SELL' && nextDecision === 'BUY'))
   ) {
     return {
@@ -821,19 +835,25 @@ function getBlockerAnalysis(decision: AiTraderDecision | null, summary: AiTrader
   const nrtrConflicts = toFiniteNumber(directional?.nrtrConflictCount, 0)
   const nrtrAgreements = toFiniteNumber(directional?.nrtrAgreementCount, 0)
 
+  const learningMode = decision?.details?.entryPermission?.learningMode !== false
+
   if (confidence < minConfidence) {
     blockers.push({
-      label: 'Confidence below threshold',
-      detail: `${confidence.toFixed(1)}% / required ${minConfidence.toFixed(1)}%`,
-      severity: 'high',
+      label: learningMode ? 'Confidence learning label' : 'Confidence below threshold',
+      detail: learningMode
+        ? `${confidence.toFixed(1)}% saved for learning; it does not block Auto Paper entries.`
+        : `${confidence.toFixed(1)}% / required ${minConfidence.toFixed(1)}%`,
+      severity: learningMode ? 'low' : 'high',
     })
   }
 
   if (riskReward > 0 && riskReward < minRiskReward) {
     blockers.push({
-      label: 'Risk/Reward below minimum',
-      detail: `${riskReward.toFixed(2)}R / required ${minRiskReward.toFixed(2)}R`,
-      severity: 'high',
+      label: learningMode ? 'Risk/Reward learning label' : 'Risk/Reward below minimum',
+      detail: learningMode
+        ? `${riskReward.toFixed(2)}R saved for learning; NRTR/internal exits can still manage the trade.`
+        : `${riskReward.toFixed(2)}R / required ${minRiskReward.toFixed(2)}R`,
+      severity: learningMode ? 'low' : 'high',
     })
   }
 
@@ -1553,15 +1573,22 @@ export default function AiTraderPanel({
       return
     }
 
-    const existingOpenTrades = mergeTrades(localOpenTrades, Array.isArray(summary?.openTrades) ? summary?.openTrades : [])
+    const trustedBackendOpenTrades = (Array.isArray(summary?.openTrades) ? summary.openTrades : [])
       .filter((trade: any) => {
         const tradeSymbol = String(trade?.symbol ?? symbol).toUpperCase()
         const tradeTimeframe = String(trade?.timeframe ?? timeframe)
-        return tradeSymbol === String(symbol).toUpperCase() && tradeTimeframe === String(timeframe)
+        const status = String(trade?.status ?? 'OPEN').toUpperCase()
+
+        return (
+          tradeSymbol === String(symbol).toUpperCase() &&
+          tradeTimeframe === String(timeframe) &&
+          status.includes('OPEN')
+        )
       })
 
-    if (existingOpenTrades.length > 0) {
-      setActionStatus('Open blocked: one AI paper trade is already active for this symbol/timeframe.')
+    if (trustedBackendOpenTrades.length > 0) {
+      setActionStatus('Open blocked: backend already has one active AI paper trade for this symbol/timeframe.')
+      saveOpenTrades(trustedBackendOpenTrades)
       return
     }
 
@@ -1613,7 +1640,7 @@ export default function AiTraderPanel({
       timeout.clear()
       openRequestInFlightRef.current = false
     }
-  }, [apiBaseUrl, safePayload, decision, summary, symbol, timeframe, candles, saveOpenTrades, localOpenTrades])
+  }, [apiBaseUrl, safePayload, decision, summary, symbol, timeframe, candles, saveOpenTrades])
 
   useEffect(() => {
     fetchDecision(true)
@@ -1630,6 +1657,7 @@ export default function AiTraderPanel({
     const key = [
       symbol,
       timeframe,
+      getLatestCandleAutoKey(candles),
       side,
       Number(decision.entry ?? 0).toFixed(4),
       Number(decision.target ?? 0).toFixed(4),
@@ -1640,7 +1668,7 @@ export default function AiTraderPanel({
 
     setLastAutoOpenKey(key)
     openDashboardTrade('auto')
-  }, [autoPaperMode, decision, lastAutoOpenKey, openDashboardTrade, symbol, timeframe])
+  }, [autoPaperMode, candles, decision, lastAutoOpenKey, openDashboardTrade, symbol, timeframe])
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -1782,6 +1810,12 @@ export default function AiTraderPanel({
       }
     })
 
+  useEffect(() => {
+    if (liveOpenTrades.length === 0 && lastAutoOpenKey) {
+      setLastAutoOpenKey('')
+    }
+  }, [liveOpenTrades.length, lastAutoOpenKey])
+
   const settlementAutoEvaluateKey = liveOpenTrades
     .filter((trade: any) => trade.shouldCloseNow)
     .map((trade: any) => `${getTradeKey(trade)}:${trade.closeReason}:${trade.closePrice}`)
@@ -1852,7 +1886,7 @@ export default function AiTraderPanel({
           </label>
 
           <label className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-gray-400">
-            Min Conf
+            Conf Label
             <input
               type="number"
               min={1}
