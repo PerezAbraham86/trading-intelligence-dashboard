@@ -8388,6 +8388,21 @@ def api_insightsentry_history(
     if get_historical_ohlcv is None:
         raise HTTPException(status_code=503, detail="api.insightsentry_history module unavailable")
 
+    provider_force = force and not is_futures_symbol(normalized_symbol)
+
+    # MES/ES should not bypass cache on normal dashboard refreshes. The frontend can
+    # request force=true after a live/history gap, but sending that directly to
+    # InsightSentry keeps causing 429 rate limits. For futures, prefer cached/stale
+    # history fallback and only refresh through the bounded backend cache path.
+    if force and is_futures_symbol(normalized_symbol):
+        fallback = cached_futures_history_payload_for_rate_limit(
+            normalized_symbol,
+            normalized_timeframe,
+            safe_limit,
+        )
+        if fallback:
+            return fallback
+
     try:
         return get_historical_ohlcv(
             symbol=normalized_symbol,
@@ -8397,7 +8412,7 @@ def api_insightsentry_history(
             extended=extended,
             badj=badj,
             dadj=dadj,
-            force=force,
+            force=provider_force,
         )
     except HTTPException as error:
         if error.status_code == 429 and is_futures_symbol(normalized_symbol):
