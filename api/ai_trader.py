@@ -927,6 +927,78 @@ def dedupe_open_trades(trades: List[Any]) -> List[Dict[str, Any]]:
     if AI_TRADER_ALLOW_MULTIPLE_OPEN_TRADES:
         return clean_trades[-AI_TRADER_MAX_ACTIVE_OPEN_TRADES:]
 
+
+def ai_trade_match_keys(trade: Dict[str, Any]) -> set[str]:
+    """Return stable keys that identify one AI trade across open/closed tables."""
+    if not isinstance(trade, dict):
+        return set()
+
+    keys: set[str] = set()
+
+    trade_id = str(trade.get("id") or trade.get("tradeId") or "").strip()
+    if trade_id:
+        keys.add(f"id:{trade_id}")
+
+    source_snapshot = safe_dict(trade.get("sourceSnapshot"))
+    setup_key = str(trade.get("setupKey") or source_snapshot.get("setupKey") or "").strip()
+    if setup_key:
+        keys.add(f"setup:{setup_key}")
+
+    symbol = normalize_symbol(trade.get("symbol"))
+    timeframe = normalize_timeframe(trade.get("timeframe"))
+    side = normalize_side(trade.get("side") or trade.get("decision") or trade.get("rawDecision"))
+    entry_time = str(trade.get("entryTime") or trade.get("createdAt") or "").strip()
+    entry = to_float(trade.get("entry") or trade.get("entryPrice"), 0.0)
+    target = to_float(trade.get("target") or trade.get("targetPrice"), 0.0)
+    stop = to_float(trade.get("stop") or trade.get("stopPrice"), 0.0)
+
+    if symbol and timeframe and side in {"BUY", "SELL"} and entry > 0:
+        keys.add(f"shape:{symbol}|{timeframe}|{side}|{entry_time}|{entry:.4f}|{target:.4f}|{stop:.4f}")
+
+    return keys
+
+
+def purge_closed_open_trade_conflicts(memory: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove stale OPEN rows when the same trade already exists in closed history.
+
+    This fixes the UI state where the one-trade lock says an open trade exists,
+    while the visible table shows only closed trades. The closed table is the
+    final source for that trade, so the matching open row must not keep blocking
+    the next learning entry.
+    """
+    closed_keys: set[str] = set()
+    for trade in [
+        *safe_list(memory.get("closedTrades")),
+        *safe_list(memory.get("virtualClosedTrades")),
+    ]:
+        if isinstance(trade, dict):
+            closed_keys.update(ai_trade_match_keys(trade))
+
+    if not closed_keys:
+        return memory
+
+    removed_count = 0
+
+    def keep_open(trade: Any) -> bool:
+        nonlocal removed_count
+        if not isinstance(trade, dict) or not is_open_trade_status(trade):
+            removed_count += 1
+            return False
+        keys = ai_trade_match_keys(trade)
+        if keys and not keys.isdisjoint(closed_keys):
+            removed_count += 1
+            return False
+        return True
+
+    memory["openTrades"] = [trade for trade in safe_list(memory.get("openTrades")) if keep_open(trade)]
+    memory["virtualOpenTrades"] = [trade for trade in safe_list(memory.get("virtualOpenTrades")) if keep_open(trade)]
+
+    if removed_count > 0:
+        memory["staleOpenTradesRemoved"] = to_int(memory.get("staleOpenTradesRemoved"), 0) + removed_count
+        memory["lastStaleOpenCleanupAt"] = now_iso()
+
+    return memory
+
     by_key: Dict[str, Dict[str, Any]] = {}
 
     for trade in safe_list(trades):
@@ -969,6 +1041,7 @@ def load_memory() -> Dict[str, Any]:
     if supabase_enabled():
         try:
             memory = load_memory_from_supabase()
+            memory = purge_closed_open_trade_conflicts(memory)
             memory["openTrades"] = dedupe_open_trades(memory.get("openTrades", []))
             memory["storage"] = "supabase"
             return memory
@@ -1007,6 +1080,7 @@ def load_memory() -> Dict[str, Any]:
         if not isinstance(data.get(key), list):
             data[key] = []
 
+    data = purge_closed_open_trade_conflicts(data)
     data["openTrades"] = dedupe_open_trades(data.get("openTrades", []))
     return data
 
@@ -1018,6 +1092,7 @@ def save_memory(memory: Dict[str, Any]) -> Dict[str, Any]:
     memory["closedTrades"] = safe_list(memory.get("closedTrades"))[-MAX_CLOSED_TRADES:]
     memory["virtualClosedTrades"] = safe_list(memory.get("virtualClosedTrades"))[-MAX_CLOSED_TRADES:]
     memory["decisionLog"] = safe_list(memory.get("decisionLog"))[-MAX_DECISION_OBSERVATIONS:]
+    memory = purge_closed_open_trade_conflicts(memory)
     memory["openTrades"] = dedupe_open_trades(memory.get("openTrades", []))
     memory["virtualOpenTrades"] = safe_list(memory.get("virtualOpenTrades"))[-250:]
 
@@ -2741,11 +2816,22 @@ def ai_trader_summary(symbol: Any = "", timeframe: Any = "") -> Dict[str, Any]:
             return False
         return True
 
-    # Open trades remain filtered by the requested dashboard symbol/timeframe when supplied.
-    # Closed trade history is intentionally global so the Saved Closed AI Trades list
-    # shows every completed learning trade from every symbol/timeframe.
-    open_trades = [trade for trade in safe_list(memory.get("openTrades")) if isinstance(trade, dict) and matches(trade)]
-    virtual_open_trades = [trade for trade in safe_list(memory.get("virtualOpenTrades")) if isinstance(trade, dict) and matches(trade)]
+    # One-trade learning mode is global. Return global open trades so the UI
+    # can show exactly what is blocking the next entry, even when the open trade
+    # came from another symbol/timeframe. Closed trade history is also global.
+    all_open_trades = [
+        trade for trade in safe_list(memory.get("openTrades"))
+        if isinstance(trade, dict) and is_open_trade_status(trade)
+    ]
+    all_virtual_open_trades = [
+        trade for trade in safe_list(memory.get("virtualOpenTrades"))
+        if isinstance(trade, dict) and is_open_trade_status(trade)
+    ]
+    current_chart_open_trades = [trade for trade in all_open_trades if matches(trade)]
+    current_chart_virtual_open_trades = [trade for trade in all_virtual_open_trades if matches(trade)]
+
+    open_trades = all_open_trades if AI_TRADER_MAX_ACTIVE_OPEN_TRADES <= 1 else current_chart_open_trades
+    virtual_open_trades = all_virtual_open_trades if AI_TRADER_MAX_ACTIVE_OPEN_TRADES <= 1 else current_chart_virtual_open_trades
 
     real_closed_trades = [trade for trade in safe_list(memory.get("closedTrades")) if isinstance(trade, dict)]
     virtual_closed_trades = [trade for trade in safe_list(memory.get("virtualClosedTrades")) if isinstance(trade, dict)]
@@ -2761,13 +2847,21 @@ def ai_trader_summary(symbol: Any = "", timeframe: Any = "") -> Dict[str, Any]:
         "symbol": normalized_symbol or "ALL",
         "timeframe": normalized_timeframe or "ALL",
         "openTrades": open_trades[-20:],
+        "globalOpenTrades": all_open_trades[-20:],
+        "currentChartOpenTrades": current_chart_open_trades[-20:],
         "virtualOpenTrades": virtual_open_trades[-20:],
+        "globalVirtualOpenTrades": all_virtual_open_trades[-20:],
+        "currentChartVirtualOpenTrades": current_chart_virtual_open_trades[-20:],
         "closedTrades": closed_trades[-20:],
         "realClosedTrades": real_closed_trades[-20:],
         "virtualClosedTrades": virtual_closed_trades[-20:],
         "recentClosedTrades": closed_trades[-10:],
         "openCount": len(open_trades),
+        "globalOpenCount": len(all_open_trades),
+        "currentChartOpenCount": len(current_chart_open_trades),
         "virtualOpenCount": len(virtual_open_trades),
+        "globalVirtualOpenCount": len(all_virtual_open_trades),
+        "currentChartVirtualOpenCount": len(current_chart_virtual_open_trades),
         "closedCount": len(closed_trades),
         "realClosedCount": len(real_closed_trades),
         "virtualClosedCount": len(virtual_closed_trades),
