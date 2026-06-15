@@ -30,6 +30,7 @@ SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
 AI_TRADER_STORAGE = os.getenv("AI_TRADER_STORAGE", "json").lower().strip()
 AI_TRADER_USER_KEY = os.getenv("AI_TRADER_USER_KEY", "default").strip() or "default"
 AI_TRADER_ALLOW_MULTIPLE_OPEN_TRADES = os.getenv("AI_TRADER_ALLOW_MULTIPLE_OPEN_TRADES", "false").lower().strip() in {"1", "true", "yes", "on"}
+AI_TRADER_MAX_ACTIVE_OPEN_TRADES = max(1, int(os.getenv("AI_TRADER_MAX_ACTIVE_OPEN_TRADES", "1")))
 AI_TRADER_OPEN_LOAD_LIMIT = int(os.getenv("AI_TRADER_OPEN_LOAD_LIMIT", "50"))
 AI_TRADER_CLOSED_LOAD_LIMIT = int(os.getenv("AI_TRADER_CLOSED_LOAD_LIMIT", "500"))
 AI_TRADER_DECISION_LOAD_LIMIT = int(os.getenv("AI_TRADER_DECISION_LOAD_LIMIT", "1200"))
@@ -885,6 +886,9 @@ def empty_memory(storage: str = "json") -> Dict[str, Any]:
 
 
 def open_trade_dedupe_key(trade: Dict[str, Any]) -> str:
+    if AI_TRADER_MAX_ACTIVE_OPEN_TRADES <= 1:
+        return "GLOBAL_ACTIVE_AI_TRADE"
+
     if AI_TRADER_ALLOW_MULTIPLE_OPEN_TRADES:
         return str(trade.get("id") or build_trade_id(trade.get("symbol"), trade.get("timeframe"), normalize_side(trade.get("side"))))
 
@@ -894,10 +898,34 @@ def open_trade_dedupe_key(trade: Dict[str, Any]) -> str:
     ])
 
 
+def is_open_trade_status(trade: Dict[str, Any]) -> bool:
+    status = str(trade.get("status") or "OPEN").upper()
+    return "OPEN" in status and "CLOSED" not in status
+
+
 def dedupe_open_trades(trades: List[Any]) -> List[Dict[str, Any]]:
-    """Keep one active open trade per symbol/timeframe unless multiple entries are explicitly enabled."""
+    """Keep only the allowed number of active open trades.
+
+    Default is one total AI paper trade at a time. This protects Render/Supabase
+    load, prevents duplicate learning noise, and forces deeper learning from one
+    fully tracked trade instead of many shallow simultaneous entries.
+    """
+    clean_trades = [trade for trade in safe_list(trades) if isinstance(trade, dict) and is_open_trade_status(trade)]
+
+    if AI_TRADER_MAX_ACTIVE_OPEN_TRADES <= 1:
+        if not clean_trades:
+            return []
+
+        # Keep the newest active trade if older duplicates already exist.
+        return [
+            max(
+                clean_trades,
+                key=lambda trade: DateParseSafe(trade.get("createdAt") or trade.get("entryTime") or trade.get("updatedAt")),
+            )
+        ]
+
     if AI_TRADER_ALLOW_MULTIPLE_OPEN_TRADES:
-        return [trade for trade in safe_list(trades) if isinstance(trade, dict)]
+        return clean_trades[-AI_TRADER_MAX_ACTIVE_OPEN_TRADES:]
 
     by_key: Dict[str, Dict[str, Any]] = {}
 
@@ -2169,8 +2197,23 @@ def open_ai_trade(**payload: Any) -> Dict[str, Any]:
             entry_time=entry_time,
         )
 
+        active_open_trades = [trade for trade in open_trades if isinstance(trade, dict) and is_open_trade_status(trade)]
+
+        if AI_TRADER_MAX_ACTIVE_OPEN_TRADES <= 1 and active_open_trades:
+            return {
+                "eventType": "AI_TRADER_OPEN",
+                "status": "AlreadyOpen",
+                "opened": False,
+                "dashboardOnly": True,
+                "brokerConnected": False,
+                "trade": active_open_trades[-1],
+                "decision": decision,
+                "message": "Open blocked: one AI paper trade is already active. Learning mode is set to one trade at a time.",
+                "createdAt": now_iso(),
+            }
+
         existing = [
-            trade for trade in open_trades
+            trade for trade in active_open_trades
             if isinstance(trade, dict)
             and normalize_symbol(trade.get("symbol")) == symbol
             and normalize_timeframe(trade.get("timeframe")) == timeframe
@@ -2190,6 +2233,7 @@ def open_ai_trade(**payload: Any) -> Dict[str, Any]:
                 "brokerConnected": False,
                 "trade": existing[-1],
                 "decision": decision,
+                "message": "Open blocked: matching AI paper trade is already active.",
                 "createdAt": now_iso(),
             }
 
@@ -2224,7 +2268,7 @@ def open_ai_trade(**payload: Any) -> Dict[str, Any]:
         }
 
         open_trades.append(trade)
-        memory["openTrades"] = open_trades
+        memory["openTrades"] = dedupe_open_trades(open_trades)
         save_memory(memory)
 
         return {
