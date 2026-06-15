@@ -827,6 +827,11 @@ function buildClosedTradeFromOpenTrade({
   const closedAt = getLatestCandleTime(candles)
   const result = live.pnl > 0 ? 'WIN' : live.pnl < 0 ? 'LOSS' : 'BREAKEVEN'
 
+  const maxPnl = Math.max(
+    toFiniteNumber(trade?.maxPnl ?? trade?.maxPnlDollar, live.pnl),
+    live.pnl,
+  )
+
   return {
     ...trade,
     id: getTradeKey(trade),
@@ -843,6 +848,8 @@ function buildClosedTradeFromOpenTrade({
     pnl: live.pnl,
     pnlDollar: live.pnl,
     currentPnl: live.pnl,
+    maxPnl,
+    maxPnlDollar: maxPnl,
     pnlPercent: live.pnlPercent,
     percent: live.pnlPercent,
     livePoints: live.points,
@@ -1251,6 +1258,8 @@ export default function AiTraderPanel({
   const [hydratedLocalClosedTrades, setHydratedLocalClosedTrades] = useState(false)
   const [persistentLearningStats, setPersistentLearningStats] = useState<any>(() => normalizeAiDecisionStats({}))
   const [hydratedLearningStats, setHydratedLearningStats] = useState(false)
+  const [directLivePrice, setDirectLivePrice] = useState(0)
+  const [directLivePriceUpdatedAt, setDirectLivePriceUpdatedAt] = useState('')
 
   const decisionRequestInFlightRef = useRef(false)
   const summaryRequestInFlightRef = useRef(false)
@@ -1342,9 +1351,53 @@ export default function AiTraderPanel({
     }
   }, [hydratedLearningStats, learningStorageKey, persistentLearningStats])
 
+  useEffect(() => {
+    if (!apiBaseUrl || !symbol) return
+
+    let cancelled = false
+
+    async function fetchDirectLivePrice() {
+      try {
+        const params = new URLSearchParams({
+          symbol: String(symbol ?? ''),
+          timeframe: String(timeframe ?? '1m'),
+        })
+        const response = await fetch(`${apiBaseUrl}/api/live-price?${params.toString()}`, { cache: 'no-store' })
+
+        if (!response.ok) return
+
+        const json = await response.json()
+        const price = toFiniteNumber(json?.price ?? json?.last ?? json?.currentPrice, 0)
+
+        if (!cancelled && price > 0) {
+          setDirectLivePrice(price)
+          setDirectLivePriceUpdatedAt(String(json?.time ?? json?.timestamp ?? json?.createdAt ?? new Date().toISOString()))
+        }
+      } catch {
+        // Keep the last known direct live price. The chart activePrice still remains as fallback.
+      }
+    }
+
+    fetchDirectLivePrice()
+    const intervalMs = autoPaperMode ? 5000 : 10000
+    const intervalId = window.setInterval(fetchDirectLivePrice, intervalMs)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(intervalId)
+    }
+  }, [apiBaseUrl, autoPaperMode, symbol, timeframe])
+
+  const bestLivePriceForTrades = useMemo(() => {
+    const direct = toFiniteNumber(directLivePrice, 0)
+    if (direct > 0) return direct
+
+    return toFiniteNumber(activePrice, 0)
+  }, [activePrice, directLivePrice])
+
   const liveActivePrice = useMemo(() => {
-    return getLiveAiCurrentPrice(activePrice, signal, candles)
-  }, [activePrice, signal, candles])
+    return getLiveAiCurrentPrice(bestLivePriceForTrades, signal, candles)
+  }, [bestLivePriceForTrades, signal, candles])
 
   const activeProjectionEngine = useMemo(() => {
     return directProjectionEngine ?? readProjectionEngine(signal, overlayPayload, unifiedIntelligence)
@@ -1909,17 +1962,26 @@ export default function AiTraderPanel({
         settlement.shouldClose ? settlement.closePrice : liveActivePrice
       )
 
+      const maxPnl = Math.max(
+        toFiniteNumber(trade?.maxPnl ?? trade?.maxPnlDollar, live.pnl),
+        live.pnl,
+      )
+
       return {
         ...trade,
         currentPrice: live.current,
         liveCurrentPrice: live.current,
         currentPnl: live.pnl,
         pnl: live.pnl,
+        maxPnl,
+        maxPnlDollar: maxPnl,
         pnlPercent: live.pnlPercent,
         percent: live.pnlPercent,
         livePoints: live.points,
         rMultiple: live.rMultiple,
         liveUpdatedFromChart: live.current > 0,
+        livePriceSource: directLivePrice > 0 ? 'backend_live_price' : 'chart_active_price',
+        livePriceUpdatedAt: directLivePriceUpdatedAt,
 
         shouldCloseNow: settlement.shouldClose,
         closePrice: settlement.shouldClose ? settlement.closePrice : trade.closePrice,
@@ -2304,15 +2366,17 @@ export default function AiTraderPanel({
             Open trade current price, P&amp;L, and target/stop/opposite-decision settlement are checked from the live chart price every refresh.
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[760px] text-left text-xs">
+            <table className="w-full min-w-[1120px] text-left text-xs">
               <thead className="text-gray-500">
                 <tr>
+                  <th className="pb-2">Symbol</th>
                   <th className="pb-2">Side</th>
                   <th className="pb-2">Entry</th>
                   <th className="pb-2">Target</th>
                   <th className="pb-2">Stop</th>
                   <th className="pb-2">Current</th>
                   <th className="pb-2">P&L</th>
+                  <th className="pb-2">Max P&L</th>
                   <th className="pb-2">P&L %</th>
                   <th className="pb-2">Live R</th>
                   <th className="pb-2">Confidence</th>
@@ -2329,15 +2393,27 @@ export default function AiTraderPanel({
                         : 'border-dark-700'
                     }`}
                   >
+                    <td className="py-2 font-black text-gray-300">
+                      {String(trade.symbol ?? symbol ?? '—').toUpperCase()}
+                    </td>
                     <td className={`py-2 font-black ${normalizeDecision(trade.side) === 'BUY' ? 'text-emerald-300' : 'text-red-300'}`}>
                       {trade.side}
                     </td>
-                    <td className="py-2">{formatPrice(trade.entry)}</td>
+                    <td className="py-2">
+                      <div className="font-semibold text-gray-300">{formatPrice(trade.entry)}</div>
+                      <div className="mt-0.5 text-[11px] text-gray-500">{formatTradeDateTime(trade.entryTime ?? trade.createdAt)}</div>
+                    </td>
                     <td className="py-2">{formatPrice(trade.target)}</td>
                     <td className="py-2">{formatPrice(trade.stop)}</td>
-                    <td className="py-2">{formatPrice(trade.currentPrice)}</td>
+                    <td className="py-2">
+                      <div className="font-semibold text-gray-300">{formatPrice(trade.currentPrice)}</div>
+                      <div className="mt-0.5 text-[11px] text-gray-500">{trade.livePriceSource === 'backend_live_price' ? 'live feed' : 'chart feed'}</div>
+                    </td>
                     <td className={`py-2 font-bold ${toFiniteNumber(trade.currentPnl, 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
                       {formatMoney(trade.currentPnl)}
+                    </td>
+                    <td className={`py-2 font-bold ${toFiniteNumber(trade.maxPnl ?? trade.maxPnlDollar, 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                      {formatMoney(trade.maxPnl ?? trade.maxPnlDollar)}
                     </td>
                     <td className={`py-2 font-bold ${toFiniteNumber(trade.pnlPercent, 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
                       {formatPercent(trade.pnlPercent)}
@@ -2377,7 +2453,7 @@ export default function AiTraderPanel({
             </button>
           </div>
           <div className="mt-3 overflow-x-auto">
-            <table className="w-full min-w-[980px] text-left text-xs">
+            <table className="w-full min-w-[1060px] text-left text-xs">
               <thead className="text-gray-500">
                 <tr>
                   <th className="pb-2">Result</th>
@@ -2390,6 +2466,7 @@ export default function AiTraderPanel({
                   <th className="pb-2">P&L</th>
                   <th className="pb-2">P&L %</th>
                   <th className="pb-2">R</th>
+                  <th className="pb-2">Confidence</th>
                   <th className="pb-2">Exit Reason</th>
                 </tr>
               </thead>
@@ -2422,6 +2499,7 @@ export default function AiTraderPanel({
                       {formatPercent(trade.pnlPercent ?? trade.percent)}
                     </td>
                     <td className="py-2">{toFiniteNumber(trade.rMultiple ?? trade.r, 0).toFixed(2)}</td>
+                    <td className="py-2">{toFiniteNumber(trade.confidence, 0).toFixed(1)}%</td>
                     <td className="max-w-[260px] truncate py-2 text-gray-500">{trade.exitReason ?? trade.closeLabel ?? trade.closeReason ?? '—'}</td>
                   </tr>
                 ))}
