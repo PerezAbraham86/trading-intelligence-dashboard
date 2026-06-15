@@ -1080,21 +1080,111 @@ function extractLiveCandleFromStreamPayload(payload: any): any | null {
 }
 
 
-function writeSharedLivePriceCache(snapshot: LiveFeedSnapshot | null) {
+function getLivePriceSourcePriority(source: any) {
+  const text = String(source ?? '').toLowerCase()
+
+  if (
+    text.includes('api/live-price') ||
+    text.includes('backend_live_price') ||
+    text.includes('insightsentry_live_quote') ||
+    text.includes('alpaca_latest_trade') ||
+    text.includes('alpaca_latest_quote') ||
+    text.includes('live_quote') ||
+    text.includes('latest_trade') ||
+    text.includes('latest_quote')
+  ) {
+    return 100
+  }
+
+  if (text.includes('phase8_live_feed_sse') || text.includes('live_feed') || text.includes('websocket') || text.includes('sse')) {
+    return 70
+  }
+
+  if (text.includes('live_candle') || text.includes('candle') || text.includes('historical')) {
+    return 35
+  }
+
+  return 50
+}
+
+function writeSharedLivePriceCache(snapshot: LiveFeedSnapshot | null, options?: { force?: boolean }) {
   if (!snapshot || !Number.isFinite(snapshot.price) || snapshot.price <= 0) return null
 
   const normalized: LiveFeedSnapshot = {
     ...snapshot,
     symbol: normalizeSymbol(snapshot.symbol),
+    source: String(snapshot.source ?? 'unknown_live_price_source'),
     updatedAt: snapshot.updatedAt || Date.now(),
   }
 
-  SHARED_LIVE_PRICE_CACHE.set(sharedLivePriceKey(normalized.symbol), normalized)
+  const key = sharedLivePriceKey(normalized.symbol)
+  const existing = SHARED_LIVE_PRICE_CACHE.get(key)
+
+  if (existing && !options?.force) {
+    const existingAgeMs = Date.now() - toFiniteNumber(existing.updatedAt, 0)
+    const incomingPriority = getLivePriceSourcePriority(normalized.source)
+    const existingPriority = getLivePriceSourcePriority(existing.source)
+
+    // Prevent chart candles / SSE candles from overwriting a fresh backend quote.
+    // This keeps the green Shared live price stable and authoritative for all charts.
+    if (existingAgeMs < 8000 && incomingPriority < existingPriority) {
+      return existing
+    }
+  }
+
+  SHARED_LIVE_PRICE_CACHE.set(key, normalized)
   return normalized
 }
 
 function readSharedLivePriceCache(symbol: string) {
   return SHARED_LIVE_PRICE_CACHE.get(sharedLivePriceKey(symbol)) ?? null
+}
+
+function extractBackendLivePriceSnapshot(payload: any, symbol: string, timeframe: string): LiveFeedSnapshot | null {
+  if (!payload || typeof payload !== 'object') return null
+
+  const normalizedSymbol = normalizeSymbol(payload.symbol ?? symbol)
+  const price = toFiniteNumber(
+    payload.price ??
+      payload.livePrice ??
+      payload.currentPrice ??
+      payload.current ??
+      payload.last ??
+      payload.lastPrice ??
+      payload.close ??
+      payload.c,
+    NaN
+  )
+
+  if (!Number.isFinite(price) || price <= 0) return null
+
+  return {
+    symbol: normalizedSymbol,
+    price,
+    bid: toFiniteNumber(payload.bid ?? payload.quote?.bid ?? payload.data?.bid, NaN),
+    ask: toFiniteNumber(payload.ask ?? payload.quote?.ask ?? payload.data?.ask, NaN),
+    last: toFiniteNumber(payload.last ?? payload.lastPrice ?? price, price),
+    source: String(payload.source ?? payload.provider ?? 'backend_live_price_api/live-price'),
+    updatedAt: Date.now(),
+  }
+}
+
+async function fetchBackendSharedLivePrice(apiBaseUrl: string, symbol: string, timeframe: string): Promise<LiveFeedSnapshot | null> {
+  const params = new URLSearchParams({
+    symbol: normalizeSymbol(symbol),
+    timeframe: normalizeTimeframe(timeframe),
+  })
+
+  const response = await fetch(`${apiBaseUrl}/api/live-price?${params.toString()}`, {
+    cache: 'no-store',
+  })
+
+  if (!response.ok) {
+    throw new Error(`Live price request failed: ${response.status}`)
+  }
+
+  const payload = await response.json()
+  return extractBackendLivePriceSnapshot(payload, symbol, timeframe)
 }
 
 function formatSharedLivePrice(value: any) {
@@ -5293,6 +5383,76 @@ export default function Dashboard() {
     enabled: chartConfigsHydrated,
     pollMs: 10000,
   })
+
+  useEffect(() => {
+    if (!isClient || !apiBaseUrl || !chartConfigsHydrated) return
+
+    let cancelled = false
+    let inFlight = false
+
+    const liveRequests = Array.from(
+      new Map(
+        [
+          { symbol: selectedSymbol, timeframe: selectedTimeframe },
+          { symbol: miniOneSymbol, timeframe: miniOneTimeframe },
+          { symbol: miniTwoSymbol, timeframe: miniTwoTimeframe },
+        ].map((item) => [sharedLivePriceKey(item.symbol), item])
+      ).values()
+    )
+
+    async function refreshSharedLivePrices() {
+      if (inFlight) return
+      inFlight = true
+
+      try {
+        const snapshots = await Promise.allSettled(
+          liveRequests.map((item) => fetchBackendSharedLivePrice(apiBaseUrl, item.symbol, item.timeframe))
+        )
+
+        if (cancelled) return
+
+        const nextSnapshots: Record<string, LiveFeedSnapshot> = {}
+
+        snapshots.forEach((result) => {
+          if (result.status !== 'fulfilled' || !result.value) return
+
+          const normalizedSnapshot = writeSharedLivePriceCache(result.value, { force: true })
+          if (!normalizedSnapshot) return
+
+          nextSnapshots[sharedLivePriceKey(normalizedSnapshot.symbol)] = normalizedSnapshot
+        })
+
+        if (Object.keys(nextSnapshots).length > 0) {
+          setSharedLivePrices((current) => ({
+            ...current,
+            ...nextSnapshots,
+          }))
+        }
+      } catch (error) {
+        console.error('Shared live price refresh failed:', error)
+      } finally {
+        inFlight = false
+      }
+    }
+
+    refreshSharedLivePrices()
+    const intervalId = window.setInterval(refreshSharedLivePrices, 2500)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(intervalId)
+    }
+  }, [
+    apiBaseUrl,
+    chartConfigsHydrated,
+    isClient,
+    miniOneSymbol,
+    miniOneTimeframe,
+    miniTwoSymbol,
+    miniTwoTimeframe,
+    selectedSymbol,
+    selectedTimeframe,
+  ])
 
   const dashboardTimeframes = useMemo(
     () => Array.from(new Set([selectedTimeframe, miniOneTimeframe, miniTwoTimeframe])),
