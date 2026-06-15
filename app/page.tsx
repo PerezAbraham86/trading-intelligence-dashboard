@@ -325,6 +325,10 @@ function isFuturesCandleSymbol(symbol: string) {
   return normalized === 'MES1!'
 }
 
+function isInsightSentryDirectHistoricalTimeframe(timeframe: string) {
+  return ['1m', '5m', '10m', '15m', '30m'].includes(normalizeTimeframe(timeframe))
+}
+
 function getHistoricalCandleRouteForSymbol(apiBaseUrl: string, symbol: string) {
   const normalized = normalizeSymbol(symbol)
 
@@ -1120,14 +1124,22 @@ function writeSharedLivePriceCache(snapshot: LiveFeedSnapshot | null, options?: 
   const key = sharedLivePriceKey(normalized.symbol)
   const existing = SHARED_LIVE_PRICE_CACHE.get(key)
 
-  if (existing && !options?.force) {
-    const existingAgeMs = Date.now() - toFiniteNumber(existing.updatedAt, 0)
-    const incomingPriority = getLivePriceSourcePriority(normalized.source)
+  if (existing) {
+    const existingTime = toFiniteNumber(existing.updatedAt, 0)
+    const incomingTime = toFiniteNumber(normalized.updatedAt, 0)
     const existingPriority = getLivePriceSourcePriority(existing.source)
+    const incomingPriority = getLivePriceSourcePriority(normalized.source)
 
-    // Prevent chart candles / SSE candles from overwriting a fresh backend quote.
-    // This keeps the green Shared live price stable and authoritative for all charts.
-    if (existingAgeMs < 8000 && incomingPriority < existingPriority) {
+    // Do not let a stale backend quote overwrite a fresher chart/live-feed price.
+    // The shared live price should represent the freshest live value for the symbol,
+    // not whichever poll finished last.
+    if (incomingTime + 1500 < existingTime) {
+      return existing
+    }
+
+    // If two updates arrive at nearly the same time, allow the more direct backend
+    // quote to win only when it is not older. Otherwise, keep the fresher candle/SSE value.
+    if (!options?.force && Math.abs(incomingTime - existingTime) <= 1500 && incomingPriority < existingPriority) {
       return existing
     }
   }
@@ -1158,6 +1170,20 @@ function extractBackendLivePriceSnapshot(payload: any, symbol: string, timeframe
 
   if (!Number.isFinite(price) || price <= 0) return null
 
+  const rawTime =
+    payload.time ??
+    payload.timestamp ??
+    payload.updatedAt ??
+    payload.createdAt ??
+    payload.data?.time ??
+    payload.data?.timestamp ??
+    payload.quote?.time ??
+    payload.quote?.timestamp
+
+  const parsedTime = typeof rawTime === 'number'
+    ? (rawTime > 10_000_000_000 ? rawTime : rawTime * 1000)
+    : Date.parse(String(rawTime ?? ''))
+
   return {
     symbol: normalizedSymbol,
     price,
@@ -1165,7 +1191,7 @@ function extractBackendLivePriceSnapshot(payload: any, symbol: string, timeframe
     ask: toFiniteNumber(payload.ask ?? payload.quote?.ask ?? payload.data?.ask, NaN),
     last: toFiniteNumber(payload.last ?? payload.lastPrice ?? price, price),
     source: String(payload.source ?? payload.provider ?? 'backend_live_price_api/live-price'),
-    updatedAt: Date.now(),
+    updatedAt: Number.isFinite(parsedTime) && parsedTime > 0 ? parsedTime : Date.now(),
   }
 }
 
@@ -1383,7 +1409,19 @@ async function fetchSharedCandlePayload(
     const previous = SHARED_CANDLE_CACHE.get(key)
     const apiLimit = Math.max(requestedLimit, previous?.limit ?? 0)
 
-    const routeConfig = getHistoricalCandleRouteForSymbol(apiBaseUrl, normalizedSymbol)
+    let routeConfig = getHistoricalCandleRouteForSymbol(apiBaseUrl, normalizedSymbol)
+
+    // InsightSentry direct history does not return reliable full series for every
+    // custom timeframe. For MES 3m/2h/4h/etc., use the backend candle router so
+    // api/main.py can fetch 1m/valid source candles and resample them correctly.
+    if (isFuturesCandleSymbol(normalizedSymbol) && !isInsightSentryDirectHistoricalTimeframe(normalizedTimeframe)) {
+      routeConfig = {
+        route: `${apiBaseUrl}/api/candles`,
+        provider: 'dashboard_candles',
+        source: 'dashboard_candle_router_resampled_futures_history',
+      }
+    }
+
     const useBackendFallbackFirst =
       routeConfig.provider === 'insightsentry' &&
       (!providerForce || shouldUseInsightSentryBackoff(key)) &&
@@ -5416,7 +5454,7 @@ export default function Dashboard() {
         snapshots.forEach((result) => {
           if (result.status !== 'fulfilled' || !result.value) return
 
-          const normalizedSnapshot = writeSharedLivePriceCache(result.value, { force: true })
+          const normalizedSnapshot = writeSharedLivePriceCache(result.value)
           if (!normalizedSnapshot) return
 
           nextSnapshots[sharedLivePriceKey(normalizedSnapshot.symbol)] = normalizedSnapshot
