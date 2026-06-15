@@ -932,6 +932,7 @@ const CHART_CANDLE_DEBUG_MAX_ROWS = 16
 const MAIN_HISTORICAL_REFRESH_MS = 2 * 60 * 1000
 const MINI_HISTORICAL_REFRESH_MS = 5 * 60 * 1000
 const LIVE_GAP_REPAIR_COOLDOWN_MS = 45 * 1000
+const LIVE_GAP_REPAIR_LOG_THROTTLE_MS = 5 * 1000
 
 type ChartCandleDebugLogEntry = {
   time: string
@@ -3987,6 +3988,8 @@ function useChartCandles(
     let lastHistoricalFetchStartedAt = 0
     let lastHistoricalFetchSucceededAt = 0
     let lastLiveGapRepairFetchAt = 0
+    let lastLiveGapRepairRequestedAt = 0
+    let lastLiveGapRepairSkipLoggedAt = 0
 
     setDebugLog([])
     addCandleDebugLog('mount', { enabled, limit, pollMs })
@@ -4201,6 +4204,57 @@ function useChartCandles(
       }
     }
 
+
+    function requestLiveGapRepairOnce(previousCandles: DashboardCandle[], liveCandle: any, streamSource: string) {
+      const now = Date.now()
+      const timeframeSeconds = timeframeToSeconds(timeframe)
+      const gapSeconds = candleGapSeconds(previousCandles, liveCandle)
+      const liveTooFarFromHistory = isLiveCandleTooFarFromHistory(symbol, previousCandles, liveCandle)
+      const fullCache = getFullSharedCacheEntry()
+      const liveClose = getCandleCloseValue(normalizeCandlePayloadItem(liveCandle))
+      const lastClose = getCandleCloseValue(previousCandles[previousCandles.length - 1])
+
+      if (!(gapSeconds > timeframeSeconds * 2 || liveTooFarFromHistory)) {
+        return false
+      }
+
+      // SSE can send one message every second. When a history/live gap exists,
+      // every message used to call fetchCandles(), which repeatedly re-plotted
+      // the same cached 700 candles and spammed the log. Request one repair per
+      // cooldown window, then keep the current candles visible until the next
+      // repair attempt is allowed.
+      if (now - lastLiveGapRepairRequestedAt < LIVE_GAP_REPAIR_COOLDOWN_MS) {
+        if (now - lastLiveGapRepairSkipLoggedAt >= LIVE_GAP_REPAIR_LOG_THROTTLE_MS) {
+          lastLiveGapRepairSkipLoggedAt = now
+          addCandleDebugLog('live-gap-repair-wait', {
+            streamSource,
+            cooldownMs: LIVE_GAP_REPAIR_COOLDOWN_MS,
+            cacheCount: fullCache?.candles?.length ?? previousCandles.length,
+            cacheSource: fullCache?.source,
+            gapSeconds,
+            liveTooFarFromHistory,
+            lastClose: Number.isFinite(lastClose) ? lastClose : undefined,
+            liveClose: Number.isFinite(liveClose) ? liveClose : undefined,
+          }, 'warn')
+        }
+
+        return true
+      }
+
+      lastLiveGapRepairRequestedAt = now
+      addCandleDebugLog('live-gap-repair-request', {
+        streamSource,
+        cacheCount: fullCache?.candles?.length ?? previousCandles.length,
+        cacheSource: fullCache?.source,
+        gapSeconds,
+        liveTooFarFromHistory,
+        lastClose: Number.isFinite(lastClose) ? lastClose : undefined,
+        liveClose: Number.isFinite(liveClose) ? liveClose : undefined,
+      }, 'warn')
+      fetchCandles(false, 'live-gap')
+      return true
+    }
+
     if (!enabled) {
       applyCachedPayload()
       setIsLoading(false)
@@ -4249,14 +4303,8 @@ function useChartCandles(
 
           setCandles((previousCandles) => {
             const timeframeSeconds = timeframeToSeconds(timeframe)
-            const gapSeconds = candleGapSeconds(previousCandles, liveCandle)
-            const liveTooFarFromHistory = isLiveCandleTooFarFromHistory(symbol, previousCandles, liveCandle)
 
-            if (gapSeconds > timeframeSeconds * 2 || liveTooFarFromHistory) {
-              // History/live gap detected. Do not create fake bridge candles.
-              // Force-refresh the correct historical OHLCV provider first so MES/BTCUSD fills
-              // the missing area with real candles instead of a fake vertical live candle.
-              fetchCandles(false, 'live-gap')
+            if (requestLiveGapRepairOnce(previousCandles, liveCandle, 'message')) {
               return previousCandles
             }
 
@@ -4305,14 +4353,8 @@ function useChartCandles(
 
           setCandles((previousCandles) => {
             const timeframeSeconds = timeframeToSeconds(timeframe)
-            const gapSeconds = candleGapSeconds(previousCandles, liveCandle)
-            const liveTooFarFromHistory = isLiveCandleTooFarFromHistory(symbol, previousCandles, liveCandle)
 
-            if (gapSeconds > timeframeSeconds * 2 || liveTooFarFromHistory) {
-              // History/live gap detected. Do not create fake bridge candles.
-              // Force-refresh the correct historical OHLCV provider first so MES/BTCUSD fills
-              // the missing area with real candles instead of a fake vertical live candle.
-              fetchCandles(false, 'live-gap')
+            if (requestLiveGapRepairOnce(previousCandles, liveCandle, 'candle')) {
               return previousCandles
             }
 
