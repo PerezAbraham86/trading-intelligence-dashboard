@@ -925,6 +925,14 @@ function normalizeCandlePayload(payload: any): DashboardCandle[] {
 const SHARED_CANDLE_CACHE_MAX_BARS = 5000
 const CHART_CANDLE_DEBUG_MAX_ROWS = 16
 
+// Historical OHLCV is expensive and rate-limited. After a good historical
+// payload is loaded, keep the chart alive from cache + live candles and only
+// refetch full history when the cache is stale, the symbol/timeframe changes,
+// or a live/history gap needs repair.
+const MAIN_HISTORICAL_REFRESH_MS = 2 * 60 * 1000
+const MINI_HISTORICAL_REFRESH_MS = 5 * 60 * 1000
+const LIVE_GAP_REPAIR_COOLDOWN_MS = 45 * 1000
+
 type ChartCandleDebugLogEntry = {
   time: string
   level: 'info' | 'warn' | 'error' | 'success'
@@ -1469,7 +1477,21 @@ async function fetchSharedCandlePayload(
 
   const request = (async () => {
     const previous = SHARED_CANDLE_CACHE.get(key)
-    const apiLimit = Math.max(requestedLimit, previous?.limit ?? 0)
+    const previousCount = previous?.candles?.length ?? 0
+
+    // Backfill/grow rule:
+    // Display can still request 300/700 candles, but the stored shared cache
+    // should grow after history has loaded once. Increasing the provider limit
+    // on occasional historical refreshes lets the cache expand toward 5,000
+    // bars instead of permanently staying at the visible chart limit.
+    const apiLimit = Math.min(
+      SHARED_CANDLE_CACHE_MAX_BARS,
+      Math.max(
+        requestedLimit,
+        previous?.limit ?? 0,
+        previousCount > 0 ? previousCount + requestedLimit : requestedLimit
+      )
+    )
 
     let routeConfig = getHistoricalCandleRouteForSymbol(apiBaseUrl, normalizedSymbol)
 
@@ -3962,6 +3984,9 @@ function useChartCandles(
     let intervalId: ReturnType<typeof setInterval> | null = null
     let liveEventSource: EventSource | null = null
     let liveSourceConnected = false
+    let lastHistoricalFetchStartedAt = 0
+    let lastHistoricalFetchSucceededAt = 0
+    let lastLiveGapRepairFetchAt = 0
 
     setDebugLog([])
     addCandleDebugLog('mount', { enabled, limit, pollMs })
@@ -4041,7 +4066,69 @@ function useChartCandles(
       return cached.candles.length > 0
     }
 
-    async function fetchCandles(force = false) {
+    function getFullSharedCacheEntry() {
+      return SHARED_CANDLE_CACHE.get(sharedCandleKey(symbol, timeframe)) ?? null
+    }
+
+    function getHistoricalRefreshMs() {
+      return priority === 'mini' ? MINI_HISTORICAL_REFRESH_MS : MAIN_HISTORICAL_REFRESH_MS
+    }
+
+    function shouldSkipHistoricalFetchAfterCache(reason: string, cachedWasApplied: boolean, force: boolean) {
+      if (force || !cachedWasApplied) return false
+
+      const fullCache = getFullSharedCacheEntry()
+      if (!fullCache || !Array.isArray(fullCache.candles) || fullCache.candles.length === 0) return false
+
+      const minimumReusableCandles = priority === 'mini' ? 20 : 10
+      if (fullCache.candles.length < minimumReusableCandles) return false
+
+      const now = Date.now()
+      const cacheAgeMs = now - toFiniteNumber(fullCache.updatedAt, 0)
+      const historicalAgeMs = lastHistoricalFetchSucceededAt > 0
+        ? now - lastHistoricalFetchSucceededAt
+        : cacheAgeMs
+      const refreshMs = getHistoricalRefreshMs()
+
+      if (reason === 'live-gap') {
+        if (now - lastLiveGapRepairFetchAt < LIVE_GAP_REPAIR_COOLDOWN_MS) {
+          addCandleDebugLog('fetch-skip-live-gap-cooldown', {
+            cooldownMs: LIVE_GAP_REPAIR_COOLDOWN_MS,
+            cacheCount: fullCache.candles.length,
+            cacheSource: fullCache.source,
+          }, 'warn')
+          return true
+        }
+
+        lastLiveGapRepairFetchAt = now
+        return false
+      }
+
+      if (priority === 'mini') {
+        addCandleDebugLog('fetch-skip-mini-cache-good', {
+          reason,
+          cacheCount: fullCache.candles.length,
+          cacheAgeMs,
+          source: fullCache.source,
+        })
+        return true
+      }
+
+      if (historicalAgeMs < refreshMs) {
+        addCandleDebugLog('fetch-skip-cache-fresh', {
+          reason,
+          cacheCount: fullCache.candles.length,
+          historicalAgeMs,
+          refreshMs,
+          source: fullCache.source,
+        })
+        return true
+      }
+
+      return false
+    }
+
+    async function fetchCandles(force = false, reason = 'poll') {
       if (!enabled) {
         applyCachedPayload()
         setIsLoading(false)
@@ -4049,13 +4136,10 @@ function useChartCandles(
       }
 
       try {
-        const cachedWasApplied = applyCachedPayload(force ? 'before-force-fetch' : 'before-fetch')
+        const cacheReason = force ? `before-force-fetch:${reason}` : `before-fetch:${reason}`
+        const cachedWasApplied = applyCachedPayload(cacheReason)
 
-        // Priority rule:
-        // Main chart owns the refresh. Mini charts reuse main/shared cache when
-        // the symbol + timeframe already exist, so identical mini charts do not
-        // start a second historical OHLCV request.
-        if (priority === 'mini' && cachedWasApplied) {
+        if (shouldSkipHistoricalFetchAfterCache(reason, cachedWasApplied, force)) {
           setIsLoading(false)
           return
         }
@@ -4063,15 +4147,32 @@ function useChartCandles(
         setIsLoading(!cachedWasApplied)
         setErrorText('')
 
-        addCandleDebugLog('fetch-start', { force, limit, priority })
+        lastHistoricalFetchStartedAt = Date.now()
+        const fullCacheBeforeFetch = getFullSharedCacheEntry()
+
+        addCandleDebugLog('fetch-start', {
+          force,
+          limit,
+          priority,
+          reason,
+          existingCacheCount: fullCacheBeforeFetch?.candles?.length ?? 0,
+          existingCacheLimit: fullCacheBeforeFetch?.limit ?? 0,
+        })
+
         const nextPayload = await fetchSharedCandlePayload(activeApiBaseUrl, symbol, timeframe, limit, force)
 
         if (!cancelled) {
+          const fullCacheAfterFetch = getFullSharedCacheEntry()
+          lastHistoricalFetchSucceededAt = Date.now()
+
           addCandleDebugLog('plot-candles-from-fetch', {
             ...describeCandleRange(nextPayload.candles),
             source: nextPayload.source,
             provider: nextPayload.provider,
+            displayLimit: limit,
+            returnedCount: nextPayload.candles.length,
             cacheLimit: nextPayload.limit,
+            storedCacheCount: fullCacheAfterFetch?.candles?.length ?? nextPayload.candles.length,
           }, 'success')
           setCandles(nextPayload.candles)
 
@@ -4111,7 +4212,7 @@ function useChartCandles(
     setCandles([])
     setOverlayPayload(null)
     setUnifiedIntelligence(null)
-    fetchCandles()
+    fetchCandles(false, 'initial')
     startPolling()
 
     if (typeof window !== 'undefined' && typeof EventSource !== 'undefined') {
@@ -4155,7 +4256,7 @@ function useChartCandles(
               // History/live gap detected. Do not create fake bridge candles.
               // Force-refresh the correct historical OHLCV provider first so MES/BTCUSD fills
               // the missing area with real candles instead of a fake vertical live candle.
-              fetchCandles(false)
+              fetchCandles(false, 'live-gap')
               return previousCandles
             }
 
@@ -4211,7 +4312,7 @@ function useChartCandles(
               // History/live gap detected. Do not create fake bridge candles.
               // Force-refresh the correct historical OHLCV provider first so MES/BTCUSD fills
               // the missing area with real candles instead of a fake vertical live candle.
-              fetchCandles(false)
+              fetchCandles(false, 'live-gap')
               return previousCandles
             }
 
