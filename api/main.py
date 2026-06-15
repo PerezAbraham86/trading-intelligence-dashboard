@@ -1693,6 +1693,66 @@ def futures_cached_payload_is_stale_against_live(cached: Any, symbol: str, timef
 
     return False
 
+def cached_futures_history_payload_for_rate_limit(symbol: str, timeframe: str, limit: int) -> Optional[Dict[str, Any]]:
+    """Return cached MES history when InsightSentry rate-limits fresh history.
+
+    This fallback intentionally does not merge a far-away live candle into stale
+    historical candles. The frontend live/history gap guard decides whether live
+    should be stitched onto the chart. The goal here is to keep the chart from
+    going blank during 429 windows while still showing the last usable MES
+    candle series.
+    """
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    if not is_futures_symbol(normalized_symbol):
+        return None
+
+    safe_limit = max(1, min(int(limit or 500), 5000))
+    max_age = int(os.getenv("MES_RATE_LIMIT_CACHE_MAX_AGE_SECONDS", str(max(CANDLE_SITE_CACHE_MAX_AGE_SECONDS, 86400))))
+
+    candidates: List[Any] = []
+    for route_name in ["historical", "dashboard"]:
+        cached = candle_cache_get(route_name, normalized_symbol, normalized_timeframe, safe_limit, max_age)
+        if cached:
+            candidates.append(cached)
+
+        best = candle_cache_best(route_name, normalized_symbol, normalized_timeframe, safe_limit, max_age)
+        if best:
+            candidates.append(best)
+
+        stale = candle_cache_stale(route_name, normalized_symbol, normalized_timeframe, safe_limit)
+        if stale:
+            candidates.append(stale)
+
+    for cached in candidates:
+        if not isinstance(cached, dict):
+            continue
+
+        candles = cached.get("candles")
+        if not isinstance(candles, list) or not candles:
+            continue
+
+        filtered = filter_valid_candles_for_symbol(merge_candles_by_time(candles), normalized_symbol)[-safe_limit:]
+        if not filtered:
+            continue
+
+        payload = build_candle_route_payload(
+            route_source="insightsentry_history_rate_limit_cache",
+            symbol=normalized_symbol,
+            timeframe=normalized_timeframe,
+            candles=filtered,
+            provider=str(cached.get("provider") or "insightsentry"),
+            cache_label="rate_limit_cached_history",
+        )
+        payload["siteCache"] = cached.get("siteCache", True)
+        payload["siteCacheAgeSeconds"] = cached.get("siteCacheAgeSeconds")
+        payload["rateLimitFallback"] = True
+        payload["warning"] = "InsightSentry returned 429; using cached MES historical candles."
+        return payload
+
+    return None
+
 def timeframe_to_1m_fetch_limit(timeframe: str, limit: int) -> int:
     seconds = timeframe_seconds(timeframe)
     mult = max(1, int(seconds / 60))
@@ -8321,18 +8381,45 @@ def api_insightsentry_history(
     dadj: bool = False,
     force: bool = False,
 ) -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    safe_limit = max(1, min(int(limit or 700), 5000))
+
     if get_historical_ohlcv is None:
         raise HTTPException(status_code=503, detail="api.insightsentry_history module unavailable")
-    return get_historical_ohlcv(
-        symbol=symbol,
-        timeframe=timeframe,
-        start_ym=start_ym,
-        limit=limit,
-        extended=extended,
-        badj=badj,
-        dadj=dadj,
-        force=force,
-    )
+
+    try:
+        return get_historical_ohlcv(
+            symbol=normalized_symbol,
+            timeframe=normalized_timeframe,
+            start_ym=start_ym,
+            limit=safe_limit,
+            extended=extended,
+            badj=badj,
+            dadj=dadj,
+            force=force,
+        )
+    except HTTPException as error:
+        if error.status_code == 429 and is_futures_symbol(normalized_symbol):
+            fallback = cached_futures_history_payload_for_rate_limit(
+                normalized_symbol,
+                normalized_timeframe,
+                safe_limit,
+            )
+            if fallback:
+                return fallback
+        raise
+    except Exception as error:
+        text = str(error).lower()
+        if is_futures_symbol(normalized_symbol) and ("429" in text or "rate" in text or "too many" in text):
+            fallback = cached_futures_history_payload_for_rate_limit(
+                normalized_symbol,
+                normalized_timeframe,
+                safe_limit,
+            )
+            if fallback:
+                return fallback
+        raise
 
 
 @app.get("/insightsentry/history")
