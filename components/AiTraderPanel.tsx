@@ -1534,12 +1534,9 @@ export default function AiTraderPanel({
     const timeout = createRequestTimeout(12000)
 
     try {
-      const params = new URLSearchParams({
-        symbol,
-        timeframe,
-      })
-
-      const response = await fetch(`${apiBaseUrl}/api/ai-trader/summary?${params.toString()}`, {
+      // Closed trade history should be global across all symbols/timeframes.
+      // Open-trade locking is already handled by the backend one-trade-at-a-time rule.
+      const response = await fetch(`${apiBaseUrl}/api/ai-trader/summary`, {
         cache: 'no-store',
         signal: timeout.signal,
       })
@@ -1565,7 +1562,7 @@ export default function AiTraderPanel({
       timeout.clear()
       summaryRequestInFlightRef.current = false
     }
-  }, [apiBaseUrl, saveClosedTrades, saveOpenTrades, symbol, timeframe])
+  }, [apiBaseUrl, saveClosedTrades, saveOpenTrades])
 
   const evaluateOpenTrades = useCallback(async (force = false) => {
     if (!apiBaseUrl) return
@@ -2355,13 +2352,12 @@ export default function AiTraderPanel({
             </button>
           </div>
           <div className="mt-3 overflow-x-auto">
-            <table className="w-full min-w-[880px] text-left text-xs">
+            <table className="w-full min-w-[980px] text-left text-xs">
               <thead className="text-gray-500">
                 <tr>
                   <th className="pb-2">Result</th>
+                  <th className="pb-2">Symbol</th>
                   <th className="pb-2">Side</th>
-                  <th className="pb-2">Entry Time</th>
-                  <th className="pb-2">Exit Time</th>
                   <th className="pb-2">Entry</th>
                   <th className="pb-2">Exit</th>
                   <th className="pb-2">Target</th>
@@ -2378,13 +2374,20 @@ export default function AiTraderPanel({
                     <td className={`py-2 font-black ${String(trade.result).toUpperCase() === 'WIN' ? 'text-emerald-300' : String(trade.result).toUpperCase() === 'LOSS' ? 'text-red-300' : 'text-amber-300'}`}>
                       {trade.result ?? 'CLOSED'}
                     </td>
+                    <td className="py-2 font-black text-gray-300">
+                      {String(trade.symbol ?? '—').toUpperCase()}
+                    </td>
                     <td className={`py-2 font-black ${normalizeDecision(trade.side) === 'BUY' ? 'text-emerald-300' : 'text-red-300'}`}>
                       {trade.side}
                     </td>
-                    <td className="py-2 text-gray-500">{formatTradeDateTime(trade.entryTime)}</td>
-                    <td className="py-2 text-gray-500">{formatTradeDateTime(trade.exitTime ?? trade.closedAt)}</td>
-                    <td className="py-2">{formatPrice(trade.entry ?? trade.entryPrice)}</td>
-                    <td className="py-2">{formatPrice(trade.exit ?? trade.exitPrice)}</td>
+                    <td className="py-2">
+                      <div className="font-semibold text-gray-300">{formatPrice(trade.entry ?? trade.entryPrice)}</div>
+                      <div className="mt-0.5 text-[11px] text-gray-500">{formatTradeDateTime(trade.entryTime)}</div>
+                    </td>
+                    <td className="py-2">
+                      <div className="font-semibold text-gray-300">{formatPrice(trade.exit ?? trade.exitPrice)}</div>
+                      <div className="mt-0.5 text-[11px] text-gray-500">{formatTradeDateTime(trade.exitTime ?? trade.closedAt)}</div>
+                    </td>
                     <td className="py-2">{formatPrice(trade.target ?? trade.targetPrice)}</td>
                     <td className="py-2">{formatPrice(trade.stop ?? trade.stopPrice)}</td>
                     <td className={`py-2 font-bold ${toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
