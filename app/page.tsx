@@ -945,6 +945,25 @@ function rememberInsightSentryBackoff(key: string) {
 function sharedCandleKey(symbol: string, timeframe: string) {
   return `${normalizeSymbol(symbol)}::${normalizeTimeframe(timeframe)}`
 }
+function clearSharedChartCachesForSymbolSwitch(symbol: string, timeframe?: string) {
+  const normalizedSymbol = normalizeSymbol(symbol)
+  const normalizedTimeframe = timeframe ? normalizeTimeframe(timeframe) : ''
+
+  Array.from(SHARED_CANDLE_CACHE.keys()).forEach((key) => {
+    const [cacheSymbol, cacheTimeframe] = key.split('::')
+    if (cacheSymbol !== normalizedSymbol) return
+    if (normalizedTimeframe && cacheTimeframe !== normalizedTimeframe) return
+    SHARED_CANDLE_CACHE.delete(key)
+  })
+
+  Array.from(SHARED_CANDLE_IN_FLIGHT.keys()).forEach((key) => {
+    const [cacheSymbol, cacheTimeframe] = key.split('::')
+    if (cacheSymbol !== normalizedSymbol) return
+    if (normalizedTimeframe && cacheTimeframe !== normalizedTimeframe) return
+    SHARED_CANDLE_IN_FLIGHT.delete(key)
+  })
+}
+
 
 const SHARED_LIVE_PRICE_CACHE = new Map<string, LiveFeedSnapshot>()
 
@@ -3764,8 +3783,8 @@ function useChartCandles(
       }
 
       setCandles(cached.candles)
-      setOverlayPayload((previous: any | null) => cached.overlayPayload ?? previous)
-      setUnifiedIntelligence((previous: any | null) => cached.unifiedIntelligence ?? previous)
+      setOverlayPayload(cached.overlayPayload ?? null)
+      setUnifiedIntelligence(cached.unifiedIntelligence ?? null)
 
       if (cachedLivePrice) {
         onLivePriceUpdate?.(cachedLivePrice)
@@ -3805,8 +3824,8 @@ function useChartCandles(
           // Keep overlay/intelligence stable during polling/history refresh.
           // Historical OHLCV usually returns candles only, so never replace a
           // valid canvas overlay with null.
-          setOverlayPayload((previous: any | null) => nextPayload.overlayPayload ?? previous)
-          setUnifiedIntelligence((previous: any | null) => nextPayload.unifiedIntelligence ?? previous)
+          setOverlayPayload(nextPayload.overlayPayload ?? null)
+          setUnifiedIntelligence(nextPayload.unifiedIntelligence ?? null)
         }
       } catch (error) {
         console.error('Lightweight chart candle sync error:', error)
@@ -3900,8 +3919,8 @@ function useChartCandles(
             )
 
             if (cacheEntry) {
-              setOverlayPayload((previous: any | null) => cacheEntry.overlayPayload ?? previous)
-              setUnifiedIntelligence((previous: any | null) => cacheEntry.unifiedIntelligence ?? previous)
+              setOverlayPayload(cacheEntry.overlayPayload ?? null)
+              setUnifiedIntelligence(cacheEntry.unifiedIntelligence ?? null)
             }
 
             return merged
@@ -3956,8 +3975,8 @@ function useChartCandles(
             )
 
             if (cacheEntry) {
-              setOverlayPayload((previous: any | null) => cacheEntry.overlayPayload ?? previous)
-              setUnifiedIntelligence((previous: any | null) => cacheEntry.unifiedIntelligence ?? previous)
+              setOverlayPayload(cacheEntry.overlayPayload ?? null)
+              setUnifiedIntelligence(cacheEntry.unifiedIntelligence ?? null)
             }
 
             return merged
@@ -4087,6 +4106,107 @@ function roundedOverlayPriceKey(value: any) {
   // MES/ES run on quarter ticks. This fuzzy bucket also keeps stock/crypto
   // overlays stable enough while preventing near-identical OB duplicates.
   return String(Math.round(price * 4) / 4)
+}
+
+
+function getOverlayReferencePrice(candles: DashboardCandle[] | undefined, symbol?: string) {
+  const latest = getLatestVisualClose(Array.isArray(candles) ? candles : [])
+  if (latest && latest > 0) return latest
+
+  const sharedLive = readSharedLivePriceCache(normalizeSymbol(symbol ?? ''))
+  if (sharedLive?.price && sharedLive.price > 0) return sharedLive.price
+
+  return 0
+}
+
+function isOverlayPriceNearChart(price: any, referencePrice: number, symbol?: string) {
+  const value = overlayNumber(price, NaN)
+  if (!Number.isFinite(value) || value <= 0) return false
+  if (!Number.isFinite(referencePrice) || referencePrice <= 0) return true
+
+  const normalized = normalizeSymbol(symbol ?? '')
+  const pctDistance = Math.abs(value - referencePrice) / Math.max(referencePrice, 1)
+
+  // MES/ES overlays must stay close to the visible futures scale. This prevents
+  // BTCUSD premium/discount and DLM liquidity profile levels from remaining on
+  // the MES chart after switching symbols.
+  const maxPctDistance = normalized.includes('MES') || normalized.includes('ES') ? 0.18 : 0.35
+
+  return pctDistance <= maxPctDistance
+}
+
+function getOverlayItemPriceCandidates(item: any) {
+  if (!item || typeof item !== 'object') return [] as number[]
+
+  return getVisualPriceCandidatesFromItem(item)
+}
+
+function isOverlayItemNearChart(item: any, referencePrice: number, symbol?: string) {
+  const prices = getOverlayItemPriceCandidates(item)
+  if (prices.length === 0) return true
+
+  return prices.some((price) => isOverlayPriceNearChart(price, referencePrice, symbol))
+}
+
+function filterOverlayArrayForChartScale(items: any, referencePrice: number, symbol?: string) {
+  if (!Array.isArray(items)) return items
+
+  return items.filter((item) => isOverlayItemNearChart(item, referencePrice, symbol))
+}
+
+function sanitizeBackendOverlayPayloadForChart(
+  backendPayload: any,
+  chartCandles: DashboardCandle[] | undefined,
+  symbol?: string
+) {
+  if (!backendPayload || typeof backendPayload !== 'object') return backendPayload
+
+  const referencePrice = getOverlayReferencePrice(chartCandles, symbol)
+  if (!referencePrice || referencePrice <= 0) return backendPayload
+
+  const sanitized = {
+    ...safeBackendPayload,
+    lines: filterOverlayArrayForChartScale(backendPayload.lines, referencePrice, symbol),
+    zones: filterOverlayArrayForChartScale(backendPayload.zones, referencePrice, symbol),
+    markers: filterOverlayArrayForChartScale(backendPayload.markers, referencePrice, symbol),
+    smcEvents: filterOverlayArrayForChartScale(backendPayload.smcEvents, referencePrice, symbol),
+    orderBlocks: filterOverlayArrayForChartScale(backendPayload.orderBlocks, referencePrice, symbol),
+    liquidityEvents: filterOverlayArrayForChartScale(backendPayload.liquidityEvents, referencePrice, symbol),
+    liquidityProfileBins: filterOverlayArrayForChartScale(backendPayload.liquidityProfileBins, referencePrice, symbol),
+    dlmLevels: filterOverlayArrayForChartScale(backendPayload.dlmLevels, referencePrice, symbol),
+    pdZones: filterOverlayArrayForChartScale(backendPayload.pdZones, referencePrice, symbol),
+    premiumDiscountZones: filterOverlayArrayForChartScale(backendPayload.premiumDiscountZones, referencePrice, symbol),
+    premiumDiscount: filterOverlayArrayForChartScale(backendPayload.premiumDiscount, referencePrice, symbol),
+    pdLevels: filterOverlayArrayForChartScale(backendPayload.pdLevels, referencePrice, symbol),
+  }
+
+  const targetPrice = overlayNumber(
+    sanitized.targetPrice ??
+      sanitized.targetMl?.targetPrice ??
+      sanitized.targetPlan?.targetPrice ??
+      sanitized.finalTargetPrice ??
+      sanitized.overallTargetPrice,
+    NaN
+  )
+
+  if (Number.isFinite(targetPrice) && targetPrice > 0 && !isOverlayPriceNearChart(targetPrice, referencePrice, symbol)) {
+    sanitized.targetPrice = undefined
+    sanitized.finalTargetPrice = undefined
+    sanitized.overallTargetPrice = undefined
+    sanitized.targetMl = undefined
+    sanitized.targetPlan = undefined
+    sanitized.targetMlStatus = undefined
+    sanitized.targetConfidence = undefined
+  }
+
+  sanitized.summary = {
+    ...(backendPayload.summary ?? {}),
+    chartScaleReferencePrice: referencePrice,
+    chartScaleSymbol: normalizeSymbol(symbol ?? ''),
+    backendOverlayScaleFiltered: true,
+  }
+
+  return sanitized
 }
 
 function mergeStableOverlayZones(fallbackPayload: any, backendPayload: any) {
@@ -4242,13 +4362,16 @@ function mergeStableOverlayLines(fallbackPayload: any, backendPayload: any) {
 }
 
 
-function mergeStableOverlayPayloads(fallbackPayload: any, backendPayload: any) {
+function mergeStableOverlayPayloads(fallbackPayload: any, backendPayload: any, chartCandles?: DashboardCandle[], symbol?: string) {
   if (!fallbackPayload && !backendPayload) return null
   if (!backendPayload) return fallbackPayload
-  if (!fallbackPayload) return backendPayload
+
+  const safeBackendPayload = sanitizeBackendOverlayPayloadForChart(backendPayload, chartCandles, symbol)
+
+  if (!fallbackPayload) return safeBackendPayload
 
   const fallbackMarkers = Array.isArray(fallbackPayload.markers) ? fallbackPayload.markers : []
-  const backendMarkers = Array.isArray(backendPayload.markers) ? backendPayload.markers : []
+  const backendMarkers = Array.isArray(safeBackendPayload.markers) ? safeBackendPayload.markers : []
 
   /**
    * Source-lock markers too. Some BOS/CHoCH labels can be rendered as
@@ -4288,14 +4411,14 @@ function mergeStableOverlayPayloads(fallbackPayload: any, backendPayload: any) {
     mergedMarkers.push(marker)
   }
 
-  const lines = mergeStableOverlayLines(fallbackPayload, backendPayload)
-  const zones = mergeStableOverlayZones(fallbackPayload, backendPayload)
+  const lines = mergeStableOverlayLines(fallbackPayload, safeBackendPayload)
+  const zones = mergeStableOverlayZones(fallbackPayload, safeBackendPayload)
 
   return {
-    ...backendPayload,
+    ...safeBackendPayload,
     // Keep fallback SMC analysis attached because it is the current stable SMC layer.
-    smc: fallbackPayload.smc ?? backendPayload.smc,
-    alphaX: backendPayload.alphaX ?? fallbackPayload.alphaX,
+    smc: fallbackPayload.smc ?? safeBackendPayload.smc,
+    alphaX: safeBackendPayload.alphaX ?? fallbackPayload.alphaX,
 
     // Final merged draw sources.
     lines,
@@ -4303,22 +4426,22 @@ function mergeStableOverlayPayloads(fallbackPayload: any, backendPayload: any) {
     markers: mergedMarkers.slice(-60),
 
     // Preserve backend unified extras.
-    smcEvents: fallbackPayload.smcEvents ?? backendPayload.smcEvents,
+    smcEvents: fallbackPayload.smcEvents ?? safeBackendPayload.smcEvents,
     orderBlocks: zones.filter(isOrderBlockOverlayZone),
-    liquidityEvents: backendPayload.liquidityEvents ?? fallbackPayload.liquidityEvents,
+    liquidityEvents: safeBackendPayload.liquidityEvents ?? fallbackPayload.liquidityEvents,
     liquidityProfileBins:
-      backendPayload.liquidityProfileBins ?? fallbackPayload.liquidityProfileBins,
-    dlmLevels: backendPayload.dlmLevels ?? fallbackPayload.dlmLevels,
-    ghostCandles: backendPayload.ghostCandles ?? fallbackPayload.ghostCandles,
-    targetMl: backendPayload.targetMl ?? backendPayload.targetPlan ?? fallbackPayload.targetMl ?? fallbackPayload.targetPlan,
-    targetPlan: backendPayload.targetPlan ?? backendPayload.targetMl ?? fallbackPayload.targetPlan ?? fallbackPayload.targetMl,
-    targetMlStatus: backendPayload.targetMlStatus ?? fallbackPayload.targetMlStatus,
-    targetPrice: backendPayload.targetPrice ?? backendPayload.targetMl?.targetPrice ?? backendPayload.targetPlan?.targetPrice,
-    targetConfidence: backendPayload.targetConfidence ?? backendPayload.targetMl?.targetConfidence ?? backendPayload.targetPlan?.targetConfidence,
+      safeBackendPayload.liquidityProfileBins ?? fallbackPayload.liquidityProfileBins,
+    dlmLevels: safeBackendPayload.dlmLevels ?? fallbackPayload.dlmLevels,
+    ghostCandles: safeBackendPayload.ghostCandles ?? fallbackPayload.ghostCandles,
+    targetMl: safeBackendPayload.targetMl ?? safeBackendPayload.targetPlan ?? fallbackPayload.targetMl ?? fallbackPayload.targetPlan,
+    targetPlan: safeBackendPayload.targetPlan ?? safeBackendPayload.targetMl ?? fallbackPayload.targetPlan ?? fallbackPayload.targetMl,
+    targetMlStatus: safeBackendPayload.targetMlStatus ?? fallbackPayload.targetMlStatus,
+    targetPrice: safeBackendPayload.targetPrice ?? safeBackendPayload.targetMl?.targetPrice ?? safeBackendPayload.targetPlan?.targetPrice,
+    targetConfidence: safeBackendPayload.targetConfidence ?? safeBackendPayload.targetMl?.targetConfidence ?? safeBackendPayload.targetPlan?.targetConfidence,
 
     summary: {
       ...(fallbackPayload.summary ?? {}),
-      ...(backendPayload.summary ?? {}),
+      ...(safeBackendPayload.summary ?? {}),
       lineCount: lines.length,
       zoneCount: zones.length,
       markerCount: mergedMarkers.length,
@@ -4519,8 +4642,8 @@ function LightweightChartPanel({
      * - BOS / CHoCH lines
      * - order blocks
      */
-    return mergeStableOverlayPayloads(fallbackPayload, backendOverlayPayload)
-  }, [compact, engineState, overlayBaseCandles, showOverlayLines, unifiedOverlayPayload])
+    return mergeStableOverlayPayloads(fallbackPayload, backendOverlayPayload, overlayBaseCandles, symbol)
+  }, [compact, engineState, overlayBaseCandles, showOverlayLines, symbol, unifiedOverlayPayload])
 
   const scorecards = useMemo(() => {
     return getScorecardsFromOverlayPayload(
@@ -5201,6 +5324,7 @@ export default function Dashboard() {
 
 
   useEffect(() => {
+    clearSharedChartCachesForSymbolSwitch(selectedSymbol, selectedTimeframe)
     setFactorTechnicalSentiment(null)
     setChartScorecards(null)
     setChartMlFeatures(null)
@@ -5211,7 +5335,7 @@ export default function Dashboard() {
     setSharedTechnicalSentiment(null)
     setTimeframeTechnicalSentiments({})
     setMainChartOverlayPayload(null)
-  }, [selectedSymbol, overallTimeframeLabel])
+  }, [selectedSymbol, selectedTimeframe, overallTimeframeLabel])
 
   useEffect(() => {
     if (!isClient || !apiBaseUrl || !mainCandlesReady) return
