@@ -2741,10 +2741,14 @@ def ai_trader_summary(symbol: Any = "", timeframe: Any = "") -> Dict[str, Any]:
             return False
         return True
 
+    # Open trades remain filtered by the requested dashboard symbol/timeframe when supplied.
+    # Closed trade history is intentionally global so the Saved Closed AI Trades list
+    # shows every completed learning trade from every symbol/timeframe.
     open_trades = [trade for trade in safe_list(memory.get("openTrades")) if isinstance(trade, dict) and matches(trade)]
     virtual_open_trades = [trade for trade in safe_list(memory.get("virtualOpenTrades")) if isinstance(trade, dict) and matches(trade)]
-    real_closed_trades = [trade for trade in safe_list(memory.get("closedTrades")) if isinstance(trade, dict) and matches(trade)]
-    virtual_closed_trades = [trade for trade in safe_list(memory.get("virtualClosedTrades")) if isinstance(trade, dict) and matches(trade)]
+
+    real_closed_trades = [trade for trade in safe_list(memory.get("closedTrades")) if isinstance(trade, dict)]
+    virtual_closed_trades = [trade for trade in safe_list(memory.get("virtualClosedTrades")) if isinstance(trade, dict)]
     closed_trades = real_closed_trades + virtual_closed_trades
     stats = summarize_closed_trades(closed_trades)
     memory_status = ai_memory_status(memory)
