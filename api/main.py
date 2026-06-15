@@ -1557,8 +1557,76 @@ def candle_cache_get(route: str, symbol: str, timeframe: str, limit: int, max_ag
     return None
 
 
+MAX_STORED_CANDLES_PER_CACHE_ENTRY = int(os.getenv("MAX_STORED_CANDLES_PER_CACHE_ENTRY", "5000"))
+
+
+def find_existing_candle_cache_payload_for_merge(route: str, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    if db_get_best_candle_payload:
+        try:
+            existing_db = db_get_best_candle_payload(
+                route=route,
+                symbol=normalized_symbol,
+                timeframe=normalized_timeframe,
+                min_limit_value=1,
+                max_age_seconds=max(CANDLE_SITE_CACHE_MAX_AGE_SECONDS, 7 * 24 * 60 * 60),
+                allow_stale=True,
+            )
+            if isinstance(existing_db, dict):
+                return existing_db
+        except Exception as error:
+            print(f"[Site DB Cache] merge lookup failed: {error}")
+
+    prefix = f"{route}::{normalized_symbol}::{normalized_timeframe}::"
+    best: Optional[Dict[str, Any]] = None
+    best_count = -1
+
+    for key, value in CANDLE_RESPONSE_CACHE.items():
+        if not str(key).startswith(prefix) or not isinstance(value, dict):
+            continue
+        candles = value.get("candles")
+        count = len(candles) if isinstance(candles, list) else 0
+        if count > best_count:
+            best = value
+            best_count = count
+
+    return best
+
+
+def merge_candle_cache_payload(route: str, symbol: str, timeframe: str, limit: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+    stored = dict(payload)
+    incoming_candles = stored.get("candles") if isinstance(stored.get("candles"), list) else []
+    existing_payload = find_existing_candle_cache_payload_for_merge(route, symbol, timeframe)
+    existing_candles = existing_payload.get("candles") if isinstance(existing_payload, dict) and isinstance(existing_payload.get("candles"), list) else []
+
+    if existing_candles or incoming_candles:
+        merged = merge_candles_by_time([*existing_candles, *incoming_candles])[-MAX_STORED_CANDLES_PER_CACHE_ENTRY:]
+        stored["candles"] = merged
+        stored["count"] = len(merged)
+        stored["candleCount"] = len(merged)
+        stored["firstCandleTime"] = merged[0].get("time") if merged else None
+        stored["lastCandleTime"] = merged[-1].get("time") if merged else None
+        stored["lastClose"] = to_float(merged[-1].get("close"), 0) if merged else 0
+        stored["cacheMerge"] = {
+            "enabled": True,
+            "existingCount": len(existing_candles),
+            "incomingCount": len(incoming_candles),
+            "mergedCount": len(merged),
+            "maxStoredCandles": MAX_STORED_CANDLES_PER_CACHE_ENTRY,
+        }
+
+    stored["requestedLimit"] = int(limit or 500)
+    return stored
+
+
 def candle_cache_set(route: str, symbol: str, timeframe: str, limit: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     key = candle_cache_key(route, symbol, timeframe, limit)
+    stored = merge_candle_cache_payload(route, symbol, timeframe, limit, payload)
+    stored["createdAt"] = now_iso()
+    stored["cache"] = "stored"
+    stored["siteCache"] = True
 
     if db_set_candle_payload:
         try:
@@ -1567,16 +1635,12 @@ def candle_cache_set(route: str, symbol: str, timeframe: str, limit: int, payloa
                 route=route,
                 symbol=normalize_symbol(symbol),
                 timeframe=normalize_timeframe(timeframe),
-                limit_value=int(limit or 500),
-                payload=payload,
+                limit_value=max(int(limit or 500), len(stored.get("candles", [])) if isinstance(stored.get("candles"), list) else int(limit or 500)),
+                payload=stored,
             )
         except Exception as error:
             print(f"[Site DB Cache] set failed, using memory/json fallback: {error}")
 
-    stored = dict(payload)
-    stored["createdAt"] = now_iso()
-    stored["cache"] = "stored"
-    stored["siteCache"] = True
     CANDLE_RESPONSE_CACHE[key] = stored
     trim_in_memory_cache(CANDLE_RESPONSE_CACHE, MAX_CANDLE_RESPONSE_CACHE_ITEMS, "candle response cache")
     save_persistent_candle_cache()
