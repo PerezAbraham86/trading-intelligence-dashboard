@@ -714,6 +714,32 @@ function mergeTrades(existing: any[], incoming: any[]) {
     .slice(0, 500)
 }
 
+
+function isActiveAiOpenTrade(trade: any) {
+  if (!trade || typeof trade !== 'object') return false
+
+  const status = String(trade?.status ?? 'OPEN').toUpperCase()
+  return status.includes('OPEN') && !status.includes('CLOSED')
+}
+
+function getActiveOpenTrades(trades: any[]) {
+  return (Array.isArray(trades) ? trades : []).filter(isActiveAiOpenTrade)
+}
+
+function keepNewestActiveOpenTrade(trades: any[]) {
+  const active = getActiveOpenTrades(trades)
+
+  if (active.length <= 1) return active
+
+  return [
+    active.reduce((newest, trade) => {
+      const newestTime = Date.parse(String(newest?.createdAt ?? newest?.entryTime ?? newest?.updatedAt ?? 0)) || 0
+      const tradeTime = Date.parse(String(trade?.createdAt ?? trade?.entryTime ?? trade?.updatedAt ?? 0)) || 0
+      return tradeTime >= newestTime ? trade : newest
+    }, active[0]),
+  ]
+}
+
 function getAiTradeSettlement(
   trade: any,
   livePrice: number,
@@ -1230,6 +1256,7 @@ export default function AiTraderPanel({
   const summaryRequestInFlightRef = useRef(false)
   const evaluateRequestInFlightRef = useRef(false)
   const openRequestInFlightRef = useRef(false)
+  const activePaperTradeLockRef = useRef(false)
   const recentOpenSetupKeysRef = useRef<Map<string, number>>(new Map())
   const lastDecisionRequestAtRef = useRef(0)
   const lastSummaryRequestAtRef = useRef(0)
@@ -1419,7 +1446,7 @@ export default function AiTraderPanel({
   const saveOpenTrades = useCallback((incomingTrades: any[]) => {
     if (!Array.isArray(incomingTrades) || incomingTrades.length === 0) return
 
-    setLocalOpenTrades((current) => mergeTrades(current, incomingTrades))
+    setLocalOpenTrades((current) => keepNewestActiveOpenTrade(mergeTrades(current, incomingTrades)))
   }, [])
 
   const forgetOpenTrades = useCallback((closedOrRemovedTrades: any[]) => {
@@ -1625,27 +1652,30 @@ export default function AiTraderPanel({
     const openSetupKey = String((safePayload as any)?.setupKey ?? '')
     pruneRecentSetupKeys(recentOpenSetupKeysRef.current, now)
 
+    if (activePaperTradeLockRef.current) {
+      setActionStatus('Open blocked: one AI paper trade is already active. Learning mode is one trade at a time.')
+      return
+    }
+
     if (openSetupKey && recentOpenSetupKeysRef.current.has(openSetupKey)) {
       setActionStatus('Open blocked: this exact AI setup was already sent recently. Waiting for a fresh candle/setup.')
       return
     }
 
-    const trustedBackendOpenTrades = (Array.isArray(summary?.openTrades) ? summary.openTrades : [])
-      .filter((trade: any) => {
-        const tradeSymbol = String(trade?.symbol ?? symbol).toUpperCase()
-        const tradeTimeframe = String(trade?.timeframe ?? timeframe)
-        const status = String(trade?.status ?? 'OPEN').toUpperCase()
-
-        return (
-          tradeSymbol === String(symbol).toUpperCase() &&
-          tradeTimeframe === String(timeframe) &&
-          status.includes('OPEN')
-        )
-      })
+    const trustedBackendOpenTrades = getActiveOpenTrades(Array.isArray(summary?.openTrades) ? summary.openTrades : [])
 
     if (trustedBackendOpenTrades.length > 0) {
-      setActionStatus('Open blocked: backend already has one active AI paper trade for this symbol/timeframe.')
+      activePaperTradeLockRef.current = true
+      setActionStatus('Open blocked: backend already has one active AI paper trade. Learning mode is one trade at a time.')
       saveOpenTrades(trustedBackendOpenTrades)
+      return
+    }
+
+    const visibleLocalOpenTrades = getActiveOpenTrades(localOpenTrades)
+
+    if (visibleLocalOpenTrades.length > 0) {
+      activePaperTradeLockRef.current = true
+      setActionStatus('Open blocked: one dashboard AI trade is already visible. Learning mode is one trade at a time.')
       return
     }
 
@@ -1658,6 +1688,7 @@ export default function AiTraderPanel({
       recentOpenSetupKeysRef.current.set(openSetupKey, now)
     }
 
+    activePaperTradeLockRef.current = true
     openRequestInFlightRef.current = true
     lastOpenRequestAtRef.current = now
     const timeout = createRequestTimeout(16000)
@@ -1694,14 +1725,18 @@ export default function AiTraderPanel({
         const withDecisionStats = mergeAiDecisionStats(withSummaryStats, getAiDecisionStatsFromDecision(nextDecision))
         return addLiveDecisionObservation(withDecisionStats, nextDecision, symbol, timeframe, candles)
       })
+      if (!json?.opened && !json?.trade) {
+        activePaperTradeLockRef.current = false
+      }
       setActionStatus(json?.opened ? 'Dashboard AI trade opened' : json?.message ?? 'AI trade not opened')
     } catch (error) {
+      activePaperTradeLockRef.current = false
       setActionStatus(formatRequestError(error, 'Open failed'))
     } finally {
       timeout.clear()
       openRequestInFlightRef.current = false
     }
-  }, [apiBaseUrl, safePayload, decision, summary, symbol, timeframe, candles, saveOpenTrades])
+  }, [apiBaseUrl, safePayload, decision, summary, symbol, timeframe, candles, localOpenTrades, saveOpenTrades])
 
   useEffect(() => {
     fetchDecision(true)
@@ -1838,8 +1873,21 @@ export default function AiTraderPanel({
   }, [summary])
 
   const rawOpenTrades = useMemo(() => {
-    return mergeTrades(localOpenTrades, backendOpenTrades)
+    return keepNewestActiveOpenTrade(mergeTrades(localOpenTrades, backendOpenTrades))
   }, [localOpenTrades, backendOpenTrades])
+
+  useEffect(() => {
+    const hasActiveOpenTrade = getActiveOpenTrades(rawOpenTrades).length > 0
+
+    if (hasActiveOpenTrade) {
+      activePaperTradeLockRef.current = true
+      return
+    }
+
+    if (!openRequestInFlightRef.current) {
+      activePaperTradeLockRef.current = false
+    }
+  }, [rawOpenTrades])
 
   const locallyClosedKeys = useMemo(() => new Set(closedTrades.map(getTradeKey)), [closedTrades])
 
