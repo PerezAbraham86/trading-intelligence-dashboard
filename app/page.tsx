@@ -328,15 +328,17 @@ function isFuturesCandleSymbol(symbol: string) {
 function getHistoricalCandleRouteForSymbol(apiBaseUrl: string, symbol: string) {
   const normalized = normalizeSymbol(symbol)
 
-  // MES/futures must go through the dashboard candle router, not the direct
-  // InsightSentry history wrapper. The dashboard router can validate cache
-  // freshness against live price and prevents stale history from being merged
-  // into a fake vertical live candle.
+  // MES/futures historical candles must use the verified InsightSentry history
+  // endpoint. The dashboard /api/candles router can return live price without a
+  // full historical OHLCV set when MES cache is rejected, which creates a blank
+  // chart with only a live vertical candle. Keep MES history on the route that
+  // already returns the real candle series, then let the frontend merge guard
+  // prevent stale history from being stitched to far-away live quotes.
   if (isFuturesCandleSymbol(normalized)) {
     return {
-      route: `${apiBaseUrl}/api/candles`,
-      provider: 'dashboard_futures_candles',
-      source: 'dashboard_mes_live_validated_candle_router',
+      route: `${apiBaseUrl}/api/insightsentry/history`,
+      provider: 'insightsentry',
+      source: 'insightsentry_v3_historical_ohlcv',
     }
   }
 
