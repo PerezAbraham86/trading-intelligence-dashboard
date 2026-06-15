@@ -5861,7 +5861,12 @@ export default function Dashboard() {
 
 
   useEffect(() => {
-    clearSharedChartCachesForSymbolSwitch(selectedSymbol, selectedTimeframe)
+    // Do not clear SHARED_CANDLE_CACHE here. Candle cache entries are already
+    // keyed by symbol + timeframe, so clearing this cache when a mini chart
+    // timeframe changes erases the main chart's growing history and causes the
+    // next poll to cold-start from InsightSentry again. Keep stored candles
+    // available for fast reload/switchback; reset only the active chart state
+    // and computed intelligence panels.
     setFactorTechnicalSentiment(null)
     setChartScorecards(null)
     setChartMlFeatures(null)
@@ -5872,7 +5877,7 @@ export default function Dashboard() {
     setSharedTechnicalSentiment(null)
     setTimeframeTechnicalSentiments({})
     setMainChartOverlayPayload(null)
-  }, [selectedSymbol, selectedTimeframe, overallTimeframeLabel])
+  }, [selectedSymbol, selectedTimeframe])
 
   useEffect(() => {
     if (!isClient || !apiBaseUrl || !mainCandlesReady) return
