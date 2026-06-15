@@ -903,7 +903,7 @@ function getBlockerAnalysis(decision: AiTraderDecision | null, summary: AiTrader
     blockers.push({
       label: learningMode ? 'Confidence learning label' : 'Confidence below threshold',
       detail: learningMode
-        ? `${confidence.toFixed(1)}% saved for learning; it does not block Auto Paper entries.`
+        ? `${confidence.toFixed(1)}% saved for learning; it does not block AI Auto Trade entries.`
         : `${confidence.toFixed(1)}% / required ${minConfidence.toFixed(1)}%`,
       severity: learningMode ? 'low' : 'high',
     })
@@ -1257,6 +1257,7 @@ export default function AiTraderPanel({
   const evaluateRequestInFlightRef = useRef(false)
   const openRequestInFlightRef = useRef(false)
   const activePaperTradeLockRef = useRef(false)
+  const closedTradeKeysRef = useRef<Set<string>>(new Set())
   const recentOpenSetupKeysRef = useRef<Map<string, number>>(new Map())
   const lastDecisionRequestAtRef = useRef(0)
   const lastSummaryRequestAtRef = useRef(0)
@@ -1547,8 +1548,13 @@ export default function AiTraderPanel({
       setSummary(json)
       setPersistentLearningStats((current: any) => mergeAiDecisionStats(current, getAiDecisionStatsFromSummary(json)))
 
-      if (Array.isArray(json?.openTrades) && json.openTrades.length > 0) {
-        saveOpenTrades(json.openTrades)
+      const backendOpenPayload = [
+        ...(Array.isArray(json?.globalOpenTrades) ? json.globalOpenTrades : []),
+        ...(Array.isArray(json?.openTrades) ? json.openTrades : []),
+      ]
+
+      if (backendOpenPayload.length > 0) {
+        saveOpenTrades(backendOpenPayload)
       }
 
       const backendClosedTrades = [
@@ -1605,11 +1611,15 @@ export default function AiTraderPanel({
       setSummary(nextSummary)
       setPersistentLearningStats((current: any) => mergeAiDecisionStats(current, getAiDecisionStatsFromSummary(nextSummary)))
 
-      if (Array.isArray(json?.openTrades) && json.openTrades.length > 0) {
-        saveOpenTrades(json.openTrades)
-      }
-      if (Array.isArray(nextSummary?.openTrades) && nextSummary.openTrades.length > 0) {
-        saveOpenTrades(nextSummary.openTrades)
+      const backendOpenPayload = [
+        ...(Array.isArray(json?.globalOpenTrades) ? json.globalOpenTrades : []),
+        ...(Array.isArray(json?.openTrades) ? json.openTrades : []),
+        ...(Array.isArray(nextSummary?.globalOpenTrades) ? nextSummary.globalOpenTrades : []),
+        ...(Array.isArray(nextSummary?.openTrades) ? nextSummary.openTrades : []),
+      ]
+
+      if (backendOpenPayload.length > 0) {
+        saveOpenTrades(backendOpenPayload)
       }
 
       const backendClosedTrades = [
@@ -1650,7 +1660,7 @@ export default function AiTraderPanel({
     pruneRecentSetupKeys(recentOpenSetupKeysRef.current, now)
 
     if (activePaperTradeLockRef.current) {
-      setActionStatus('Open blocked: one AI paper trade is already active. Learning mode is one trade at a time.')
+      setActionStatus('Open blocked: one AI Auto Trade is already active. Learning mode is one trade at a time.')
       return
     }
 
@@ -1659,11 +1669,17 @@ export default function AiTraderPanel({
       return
     }
 
-    const trustedBackendOpenTrades = getActiveOpenTrades(Array.isArray(summary?.openTrades) ? summary.openTrades : [])
+    const trustedBackendOpenTrades = getActiveOpenTrades([
+      ...(Array.isArray((summary as any)?.globalOpenTrades) ? (summary as any).globalOpenTrades : []),
+      ...(Array.isArray(summary?.openTrades) ? summary.openTrades : []),
+    ]).filter((trade: any) => !closedTradeKeysRef.current.has(getTradeKey(trade)))
 
     if (trustedBackendOpenTrades.length > 0) {
       activePaperTradeLockRef.current = true
-      setActionStatus('Open blocked: backend already has one active AI paper trade. Learning mode is one trade at a time.')
+      const blocker = trustedBackendOpenTrades[trustedBackendOpenTrades.length - 1]
+      const blockerSymbol = String(blocker?.symbol ?? 'another symbol')
+      const blockerSide = normalizeTradeSide(blocker?.side ?? blocker?.decision ?? blocker?.rawDecision)
+      setActionStatus(`Open blocked: one AI Auto Trade is already active (${blockerSymbol} ${blockerSide}). Learning mode is one trade at a time.`)
       saveOpenTrades(trustedBackendOpenTrades)
       return
     }
@@ -1672,7 +1688,7 @@ export default function AiTraderPanel({
 
     if (visibleLocalOpenTrades.length > 0) {
       activePaperTradeLockRef.current = true
-      setActionStatus('Open blocked: one dashboard AI trade is already visible. Learning mode is one trade at a time.')
+      setActionStatus('Open blocked: one dashboard AI Auto Trade is already visible. Learning mode is one trade at a time.')
       return
     }
 
@@ -1691,7 +1707,7 @@ export default function AiTraderPanel({
     const timeout = createRequestTimeout(16000)
 
     try {
-      setActionStatus(source === 'auto' ? 'Auto Paper opening dashboard-only AI trade...' : 'Opening dashboard-only AI trade...')
+      setActionStatus(source === 'auto' ? 'AI Auto Trade opening dashboard-only trade...' : 'Opening dashboard-only AI trade...')
 
       const response = await fetch(`${apiBaseUrl}/api/ai-trader/open`, {
         method: 'POST',
@@ -1865,28 +1881,24 @@ export default function AiTraderPanel({
     aiMemorySamples > 0 ? Math.min(100, toFiniteNumber(decisionStats.avgConfidence, 0)) : 0,
   )
 
+  const locallyClosedKeys = useMemo(() => new Set(closedTrades.map(getTradeKey)), [closedTrades])
+
+  useEffect(() => {
+    closedTradeKeysRef.current = locallyClosedKeys
+  }, [locallyClosedKeys])
+
   const backendOpenTrades = useMemo(() => {
-    return Array.isArray(summary?.openTrades) ? summary?.openTrades ?? [] : []
+    return [
+      ...(Array.isArray((summary as any)?.globalOpenTrades) ? (summary as any).globalOpenTrades : []),
+      ...(Array.isArray(summary?.openTrades) ? summary?.openTrades ?? [] : []),
+    ]
   }, [summary])
 
   const rawOpenTrades = useMemo(() => {
-    return keepNewestActiveOpenTrade(mergeTrades(localOpenTrades, backendOpenTrades))
-  }, [localOpenTrades, backendOpenTrades])
-
-  useEffect(() => {
-    const hasActiveOpenTrade = getActiveOpenTrades(rawOpenTrades).length > 0
-
-    if (hasActiveOpenTrade) {
-      activePaperTradeLockRef.current = true
-      return
-    }
-
-    if (!openRequestInFlightRef.current) {
-      activePaperTradeLockRef.current = false
-    }
-  }, [rawOpenTrades])
-
-  const locallyClosedKeys = useMemo(() => new Set(closedTrades.map(getTradeKey)), [closedTrades])
+    const merged = mergeTrades(localOpenTrades, backendOpenTrades)
+      .filter((trade: any) => !locallyClosedKeys.has(getTradeKey(trade)))
+    return keepNewestActiveOpenTrade(merged)
+  }, [localOpenTrades, backendOpenTrades, locallyClosedKeys])
 
   const liveOpenTrades = rawOpenTrades
     .filter((trade: any) => !locallyClosedKeys.has(getTradeKey(trade)))
@@ -1915,6 +1927,19 @@ export default function AiTraderPanel({
         closeLabel: settlement.shouldClose ? settlement.closeLabel : trade.closeLabel,
       }
     })
+
+  useEffect(() => {
+    const hasActiveOpenTrade = getActiveOpenTrades(liveOpenTrades).length > 0
+
+    if (hasActiveOpenTrade) {
+      activePaperTradeLockRef.current = true
+      return
+    }
+
+    if (!openRequestInFlightRef.current) {
+      activePaperTradeLockRef.current = false
+    }
+  }, [liveOpenTrades])
 
   useEffect(() => {
     setLastAutoOpenKey('')
@@ -1971,7 +1996,7 @@ export default function AiTraderPanel({
             </span>
           </div>
           <p className="mt-1 text-xs text-gray-400">
-            Simulated AI trades only. Open and closed trades are merged from backend memory and browser localStorage so active trades do not disappear during a backend memory refresh.
+            Dashboard paper/simulated AI trades only. Broker execution is OFF. Open and closed trades are merged from backend memory and browser localStorage so active trades do not disappear during a backend memory refresh.
           </p>
         </div>
 
@@ -1987,7 +2012,7 @@ export default function AiTraderPanel({
               onChange={(event) => setAutoPaperMode(event.target.checked)}
               className="h-3 w-3"
             />
-            Auto Paper
+            AI Auto Trade
           </label>
 
           <label className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-gray-400">
@@ -2040,7 +2065,7 @@ export default function AiTraderPanel({
                 : 'cursor-not-allowed border border-dark-600 bg-dark-900 text-gray-600'
             }`}
           >
-            {autoPaperMode ? 'Auto Paper Armed' : 'Open AI Paper Trade'}
+            {autoPaperMode ? 'AI Auto Trade Armed' : 'Open AI Auto Trade'}
           </button>
         </div>
       </div>
@@ -2069,7 +2094,7 @@ export default function AiTraderPanel({
           tone={rawDecision === 'BUY' ? 'bull' : rawDecision === 'SELL' ? 'bear' : 'neutral'}
         />
         <StatBox label="Confidence" value={`${toFiniteNumber(decision?.confidence, 0).toFixed(1)}% ${decision?.confidenceGrade ?? ''}`} />
-        <StatBox label="Auto Paper" value={autoPaperMode ? 'ARMED' : 'OFF'} tone={autoPaperMode ? 'bull' : 'neutral'} />
+        <StatBox label="AI Auto Trade" value={autoPaperMode ? 'ARMED' : 'OFF'} tone={autoPaperMode ? 'bull' : 'neutral'} />
         <StatBox label="Entry" value={formatPrice(decision?.entry)} />
         <StatBox label="Target" value={formatPrice(decision?.target)} />
         <StatBox label="Stop" value={formatPrice(decision?.stop)} tone="warn" />
