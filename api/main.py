@@ -1637,6 +1637,62 @@ def candle_cache_best(route: str, symbol: str, timeframe: str, limit: int, max_a
 
     return None
 
+
+
+def latest_candle_close(candles: List[Dict[str, Any]]) -> float:
+    for candle in reversed(safe_list(candles)):
+        if not isinstance(candle, dict):
+            continue
+        close = to_float(candle.get("close") or candle.get("c") or candle.get("price"), 0.0)
+        if close > 0:
+            return close
+    return 0.0
+
+
+def futures_live_gap_too_large(candles: List[Dict[str, Any]], symbol: str, live_price: float) -> bool:
+    if not is_futures_symbol(symbol):
+        return False
+
+    last_close = latest_candle_close(candles)
+    if last_close <= 0 or live_price <= 0:
+        return False
+
+    max_gap_pct = to_float(os.getenv("MES_LIVE_HISTORY_MAX_GAP_PCT", "0.0025"), 0.0025)
+    gap_pct = abs(live_price - last_close) / last_close
+    return gap_pct > max_gap_pct
+
+
+def fetch_live_price_number(symbol: str, timeframe: str) -> float:
+    try:
+        live = get_live_price_payload(symbol, timeframe)
+        return to_float(live.get("price") if isinstance(live, dict) else None, 0.0)
+    except Exception as error:
+        print(f"[MES cache guard] live price check failed: {error}")
+        return 0.0
+
+
+def futures_cached_payload_is_stale_against_live(cached: Any, symbol: str, timeframe: str) -> bool:
+    if not is_futures_symbol(symbol) or not isinstance(cached, dict):
+        return False
+
+    candles = cached.get("candles")
+    if not isinstance(candles, list) or not candles:
+        return False
+
+    live_price = fetch_live_price_number(symbol, timeframe)
+    if live_price <= 0:
+        return False
+
+    if futures_live_gap_too_large(candles, symbol, live_price):
+        last_close = latest_candle_close(candles)
+        print(
+            f"[MES cache guard] rejecting stale {normalize_symbol(symbol)} {normalize_timeframe(timeframe)} cache: "
+            f"last_close={last_close} live_price={live_price}"
+        )
+        return True
+
+    return False
+
 def timeframe_to_1m_fetch_limit(timeframe: str, limit: int) -> int:
     seconds = timeframe_seconds(timeframe)
     mult = max(1, int(seconds / 60))
@@ -1725,10 +1781,19 @@ def get_dashboard_candles(symbol: str, timeframe: str = "1m", limit: int = 500, 
 
             cached_candles = cached.get("candles") if isinstance(cached, dict) else None
             if isinstance(cached_candles, list) and len(cached_candles) > 0:
+                if futures_cached_payload_is_stale_against_live(cached, normalized_symbol, normalized_timeframe):
+                    continue
+
                 live = filter_valid_candles_for_symbol(
                     get_live_recent_candles(normalized_symbol, normalized_timeframe),
                     normalized_symbol,
                 )
+
+                if live and futures_live_gap_too_large(cached_candles, normalized_symbol, latest_candle_close(live)):
+                    # Do not stitch a far-away MES quote/live candle onto stale historical candles.
+                    # The route should refresh history instead of drawing a fake vertical candle.
+                    continue
+
                 merged = merge_candles_by_time([*cached_candles, *live])[-safe_limit:]
                 return filter_valid_candles_for_symbol(merged, normalized_symbol)
 
@@ -1741,6 +1806,13 @@ def get_dashboard_candles(symbol: str, timeframe: str = "1m", limit: int = 500, 
         get_live_recent_candles(normalized_symbol, normalized_timeframe),
         normalized_symbol,
     )
+
+    if historical and live and futures_live_gap_too_large(historical, normalized_symbol, latest_candle_close(live)):
+        print(
+            f"[MES merge guard] skipped live merge for {normalized_symbol} {normalized_timeframe}; "
+            f"history_close={latest_candle_close(historical)} live_close={latest_candle_close(live)}"
+        )
+        return historical[-safe_limit:]
 
     merged = merge_candles_by_time([*historical, *live])[-safe_limit:]
     return filter_valid_candles_for_symbol(merged, normalized_symbol)
@@ -7188,26 +7260,31 @@ def candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500, for
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = max(1, min(int(limit or 500), 5000))
+    use_backend_cache = not force
 
     if not force:
         cached = candle_cache_get("dashboard", normalized_symbol, normalized_timeframe, safe_limit, CANDLE_SITE_CACHE_MAX_AGE_SECONDS)
         if cached:
             cached_candles = cached.get("candles")
             if isinstance(cached_candles, list):
-                rebuilt = build_candle_route_payload(
-                    route_source="dashboard_merged_candles",
-                    symbol=normalized_symbol,
-                    timeframe=normalized_timeframe,
-                    candles=cached_candles,
-                    provider=cached.get("provider"),
-                    cache_label=str(cached.get("cache") or "site_cached"),
-                )
-                rebuilt["siteCache"] = cached.get("siteCache", True)
-                rebuilt["siteCacheAgeSeconds"] = cached.get("siteCacheAgeSeconds")
-                return rebuilt
-            return cached
+                if futures_cached_payload_is_stale_against_live(cached, normalized_symbol, normalized_timeframe):
+                    use_backend_cache = False
+                else:
+                    rebuilt = build_candle_route_payload(
+                        route_source="dashboard_merged_candles",
+                        symbol=normalized_symbol,
+                        timeframe=normalized_timeframe,
+                        candles=cached_candles,
+                        provider=cached.get("provider"),
+                        cache_label=str(cached.get("cache") or "site_cached"),
+                    )
+                    rebuilt["siteCache"] = cached.get("siteCache", True)
+                    rebuilt["siteCacheAgeSeconds"] = cached.get("siteCacheAgeSeconds")
+                    return rebuilt
+            elif not futures_cached_payload_is_stale_against_live(cached, normalized_symbol, normalized_timeframe):
+                return cached
 
-    merged = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit, use_cache=not force)
+    merged = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit, use_cache=use_backend_cache)
     provider = merged[-1].get("provider") if merged else None
 
     payload = build_candle_route_payload(
