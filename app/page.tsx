@@ -328,12 +328,15 @@ function isFuturesCandleSymbol(symbol: string) {
 function getHistoricalCandleRouteForSymbol(apiBaseUrl: string, symbol: string) {
   const normalized = normalizeSymbol(symbol)
 
-  // MES / futures use the verified InsightSentry historical route.
+  // MES/futures must go through the dashboard candle router, not the direct
+  // InsightSentry history wrapper. The dashboard router can validate cache
+  // freshness against live price and prevents stale history from being merged
+  // into a fake vertical live candle.
   if (isFuturesCandleSymbol(normalized)) {
     return {
-      route: `${apiBaseUrl}/api/insightsentry/history`,
-      provider: 'insightsentry',
-      source: 'insightsentry_v3_historical_ohlcv',
+      route: `${apiBaseUrl}/api/candles`,
+      provider: 'dashboard_futures_candles',
+      source: 'dashboard_mes_live_validated_candle_router',
     }
   }
 
@@ -1105,6 +1108,48 @@ function candleGapSeconds(currentCandles: DashboardCandle[], rawCandle: any) {
   return liveEpoch - lastHistoricalEpoch
 }
 
+function getCandleCloseValue(candle: any) {
+  return toFiniteNumber(candle?.close ?? candle?.c ?? candle?.price ?? candle?.last, NaN)
+}
+
+function getMaxLiveMergeGapPct(symbol: string) {
+  const normalized = normalizeSymbol(symbol)
+
+  // MES live quotes should never be stitched onto old Friday/Sunday history.
+  // 0.25% is roughly 19 points near 7600. If price is farther away, refresh
+  // historical candles first instead of creating a fake vertical candle.
+  if (normalized === 'MES1!') return 0.0025
+
+  if (normalized === 'BTCUSD' || normalized === 'ETHUSD') return 0.03
+
+  return 0.01
+}
+
+function livePriceGapPctFromHistory(currentCandles: DashboardCandle[], rawCandle: any) {
+  if (!Array.isArray(currentCandles) || currentCandles.length === 0) return 0
+
+  const liveCandle = normalizeCandlePayloadItem(rawCandle)
+  if (!liveCandle) return 0
+
+  const lastClose = getCandleCloseValue(currentCandles[currentCandles.length - 1])
+  const liveClose = getCandleCloseValue(liveCandle)
+
+  if (!Number.isFinite(lastClose) || lastClose <= 0 || !Number.isFinite(liveClose) || liveClose <= 0) {
+    return 0
+  }
+
+  return Math.abs(liveClose - lastClose) / lastClose
+}
+
+function isLiveCandleTooFarFromHistory(symbol: string, currentCandles: DashboardCandle[], rawCandle: any) {
+  if (!Array.isArray(currentCandles) || currentCandles.length === 0) return false
+
+  const gapPct = livePriceGapPctFromHistory(currentCandles, rawCandle)
+  const maxGapPct = getMaxLiveMergeGapPct(symbol)
+
+  return gapPct > maxGapPct
+}
+
 function mergeLiveCandleIntoCandles(
   currentCandles: DashboardCandle[],
   rawCandle: any,
@@ -1162,6 +1207,11 @@ function writeLiveCandleToSharedCache(
 ) {
   const key = sharedCandleKey(symbol, timeframe)
   const previous = SHARED_CANDLE_CACHE.get(key)
+
+  if (previous?.candles?.length && isLiveCandleTooFarFromHistory(symbol, previous.candles, rawCandle)) {
+    return null
+  }
+
   const mergedCandles = mergeLiveCandleIntoCandles(
     previous?.candles ?? [],
     rawCandle,
@@ -3621,11 +3671,27 @@ function useChartCandles(
       const cached = readSharedCandleCache(symbol, timeframe, limit)
       if (!cached || cancelled) return false
 
+      const cachedLivePrice = readSharedLivePriceCache(symbol)
+      if (cachedLivePrice) {
+        const syntheticLiveCandle = {
+          symbol,
+          timeframe,
+          time: Math.floor(toFiniteNumber(cachedLivePrice.updatedAt, Date.now()) / 1000),
+          open: cachedLivePrice.price,
+          high: cachedLivePrice.price,
+          low: cachedLivePrice.price,
+          close: cachedLivePrice.price,
+        }
+
+        if (isLiveCandleTooFarFromHistory(symbol, cached.candles, syntheticLiveCandle)) {
+          return false
+        }
+      }
+
       setCandles(cached.candles)
       setOverlayPayload((previous: any | null) => cached.overlayPayload ?? previous)
       setUnifiedIntelligence((previous: any | null) => cached.unifiedIntelligence ?? previous)
 
-      const cachedLivePrice = readSharedLivePriceCache(symbol)
       if (cachedLivePrice) {
         onLivePriceUpdate?.(cachedLivePrice)
       }
@@ -3732,11 +3798,12 @@ function useChartCandles(
           setCandles((previousCandles) => {
             const timeframeSeconds = timeframeToSeconds(timeframe)
             const gapSeconds = candleGapSeconds(previousCandles, liveCandle)
+            const liveTooFarFromHistory = isLiveCandleTooFarFromHistory(symbol, previousCandles, liveCandle)
 
-            if (gapSeconds > timeframeSeconds * 2) {
+            if (gapSeconds > timeframeSeconds * 2 || liveTooFarFromHistory) {
               // History/live gap detected. Do not create fake bridge candles.
-              // Force-refresh the correct historical OHLCV provider first so BTCUSD fills
-              // the missing area with real Alpaca crypto candles instead of invisible flat candles.
+              // Force-refresh the correct historical OHLCV provider first so MES/BTCUSD fills
+              // the missing area with real candles instead of a fake vertical live candle.
               fetchCandles(true)
               return previousCandles
             }
@@ -3787,11 +3854,12 @@ function useChartCandles(
           setCandles((previousCandles) => {
             const timeframeSeconds = timeframeToSeconds(timeframe)
             const gapSeconds = candleGapSeconds(previousCandles, liveCandle)
+            const liveTooFarFromHistory = isLiveCandleTooFarFromHistory(symbol, previousCandles, liveCandle)
 
-            if (gapSeconds > timeframeSeconds * 2) {
+            if (gapSeconds > timeframeSeconds * 2 || liveTooFarFromHistory) {
               // History/live gap detected. Do not create fake bridge candles.
-              // Force-refresh the correct historical OHLCV provider first so BTCUSD fills
-              // the missing area with real Alpaca crypto candles instead of invisible flat candles.
+              // Force-refresh the correct historical OHLCV provider first so MES/BTCUSD fills
+              // the missing area with real candles instead of a fake vertical live candle.
               fetchCandles(true)
               return previousCandles
             }
