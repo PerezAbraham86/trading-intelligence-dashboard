@@ -931,6 +931,16 @@ type SharedCandleCacheEntry = {
 
 const SHARED_CANDLE_CACHE = new Map<string, SharedCandleCacheEntry>()
 const SHARED_CANDLE_IN_FLIGHT = new Map<string, Promise<SharedCandleCacheEntry>>()
+const INSIGHTSENTRY_HISTORY_BACKOFF_UNTIL = new Map<string, number>()
+const INSIGHTSENTRY_HISTORY_BACKOFF_MS = 3 * 60 * 1000
+
+function shouldUseInsightSentryBackoff(key: string) {
+  return (INSIGHTSENTRY_HISTORY_BACKOFF_UNTIL.get(key) ?? 0) > Date.now()
+}
+
+function rememberInsightSentryBackoff(key: string) {
+  INSIGHTSENTRY_HISTORY_BACKOFF_UNTIL.set(key, Date.now() + INSIGHTSENTRY_HISTORY_BACKOFF_MS)
+}
 
 function sharedCandleKey(symbol: string, timeframe: string) {
   return `${normalizeSymbol(symbol)}::${normalizeTimeframe(timeframe)}`
@@ -1263,6 +1273,18 @@ async function fetchSharedCandlePayload(
     const apiLimit = Math.max(requestedLimit, previous?.limit ?? 0)
 
     const routeConfig = getHistoricalCandleRouteForSymbol(apiBaseUrl, normalizedSymbol)
+    const useBackendFallbackFirst =
+      routeConfig.provider === 'insightsentry' &&
+      !force &&
+      shouldUseInsightSentryBackoff(key)
+
+    const activeRouteConfig = useBackendFallbackFirst
+      ? {
+          route: `${apiBaseUrl}/api/candles`,
+          provider: 'dashboard_candles',
+          source: 'dashboard_candle_router_rate_limit_backoff',
+        }
+      : routeConfig
 
     const params = new URLSearchParams({
       symbol: normalizedSymbol,
@@ -1271,22 +1293,71 @@ async function fetchSharedCandlePayload(
       force: force ? 'true' : 'false',
     })
 
-    if (routeConfig.provider === 'insightsentry') {
+    if (activeRouteConfig.provider === 'insightsentry') {
       params.set('start_ym', new Date().toISOString().slice(0, 7))
       params.set('extended', 'true')
       params.set('badj', 'true')
       params.set('dadj', 'false')
     }
 
-    const response = await fetch(`${routeConfig.route}?${params.toString()}`, {
+    let json: any = null
+    let providerLabel = activeRouteConfig.provider
+    let sourceLabel = activeRouteConfig.source
+
+    const response = await fetch(`${activeRouteConfig.route}?${params.toString()}`, {
       cache: 'no-store',
     })
 
     if (!response.ok) {
-      throw new Error(`${routeConfig.provider} candle history error ${response.status}`)
+      if (routeConfig.provider === 'insightsentry') {
+        if (response.status === 429) {
+          rememberInsightSentryBackoff(key)
+        }
+
+        const fallbackParams = new URLSearchParams({
+          symbol: normalizedSymbol,
+          timeframe: normalizedTimeframe,
+          limit: String(apiLimit),
+          force: 'false',
+        })
+
+        const fallbackResponse = await fetch(`${apiBaseUrl}/api/candles?${fallbackParams.toString()}`, {
+          cache: 'no-store',
+        }).catch(() => null)
+
+        if (fallbackResponse?.ok) {
+          const fallbackJson = await fallbackResponse.json()
+          const fallbackCandles = normalizeCandlePayload(fallbackJson)
+
+          if (fallbackCandles.length > 0) {
+            json = {
+              ...fallbackJson,
+              warning: `InsightSentry history returned ${response.status}; using backend cached MES candles.`,
+            }
+            providerLabel = typeof fallbackJson?.provider === 'string' ? fallbackJson.provider : 'dashboard_candles'
+            sourceLabel = typeof fallbackJson?.source === 'string' ? fallbackJson.source : 'dashboard_candle_router_rate_limit_fallback'
+          }
+        }
+
+        if (!json && previous?.candles?.length) {
+          return {
+            ...previous,
+            candles: previous.candles.slice(-requestedLimit),
+            updatedAt: Date.now(),
+            source: 'frontend_cached_history_after_insightsentry_error',
+          }
+        }
+      }
+
+      if (!json) {
+        throw new Error(`${activeRouteConfig.provider} candle history error ${response.status}`)
+      }
     }
 
-    const json = await response.json()
+    if (!json) {
+      json = await response.json()
+    }
+
     const candles = normalizeCandlePayload(json)
     const overlayPayload = getUnifiedOverlayPayload(json)
     const unifiedIntelligence = getUnifiedIntelligencePayload(json)
@@ -1299,8 +1370,8 @@ async function fetchSharedCandlePayload(
       unifiedIntelligence: unifiedIntelligence ?? previous?.unifiedIntelligence ?? null,
       updatedAt: Date.now(),
       limit: apiLimit,
-      provider: typeof json?.provider === 'string' ? json.provider : routeConfig.provider,
-      source: typeof json?.source === 'string' ? json.source : routeConfig.source,
+      provider: typeof json?.provider === 'string' ? json.provider : providerLabel,
+      source: typeof json?.source === 'string' ? json.source : sourceLabel,
     }
 
     SHARED_CANDLE_CACHE.set(key, entry)
