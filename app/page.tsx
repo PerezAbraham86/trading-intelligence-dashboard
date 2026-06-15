@@ -1259,8 +1259,10 @@ async function fetchSharedCandlePayload(
   const key = sharedCandleKey(normalizedSymbol, normalizedTimeframe)
   const requestedLimit = Math.max(1, limit)
 
+  const providerForce = force && !isFuturesCandleSymbol(normalizedSymbol)
+
   const activeRequest = SHARED_CANDLE_IN_FLIGHT.get(key)
-  if (activeRequest && !force) {
+  if (activeRequest && !providerForce) {
     const activeResult = await activeRequest
     return {
       ...activeResult,
@@ -1275,7 +1277,7 @@ async function fetchSharedCandlePayload(
     const routeConfig = getHistoricalCandleRouteForSymbol(apiBaseUrl, normalizedSymbol)
     const useBackendFallbackFirst =
       routeConfig.provider === 'insightsentry' &&
-      !force &&
+      (!providerForce || shouldUseInsightSentryBackoff(key)) &&
       shouldUseInsightSentryBackoff(key)
 
     const activeRouteConfig = useBackendFallbackFirst
@@ -1290,7 +1292,7 @@ async function fetchSharedCandlePayload(
       symbol: normalizedSymbol,
       timeframe: normalizedTimeframe,
       limit: String(apiLimit),
-      force: force ? 'true' : 'false',
+      force: providerForce ? 'true' : 'false',
     })
 
     if (activeRouteConfig.provider === 'insightsentry') {
@@ -3877,7 +3879,7 @@ function useChartCandles(
               // History/live gap detected. Do not create fake bridge candles.
               // Force-refresh the correct historical OHLCV provider first so MES/BTCUSD fills
               // the missing area with real candles instead of a fake vertical live candle.
-              fetchCandles(true)
+              fetchCandles(false)
               return previousCandles
             }
 
@@ -3933,7 +3935,7 @@ function useChartCandles(
               // History/live gap detected. Do not create fake bridge candles.
               // Force-refresh the correct historical OHLCV provider first so MES/BTCUSD fills
               // the missing area with real candles instead of a fake vertical live candle.
-              fetchCandles(true)
+              fetchCandles(false)
               return previousCandles
             }
 
