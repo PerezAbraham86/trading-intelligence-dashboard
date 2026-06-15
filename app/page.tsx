@@ -922,6 +922,68 @@ function normalizeCandlePayload(payload: any): DashboardCandle[] {
     })
 }
 
+const SHARED_CANDLE_CACHE_MAX_BARS = 5000
+const CHART_CANDLE_DEBUG_MAX_ROWS = 16
+
+type ChartCandleDebugLogEntry = {
+  time: string
+  level: 'info' | 'warn' | 'error' | 'success'
+  stage: string
+  message: string
+}
+
+function candleDebugTime() {
+  return new Date().toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+}
+
+function candleDebugMessage(stage: string, detail: Record<string, any> = {}) {
+  const readable = Object.entries(detail)
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join(' • ')
+
+  return readable ? `${stage} • ${readable}` : stage
+}
+
+function candleIdentityKey(candle: DashboardCandle) {
+  const epoch = liveCandleEpoch(candle)
+  if (epoch > 0) return String(epoch)
+  return String(candle.time ?? `${candle.open}-${candle.high}-${candle.low}-${candle.close}`)
+}
+
+function mergeHistoricalCandles(
+  existingCandles: DashboardCandle[] | undefined,
+  incomingCandles: DashboardCandle[],
+  maxBars = SHARED_CANDLE_CACHE_MAX_BARS
+) {
+  const map = new Map<string, DashboardCandle>()
+
+  ;[...(existingCandles ?? []), ...incomingCandles].forEach((candle) => {
+    if (!candle) return
+    map.set(candleIdentityKey(candle), candle)
+  })
+
+  return Array.from(map.values())
+    .sort((left, right) => liveCandleEpoch(left) - liveCandleEpoch(right))
+    .slice(-Math.max(1, maxBars))
+}
+
+function describeCandleRange(candles: DashboardCandle[]) {
+  const first = candles[0]
+  const last = candles[candles.length - 1]
+
+  return {
+    count: candles.length,
+    first: first ? String(first.time) : 'none',
+    last: last ? String(last.time) : 'none',
+    lastClose: last ? Number(last.close).toFixed(last.close >= 100 ? 2 : 6) : 'none',
+  }
+}
+
 
 type SharedCandleCacheEntry = {
   candles: DashboardCandle[]
@@ -1362,7 +1424,7 @@ function writeLiveCandleToSharedCache(
   const mergedCandles = mergeLiveCandleIntoCandles(
     previous?.candles ?? [],
     rawCandle,
-    Math.max(limit, previous?.limit ?? 0, 700),
+    SHARED_CANDLE_CACHE_MAX_BARS,
     timeframeSeconds
   )
 
@@ -1510,15 +1572,16 @@ async function fetchSharedCandlePayload(
     const candles = normalizeCandlePayload(json)
     const overlayPayload = getUnifiedOverlayPayload(json)
     const unifiedIntelligence = getUnifiedIntelligencePayload(json)
+    const mergedCandles = mergeHistoricalCandles(previous?.candles, candles)
 
     const entry: SharedCandleCacheEntry = {
-      candles,
+      candles: mergedCandles,
       // Candle history is the candle source. Preserve any previous
       // overlay/intelligence payload so live refreshes do not blank the canvas.
       overlayPayload: overlayPayload ?? previous?.overlayPayload ?? null,
       unifiedIntelligence: unifiedIntelligence ?? previous?.unifiedIntelligence ?? null,
       updatedAt: Date.now(),
-      limit: apiLimit,
+      limit: Math.max(apiLimit, previous?.limit ?? 0, mergedCandles.length),
       provider: typeof json?.provider === 'string' ? json.provider : providerLabel,
       source: typeof json?.source === 'string' ? json.source : sourceLabel,
     }
@@ -3867,6 +3930,29 @@ function useChartCandles(
   const [unifiedIntelligence, setUnifiedIntelligence] = useState<any | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [errorText, setErrorText] = useState('')
+  const [debugLog, setDebugLog] = useState<ChartCandleDebugLogEntry[]>([])
+
+  const addCandleDebugLog = useCallback((
+    stage: string,
+    detail: Record<string, any> = {},
+    level: ChartCandleDebugLogEntry['level'] = 'info'
+  ) => {
+    const entry = {
+      time: candleDebugTime(),
+      level,
+      stage,
+      message: candleDebugMessage(stage, detail),
+    }
+
+    setDebugLog((current) => [...current, entry].slice(-CHART_CANDLE_DEBUG_MAX_ROWS))
+
+    if (typeof console !== 'undefined') {
+      const prefix = `[Chart candles] ${normalizeSymbol(symbol)} ${normalizeTimeframe(timeframe)} ${priority}`
+      if (level === 'error') console.error(prefix, entry.message)
+      else if (level === 'warn') console.warn(prefix, entry.message)
+      else console.log(prefix, entry.message)
+    }
+  }, [priority, symbol, timeframe])
 
   useEffect(() => {
     if (!isClient || !apiBaseUrl) return
@@ -3876,6 +3962,9 @@ function useChartCandles(
     let intervalId: ReturnType<typeof setInterval> | null = null
     let liveEventSource: EventSource | null = null
     let liveSourceConnected = false
+
+    setDebugLog([])
+    addCandleDebugLog('mount', { enabled, limit, pollMs })
 
     function stopPolling() {
       if (intervalId) {
@@ -3889,15 +3978,24 @@ function useChartCandles(
       intervalId = setInterval(fetchCandles, pollMs)
     }
 
-    function applyCachedPayload() {
+    function applyCachedPayload(reason = 'cache-check') {
       const cached = readSharedCandleCache(symbol, timeframe, limit)
-      if (!cached || cancelled) return false
+      if (!cached || cancelled) {
+        addCandleDebugLog('cache-miss', { reason })
+        return false
+      }
 
       // Do not let mini charts reuse a one-candle live-only cache as if it were
       // historical data. When a mini timeframe is changed, this forces a real
       // historical candle request for that symbol/timeframe.
       const minimumReusableCandles = priority === 'mini' ? 20 : 10
       if (!Array.isArray(cached.candles) || cached.candles.length < minimumReusableCandles) {
+        addCandleDebugLog('cache-skip-too-few-candles', {
+          reason,
+          count: cached.candles?.length ?? 0,
+          required: minimumReusableCandles,
+          source: cached.source,
+        }, 'warn')
         return false
       }
 
@@ -3914,9 +4012,22 @@ function useChartCandles(
         }
 
         if (isLiveCandleTooFarFromHistory(symbol, cached.candles, syntheticLiveCandle)) {
+          addCandleDebugLog('cache-skip-live-gap', {
+            reason,
+            count: cached.candles.length,
+            live: cachedLivePrice.price,
+            lastClose: cached.candles[cached.candles.length - 1]?.close,
+          }, 'warn')
           return false
         }
       }
+
+      addCandleDebugLog('plot-candles-from-cache', {
+        reason,
+        ...describeCandleRange(cached.candles),
+        source: cached.source,
+        provider: cached.provider,
+      }, 'success')
 
       setCandles(cached.candles)
       setOverlayPayload(cached.overlayPayload ?? null)
@@ -3938,7 +4049,7 @@ function useChartCandles(
       }
 
       try {
-        const cachedWasApplied = applyCachedPayload()
+        const cachedWasApplied = applyCachedPayload(force ? 'before-force-fetch' : 'before-fetch')
 
         // Priority rule:
         // Main chart owns the refresh. Mini charts reuse main/shared cache when
@@ -3952,9 +4063,16 @@ function useChartCandles(
         setIsLoading(!cachedWasApplied)
         setErrorText('')
 
+        addCandleDebugLog('fetch-start', { force, limit, priority })
         const nextPayload = await fetchSharedCandlePayload(activeApiBaseUrl, symbol, timeframe, limit, force)
 
         if (!cancelled) {
+          addCandleDebugLog('plot-candles-from-fetch', {
+            ...describeCandleRange(nextPayload.candles),
+            source: nextPayload.source,
+            provider: nextPayload.provider,
+            cacheLimit: nextPayload.limit,
+          }, 'success')
           setCandles(nextPayload.candles)
 
           // Keep overlay/intelligence stable during polling/history refresh.
@@ -3965,9 +4083,12 @@ function useChartCandles(
         }
       } catch (error) {
         console.error('Lightweight chart candle sync error:', error)
+        addCandleDebugLog('fetch-error', {
+          error: error instanceof Error ? error.message : 'Candle API error',
+        }, 'error')
 
         if (!cancelled) {
-          const cachedWasApplied = applyCachedPayload()
+          const cachedWasApplied = applyCachedPayload('after-fetch-error')
           if (!cachedWasApplied) {
             setErrorText(error instanceof Error ? error.message : 'Candle API error')
           }
@@ -4134,7 +4255,7 @@ function useChartCandles(
       if (intervalId) clearInterval(intervalId)
       if (liveEventSource) liveEventSource.close()
     }
-  }, [apiBaseUrl, isClient, symbol, timeframe, limit, pollMs, enabled, priority, onLivePriceUpdate])
+  }, [addCandleDebugLog, apiBaseUrl, isClient, symbol, timeframe, limit, pollMs, enabled, priority, onLivePriceUpdate])
 
   return {
     candles,
@@ -4142,6 +4263,7 @@ function useChartCandles(
     unifiedIntelligence,
     isLoading,
     errorText,
+    debugLog,
   }
 }
 
@@ -4653,7 +4775,7 @@ function LightweightChartPanel({
 }: LightweightChartPanelProps) {
   const normalizedSymbol = normalizeSymbol(symbol)
   const normalizedTimeframe = normalizeTimeframe(timeframe)
-  const { candles, overlayPayload: unifiedOverlayPayload, unifiedIntelligence, isLoading, errorText } = useChartCandles(
+  const { candles, overlayPayload: unifiedOverlayPayload, unifiedIntelligence, isLoading, errorText, debugLog } = useChartCandles(
     apiBaseUrl,
     isClient,
     normalizedSymbol,
@@ -5069,6 +5191,35 @@ function LightweightChartPanel({
         <div className="mb-3 rounded-lg border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-xs text-amber-300">
           Loading candles...
         </div>
+      )}
+
+      {debugLog.length > 0 && (
+        <details
+          className="mb-3 rounded-lg border border-blue-400/20 bg-blue-400/10 px-3 py-2 text-[10px] text-blue-100"
+          open={!compact}
+        >
+          <summary className="cursor-pointer select-none font-black uppercase tracking-wide text-blue-300">
+            Chart candle load log • {normalizedSymbol} • {normalizedTimeframe} • {candles.length} plotted
+          </summary>
+          <div className="mt-2 max-h-40 space-y-1 overflow-auto font-mono leading-4">
+            {debugLog.map((item, index) => (
+              <div
+                key={`${item.time}-${item.stage}-${index}`}
+                className={
+                  item.level === 'error'
+                    ? 'text-red-300'
+                    : item.level === 'warn'
+                      ? 'text-amber-300'
+                      : item.level === 'success'
+                        ? 'text-emerald-300'
+                        : 'text-blue-100'
+                }
+              >
+                <span className="text-gray-500">{item.time}</span> {item.message}
+              </div>
+            ))}
+          </div>
+        </details>
       )}
 
       <LightweightCandlestickChart
