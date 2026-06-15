@@ -4165,7 +4165,7 @@ function sanitizeBackendOverlayPayloadForChart(
   if (!referencePrice || referencePrice <= 0) return backendPayload
 
   const sanitized = {
-    ...safeBackendPayload,
+    ...backendPayload,
     lines: filterOverlayArrayForChartScale(backendPayload.lines, referencePrice, symbol),
     zones: filterOverlayArrayForChartScale(backendPayload.zones, referencePrice, symbol),
     markers: filterOverlayArrayForChartScale(backendPayload.markers, referencePrice, symbol),
