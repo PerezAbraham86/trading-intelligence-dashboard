@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -1741,6 +1742,43 @@ def build_trade_id(symbol: str, timeframe: str, side: str, entry_time: Optional[
     return f"AI-{normalize_symbol(symbol)}-{normalize_timeframe(timeframe)}-{side}-{stamp}"
 
 
+def build_trade_setup_id(
+    symbol: str,
+    timeframe: str,
+    side: str,
+    setup_key: Optional[Any] = None,
+    entry: Any = None,
+    target: Any = None,
+    stop: Any = None,
+    entry_time: Optional[Any] = None,
+) -> str:
+    """Stable open-trade id for one dashboard setup attempt.
+
+    This prevents duplicate OPEN trades when the frontend sends the same auto
+    setup twice before Supabase/summary refresh finishes. The id is stable for
+    the same symbol/timeframe/side/candle/setup, but a new candle can create a
+    new learning attempt after the previous one closes.
+    """
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    normalized_side = normalize_side(side)
+    raw_setup_key = str(setup_key or "").strip()
+
+    if not raw_setup_key:
+        raw_setup_key = "|".join([
+            normalized_symbol,
+            normalized_timeframe,
+            normalized_side,
+            str(entry_time or ""),
+            f"{to_float(entry, 0.0):.4f}",
+            f"{to_float(target, 0.0):.4f}",
+            f"{to_float(stop, 0.0):.4f}",
+        ])
+
+    digest = hashlib.sha1(raw_setup_key.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return f"AI-{normalized_symbol}-{normalized_timeframe}-{normalized_side}-{digest}"
+
+
 def has_nrtr_entry_trigger(side: str, nrtr_context: Optional[Dict[str, Any]] = None, signal: Optional[Dict[str, Any]] = None) -> bool:
     nrtr_context = safe_dict(nrtr_context)
     signal = safe_dict(signal)
@@ -2075,6 +2113,7 @@ def get_ai_trader_decision(
         "maxPnl": round(max_pnl, 4),
         "riskPnl": round(risk_pnl, 4),
         "pointValue": point_value(normalized_symbol),
+        "setupKey": _.get("setupKey") if isinstance(_, dict) else None,
         "reason": reason,
         "reasons": score["reasons"],
         "details": {
@@ -2118,13 +2157,28 @@ def open_ai_trade(**payload: Any) -> Dict[str, Any]:
         timeframe = normalize_timeframe(decision.get("timeframe"))
         side = normalize_side(decision.get("rawDecision") or decision.get("decision"))
         entry_time = payload.get("entryTime") or decision.get("createdAt") or now_iso()
+        setup_key = str(payload.get("setupKey") or decision.get("setupKey") or "").strip()
+        trade_id = build_trade_setup_id(
+            symbol,
+            timeframe,
+            side,
+            setup_key=setup_key,
+            entry=decision.get("entry"),
+            target=decision.get("target"),
+            stop=decision.get("stop"),
+            entry_time=entry_time,
+        )
 
         existing = [
             trade for trade in open_trades
             if isinstance(trade, dict)
             and normalize_symbol(trade.get("symbol")) == symbol
             and normalize_timeframe(trade.get("timeframe")) == timeframe
-            and (not AI_TRADER_ALLOW_MULTIPLE_OPEN_TRADES or normalize_side(trade.get("side")) == side)
+            and (
+                str(trade.get("id") or "") == trade_id
+                or (setup_key and str(trade.get("setupKey") or trade.get("sourceSnapshot", {}).get("setupKey") or "") == setup_key)
+                or (not AI_TRADER_ALLOW_MULTIPLE_OPEN_TRADES or normalize_side(trade.get("side")) == side)
+            )
         ]
 
         if existing:
@@ -2140,7 +2194,8 @@ def open_ai_trade(**payload: Any) -> Dict[str, Any]:
             }
 
         trade = {
-            "id": build_trade_id(symbol, timeframe, side, entry_time),
+            "id": trade_id,
+            "setupKey": setup_key,
             "symbol": symbol,
             "timeframe": timeframe,
             "side": side,
