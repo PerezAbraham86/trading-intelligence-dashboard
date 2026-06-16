@@ -8021,31 +8021,211 @@ def candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500, for
 
 
 
+def _preload_unique_timeframes(timeframes: str) -> List[str]:
+    seen: set[str] = set()
+    result: List[str] = []
+    for item in str(timeframes or "").split(","):
+        tf = normalize_timeframe(item.strip())
+        if not tf or tf in seen:
+            continue
+        seen.add(tf)
+        result.append(tf)
+    return result or ["1m"]
+
+
+def _best_cached_candles_for_preload(symbol: str, timeframe: str, limit: int) -> List[Dict[str, Any]]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    safe_limit = max(1, min(int(limit or 500), 5000))
+
+    for route_name in ["dashboard", "historical"]:
+        try:
+            cached = candle_cache_best(
+                route_name,
+                normalized_symbol,
+                normalized_timeframe,
+                1,
+                max_age_seconds=max(CANDLE_SITE_CACHE_MAX_AGE_SECONDS, 7 * 24 * 60 * 60),
+            )
+        except Exception as error:
+            print(f"[Preload candles] cache lookup failed for {normalized_symbol} {normalized_timeframe}: {error}")
+            cached = None
+
+        raw_candles = cached.get("candles") if isinstance(cached, dict) else None
+        if isinstance(raw_candles, list) and raw_candles:
+            candles_list = filter_valid_candles_for_symbol(
+                [item for item in raw_candles if isinstance(item, dict)],
+                normalized_symbol,
+            )
+            if candles_list:
+                return candles_list[-safe_limit:]
+
+    return []
+
+
+def _store_preload_candle_payload(
+    *,
+    symbol: str,
+    timeframe: str,
+    limit: int,
+    candles_list: List[Dict[str, Any]],
+    provider: str,
+    source: str,
+) -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    safe_limit = max(1, min(int(limit or 500), 5000))
+    clean_candles = filter_valid_candles_for_symbol(candles_list, normalized_symbol)[-safe_limit:]
+
+    payload = build_candle_route_payload(
+        route_source=source,
+        symbol=normalized_symbol,
+        timeframe=normalized_timeframe,
+        candles=clean_candles,
+        provider=provider,
+        cache_label="preloaded",
+    )
+    payload["preloaded"] = True
+    payload["preloadSource"] = source
+    payload["historicalOnly"] = True
+
+    if clean_candles:
+        stored_dashboard = candle_cache_set("dashboard", normalized_symbol, normalized_timeframe, safe_limit, payload)
+        candle_cache_set("historical", normalized_symbol, normalized_timeframe, safe_limit, payload)
+        return stored_dashboard
+
+    return payload
+
+
+def _preload_mes_history_from_one_minute(timeframe_list: List[str], limit: int) -> List[Dict[str, Any]]:
+    normalized_symbol = "MES1!"
+    safe_limit = max(1, min(int(limit or 500), 5000))
+    unique_timeframes = []
+    seen: set[str] = set()
+    for timeframe in timeframe_list:
+        tf = normalize_timeframe(timeframe)
+        if tf and tf not in seen:
+            seen.add(tf)
+            unique_timeframes.append(tf)
+
+    max_multiplier = max(
+        1,
+        *[max(1, int(timeframe_seconds(tf) / 60)) for tf in unique_timeframes],
+    )
+    one_min_limit = max(
+        1000,
+        min(5000, safe_limit * max_multiplier + 300),
+    )
+    one_minute = _best_cached_candles_for_preload(normalized_symbol, "1m", one_min_limit)
+    one_minute_source = "cached_1m" if one_minute else "provider_1m"
+
+    if len(one_minute) < max(120, min(safe_limit, 300)):
+        try:
+            fetched = fetch_historical_candles(normalized_symbol, "1m", one_min_limit)
+            fetched = filter_valid_candles_for_symbol(fetched, normalized_symbol)
+            if len(fetched) > len(one_minute):
+                one_minute = fetched
+                one_minute_source = "provider_1m"
+        except Exception as error:
+            print(f"[Preload candles] MES 1m fetch failed: {error}")
+
+    if one_minute:
+        one_minute_payload = _store_preload_candle_payload(
+            symbol=normalized_symbol,
+            timeframe="1m",
+            limit=min(one_min_limit, 5000),
+            candles_list=one_minute,
+            provider="insightsentry",
+            source=f"mes_preload_{one_minute_source}",
+        )
+        one_minute = one_minute_payload.get("candles") if isinstance(one_minute_payload.get("candles"), list) else one_minute
+
+    results: List[Dict[str, Any]] = []
+
+    for tf in unique_timeframes:
+        if tf == "1m":
+            tf_candles = one_minute[-safe_limit:]
+            source = f"mes_preload_{one_minute_source}"
+        else:
+            tf_candles = resample_candles_to_timeframe(one_minute, tf, safe_limit) if one_minute else []
+            source = f"mes_preload_resampled_from_1m_{one_minute_source}"
+
+        if not tf_candles:
+            # Last resort: use the normal route for this timeframe. This can hit
+            # provider/cache, but only after the single 1m preload attempt failed.
+            try:
+                fallback_payload = candles(symbol=normalized_symbol, timeframe=tf, limit=safe_limit, force=False)
+                fallback_candles = fallback_payload.get("candles") if isinstance(fallback_payload, dict) else []
+                if isinstance(fallback_candles, list):
+                    tf_candles = [item for item in fallback_candles if isinstance(item, dict)]
+                    source = str(fallback_payload.get("source") or "normal_route_fallback")
+            except Exception as error:
+                print(f"[Preload candles] fallback route failed for {normalized_symbol} {tf}: {error}")
+
+        stored = _store_preload_candle_payload(
+            symbol=normalized_symbol,
+            timeframe=tf,
+            limit=safe_limit,
+            candles_list=tf_candles,
+            provider="insightsentry" if tf_candles else "unavailable",
+            source=source,
+        )
+
+        stored_candles = stored.get("candles") if isinstance(stored, dict) else []
+        stored_count = len(stored_candles) if isinstance(stored_candles, list) else 0
+        results.append({
+            "symbol": normalized_symbol,
+            "timeframe": tf,
+            "count": stored_count,
+            "cache": stored.get("cache") if isinstance(stored, dict) else None,
+            "provider": stored.get("provider") if isinstance(stored, dict) else "insightsentry",
+            "source": stored.get("source") if isinstance(stored, dict) else source,
+            "preloaded": stored_count > 0,
+            "historicalOnly": True,
+            "oneMinuteSource": one_minute_source,
+            "oneMinuteCount": len(one_minute),
+        })
+
+    return results
+
+
 @app.get("/api/preload-candles")
 def preload_candles(
     symbols: str = "BTCUSD,MES1!,SPY",
     timeframes: str = "1m,5m,10m,15m",
     limit: int = 500,
+    historicalOnly: bool = True,
 ) -> Dict[str, Any]:
     symbol_list = [normalize_symbol(item) for item in symbols.split(",") if item.strip()]
-    timeframe_list = [normalize_timeframe(item) for item in timeframes.split(",") if item.strip()]
-    safe_limit = max(1, min(int(limit or 500), 1000))
+    timeframe_list = _preload_unique_timeframes(timeframes)
+    safe_limit = max(1, min(int(limit or 500), 5000))
 
     results: List[Dict[str, Any]] = []
 
     for item_symbol in symbol_list:
+        if is_futures_symbol(item_symbol):
+            # MES boot warmup must not ask InsightSentry separately for 3m/5m/10m.
+            # Fetch/cache 1m once, then resample locally so custom timeframes are
+            # ready before React mounts charts and starts live streams.
+            results.extend(_preload_mes_history_from_one_minute(timeframe_list, safe_limit))
+            continue
+
         for item_timeframe in timeframe_list:
-            payload = candles(symbol=item_symbol, timeframe=item_timeframe, limit=safe_limit)
+            payload = candles(symbol=item_symbol, timeframe=item_timeframe, limit=safe_limit, force=False)
             results.append({
                 "symbol": item_symbol,
                 "timeframe": item_timeframe,
                 "count": payload.get("count", 0),
                 "cache": payload.get("cache"),
                 "provider": payload.get("provider"),
+                "source": payload.get("source"),
+                "preloaded": int(payload.get("count", 0) or 0) > 0,
+                "historicalOnly": historicalOnly,
             })
 
     return {
         "eventType": "CANDLE_PRELOAD",
+        "status": "Ready" if all(int(item.get("count", 0) or 0) > 0 for item in results) else "Partial",
         "count": len(results),
         "results": results,
         "createdAt": now_iso(),
