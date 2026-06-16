@@ -1117,7 +1117,7 @@ def insightsentry_symbol_candidates(symbol: str) -> List[str]:
 
 def insightsentry_interval_candidates(timeframe: str) -> List[str]:
     tf = normalize_timeframe(timeframe)
-    allowed = {"1m", "5m", "10m", "15m", "30m"}
+    allowed = {"1m", "3m", "5m", "10m", "15m", "30m"}
     return [tf] if tf in allowed else ["1m"]
 
 
@@ -1125,6 +1125,7 @@ def insightsentry_bar_type_interval(timeframe: str) -> Tuple[str, int]:
     tf = normalize_timeframe(timeframe)
     mapping = {
         "1m": ("minute", 1),
+        "3m": ("minute", 3),
         "5m": ("minute", 5),
         "10m": ("minute", 10),
         "15m": ("minute", 15),
@@ -1278,11 +1279,49 @@ def normalize_insightsentry_bar(raw: Any, symbol: str, timeframe: str) -> Option
     return candle
 
 
+def insightsentry_history_start_ym(symbol: str, timeframe: str) -> str:
+    """Return the verified earliest stable start_ym for InsightSentry futures history.
+
+    RapidAPI manual tests confirmed:
+    - CME_MINI:MES1! 1m with start_ym=2022-05 returns data_unavailable.
+    - CME_MINI:MES1! 1m with start_ym=2026-06 returns 16,000+ candles.
+    - CME_MINI:MES1! 3m with start_ym=2026-06 returns 5,000+ candles.
+    - CME_MINI:MES1! 5m/10m direct history returns thousands of candles.
+
+    Use one recent verified month for MES preload/direct history so every boot
+    timeframe can fetch 300+ real provider candles without 1m resampling.
+    """
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    if normalized_symbol == "MES1!":
+        return "2026-06"
+
+    # Keep other symbols on a recent, safe default. Their provider routers can
+    # override this if needed.
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
 def build_insightsentry_urls(api_symbol: str, api_interval: str, limit: int) -> List[str]:
     encoded_path_symbol = quote(api_symbol, safe="")
     bar_type, bar_interval = insightsentry_bar_type_interval(api_interval)
     safe_limit = max(1, min(int(limit or 500), 5000))
 
+    # InsightSentry Historical Time Series OHLCV uses /history with start_ym.
+    # We intentionally do not rely on /series dp for MES preload because it was
+    # returning short windows like 120 x 5m / 70 x 10m. RapidAPI confirmed that
+    # /history + start_ym=2026-06 returns thousands of direct 1m/3m/5m/10m bars.
+    history_params = {
+        "bar_type": bar_type,
+        "bar_interval": bar_interval,
+        "extended": "true",
+        "badj": "true",
+        "dadj": "false",
+        "start_ym": insightsentry_history_start_ym(api_symbol, api_interval),
+    }
+
+    # Keep /series as a last fallback only. Some older paths used this route;
+    # the /history route should win for MES.
     series_params = {
         "bar_type": bar_type,
         "bar_interval": bar_interval,
@@ -1294,9 +1333,9 @@ def build_insightsentry_urls(api_symbol: str, api_interval: str, limit: int) -> 
     }
 
     return [
+        f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_path_symbol}/history?{urlencode(history_params)}",
         f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_path_symbol}/series?{urlencode(series_params)}",
     ]
-
 
 def fetch_insightsentry_direct_candles(symbol: str, timeframe: str = "1m", limit: int = 500) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
@@ -8097,79 +8136,57 @@ def _store_preload_candle_payload(
     return payload
 
 
-def _preload_mes_history_from_one_minute(timeframe_list: List[str], limit: int) -> List[Dict[str, Any]]:
+def _preload_mes_direct_history(timeframe_list: List[str], limit: int) -> List[Dict[str, Any]]:
+    """Preload MES using the exact direct InsightSentry intervals confirmed in RapidAPI.
+
+    No guessing and no 1m-resample shortcut for 5m/10m/3m during boot:
+    - Provider display in UI remains MES1!
+    - InsightSentry provider symbol is locked to CME_MINI:MES1!
+    - 1m/3m/5m/10m are fetched directly with bar_type=minute and matching bar_interval
+    - start_ym=2026-06 is used for MES because RapidAPI verified it returns real bars
+    """
     normalized_symbol = "MES1!"
     safe_limit = max(1, min(int(limit or 500), 5000))
-    unique_timeframes = []
+    required_count = min(safe_limit, 300)
+
+    unique_timeframes: List[str] = []
     seen: set[str] = set()
     for timeframe in timeframe_list:
         tf = normalize_timeframe(timeframe)
-        if tf and tf not in seen:
-            seen.add(tf)
-            unique_timeframes.append(tf)
-
-    max_multiplier = max(
-        1,
-        *[max(1, int(timeframe_seconds(tf) / 60)) for tf in unique_timeframes],
-    )
-    one_min_limit = max(
-        1000,
-        min(5000, safe_limit * max_multiplier + 300),
-    )
-    one_minute = _best_cached_candles_for_preload(normalized_symbol, "1m", one_min_limit)
-    one_minute_source = "cached_1m" if one_minute else "provider_1m"
-
-    if len(one_minute) < max(120, min(safe_limit, 300)):
-        try:
-            fetched = fetch_historical_candles(normalized_symbol, "1m", one_min_limit)
-            fetched = filter_valid_candles_for_symbol(fetched, normalized_symbol)
-            if len(fetched) > len(one_minute):
-                one_minute = fetched
-                one_minute_source = "provider_1m"
-        except Exception as error:
-            print(f"[Preload candles] MES 1m fetch failed: {error}")
-
-    if one_minute:
-        one_minute_payload = _store_preload_candle_payload(
-            symbol=normalized_symbol,
-            timeframe="1m",
-            limit=min(one_min_limit, 5000),
-            candles_list=one_minute,
-            provider="insightsentry",
-            source=f"mes_preload_{one_minute_source}",
-        )
-        one_minute = one_minute_payload.get("candles") if isinstance(one_minute_payload.get("candles"), list) else one_minute
+        if not tf or tf in seen:
+            continue
+        seen.add(tf)
+        unique_timeframes.append(tf)
 
     results: List[Dict[str, Any]] = []
 
     for tf in unique_timeframes:
-        if tf == "1m":
-            tf_candles = one_minute[-safe_limit:]
-            source = f"mes_preload_{one_minute_source}"
-        else:
-            tf_candles = resample_candles_to_timeframe(one_minute, tf, safe_limit) if one_minute else []
-            source = f"mes_preload_resampled_from_1m_{one_minute_source}"
+        cached = _best_cached_candles_for_preload(normalized_symbol, tf, safe_limit)
+        source = "mes_preload_cached_direct_history"
+        tf_candles = cached
 
-        required_tf_count = min(safe_limit, 300)
-
-        if len(tf_candles) < required_tf_count:
-            # Last resort / depth extender:
-            # If 1m history only returned a short session, resampling can produce
-            # too few 5m/10m bars. In that case ask the normal candle router for
-            # the requested timeframe and keep whichever source returns more real
-            # candles. This lets 10m load 300+ direct bars when InsightSentry has
-            # them, while still using the 1m-resampled path for unsupported custom
-            # timeframes like 3m.
+        if len(tf_candles) < required_count:
             try:
-                fallback_payload = candles(symbol=normalized_symbol, timeframe=tf, limit=safe_limit, force=False)
-                fallback_candles = fallback_payload.get("candles") if isinstance(fallback_payload, dict) else []
-                if isinstance(fallback_candles, list):
-                    clean_fallback = [item for item in fallback_candles if isinstance(item, dict)]
-                    if len(clean_fallback) > len(tf_candles):
-                        tf_candles = clean_fallback[-safe_limit:]
-                        source = str(fallback_payload.get("source") or "normal_route_fallback_depth_extender")
+                fetched = fetch_insightsentry_historical_candles(normalized_symbol, tf, safe_limit)
+                fetched = filter_valid_candles_for_symbol(fetched, normalized_symbol)
+                if len(fetched) >= len(tf_candles):
+                    tf_candles = fetched[-safe_limit:]
+                    source = f"mes_preload_direct_{tf}_history_start_ym_{insightsentry_history_start_ym(normalized_symbol, tf)}"
             except Exception as error:
-                print(f"[Preload candles] fallback route failed for {normalized_symbol} {tf}: {error}")
+                print(f"[Preload candles] MES direct {tf} fetch failed: {error}")
+
+        # Only custom unsupported TFs should fall back to 1m resampling. RapidAPI
+        # confirmed 3m works with start_ym=2026-06, so this should rarely run.
+        if len(tf_candles) < required_count and tf not in {"1m", "3m", "5m", "10m", "15m", "30m"}:
+            try:
+                one_min_limit = max(safe_limit * max(1, int(timeframe_seconds(tf) / 60)) + 300, 1000)
+                one_min = fetch_insightsentry_historical_candles(normalized_symbol, "1m", min(one_min_limit, 5000))
+                resampled = resample_candles_to_timeframe(one_min, tf, safe_limit)
+                if len(resampled) > len(tf_candles):
+                    tf_candles = resampled[-safe_limit:]
+                    source = "mes_preload_resampled_from_direct_1m_history"
+            except Exception as error:
+                print(f"[Preload candles] MES resample fallback failed for {tf}: {error}")
 
         stored = _store_preload_candle_payload(
             symbol=normalized_symbol,
@@ -8177,28 +8194,29 @@ def _preload_mes_history_from_one_minute(timeframe_list: List[str], limit: int) 
             limit=safe_limit,
             candles_list=tf_candles,
             provider="insightsentry" if tf_candles else "unavailable",
-            source=source,
+            source=source if tf_candles else "mes_preload_direct_history_unavailable",
         )
 
         stored_candles = stored.get("candles") if isinstance(stored, dict) else []
         stored_count = len(stored_candles) if isinstance(stored_candles, list) else 0
-        required_tf_count = min(safe_limit, 300)
+
         results.append({
             "symbol": normalized_symbol,
             "timeframe": tf,
             "count": stored_count,
-            "requiredCount": required_tf_count,
+            "requiredCount": required_count,
             "cache": stored.get("cache") if isinstance(stored, dict) else None,
             "provider": stored.get("provider") if isinstance(stored, dict) else "insightsentry",
             "source": stored.get("source") if isinstance(stored, dict) else source,
-            "preloaded": stored_count >= required_tf_count,
+            "preloaded": stored_count >= required_count,
             "historicalOnly": True,
-            "oneMinuteSource": one_minute_source,
-            "oneMinuteCount": len(one_minute),
+            "insightSentrySymbol": "CME_MINI:MES1!",
+            "barType": "minute",
+            "barInterval": insightsentry_bar_type_interval(tf)[1],
+            "startYm": insightsentry_history_start_ym(normalized_symbol, tf),
         })
 
     return results
-
 
 @app.get("/api/preload-candles")
 def preload_candles(
@@ -8215,10 +8233,11 @@ def preload_candles(
 
     for item_symbol in symbol_list:
         if is_futures_symbol(item_symbol):
-            # MES boot warmup must not ask InsightSentry separately for 3m/5m/10m.
-            # Fetch/cache 1m once, then resample locally so custom timeframes are
-            # ready before React mounts charts and starts live streams.
-            results.extend(_preload_mes_history_from_one_minute(timeframe_list, safe_limit))
+            # MES boot warmup uses exact direct InsightSentry intervals confirmed
+            # in RapidAPI: CME_MINI:MES1! with bar_interval 1/3/5/10 and
+            # start_ym=2026-06. This avoids the bad 700 x 1m -> short 5m/10m
+            # resample path and lets preload require 300+ real candles per TF.
+            results.extend(_preload_mes_direct_history(timeframe_list, safe_limit))
             continue
 
         for item_timeframe in timeframe_list:
