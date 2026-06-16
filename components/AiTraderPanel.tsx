@@ -1212,12 +1212,15 @@ function getAiTrailingStopSettlement({
 
   const best = calculateBestFavorableTradeR(trade, livePrice, candles);
 
-  // Trailing stop activates only after the trade has reached at least +1.00R.
-  // Then it locks profit activeTrailR behind the best favorable R.
+  // Trailing stop activates automatically as soon as the trade has ever
+  // moved into positive R. It no longer waits for +0.50R or +1.00R.
+  //
+  // Trail Stop R is only the trailing distance behind the best favorable move.
   // Example with Trail Stop R = 0.50:
-  // best +1.00R -> trail at +0.50R
+  // best +0.16R -> trail at breakeven 0.00R
+  // best +0.75R -> trail at +0.25R
   // best +1.50R -> trail at +1.00R
-  if (best.bestR < 1) {
+  if (best.bestR <= 0) {
     return {
       active: false,
       shouldClose: false,
@@ -3716,7 +3719,7 @@ export default function AiTraderPanel({
     pushRow("warn", "risk-control-table", {
       maxRiskR: `-${maxRiskR.toFixed(2)}R`,
       action: "Close open AI trade when Live R is less than or equal to max risk",
-      trailingStop: useAiTrailingStop ? `ON • ${trailingStopR.toFixed(2)}R` : "OFF",
+      trailingStop: useAiTrailingStop ? `ON • active when profit > 0 • ${trailingStopR.toFixed(2)}R distance` : "OFF",
     });
 
     liveOpenTrades.slice(0, 5).forEach((trade: any, index: number) => {
@@ -4027,7 +4030,7 @@ export default function AiTraderPanel({
           <button
             type="button"
             onClick={() => setUseAiTrailingStop((current) => !current)}
-            title="Trailing stop activates after the AI trade reaches +1.00R. It trails behind the best favorable R by the Trailing Stop R amount."
+            title="Trailing stop activates automatically as soon as the AI trade is positive. The Trailing Stop R value is only the distance behind the best favorable R."
             className={`rounded-lg border px-3 py-2 text-[10px] font-black uppercase tracking-wide transition ${
               useAiTrailingStop
                 ? "border-emerald-400/40 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20"
@@ -4043,7 +4046,7 @@ export default function AiTraderPanel({
                 ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
                 : "border-dark-600 bg-dark-900 text-gray-400"
             }`}
-            title="Trailing Stop R. Example: 0.50 means after best profit reaches +1.50R, AI closes if price falls back to +1.00R."
+            title="Trailing Stop R distance. Example: 0.50 means best +0.75R trails at +0.25R; best +1.50R trails at +1.00R. Activation begins automatically once profit is positive."
           >
             Trailing Stop
             <input
@@ -4799,7 +4802,7 @@ export default function AiTraderPanel({
                             </div>
                           </div>
                         ) : (
-                          <span className="text-gray-500">Waiting +1R</span>
+                          <span className="text-gray-500">Waiting profit</span>
                         )
                       ) : (
                         <span className="text-gray-600">Off</span>
