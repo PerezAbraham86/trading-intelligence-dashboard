@@ -2360,7 +2360,11 @@ def get_live_price_payload(symbol: str, timeframe: str = "1m") -> Dict[str, Any]
 PERSISTENT_LIVE_CANDLE_CACHE_LIMIT = int(os.getenv("PERSISTENT_LIVE_CANDLE_CACHE_LIMIT", "5000"))
 PERSISTENT_LIVE_CANDLE_MAX_CACHE_AGE_SECONDS = int(os.getenv("PERSISTENT_LIVE_CANDLE_MAX_CACHE_AGE_SECONDS", str(7 * 24 * 60 * 60)))
 PERSISTENT_LIVE_BACKFILL_MAX_BARS = int(os.getenv("PERSISTENT_LIVE_BACKFILL_MAX_BARS", "300"))
-PERSISTENT_LIVE_BACKFILL_ENABLED = os.getenv("PERSISTENT_LIVE_BACKFILL_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
+# Important: do not fabricate missing historical OHLC candles by default.
+# We persist real live ticks/candles as they arrive, then merge them with provider
+# history. Any missing past buckets must come from the data provider, not from a
+# linear synthetic bridge, because fake bridge candles distort HA, SMC, NRTR and AI.
+PERSISTENT_LIVE_BACKFILL_ENABLED = os.getenv("PERSISTENT_LIVE_BACKFILL_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def live_price_payload_to_candle(live_payload: Any, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
@@ -2556,14 +2560,20 @@ def build_persistent_live_backfill_candles(
     previous_candle: Optional[Dict[str, Any]],
     current_tick: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
-    """Build missing timeframe buckets between provider history and the newest live tick.
+    """Return only real persisted live candles unless synthetic backfill is explicitly enabled.
 
-    If the dashboard was not open, no vendor sent us true OHLC for the missing
-    minutes. These candles are explicitly marked as live bridge candles. Their
-    purpose is continuity: the next historical load includes the live tail that
-    accumulated after the first history load, instead of leaving a blank gap.
+    The chart gap shown between historical provider data and resumed live data must
+    not be filled with invented candles. A linear bridge creates fake HA candles,
+    fake SMC/OB zones, fake NRTR movement and bad AI context. By default we store
+    only the actual live timeframe candle. Historical gaps are repaired only when
+    InsightSentry/provider history later returns real OHLCV for those buckets.
+
+    Set PERSISTENT_LIVE_BACKFILL_ENABLED=true only for visual testing.
     """
-    if not PERSISTENT_LIVE_BACKFILL_ENABLED or not isinstance(current_tick, dict):
+    if not isinstance(current_tick, dict):
+        return []
+
+    if not PERSISTENT_LIVE_BACKFILL_ENABLED:
         return [current_tick]
 
     normalized_symbol = normalize_symbol(symbol)
@@ -2588,9 +2598,6 @@ def build_persistent_live_backfill_candles(
     if gap_bars <= 0:
         return [current_tick]
 
-    # Do not create an enormous overnight/weekend synthetic tail. If the gap is
-    # larger than the safety cap, keep only the actual live tick and let the
-    # provider refill true history later.
     if gap_bars > max(1, PERSISTENT_LIVE_BACKFILL_MAX_BARS):
         return [current_tick]
 
@@ -2623,6 +2630,8 @@ def build_persistent_live_backfill_candles(
             "source": "persistent_live_gap_backfill_bridge",
             "persistentLiveCandle": True,
             "persistentLiveBackfill": True,
+            "syntheticCandle": True,
+            "excludeFromAi": True,
             "backfillFromEpoch": previous_epoch,
             "backfillToEpoch": tick_epoch,
         }
@@ -2714,7 +2723,7 @@ def persist_live_candle_to_history_cache(symbol: str, timeframe: str, live_paylo
                     "count": len(valid_store_rows),
                     "candles": valid_store_rows,
                     "provider": merged_tick.get("provider"),
-                    "source": "persistent_live_candle_cache_with_gap_backfill",
+                    "source": "persistent_live_candle_cache",
                     "cache": "persistent_live_candle",
                     "persistentLiveCandles": True,
                     "persistentLiveBackfillCount": max(0, len(valid_store_rows) - 1),
@@ -2738,18 +2747,34 @@ def merge_saved_live_candles_with_history(symbol: str, timeframe: str, candles: 
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = max(1, min(int(limit or 500), 5000))
 
+    def is_real_ohlcv_row(row: Dict[str, Any]) -> bool:
+        if not isinstance(row, dict):
+            return False
+        if bool(row.get("persistentLiveBackfill")) or bool(row.get("syntheticCandle")):
+            return False
+        if str(row.get("source") or "") == "persistent_live_gap_backfill_bridge":
+            return False
+        return True
+
     live_rows = filter_valid_candles_for_symbol(
-        get_live_recent_candles(normalized_symbol, normalized_timeframe),
+        [row for row in get_live_recent_candles(normalized_symbol, normalized_timeframe) if is_real_ohlcv_row(row)],
         normalized_symbol,
     )
 
-    historical_rows = filter_valid_candles_for_symbol(merge_candles_by_time(candles or []), normalized_symbol)
+    historical_rows = filter_valid_candles_for_symbol(
+        [row for row in merge_candles_by_time(candles or []) if is_real_ohlcv_row(row)],
+        normalized_symbol,
+    )
 
     if not live_rows:
         return historical_rows[-safe_limit:]
 
     bridge_rows: List[Dict[str, Any]] = []
-    if historical_rows and live_rows:
+
+    # Default behavior: merge only real provider history + real saved live candles.
+    # Do not create synthetic candles for missing buckets. Missing history should
+    # remain visually empty until the provider returns the real OHLCV bars.
+    if PERSISTENT_LIVE_BACKFILL_ENABLED and historical_rows and live_rows:
         first_live = live_rows[0]
         last_history = historical_rows[-1]
         first_live_epoch = int(to_epoch_seconds(first_live.get("epoch") or first_live.get("time") or first_live.get("timestamp")))
@@ -2762,8 +2787,16 @@ def merge_saved_live_candles_with_history(symbol: str, timeframe: str, candles: 
                 first_live,
             )[:-1]
 
+    merged_rows = merge_candles_by_time([*historical_rows, *bridge_rows, *live_rows])
+
+    if bridge_rows:
+        print(
+            f"[Persistent live candles] synthetic bridge merge enabled for {normalized_symbol} {normalized_timeframe}: "
+            f"provider={len(historical_rows)} live={len(live_rows)} bridge={len(bridge_rows)}"
+        )
+
     return filter_valid_candles_for_symbol(
-        merge_candles_by_time([*historical_rows, *bridge_rows, *live_rows]),
+        merged_rows,
         normalized_symbol,
     )[-safe_limit:]
 
@@ -2795,6 +2828,8 @@ def rebuild_history_payload_with_saved_live_candles(
     rebuilt["persistentLiveCandlesMerged"] = len(merged) != len(candles)
     rebuilt["providerHistoryCount"] = len(candles)
     rebuilt["savedLiveCandleCount"] = max(0, len(merged) - len(candles))
+    rebuilt["syntheticLiveBackfillEnabled"] = bool(PERSISTENT_LIVE_BACKFILL_ENABLED)
+    rebuilt["syntheticBackfillWarning"] = None if PERSISTENT_LIVE_BACKFILL_ENABLED else "disabled_to_prevent_fake_candles"
 
     return rebuilt
 
