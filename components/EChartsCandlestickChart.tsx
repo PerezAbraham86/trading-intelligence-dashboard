@@ -249,6 +249,50 @@ function normalizeDefaultSymbol(value: any, fallback = 'BTCUSD'): string {
   return normalized || fallback
 }
 
+const SHARED_LIVE_PRICE_EVENT = 'marketbos:shared-live-price:v1'
+
+type SharedLivePriceRecord = {
+  symbol: string
+  price: number
+  provider?: string
+  source?: string
+  updatedAt: number
+}
+
+const sharedLivePriceBySymbol = new Map<string, SharedLivePriceRecord>()
+
+function getSharedLivePrice(symbol: string): number | null {
+  const normalizedSymbol = normalizeDefaultSymbol(symbol)
+  const record = sharedLivePriceBySymbol.get(normalizedSymbol)
+  const price = Number(record?.price)
+  return Number.isFinite(price) && price > 0 ? price : null
+}
+
+function setSharedLivePriceForSymbol(symbol: string, live: LivePricePayload | null) {
+  if (typeof window === 'undefined' || !live) return
+
+  const normalizedSymbol = normalizeDefaultSymbol(live.symbol ?? symbol)
+  const price = Number(live.price)
+
+  if (!normalizedSymbol || !Number.isFinite(price) || price <= 0) return
+
+  const record: SharedLivePriceRecord = {
+    symbol: normalizedSymbol,
+    price,
+    provider: String(live.provider ?? ''),
+    source: String(live.source ?? ''),
+    updatedAt: Date.now(),
+  }
+
+  sharedLivePriceBySymbol.set(normalizedSymbol, record)
+
+  window.dispatchEvent(
+    new CustomEvent(SHARED_LIVE_PRICE_EVENT, {
+      detail: record,
+    })
+  )
+
+
 function normalizeTimeframe(value: any): string {
   const tf = String(value ?? '').trim().toLowerCase()
 
@@ -2112,13 +2156,17 @@ function formatSignedNumber(value: number | null | undefined, decimals = 2) {
   return `${sign}${number.toFixed(decimals)}`
 }
 
-function calculateNrtrTradeStats(candles: Candle[], points: NrtrPoint[]): NrtrTradeStats {
+function calculateNrtrTradeStats(candles: Candle[], points: NrtrPoint[], currentPriceOverride?: number | null): NrtrTradeStats {
+  const overridePrice = Number(currentPriceOverride)
+  const lastCandleClose = candles.length > 0 ? Number(candles[candles.length - 1].close) : NaN
+  const effectiveCurrentPrice = Number.isFinite(overridePrice) && overridePrice > 0 ? overridePrice : lastCandleClose
+
   const empty: NrtrTradeStats = {
     direction: 0,
     directionText: 'Flat',
     entryPrice: null,
     entryTime: null,
-    currentPrice: candles.length > 0 ? Number(candles[candles.length - 1].close) : null,
+    currentPrice: Number.isFinite(effectiveCurrentPrice) ? effectiveCurrentPrice : null,
     trailingStop: null,
     pnlPoints: null,
     pnlPercent: null,
@@ -2156,7 +2204,7 @@ function calculateNrtrTradeStats(candles: Candle[], points: NrtrPoint[]): NrtrTr
   })
 
   const latestPoint = points[points.length - 1]
-  const currentPrice = Number(candles[candles.length - 1].close)
+  const currentPrice = Number.isFinite(effectiveCurrentPrice) ? effectiveCurrentPrice : Number(candles[candles.length - 1].close)
   const trailingStop = latestPoint?.value ?? null
 
   if (direction === 0 || entryPrice === null || !Number.isFinite(entryPrice)) {
@@ -2236,6 +2284,7 @@ function buildChartOption({
   nrtrOverlayMode = 'Off',
   nrtrExitMode = 'Off',
   nrtrPresetMode = 'Scalping',
+  sharedLivePrice = null,
 }: {
   symbol: string
   timeframe: string
@@ -2249,9 +2298,12 @@ function buildChartOption({
   nrtrOverlayMode?: NrtrOverlayMode
   nrtrExitMode?: NrtrExitMode
   nrtrPresetMode?: NrtrPresetMode
+  sharedLivePrice?: number | null
 }): any {
   const activeCandles = candleMode === 'Heikin Ashi' ? convertToHeikinAshi(candles) : candles
   const latestRealClose = candles.length > 0 ? Number(candles[candles.length - 1].close) : NaN
+  const livePriceNumber = Number(sharedLivePrice)
+  const chartCurrentPrice = Number.isFinite(livePriceNumber) && livePriceNumber > 0 ? livePriceNumber : latestRealClose
   const fallbackOverlays = !compact ? buildClientFallbackOverlays(activeCandles, overlayToggles) : null
   const drawableChartOverlays = !compact
     ? mergeOverlayFallback(chartOverlays, fallbackOverlays, overlayToggles)
@@ -2378,7 +2430,7 @@ function buildChartOption({
 
   const nrtrTradeStats =
     !compact && nrtrOverlayMode !== 'Off'
-      ? calculateNrtrTradeStats(activeCandles, nrtrPoints)
+      ? calculateNrtrTradeStats(activeCandles, nrtrPoints, chartCurrentPrice)
       : null
 
   const nrtrPnlPositive = Number(nrtrTradeStats?.pnlPoints ?? 0) >= 0
@@ -2703,7 +2755,7 @@ function buildChartOption({
             barWidth: '68%',
             barMinWidth: 2,
             barMaxWidth: 10,
-            markLine: Number.isFinite(latestRealClose)
+            markLine: Number.isFinite(chartCurrentPrice)
               ? {
                   silent: true,
                   symbol: ['none', 'none'],
@@ -2711,7 +2763,7 @@ function buildChartOption({
                   label: {
                     show: true,
                     position: 'end',
-                    formatter: () => compactPrice(latestRealClose),
+                    formatter: () => compactPrice(chartCurrentPrice),
                     color: '#d1fae5',
                     backgroundColor: '#047857',
                     borderRadius: 4,
@@ -2725,7 +2777,7 @@ function buildChartOption({
                     type: 'dashed',
                     opacity: 0.85,
                   },
-                  data: [{ yAxis: latestRealClose }],
+                  data: [{ yAxis: chartCurrentPrice }],
                 }
               : undefined,
           },
@@ -2744,7 +2796,7 @@ function buildChartOption({
             barWidth: '68%',
             barMinWidth: 4,
             barMaxWidth: 18,
-            markLine: Number.isFinite(latestRealClose)
+            markLine: Number.isFinite(chartCurrentPrice)
               ? {
                   silent: true,
                   symbol: ['none', 'none'],
@@ -2752,7 +2804,7 @@ function buildChartOption({
                   label: {
                     show: true,
                     position: 'end',
-                    formatter: () => compactPrice(latestRealClose),
+                    formatter: () => compactPrice(chartCurrentPrice),
                     color: '#d1fae5',
                     backgroundColor: '#047857',
                     borderRadius: 4,
@@ -2766,7 +2818,7 @@ function buildChartOption({
                     type: 'dashed',
                     opacity: 0.9,
                   },
-                  data: [{ yAxis: latestRealClose }],
+                  data: [{ yAxis: chartCurrentPrice }],
                 }
               : undefined,
           },
@@ -3145,6 +3197,7 @@ export default function EChartsCandlestickChart({
   const [historicalCandles, setHistoricalCandles] = useState<Candle[]>([])
   const [status, setStatus] = useState<'idle' | 'loading' | 'cached' | 'loaded' | 'empty' | 'error'>('idle')
   const [liveProvider, setLiveProvider] = useState<string>('')
+  const [sharedLivePrice, setSharedLivePrice] = useState<number | null>(() => getSharedLivePrice(initialSymbol))
   const [chartOverlays, setChartOverlays] = useState<ChartOverlays | null>(null)
   const [overlayRenderStatus, setOverlayRenderStatus] = useState<OverlayRenderStatus>('off')
 
@@ -3244,6 +3297,28 @@ export default function EChartsCandlestickChart({
     }
   }, [])
 
+
+  useEffect(() => {
+    const applySharedLivePrice = (record: any) => {
+      const recordSymbol = normalizeDefaultSymbol(record?.symbol ?? '')
+      if (recordSymbol !== normalizeDefaultSymbol(symbol)) return
+
+      const price = Number(record?.price)
+      setSharedLivePrice(Number.isFinite(price) && price > 0 ? price : null)
+    }
+
+    setSharedLivePrice(getSharedLivePrice(symbol))
+
+    const onSharedLivePrice = (event: Event) => {
+      applySharedLivePrice((event as CustomEvent).detail)
+    }
+
+    window.addEventListener(SHARED_LIVE_PRICE_EVENT, onSharedLivePrice)
+
+    return () => {
+      window.removeEventListener(SHARED_LIVE_PRICE_EVENT, onSharedLivePrice)
+    }
+  }, [symbol])
 
   useEffect(() => {
     void allowCompactHistory
@@ -3411,6 +3486,7 @@ export default function EChartsCandlestickChart({
 
         if (cancelled || !live) return
 
+        setSharedLivePriceForSymbol(symbol, live)
         setLiveProvider(String(live.source || live.provider || 'live'))
 
         setHistoricalCandles((current) => {
@@ -3589,6 +3665,7 @@ export default function EChartsCandlestickChart({
       nrtrOverlayMode,
       nrtrExitMode,
       nrtrPresetMode,
+      sharedLivePrice,
     })
 
     const chartIdentity = `${symbol}::${timeframe}::${candleMode}::${compact}`
@@ -3633,7 +3710,7 @@ export default function EChartsCandlestickChart({
     return () => {
       window.removeEventListener('resize', resize)
     }
-  }, [symbol, timeframe, candleMode, candles, compact, status, chartOverlays, overlayToggles, smmaOverlayLength, nrtrOverlayMode, nrtrExitMode, nrtrPresetMode])
+  }, [symbol, timeframe, candleMode, candles, compact, status, chartOverlays, overlayToggles, smmaOverlayLength, nrtrOverlayMode, nrtrExitMode, nrtrPresetMode, sharedLivePrice])
 
   useEffect(() => {
     return () => {
