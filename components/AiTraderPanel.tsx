@@ -1103,6 +1103,51 @@ function calculateLiveTradePnl(trade: any, livePrice: number) {
   };
 }
 
+function calculateAiTradeMaxTargetPnl(trade: any) {
+  const existingMaxPnl = toFiniteNumber(
+    trade?.maxPnl ??
+      trade?.maxPnlDollar ??
+      trade?.targetPnl ??
+      trade?.targetPnlDollar,
+    NaN,
+  );
+
+  const entry = toFiniteNumber(trade?.entry ?? trade?.entryPrice, 0);
+  const target = toFiniteNumber(
+    trade?.target ?? trade?.targetPrice ?? trade?.takeProfitPrice ?? trade?.tp1,
+    0,
+  );
+
+  if (entry <= 0 || target <= 0) {
+    return Number.isFinite(existingMaxPnl) ? existingMaxPnl : 0;
+  }
+
+  const side = normalizeTradeSide(
+    trade?.side ?? trade?.decision ?? trade?.rawDecision,
+  );
+  const symbol = trade?.symbol ?? "MES1!";
+  const quantity = Math.max(
+    1,
+    toFiniteNumber(trade?.quantity ?? trade?.qty ?? trade?.contracts, 1),
+  );
+  const pointValue = getAiTradePointValue(symbol, trade);
+  const targetMove = calculateAiTradeDollarMove({
+    symbol,
+    side,
+    entry,
+    price: target,
+    quantity,
+    pointValue,
+  });
+  const calculatedMaxPnl = targetMove.pnl;
+
+  if (Number.isFinite(calculatedMaxPnl) && calculatedMaxPnl > 0) {
+    return calculatedMaxPnl;
+  }
+
+  return Number.isFinite(existingMaxPnl) ? existingMaxPnl : calculatedMaxPnl;
+}
+
 function getTradeKey(trade: any) {
   return String(
     trade?.id ??
@@ -4494,9 +4539,9 @@ export default function AiTraderPanel({
               Clear Local History
             </button>
           </div>
-          <div className="mt-3 overflow-x-auto">
-            <table className="w-full min-w-[1060px] text-left text-xs">
-              <thead className="text-gray-500">
+          <div className="mt-3 max-h-[420px] overflow-auto pr-2">
+            <table className="w-full min-w-[1160px] text-left text-xs">
+              <thead className="sticky top-0 z-10 bg-dark-900/95 text-gray-500 backdrop-blur">
                 <tr>
                   <th className="pb-2">Result</th>
                   <th className="pb-2">Symbol</th>
@@ -4506,6 +4551,7 @@ export default function AiTraderPanel({
                   <th className="pb-2">Target</th>
                   <th className="pb-2">Stop</th>
                   <th className="pb-2">P&L</th>
+                  <th className="pb-2">Max P&L</th>
                   <th className="pb-2">P&L %</th>
                   <th className="pb-2">R</th>
                   <th className="pb-2">Confidence</th>
@@ -4557,6 +4603,11 @@ export default function AiTraderPanel({
                       className={`py-2 font-bold ${toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0) >= 0 ? "text-emerald-300" : "text-red-300"}`}
                     >
                       {formatMoney(trade.pnl ?? trade.pnlDollar)}
+                    </td>
+                    <td
+                      className={`py-2 font-bold ${calculateAiTradeMaxTargetPnl(trade) >= 0 ? "text-emerald-300" : "text-red-300"}`}
+                    >
+                      {formatMoney(calculateAiTradeMaxTargetPnl(trade))}
                     </td>
                     <td
                       className={`py-2 font-bold ${toFiniteNumber(trade.pnlPercent ?? trade.percent, 0) >= 0 ? "text-emerald-300" : "text-red-300"}`}
