@@ -839,27 +839,90 @@ function getTradeLiveCurrentPrice(trade: any, livePrice: number) {
   );
 }
 
+function getAiTradeTickSize(symbol: any) {
+  const text = String(symbol ?? "").toUpperCase();
+
+  if (text.includes("MES") || text.includes("ES")) return 0.25;
+  if (text.includes("BTC")) return 0.5;
+  if (text.includes("ETH")) return 0.05;
+
+  return 0.01;
+}
+
+function getAiTradePointValue(symbol: any, trade?: any) {
+  const explicit = toFiniteNumber(
+    trade?.pointValue ?? trade?.dollarPerPoint ?? trade?.multiplier,
+    NaN,
+  );
+
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+
+  const text = String(symbol ?? trade?.symbol ?? "").toUpperCase();
+
+  // MES = $5 per full point, $1.25 per 0.25 tick.
+  if (text.includes("MES")) return 5;
+
+  // ES = $50 per full point, $12.50 per 0.25 tick.
+  if (text.includes("ES")) return 50;
+
+  return 1;
+}
+
+function roundAiTradePointsToTick(points: number, tickSize: number) {
+  if (!Number.isFinite(points)) return 0;
+  if (!Number.isFinite(tickSize) || tickSize <= 0) return points;
+
+  const sign = points < 0 ? -1 : 1;
+  const ticks = Math.round(Math.abs(points) / tickSize);
+  return sign * ticks * tickSize;
+}
+
+function calculateAiTradeDollarMove({
+  symbol,
+  side,
+  entry,
+  price,
+  quantity = 1,
+  pointValue,
+}: {
+  symbol: any;
+  side: "BUY" | "SELL" | "HOLD";
+  entry: number;
+  price: number;
+  quantity?: number;
+  pointValue?: number;
+}) {
+  if (!Number.isFinite(entry) || !Number.isFinite(price) || entry <= 0 || price <= 0) {
+    return { points: 0, ticks: 0, pnl: 0 };
+  }
+
+  const tickSize = getAiTradeTickSize(symbol);
+  const activePointValue = Math.max(1, toFiniteNumber(pointValue, getAiTradePointValue(symbol)));
+  const activeQuantity = Math.max(1, toFiniteNumber(quantity, 1));
+  const rawPoints = side === "SELL" ? entry - price : price - entry;
+  const points = roundAiTradePointsToTick(rawPoints, tickSize);
+  const ticks = tickSize > 0 ? points / tickSize : 0;
+  const pnl = points * activePointValue * activeQuantity;
+
+  return {
+    points,
+    ticks,
+    pnl,
+  };
+}
+
 function calculateLiveTradePnl(trade: any, livePrice: number) {
   const current = getTradeLiveCurrentPrice(trade, livePrice);
   const entry = toFiniteNumber(trade?.entry ?? trade?.entryPrice, 0);
   const side = normalizeTradeSide(
     trade?.side ?? trade?.decision ?? trade?.rawDecision,
   );
+  const symbol = trade?.symbol ?? "MES1!";
   const quantity = Math.max(
     1,
     toFiniteNumber(trade?.quantity ?? trade?.qty ?? trade?.contracts, 1),
   );
-  const pointValue = Math.max(
-    1,
-    toFiniteNumber(
-      trade?.pointValue ?? trade?.dollarPerPoint ?? trade?.multiplier,
-      String(trade?.symbol ?? "")
-        .toUpperCase()
-        .includes("MES")
-        ? 5
-        : 1,
-    ),
-  );
+  const pointValue = getAiTradePointValue(symbol, trade);
 
   if (entry <= 0 || current <= 0) {
     return {
@@ -867,26 +930,60 @@ function calculateLiveTradePnl(trade: any, livePrice: number) {
       pnl: toFiniteNumber(trade?.currentPnl ?? trade?.pnl, 0),
       pnlPercent: toFiniteNumber(trade?.pnlPercent ?? trade?.percent, 0),
       points: 0,
+      ticks: 0,
+      targetPnl: toFiniteNumber(trade?.targetPnl ?? trade?.maxPnl ?? trade?.maxPnlDollar, 0),
+      riskPnl: toFiniteNumber(trade?.riskPnl, 0),
       rMultiple: toFiniteNumber(trade?.rMultiple ?? trade?.r, 0),
     };
   }
 
-  const points = side === "SELL" ? entry - current : current - entry;
-  const pnl = points * pointValue * quantity;
-  const pnlPercent = entry > 0 ? points / entry : 0;
+  const liveMove = calculateAiTradeDollarMove({
+    symbol,
+    side,
+    entry,
+    price: current,
+    quantity,
+    pointValue,
+  });
+  const pnl = liveMove.pnl;
+  const pnlPercent = entry > 0 ? liveMove.points / entry : 0;
 
+  const target = toFiniteNumber(trade?.target ?? trade?.targetPrice ?? trade?.takeProfitPrice, 0);
   const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0);
+  const targetMove = calculateAiTradeDollarMove({
+    symbol,
+    side,
+    entry,
+    price: target,
+    quantity,
+    pointValue,
+  });
+  const stopMove = calculateAiTradeDollarMove({
+    symbol,
+    side,
+    entry,
+    price: stop,
+    quantity,
+    pointValue,
+  });
   const riskPoints = stop > 0 ? Math.abs(entry - stop) : 0;
   const rMultiple =
     riskPoints > 0
-      ? points / riskPoints
+      ? liveMove.points / riskPoints
       : toFiniteNumber(trade?.rMultiple ?? trade?.r, 0);
 
   return {
     current,
     pnl,
     pnlPercent,
-    points,
+    points: liveMove.points,
+    ticks: liveMove.ticks,
+    targetPnl: targetMove.pnl > 0 ? targetMove.pnl : toFiniteNumber(trade?.targetPnl ?? trade?.maxPnl ?? trade?.maxPnlDollar, 0),
+    targetTicks: targetMove.ticks,
+    targetPoints: targetMove.points,
+    riskPnl: stopMove.pnl,
+    riskTicks: stopMove.ticks,
+    riskPoints: stopMove.points,
     rMultiple,
   };
 }
@@ -1079,7 +1176,7 @@ function buildClosedTradeFromOpenTrade({
   const result = live.pnl > 0 ? "WIN" : live.pnl < 0 ? "LOSS" : "BREAKEVEN";
 
   const maxPnl = Math.max(
-    toFiniteNumber(trade?.maxPnl ?? trade?.maxPnlDollar, live.pnl),
+    toFiniteNumber(trade?.maxPnl ?? trade?.maxPnlDollar, live.targetPnl || live.pnl),
     live.pnl,
   );
 
@@ -1102,6 +1199,11 @@ function buildClosedTradeFromOpenTrade({
     currentPnl: live.pnl,
     maxPnl,
     maxPnlDollar: maxPnl,
+    targetPnl: live.targetPnl,
+    targetPnlDollar: live.targetPnl,
+    riskPnl: live.riskPnl,
+    liveTicks: live.ticks,
+    targetTicks: live.targetTicks,
     pnlPercent: live.pnlPercent,
     percent: live.pnlPercent,
     livePoints: live.points,
@@ -1190,6 +1292,22 @@ function buildFrontendOpenTradeFromDecision({
     riskPoints > 0
       ? Number((rewardPoints / riskPoints).toFixed(2))
       : toFiniteNumber(decision?.riskReward ?? payload?.riskReward, 0);
+  const targetMove = calculateAiTradeDollarMove({
+    symbol: normalizedSymbol,
+    side,
+    entry,
+    price: target,
+    quantity,
+    pointValue,
+  });
+  const stopMove = calculateAiTradeDollarMove({
+    symbol: normalizedSymbol,
+    side,
+    entry,
+    price: stop,
+    quantity,
+    pointValue,
+  });
 
   return {
     id: `AI-${normalizedSymbol}-${normalizedTimeframe}-${side}-${Math.abs(
@@ -1219,6 +1337,14 @@ function buildFrontendOpenTradeFromDecision({
     quantity,
     pointValue,
     dollarPerPoint: pointValue,
+    tickSize: getAiTradeTickSize(normalizedSymbol),
+    targetPnl: targetMove.pnl,
+    targetPnlDollar: targetMove.pnl,
+    maxPnl: targetMove.pnl,
+    maxPnlDollar: targetMove.pnl,
+    riskPnl: stopMove.pnl,
+    targetTicks: targetMove.ticks,
+    riskTicks: stopMove.ticks,
     riskReward,
     confidence: toFiniteNumber(decision?.confidence ?? payload?.confidence, 0),
     confidenceGrade: decision?.confidenceGrade,
@@ -2829,10 +2955,13 @@ export default function AiTraderPanel({
         settlement.shouldClose ? settlement.closePrice : liveActivePrice,
       );
 
-      const maxPnl = Math.max(
-        toFiniteNumber(trade?.maxPnl ?? trade?.maxPnlDollar, live.pnl),
-        live.pnl,
-      );
+      const maxPnl =
+        Number.isFinite(live.targetPnl) && live.targetPnl > 0
+          ? live.targetPnl
+          : Math.max(
+              toFiniteNumber(trade?.maxPnl ?? trade?.maxPnlDollar, live.pnl),
+              live.pnl,
+            );
 
       return {
         ...trade,
@@ -2842,6 +2971,11 @@ export default function AiTraderPanel({
         pnl: live.pnl,
         maxPnl,
         maxPnlDollar: maxPnl,
+        targetPnl: live.targetPnl,
+        targetPnlDollar: live.targetPnl,
+        riskPnl: live.riskPnl,
+        liveTicks: live.ticks,
+        targetTicks: live.targetTicks,
         pnlPercent: live.pnlPercent,
         percent: live.pnlPercent,
         livePoints: live.points,
