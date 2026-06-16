@@ -2404,6 +2404,88 @@ export default function AiTraderPanel({
     [forgetOpenTrades],
   );
 
+  const closeTradeOnBackend = useCallback(
+    async ({
+      trade,
+      closePrice,
+      closeReason,
+      closeLabel,
+    }: {
+      trade: any;
+      closePrice: number;
+      closeReason?: AiTradeCloseReason;
+      closeLabel?: string;
+    }) => {
+      if (!apiBaseUrl) {
+        throw new Error("AI Trader close failed: apiBaseUrl is missing.");
+      }
+
+      const fallbackClosedTrade = buildClosedTradeFromOpenTrade({
+        trade,
+        livePrice: closePrice,
+        closePrice,
+        closeReason,
+        closeLabel,
+        candles,
+      });
+
+      const timeout = createRequestTimeout(16000);
+
+      try {
+        const response = await fetch(`${apiBaseUrl}/api/ai-trader/close`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            tradeId: trade?.id ?? trade?.tradeId ?? getTradeKey(trade),
+            symbol: trade?.symbol ?? symbol,
+            timeframe: trade?.timeframe ?? timeframe,
+            side: trade?.side ?? trade?.decision ?? trade?.rawDecision,
+            exitPrice: closePrice,
+            currentPrice: closePrice,
+            exitReason: closeLabel ?? closeReason ?? "Closed from dashboard shared live price",
+            exitTime: getLatestCandleTime(candles),
+          }),
+          signal: timeout.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(`AI trader close failed: ${await readApiError(response)}`);
+        }
+
+        const json = await response.json();
+        const closedTrade = json?.trade ?? fallbackClosedTrade;
+
+        if (!json?.closed && !json?.trade) {
+          throw new Error(String(json?.message ?? "AI trader close did not return a closed trade."));
+        }
+
+        saveClosedTrades([closedTrade]);
+        forgetOpenTrades([trade]);
+        if (json?.summary) setSummary(json.summary);
+        activePaperTradeLockRef.current = false;
+        openRequestInFlightRef.current = false;
+
+        return {
+          closed: true,
+          trade: closedTrade,
+          summary: json?.summary,
+        };
+      } finally {
+        timeout.clear();
+      }
+    },
+    [
+      apiBaseUrl,
+      candles,
+      forgetOpenTrades,
+      saveClosedTrades,
+      symbol,
+      timeframe,
+    ],
+  );
+
   const fetchDecision = useCallback(
     async (force = false) => {
       if (!apiBaseUrl) {
@@ -2514,17 +2596,24 @@ export default function AiTraderPanel({
           ...(Array.isArray(json?.openTrades) ? json.openTrades : []),
         ];
 
-        // Dashboard-only paper trading is local-first. Backend summary is kept
-        // for learning stats only; it must not inject stale/random open or
-        // closed rows into the visible trade table.
+        // Supabase/backend is the source of truth for live AI trades.
+        // Mirror backend rows into local state only for display continuity.
+        if (backendOpenPayload.length > 0) {
+          saveOpenTrades(backendOpenPayload);
+        } else {
+          setLocalOpenTrades([]);
+        }
+
         const backendClosedTrades = [
           ...(Array.isArray(json?.closedTrades) ? json.closedTrades : []),
           ...(Array.isArray(json?.recentClosedTrades)
             ? json.recentClosedTrades
             : []),
         ];
-        void backendOpenPayload;
-        void backendClosedTrades;
+
+        if (backendClosedTrades.length > 0) {
+          saveClosedTrades(backendClosedTrades);
+        }
       } catch {
         // Keep the panel usable even if summary temporarily fails.
       } finally {
@@ -2546,11 +2635,17 @@ export default function AiTraderPanel({
       lastEvaluateRequestAtRef.current = now;
 
       try {
-        const activeLocalTrades = getActiveOpenTrades(localOpenTrades).filter(
+        const activeTrades = getActiveOpenTrades([
+          ...localOpenTrades,
+          ...(Array.isArray((summary as any)?.globalOpenTrades)
+            ? (summary as any).globalOpenTrades
+            : []),
+          ...(Array.isArray(summary?.openTrades) ? summary.openTrades : []),
+        ]).filter(
           (trade: any) => !closedTradeKeysRef.current.has(getTradeKey(trade)),
         );
 
-        const tradesToClose = activeLocalTrades
+        const tradesToClose = activeTrades
           .map((trade: any) => {
             const settlement = getAiTradeSettlement(
               trade,
@@ -2562,27 +2657,35 @@ export default function AiTraderPanel({
 
             if (!settlement.shouldClose) return null;
 
-            return buildClosedTradeFromOpenTrade({
+            return {
               trade,
-              livePrice: liveActivePrice,
               closePrice: settlement.closePrice,
               closeReason: settlement.closeReason,
               closeLabel: settlement.closeLabel,
-              candles,
-            });
+            };
           })
-          .filter(Boolean) as any[];
+          .filter(Boolean) as Array<{
+            trade: any;
+            closePrice: number;
+            closeReason?: AiTradeCloseReason;
+            closeLabel?: string;
+          }>;
 
-        if (tradesToClose.length > 0) {
-          saveClosedTrades(tradesToClose);
-          forgetOpenTrades(tradesToClose);
-          activePaperTradeLockRef.current = false;
+        let closedCount = 0;
+
+        for (const item of tradesToClose) {
+          await closeTradeOnBackend(item);
+          closedCount += 1;
         }
 
-        if (force || tradesToClose.length > 0) {
+        if (force || closedCount > 0) {
           setActionStatus(
-            `Evaluated shared live price/main chart levels • Closed ${tradesToClose.length} trade(s)`,
+            `Evaluated shared live price/main chart levels • Closed ${closedCount} trade(s) through backend/Supabase`,
           );
+        }
+
+        if (closedCount > 0) {
+          fetchSummary(true);
         }
       } catch (error) {
         setActionStatus(formatRequestError(error, "Evaluate failed"));
@@ -2592,12 +2695,13 @@ export default function AiTraderPanel({
     },
     [
       candles,
+      closeTradeOnBackend,
       decision,
+      fetchSummary,
       liveActivePrice,
       localOpenTrades,
       minConfidence,
-      saveClosedTrades,
-      forgetOpenTrades,
+      summary,
     ],
   );
 
@@ -2696,43 +2800,10 @@ export default function AiTraderPanel({
       // refresh is running. Use the latest already-rendered decision/setup.
       // The openRequestInFlightRef above still prevents duplicate submit clicks.
       //
-      // IMPORTANT DASHBOARD-ONLY RULE:
-      // This panel is dashboard/paper only and has NO broker execution. A valid
-      // dashboard trade should be opened locally first. The backend can have stale
-      // memory and may incorrectly answer "one trade already active" even when
-      // the frontend has verified visible/local/backend open trades are all 0.
-      // Therefore the backend must not be the gatekeeper for creating the visible
-      // paper trade row.
-      const localFirstTrade = buildFrontendOpenTradeFromDecision({
-        decision,
-        payload: safePayload,
-        livePrice: liveActivePrice,
-        symbol,
-        timeframe,
-        candles,
-      });
-
-      if (!localFirstTrade) {
-        activePaperTradeLockRef.current = false;
-        openRequestInFlightRef.current = false;
-        setActionStatus(
-          "Open skipped: current setup could not build a dashboard-only paper trade. Check side, entry, target, stop, and live price.",
-        );
-        return;
-      }
-
-      activePaperTradeLockRef.current = true;
-      openRequestInFlightRef.current = false;
-      saveOpenTrades([localFirstTrade]);
-      if (openSetupKey) {
-        recentOpenSetupKeysRef.current.set(openSetupKey, now);
-      }
-      lastOpenRequestAtRef.current = now;
-      setActionStatus(
-        `Dashboard AI trade opened locally: ${describeAiOpenTradeForLog(localFirstTrade, liveActivePrice)}.`,
-      );
-      return;
-
+      // IMPORTANT SYNC RULE:
+      // Supabase/backend is the official source of truth for live AI trades.
+      // Never open the visible trade only in browser state; otherwise another
+      // computer will not see it in ai_trader_open_trades.
       activePaperTradeLockRef.current = true;
       openRequestInFlightRef.current = true;
       const timeout = createRequestTimeout(16000);
@@ -2795,50 +2866,8 @@ export default function AiTraderPanel({
           getActiveOpenTrades(localOpenTrades).filter(
             (trade: any) => !closedTradeKeysRef.current.has(getTradeKey(trade)),
           ).length === 0 && trustedBackendOpenTrades.length === 0;
-        const fallbackDecisionText = normalizeDecision(
-          nextDecision?.rawDecision ??
-            nextDecision?.decision ??
-            decision?.rawDecision ??
-            decision?.decision,
-        );
-        const fallbackAllowedToTrade = Boolean(
-          nextDecision?.allowedToTrade ??
-            (nextDecision as any)?.allowed ??
-            decision?.allowedToTrade ??
-            (decision as any)?.allowed ??
-            true,
-        );
         const backendOnlyStaleOpenBlock =
           backendBlockedByOpenTrade && frontendHasNoRealOpenTrade;
-        const canUseFrontendFallback =
-          !json?.opened &&
-          !json?.trade &&
-          backendOnlyStaleOpenBlock &&
-          fallbackDecisionText !== "HOLD" &&
-          fallbackAllowedToTrade;
-
-        if (canUseFrontendFallback) {
-          const fallbackTrade = buildFrontendOpenTradeFromDecision({
-            decision: nextDecision,
-            payload: safePayload,
-            livePrice: liveActivePrice,
-            symbol,
-            timeframe,
-            candles,
-          });
-
-          if (fallbackTrade) {
-            activePaperTradeLockRef.current = true;
-            saveOpenTrades([fallbackTrade]);
-            if (openSetupKey)
-              recentOpenSetupKeysRef.current.set(openSetupKey, now);
-            lastOpenRequestAtRef.current = now;
-            setActionStatus(
-              `Dashboard AI trade opened locally. Backend reported an active paper trade, but frontend verified visible/local/backend active trades are 0. Local dashboard-only paper trade opened: ${describeAiOpenTradeForLog(fallbackTrade, liveActivePrice)}.`,
-            );
-            return;
-          }
-        }
 
         if (backendOnlyStaleOpenBlock) {
           activePaperTradeLockRef.current = false;
@@ -3148,7 +3177,7 @@ export default function AiTraderPanel({
     });
 
   const closeDashboardTradeNow = useCallback(
-    (trade: any) => {
+    async (trade: any) => {
       if (!trade) return;
 
       const closePrice =
@@ -3163,25 +3192,24 @@ export default function AiTraderPanel({
         return;
       }
 
-      const closedTrade = buildClosedTradeFromOpenTrade({
-        trade,
-        livePrice: closePrice,
-        closePrice,
-        closeReason: "MANUAL_CLOSE",
-        closeLabel: "Manually closed with X at shared live price",
-        candles,
-      });
+      try {
+        await closeTradeOnBackend({
+          trade,
+          closePrice,
+          closeReason: "MANUAL_CLOSE",
+          closeLabel: "Manually closed with X at shared live price",
+        });
 
-      saveClosedTrades([closedTrade]);
-      forgetOpenTrades([trade]);
-      activePaperTradeLockRef.current = false;
-      openRequestInFlightRef.current = false;
+        setActionStatus(
+          `Manually closed dashboard AI trade at ${formatPrice(closePrice)} through backend/Supabase.`,
+        );
 
-      setActionStatus(
-        `Manually closed dashboard AI trade at ${formatPrice(closePrice)} from shared live price.`,
-      );
+        fetchSummary(true);
+      } catch (error) {
+        setActionStatus(formatRequestError(error, "Manual close failed"));
+      }
     },
-    [candles, forgetOpenTrades, liveActivePrice, saveClosedTrades],
+    [closeTradeOnBackend, fetchSummary, liveActivePrice],
   );
 
   useEffect(() => {
@@ -3213,29 +3241,10 @@ export default function AiTraderPanel({
   useEffect(() => {
     if (!settlementAutoEvaluateKey) return;
 
-    const tradesToClose = liveOpenTrades
-      .filter((trade: any) => trade.shouldCloseNow)
-      .map((trade: any) =>
-        buildClosedTradeFromOpenTrade({
-          trade,
-          livePrice: liveActivePrice,
-          closePrice: toFiniteNumber(trade.closePrice, liveActivePrice),
-          closeReason: trade.closeReason,
-          closeLabel: trade.closeLabel,
-          candles,
-        }),
-      );
-
-    saveClosedTrades(tradesToClose);
-    forgetOpenTrades(tradesToClose);
-    setActionStatus(`Closed ${tradesToClose.length} trade(s) from shared live price/main chart level hit.`);
+    evaluateOpenTrades(true);
   }, [
     settlementAutoEvaluateKey,
-    saveClosedTrades,
-    forgetOpenTrades,
-    liveOpenTrades,
-    liveActivePrice,
-    candles,
+    evaluateOpenTrades,
   ]);
 
   const displayOpenCount = liveOpenTrades.length;
@@ -3623,9 +3632,8 @@ export default function AiTraderPanel({
           </div>
           <p className="mt-1 text-xs text-gray-400">
             Dashboard paper/simulated AI trades only. Broker execution is OFF.
-            Open and closed trades are merged from backend memory and browser
-            localStorage so active trades do not disappear during a backend
-            memory refresh.
+            Supabase/backend memory is the source of truth, so the same open
+            AI trade can appear on every computer logged into the dashboard.
           </p>
         </div>
 
@@ -4356,8 +4364,9 @@ export default function AiTraderPanel({
             Open Dashboard AI Trades
           </div>
           <div className="mb-3 text-[11px] text-gray-500">
-            Open trade current price, P&amp;L, and target/stop/opposite-decision
-            settlement are checked from the live chart price every refresh.
+            Open trade current price, P&amp;L, and target/stop settlement are
+            checked from the shared live chart price and closed through
+            backend/Supabase.
           </div>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[1180px] text-left text-xs">
@@ -4473,9 +4482,8 @@ export default function AiTraderPanel({
                 Saved Closed AI Trades
               </div>
               <div className="mt-1 text-[11px] text-gray-500">
-                Shows backend closed trades plus locally saved frontend
-                closures. This keeps Closed above 0 after target/stop/reversal
-                exits.
+                Shows backend/Supabase closed trades plus local mirrored rows
+                for display continuity. Backend is the official saved history.
               </div>
             </div>
             <button
