@@ -1123,7 +1123,7 @@ function calculateBestFavorableTradeR(
   const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0);
   const current = getTradeLiveCurrentPrice(trade, livePrice);
 
-  if (entry <= 0 || stop <= 0 || current <= 0 || side === "HOLD") {
+  if (entry <= 0 || stop <= 0 || current <= 0) {
     return {
       bestPrice: current,
       bestR: 0,
@@ -1187,7 +1187,7 @@ function getAiTrailingStopSettlement({
   const current = getTradeLiveCurrentPrice(trade, livePrice);
   const activeTrailR = Math.max(0.05, Math.abs(toFiniteNumber(trailingStopR, 0.5)));
 
-  if (entry <= 0 || stop <= 0 || current <= 0 || side === "HOLD") {
+  if (entry <= 0 || stop <= 0 || current <= 0) {
     return {
       active: false,
       shouldClose: false,
