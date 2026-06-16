@@ -643,6 +643,110 @@ function getLatestCandleTime(candles: any[] | undefined) {
   return new Date().toISOString();
 }
 
+
+function getCandleEpochMs(value: any) {
+  const raw = value?.time ?? value?.timestamp ?? value?.t ?? value?.datetime ?? value?.date ?? value;
+
+  if (typeof raw === "number") {
+    return raw > 10_000_000_000 ? raw : raw * 1000;
+  }
+
+  if (typeof raw === "string") {
+    if (/^\d+$/.test(raw.trim())) {
+      const parsed = Number(raw.trim());
+      return parsed > 10_000_000_000 ? parsed : parsed * 1000;
+    }
+
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  return 0;
+}
+
+function getTradeEntryEpochMs(trade: any) {
+  return getCandleEpochMs(trade?.entryTime ?? trade?.createdAt ?? trade?.openedAt ?? trade?.time);
+}
+
+function getCandlesAfterTradeEntry(candles: any[] | undefined, trade: any) {
+  if (!Array.isArray(candles) || candles.length === 0) return [] as any[];
+
+  const entryMs = getTradeEntryEpochMs(trade);
+  if (entryMs <= 0) return candles.slice(-2);
+
+  return candles.filter((candle) => getCandleEpochMs(candle) >= entryMs);
+}
+
+function getTradeLevelHitPrice({
+  trade,
+  livePrice,
+  candles,
+}: {
+  trade: any;
+  livePrice: number;
+  candles?: any[];
+}) {
+  const current = getTradeLiveCurrentPrice(trade, livePrice);
+  const side = normalizeTradeSide(trade?.side ?? trade?.decision ?? trade?.rawDecision);
+  const target = toFiniteNumber(trade?.target ?? trade?.targetPrice ?? trade?.takeProfitPrice ?? trade?.tp1, 0);
+  const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0);
+  const entryMs = getTradeEntryEpochMs(trade);
+  const nowMs = Date.now();
+
+  // Safety guard: never close a just-created paper trade on the same render tick.
+  // The trade must exist long enough for at least one real live-price/chart update
+  // to evaluate it. This prevents fabricated instant open/close rows.
+  if (entryMs > 0 && nowMs - entryMs < 1500) {
+    return { current, targetHit: false, stopHit: false, price: current };
+  }
+
+  const afterEntryCandles = getCandlesAfterTradeEntry(candles, trade);
+  const hitFromCandle = afterEntryCandles.some((candle) => {
+    const high = toFiniteNumber(candle?.high ?? candle?.h, NaN);
+    const low = toFiniteNumber(candle?.low ?? candle?.l, NaN);
+    if (!Number.isFinite(high) || !Number.isFinite(low)) return false;
+
+    if (side === "BUY") {
+      if (target > 0 && high >= target) return true;
+      if (stop > 0 && low <= stop) return true;
+    } else {
+      if (target > 0 && low <= target) return true;
+      if (stop > 0 && high >= stop) return true;
+    }
+
+    return false;
+  });
+
+  const buyTargetHit = target > 0 && side === "BUY" && current >= target;
+  const buyStopHit = stop > 0 && side === "BUY" && current <= stop;
+  const sellTargetHit = target > 0 && side === "SELL" && current <= target;
+  const sellStopHit = stop > 0 && side === "SELL" && current >= stop;
+
+  if (buyTargetHit || sellTargetHit) return { current, targetHit: true, stopHit: false, price: target };
+  if (buyStopHit || sellStopHit) return { current, targetHit: false, stopHit: true, price: stop };
+
+  // Candle high/low confirmation is allowed only after the trade exists. This
+  // ties closed rows to the main chart timeframe and prevents backend/random
+  // fills from creating fake outcomes.
+  if (hitFromCandle) {
+    for (const candle of afterEntryCandles) {
+      const high = toFiniteNumber(candle?.high ?? candle?.h, NaN);
+      const low = toFiniteNumber(candle?.low ?? candle?.l, NaN);
+      if (!Number.isFinite(high) || !Number.isFinite(low)) continue;
+
+      if (side === "BUY") {
+        if (target > 0 && high >= target) return { current, targetHit: true, stopHit: false, price: target };
+        if (stop > 0 && low <= stop) return { current, targetHit: false, stopHit: true, price: stop };
+      } else {
+        if (target > 0 && low <= target) return { current, targetHit: true, stopHit: false, price: target };
+        if (stop > 0 && high >= stop) return { current, targetHit: false, stopHit: true, price: stop };
+      }
+    }
+  }
+
+  return { current, targetHit: false, stopHit: false, price: current };
+}
+
 function getLatestCandleAutoKey(candles: any[] | undefined) {
   if (!Array.isArray(candles) || candles.length === 0) return "no-candle";
 
@@ -912,74 +1016,46 @@ function getAiTradeSettlement(
   livePrice: number,
   decision: AiTraderDecision | null,
   minConfidence: number,
+  candles?: any[],
 ): {
   shouldClose: boolean;
   closePrice: number;
   closeReason?: AiTradeCloseReason;
   closeLabel?: string;
 } {
-  const current = getTradeLiveCurrentPrice(trade, livePrice);
-  const side = normalizeTradeSide(
-    trade?.side ?? trade?.decision ?? trade?.rawDecision,
-  );
-  const target = toFiniteNumber(
-    trade?.target ?? trade?.targetPrice ?? trade?.takeProfitPrice ?? trade?.tp1,
-    0,
-  );
-  const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0);
+  const hit = getTradeLevelHitPrice({ trade, livePrice, candles });
 
-  if (current <= 0) {
+  if (hit.current <= 0) {
     return {
       shouldClose: false,
-      closePrice: current,
+      closePrice: hit.current,
     };
   }
 
-  const buyTargetHit = target > 0 && side === "BUY" && current >= target;
-  const buyStopHit = stop > 0 && side === "BUY" && current <= stop;
-
-  const sellTargetHit = target > 0 && side === "SELL" && current <= target;
-  const sellStopHit = stop > 0 && side === "SELL" && current >= stop;
-
-  if (buyTargetHit || sellTargetHit) {
+  if (hit.targetHit) {
     return {
       shouldClose: true,
-      closePrice: target,
+      closePrice: hit.price,
       closeReason: "TARGET_HIT",
-      closeLabel: "Target hit",
+      closeLabel: "Target hit from shared live price / main chart level",
     };
   }
 
-  if (buyStopHit || sellStopHit) {
+  if (hit.stopHit) {
     return {
       shouldClose: true,
-      closePrice: stop,
+      closePrice: hit.price,
       closeReason: "STOP_HIT",
-      closeLabel: "Stop hit",
+      closeLabel: "Stop hit from shared live price / main chart level",
     };
   }
 
-  const nextDecision = normalizeDecision(
-    decision?.rawDecision ?? decision?.decision,
-  );
-  const confidence = toFiniteNumber(decision?.confidence, 0);
-
-  if (
-    nextDecision !== "HOLD" &&
-    ((side === "BUY" && nextDecision === "SELL") ||
-      (side === "SELL" && nextDecision === "BUY"))
-  ) {
-    return {
-      shouldClose: true,
-      closePrice: current,
-      closeReason: "AI_REVERSAL_EXIT",
-      closeLabel: "AI reversal exit",
-    };
-  }
-
+  // No AI reversal auto-close here. Dashboard paper trades now close only when
+  // the real shared live price or main-chart candle high/low reaches the stored
+  // target/stop. This prevents random instant closes when the AI decision flips.
   return {
     shouldClose: false,
-    closePrice: current,
+    closePrice: hit.current,
   };
 }
 
@@ -1056,10 +1132,8 @@ function buildFrontendOpenTradeFromDecision({
 
   if (side === "HOLD") return null;
 
-  const entry = toFiniteNumber(
-    decision?.entry ?? payload?.entryPrice ?? payload?.entry ?? livePrice,
-    0,
-  );
+  const current = toFiniteNumber(livePrice, 0);
+  const entry = current;
   const target = toFiniteNumber(
     decision?.target ??
       payload?.targetPrice ??
@@ -1071,9 +1145,16 @@ function buildFrontendOpenTradeFromDecision({
     decision?.stop ?? payload?.stopPrice ?? payload?.stop,
     0,
   );
-  const current = toFiniteNumber(livePrice, entry);
 
   if (entry <= 0 || target <= 0 || stop <= 0 || current <= 0) return null;
+
+  const targetOnCorrectSide = side === "BUY" ? target > entry : target < entry;
+  const stopOnCorrectSide = side === "BUY" ? stop < entry : stop > entry;
+
+  // A dashboard-only paper trade must be filled at the actual shared live
+  // price. If the saved AI setup target/stop does not make sense versus the
+  // live fill, skip the open instead of inventing a fake entry/exit.
+  if (!targetOnCorrectSide || !stopOnCorrectSide) return null;
 
   const normalizedSymbol = String(
     symbol ?? payload?.symbol ?? "MES1!",
@@ -1144,7 +1225,7 @@ function buildFrontendOpenTradeFromDecision({
     reason:
       decision?.reason ??
       payload?.signal?.reason ??
-      "Frontend dashboard fallback open because backend had stale closed open references.",
+      "Dashboard-only paper trade opened at the shared live price. It will close only after shared live price/main chart levels hit target or stop.",
     reasons: Array.isArray(decision?.reasons) ? decision?.reasons : [],
     entryTime,
     createdAt: entryTime,
@@ -1152,7 +1233,7 @@ function buildFrontendOpenTradeFromDecision({
     frontendOnly: true,
     dashboardOnly: true,
     brokerConnected: false,
-    openedBy: "dashboard_frontend_fallback_after_stale_backend_block",
+    openedBy: "dashboard_local_live_price_fill",
   };
 }
 
@@ -2168,17 +2249,17 @@ export default function AiTraderPanel({
           ...(Array.isArray(json?.openTrades) ? json.openTrades : []),
         ];
 
-        if (backendOpenPayload.length > 0) {
-          saveOpenTrades(backendOpenPayload);
-        }
-
+        // Dashboard-only paper trading is local-first. Backend summary is kept
+        // for learning stats only; it must not inject stale/random open or
+        // closed rows into the visible trade table.
         const backendClosedTrades = [
           ...(Array.isArray(json?.closedTrades) ? json.closedTrades : []),
           ...(Array.isArray(json?.recentClosedTrades)
             ? json.recentClosedTrades
             : []),
         ];
-        saveClosedTrades(backendClosedTrades);
+        void backendOpenPayload;
+        void backendClosedTrades;
       } catch {
         // Keep the panel usable even if summary temporarily fails.
       } finally {
@@ -2191,8 +2272,6 @@ export default function AiTraderPanel({
 
   const evaluateOpenTrades = useCallback(
     async (force = false) => {
-      if (!apiBaseUrl) return;
-
       const now = Date.now();
 
       if (evaluateRequestInFlightRef.current) return;
@@ -2200,98 +2279,60 @@ export default function AiTraderPanel({
 
       evaluateRequestInFlightRef.current = true;
       lastEvaluateRequestAtRef.current = now;
-      const timeout = createRequestTimeout(14000);
 
       try {
-        setActionStatus(force ? "Evaluating open AI trades..." : "");
-
-        const response = await fetch(`${apiBaseUrl}/api/ai-trader/evaluate`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(
-            sanitizeAiTraderPayload({
-              symbol,
-              timeframe,
-              currentPrice: liveActivePrice,
-              livePrice: liveActivePrice,
-              markPrice: liveActivePrice,
-              decision,
-              candles: Array.isArray(candles) ? candles.slice(-120) : [],
-            }),
-          ),
-          signal: timeout.signal,
-        });
-
-        if (!response.ok) {
-          throw new Error(
-            `AI trader evaluate failed: ${await readApiError(response)}`,
-          );
-        }
-
-        const json = await response.json();
-        const nextSummary = json?.summary ?? null;
-        setSummary(nextSummary);
-        setPersistentLearningStats((current: any) =>
-          mergeAiDecisionStats(
-            current,
-            getAiDecisionStatsFromSummary(nextSummary),
-          ),
+        const activeLocalTrades = getActiveOpenTrades(localOpenTrades).filter(
+          (trade: any) => !closedTradeKeysRef.current.has(getTradeKey(trade)),
         );
 
-        const backendOpenPayload = [
-          ...(Array.isArray(json?.globalOpenTrades)
-            ? json.globalOpenTrades
-            : []),
-          ...(Array.isArray(json?.openTrades) ? json.openTrades : []),
-          ...(Array.isArray(nextSummary?.globalOpenTrades)
-            ? nextSummary.globalOpenTrades
-            : []),
-          ...(Array.isArray(nextSummary?.openTrades)
-            ? nextSummary.openTrades
-            : []),
-        ];
+        const tradesToClose = activeLocalTrades
+          .map((trade: any) => {
+            const settlement = getAiTradeSettlement(
+              trade,
+              liveActivePrice,
+              decision,
+              minConfidence,
+              candles,
+            );
 
-        if (backendOpenPayload.length > 0) {
-          saveOpenTrades(backendOpenPayload);
+            if (!settlement.shouldClose) return null;
+
+            return buildClosedTradeFromOpenTrade({
+              trade,
+              livePrice: liveActivePrice,
+              closePrice: settlement.closePrice,
+              closeReason: settlement.closeReason,
+              closeLabel: settlement.closeLabel,
+              candles,
+            });
+          })
+          .filter(Boolean) as any[];
+
+        if (tradesToClose.length > 0) {
+          saveClosedTrades(tradesToClose);
+          forgetOpenTrades(tradesToClose);
+          activePaperTradeLockRef.current = false;
         }
 
-        const backendClosedTrades = [
-          ...(Array.isArray(json?.closedTrades) ? json.closedTrades : []),
-          ...(Array.isArray(json?.recentClosedTrades)
-            ? json.recentClosedTrades
-            : []),
-          ...(Array.isArray(nextSummary?.closedTrades)
-            ? nextSummary.closedTrades
-            : []),
-          ...(Array.isArray(nextSummary?.recentClosedTrades)
-            ? nextSummary.recentClosedTrades
-            : []),
-        ];
-        saveClosedTrades(backendClosedTrades);
-
-        if (force || backendClosedTrades.length > 0) {
+        if (force || tradesToClose.length > 0) {
           setActionStatus(
-            `Evaluated • Closed ${json?.closedCount ?? backendClosedTrades.length ?? 0} trade(s)`,
+            `Evaluated shared live price/main chart levels • Closed ${tradesToClose.length} trade(s)`,
           );
         }
       } catch (error) {
         setActionStatus(formatRequestError(error, "Evaluate failed"));
       } finally {
-        timeout.clear();
         evaluateRequestInFlightRef.current = false;
       }
     },
     [
-      apiBaseUrl,
       candles,
       decision,
       liveActivePrice,
+      localOpenTrades,
+      minConfidence,
       saveClosedTrades,
-      saveOpenTrades,
-      symbol,
-      timeframe,
+      forgetOpenTrades,
     ],
   );
 
@@ -2781,6 +2822,7 @@ export default function AiTraderPanel({
         liveActivePrice,
         decision,
         minConfidence,
+        candles,
       );
       const live = calculateLiveTradePnl(
         trade,
@@ -2865,12 +2907,11 @@ export default function AiTraderPanel({
 
     saveClosedTrades(tradesToClose);
     forgetOpenTrades(tradesToClose);
-    evaluateOpenTrades(true);
+    setActionStatus(`Closed ${tradesToClose.length} trade(s) from shared live price/main chart level hit.`);
   }, [
     settlementAutoEvaluateKey,
     saveClosedTrades,
     forgetOpenTrades,
-    evaluateOpenTrades,
     liveOpenTrades,
     liveActivePrice,
     candles,
