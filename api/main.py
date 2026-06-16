@@ -90,6 +90,8 @@ try:
         ai_trader_diagnostics,
         ai_trader_export,
         ai_trader_summary,
+        get_ai_trader_control_state,
+        update_ai_trader_control_state,
         close_ai_trade,
         evaluate_ai_trades,
         get_ai_trader_decision,
@@ -103,6 +105,8 @@ except Exception:
             ai_trader_diagnostics,
             ai_trader_export,
             ai_trader_summary,
+            get_ai_trader_control_state,
+            update_ai_trader_control_state,
             close_ai_trade,
             evaluate_ai_trades,
             get_ai_trader_decision,
@@ -114,6 +118,8 @@ except Exception:
         ai_trader_diagnostics = None
         ai_trader_export = None
         ai_trader_summary = None
+        get_ai_trader_control_state = None
+        update_ai_trader_control_state = None
         close_ai_trade = None
         evaluate_ai_trades = None
         get_ai_trader_decision = None
@@ -541,6 +547,21 @@ class AiTraderDiagnosticsPayload(BaseModel):
     currentPrice: Optional[Any] = None
     candles: Optional[Any] = None
     includeMemory: Optional[Any] = True
+
+
+class AiTraderControlPayload(BaseModel):
+    enabled: Optional[Any] = None
+    symbol: Optional[Any] = "MES1!"
+    timeframe: Optional[Any] = "1m"
+    minConfidence: Optional[Any] = None
+    minRiskReward: Optional[Any] = None
+    maxRiskR: Optional[Any] = None
+    useAiTrailingStop: Optional[Any] = None
+    trailingStopR: Optional[Any] = None
+    settings: Optional[Any] = None
+    controlledBy: Optional[Any] = "dashboard"
+    source: Optional[Any] = "dashboard"
+
 
 class ProjectionEnginePayload(BaseModel):
     # Loose payload on purpose. The dashboard sends mixed frontend context objects,
@@ -6877,6 +6898,22 @@ def ai_trader_diagnostics_route(payload: Optional[AiTraderDiagnosticsPayload] = 
     data.setdefault("symbol", symbol)
     data.setdefault("timeframe", timeframe)
     return ai_trader_diagnostics(**data)
+
+
+@app.get("/api/ai-trader/control")
+@app.get("/api/ai-trader-control")
+def ai_trader_control_get_route(symbol: str = "MES1!", timeframe: str = "1m") -> Dict[str, Any]:
+    if get_ai_trader_control_state is None:
+        raise HTTPException(status_code=503, detail="AI Trader control module unavailable")
+    return get_ai_trader_control_state(symbol=symbol, timeframe=timeframe)
+
+
+@app.post("/api/ai-trader/control")
+@app.post("/api/ai-trader-control")
+def ai_trader_control_post_route(payload: AiTraderControlPayload) -> Dict[str, Any]:
+    if update_ai_trader_control_state is None:
+        raise HTTPException(status_code=503, detail="AI Trader control module unavailable")
+    return update_ai_trader_control_state(**model_to_dict(payload))
 
 
 @app.get("/api/ai-trader/summary")
