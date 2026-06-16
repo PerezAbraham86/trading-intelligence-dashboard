@@ -6845,6 +6845,7 @@ export default function Dashboard() {
               scorecards={matrixScorecards}
               overlayPayload={mainChartOverlayPayload}
               unifiedIntelligence={mergedUnifiedIntelligence}
+              projectionEngine={projectionEngine}
               candles={mainChartCandles}
               strategyTesterResults={strategyTesterResults}
             />
