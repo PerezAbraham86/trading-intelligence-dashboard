@@ -2373,6 +2373,43 @@ export default function AiTraderPanel({
       // Do not block a valid autonomous entry just because a decision/evaluate
       // refresh is running. Use the latest already-rendered decision/setup.
       // The openRequestInFlightRef above still prevents duplicate submit clicks.
+      //
+      // IMPORTANT DASHBOARD-ONLY RULE:
+      // This panel is dashboard/paper only and has NO broker execution. A valid
+      // dashboard trade should be opened locally first. The backend can have stale
+      // memory and may incorrectly answer "one trade already active" even when
+      // the frontend has verified visible/local/backend open trades are all 0.
+      // Therefore the backend must not be the gatekeeper for creating the visible
+      // paper trade row.
+      const localFirstTrade = buildFrontendOpenTradeFromDecision({
+        decision,
+        payload: safePayload,
+        livePrice: liveActivePrice,
+        symbol,
+        timeframe,
+        candles,
+      });
+
+      if (!localFirstTrade) {
+        activePaperTradeLockRef.current = false;
+        openRequestInFlightRef.current = false;
+        setActionStatus(
+          "Open skipped: current setup could not build a dashboard-only paper trade. Check side, entry, target, stop, and live price.",
+        );
+        return;
+      }
+
+      activePaperTradeLockRef.current = true;
+      openRequestInFlightRef.current = false;
+      saveOpenTrades([localFirstTrade]);
+      if (openSetupKey) {
+        recentOpenSetupKeysRef.current.set(openSetupKey, now);
+      }
+      lastOpenRequestAtRef.current = now;
+      setActionStatus(
+        `Dashboard AI trade opened locally: ${describeAiOpenTradeForLog(localFirstTrade, liveActivePrice)}.`,
+      );
+      return;
 
       activePaperTradeLockRef.current = true;
       openRequestInFlightRef.current = true;
