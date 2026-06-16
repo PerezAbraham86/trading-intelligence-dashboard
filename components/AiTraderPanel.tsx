@@ -1881,12 +1881,28 @@ export default function AiTraderPanel({
     };
   }, [apiBaseUrl, autoPaperMode, symbol, timeframe]);
 
+  const sharedLivePriceFromDashboard = useMemo(() => {
+    return toFiniteNumber(activePrice, 0);
+  }, [activePrice]);
+
   const bestLivePriceForTrades = useMemo(() => {
+    // Critical: the dashboard shared live price is the source of truth for
+    // open paper trades, P&L, target/stop checks, and close logic. The direct
+    // /api/live-price poll is only a fallback because it can lag behind or be
+    // rejected by the backend while the chart shared price is still updating.
+    if (sharedLivePriceFromDashboard > 0) return sharedLivePriceFromDashboard;
+
     const direct = toFiniteNumber(directLivePrice, 0);
     if (direct > 0) return direct;
 
-    return toFiniteNumber(activePrice, 0);
-  }, [activePrice, directLivePrice]);
+    return 0;
+  }, [directLivePrice, sharedLivePriceFromDashboard]);
+
+  const livePriceSourceLabel = useMemo(() => {
+    if (sharedLivePriceFromDashboard > 0) return "shared_live_price";
+    if (toFiniteNumber(directLivePrice, 0) > 0) return "backend_live_price";
+    return "chart_candle_fallback";
+  }, [directLivePrice, sharedLivePriceFromDashboard]);
 
   const liveActivePrice = useMemo(() => {
     return getLiveAiCurrentPrice(bestLivePriceForTrades, signal, candles);
@@ -2789,8 +2805,7 @@ export default function AiTraderPanel({
         livePoints: live.points,
         rMultiple: live.rMultiple,
         liveUpdatedFromChart: live.current > 0,
-        livePriceSource:
-          directLivePrice > 0 ? "backend_live_price" : "chart_active_price",
+        livePriceSource: livePriceSourceLabel,
         livePriceUpdatedAt: directLivePriceUpdatedAt,
 
         shouldCloseNow: settlement.shouldClose,
@@ -2996,8 +3011,9 @@ export default function AiTraderPanel({
       symbol,
       timeframe,
       live: formatPrice(liveActivePrice),
-      liveSource:
-        directLivePrice > 0 ? "backend_live_price" : "chart_active_price",
+      liveSource: livePriceSourceLabel,
+      sharedLive: formatPrice(sharedLivePriceFromDashboard),
+      backendLive: formatPrice(directLivePrice),
     });
 
     pushRow(decision?.allowedToTrade ? "success" : "warn", "decision-table", {
@@ -3201,6 +3217,8 @@ export default function AiTraderPanel({
     decision,
     decisionStats,
     directLivePrice,
+    livePriceSourceLabel,
+    sharedLivePriceFromDashboard,
     displayClosedCount,
     displayOpenCount,
     hiddenBackendOpenTrades,
