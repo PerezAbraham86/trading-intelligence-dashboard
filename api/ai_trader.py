@@ -29,6 +29,7 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
 AI_TRADER_STORAGE = os.getenv("AI_TRADER_STORAGE", "json").lower().strip()
 AI_TRADER_USER_KEY = os.getenv("AI_TRADER_USER_KEY", "default").strip() or "default"
+AI_TRADER_CONTROL_ROW_ID = os.getenv("AI_TRADER_CONTROL_ROW_ID", f"AI_TRADER_CONTROL::{AI_TRADER_USER_KEY}").strip() or f"AI_TRADER_CONTROL::{AI_TRADER_USER_KEY}"
 AI_TRADER_ALLOW_MULTIPLE_OPEN_TRADES = os.getenv("AI_TRADER_ALLOW_MULTIPLE_OPEN_TRADES", "false").lower().strip() in {"1", "true", "yes", "on"}
 AI_TRADER_MAX_ACTIVE_OPEN_TRADES = max(1, int(os.getenv("AI_TRADER_MAX_ACTIVE_OPEN_TRADES", "1")))
 AI_TRADER_OPEN_LOAD_LIMIT = int(os.getenv("AI_TRADER_OPEN_LOAD_LIMIT", "50"))
@@ -762,6 +763,176 @@ def decision_to_row(decision: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+
+def default_ai_trader_control_state(symbol: Any = "MES1!", timeframe: Any = "1m") -> Dict[str, Any]:
+    """Shared AI Trader ON/OFF + settings state for every browser."""
+    return {
+        "eventType": "AI_TRADER_CONTROL_STATE",
+        "status": "Ready",
+        "dashboardOnly": True,
+        "brokerConnected": False,
+        "enabled": False,
+        "symbol": normalize_symbol(symbol),
+        "timeframe": normalize_timeframe(timeframe),
+        "minConfidence": DEFAULT_MIN_CONFIDENCE,
+        "minRiskReward": DEFAULT_MIN_RR,
+        "maxRiskR": 1.0,
+        "useAiTrailingStop": False,
+        "trailingStopR": 0.5,
+        "settings": {
+            "minConfidence": DEFAULT_MIN_CONFIDENCE,
+            "minRiskReward": DEFAULT_MIN_RR,
+            "maxRiskR": 1.0,
+            "useAiTrailingStop": False,
+            "trailingStopR": 0.5,
+        },
+        "controlledBy": "backend",
+        "source": "default_control_state",
+        "storage": "supabase" if supabase_enabled() else "json",
+        "updatedAt": now_iso(),
+        "createdAt": now_iso(),
+    }
+
+
+def normalize_ai_trader_control_state(value: Any, symbol: Any = "MES1!", timeframe: Any = "1m") -> Dict[str, Any]:
+    base = default_ai_trader_control_state(symbol=symbol, timeframe=timeframe)
+    raw = value if isinstance(value, dict) else {}
+    raw_settings = raw.get("settings") if isinstance(raw.get("settings"), dict) else {}
+
+    enabled_text = str(raw.get("enabled", base["enabled"])).lower().strip()
+    enabled = raw.get("enabled")
+    if isinstance(enabled, str):
+        enabled = enabled_text in {"1", "true", "yes", "on", "enabled", "start", "started"}
+    else:
+        enabled = bool(enabled)
+
+    min_conf = clamp(to_float(raw.get("minConfidence", raw_settings.get("minConfidence", base["minConfidence"])), base["minConfidence"]), 1, 100)
+    min_rr = clamp(to_float(raw.get("minRiskReward", raw_settings.get("minRiskReward", base["minRiskReward"])), base["minRiskReward"]), 0.1, 10)
+    max_risk = clamp(abs(to_float(raw.get("maxRiskR", raw_settings.get("maxRiskR", base["maxRiskR"])), base["maxRiskR"])), 0.1, 10)
+    trailing = clamp(abs(to_float(raw.get("trailingStopR", raw_settings.get("trailingStopR", base["trailingStopR"])), base["trailingStopR"])), 0.05, 5)
+    use_trailing = raw.get("useAiTrailingStop", raw_settings.get("useAiTrailingStop", base["useAiTrailingStop"]))
+    if isinstance(use_trailing, str):
+        use_trailing = use_trailing.lower().strip() in {"1", "true", "yes", "on", "enabled"}
+    else:
+        use_trailing = bool(use_trailing)
+
+    normalized = {
+        **base,
+        **{key: val for key, val in raw.items() if key not in {"settings"}},
+        "eventType": "AI_TRADER_CONTROL_STATE",
+        "status": "Ready",
+        "dashboardOnly": True,
+        "brokerConnected": False,
+        "enabled": enabled,
+        "symbol": normalize_symbol(raw.get("symbol") or symbol or base["symbol"]),
+        "timeframe": normalize_timeframe(raw.get("timeframe") or timeframe or base["timeframe"]),
+        "minConfidence": round(min_conf, 4),
+        "minRiskReward": round(min_rr, 4),
+        "maxRiskR": round(max_risk, 4),
+        "useAiTrailingStop": bool(use_trailing),
+        "trailingStopR": round(trailing, 4),
+        "settings": {
+            "minConfidence": round(min_conf, 4),
+            "minRiskReward": round(min_rr, 4),
+            "maxRiskR": round(max_risk, 4),
+            "useAiTrailingStop": bool(use_trailing),
+            "trailingStopR": round(trailing, 4),
+        },
+        "controlledBy": str(raw.get("controlledBy") or raw.get("source") or "dashboard"),
+        "storage": "supabase" if supabase_enabled() else "json",
+        "updatedAt": str(raw.get("updatedAt") or now_iso()),
+        "createdAt": str(raw.get("createdAt") or raw.get("updatedAt") or now_iso()),
+    }
+    return normalized
+
+
+def load_ai_trader_control_from_supabase(symbol: Any = "MES1!", timeframe: Any = "1m") -> Dict[str, Any]:
+    if not supabase_enabled():
+        return default_ai_trader_control_state(symbol=symbol, timeframe=timeframe)
+    query = urllib.parse.urlencode({
+        "select": "payload,created_at",
+        "user_key": f"eq.{AI_TRADER_USER_KEY}",
+        "decision": "eq.CONTROL",
+        "order": "created_at.desc",
+        "limit": "1",
+    })
+    rows = supabase_request("GET", "ai_trader_decision_log", query=query)
+    if isinstance(rows, list) and rows:
+        payload = rows[0].get("payload") if isinstance(rows[0], dict) else None
+        return normalize_ai_trader_control_state(payload, symbol=symbol, timeframe=timeframe)
+    return default_ai_trader_control_state(symbol=symbol, timeframe=timeframe)
+
+
+def save_ai_trader_control_to_supabase(control: Dict[str, Any]) -> None:
+    if not supabase_enabled():
+        return
+    row = {
+        "id": AI_TRADER_CONTROL_ROW_ID,
+        "user_key": AI_TRADER_USER_KEY,
+        "observation_key": AI_TRADER_CONTROL_ROW_ID,
+        "symbol": normalize_symbol(control.get("symbol")),
+        "timeframe": normalize_timeframe(control.get("timeframe")),
+        "decision": "CONTROL",
+        "raw_decision": "CONTROL",
+        "allowed_to_trade": bool(control.get("enabled")),
+        "confidence": db_number(control.get("minConfidence")),
+        "confidence_grade": "CONTROL_ON" if control.get("enabled") else "CONTROL_OFF",
+        "entry": None,
+        "target": None,
+        "stop": None,
+        "risk_reward": db_number(control.get("minRiskReward")),
+        "bucket": "AI_TRADER_CONTROL",
+        "reason": "Shared backend AI Trader control state",
+        "projection_engine_mode": None,
+        "ai_permission": "ENABLED" if control.get("enabled") else "DISABLED",
+        "payload": control,
+        "created_at": control.get("updatedAt") or now_iso(),
+    }
+    supabase_upsert_rows("ai_trader_decision_log", [row])
+
+
+def get_ai_trader_control_state(symbol: Any = "MES1!", timeframe: Any = "1m") -> Dict[str, Any]:
+    if supabase_enabled():
+        try:
+            return load_ai_trader_control_from_supabase(symbol=symbol, timeframe=timeframe)
+        except Exception as error:
+            state = default_ai_trader_control_state(symbol=symbol, timeframe=timeframe)
+            state.update({"status": "Error", "error": str(error), "source": "supabase_control_load_failed"})
+            return state
+
+    memory = load_memory()
+    return normalize_ai_trader_control_state(memory.get("controlState"), symbol=symbol, timeframe=timeframe)
+
+
+def update_ai_trader_control_state(**payload: Any) -> Dict[str, Any]:
+    with MEMORY_LOCK:
+        current = get_ai_trader_control_state(
+            symbol=payload.get("symbol") or "MES1!",
+            timeframe=payload.get("timeframe") or "1m",
+        )
+        merged = {**current, **payload, "updatedAt": now_iso()}
+        control = normalize_ai_trader_control_state(
+            merged,
+            symbol=merged.get("symbol") or current.get("symbol"),
+            timeframe=merged.get("timeframe") or current.get("timeframe"),
+        )
+        control["source"] = "backend_shared_ai_trader_control"
+        control["lastCommand"] = "START" if control.get("enabled") else "STOP"
+
+        if supabase_enabled():
+            try:
+                save_ai_trader_control_to_supabase(control)
+            except Exception as error:
+                control["status"] = "Error"
+                control["error"] = str(error)
+                return control
+        else:
+            memory = load_memory()
+            memory["controlState"] = control
+            save_memory(memory)
+
+        return control
+
 def supabase_select_table(table: str, order_col: str = "created_at", limit: int = 500) -> List[Dict[str, Any]]:
     """Load a bounded recent slice from Supabase to prevent Render memory spikes."""
     safe_limit = max(1, min(int(limit or 500), 2500))
@@ -792,7 +963,7 @@ def load_memory_from_supabase() -> Dict[str, Any]:
         "updatedAt": now_iso(),
         "openTrades": dedupe_open_trades([row_to_trade(row) for row in open_rows]),
         "closedTrades": [row_to_trade(row) for row in closed_rows],
-        "decisionLog": [row_to_decision(row) for row in decision_rows],
+        "decisionLog": [row_to_decision(row) for row in decision_rows if str(row.get("decision") or "").upper() != "CONTROL"],
         "virtualOpenTrades": [row_to_trade(row, virtual=True) for row in virtual_open_rows],
         "virtualClosedTrades": [row_to_trade(row, virtual=True) for row in virtual_closed_rows],
     }
@@ -3310,6 +3481,8 @@ def ai_trader_summary(symbol: Any = "", timeframe: Any = "") -> Dict[str, Any]:
             "virtualOpen": AI_TRADER_VIRTUAL_OPEN_LOAD_LIMIT,
             "virtualClosed": AI_TRADER_VIRTUAL_CLOSED_LOAD_LIMIT,
         },
+        "controlState": get_ai_trader_control_state(symbol=normalized_symbol or symbol or "MES1!", timeframe=normalized_timeframe or timeframe or "1m"),
+        "backendControlState": True,
         "phase6MemoryFix": True,
         "createdAt": now_iso(),
     }
@@ -3458,6 +3631,8 @@ def ai_trader_diagnostics(
         "evaluatedOpenTrades": evaluated,
         "validation": validation,
         "memoryStatus": ai_memory_status(memory),
+        "controlState": get_ai_trader_control_state(symbol=normalized_symbol or symbol or "MES1!", timeframe=normalized_timeframe or timeframe or "1m"),
+        "backendControlState": True,
         "phase1BackendAuthority": {
             "validatePlan": True,
             "structuredErrors": True,
