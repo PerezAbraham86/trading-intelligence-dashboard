@@ -2352,6 +2352,273 @@ def get_live_price_payload(symbol: str, timeframe: str = "1m") -> Dict[str, Any]
         "createdAt": now_iso(),
     }
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PERSISTENT LIVE CANDLE BRIDGE
+# ─────────────────────────────────────────────────────────────────────────────
+
+PERSISTENT_LIVE_CANDLE_CACHE_LIMIT = int(os.getenv("PERSISTENT_LIVE_CANDLE_CACHE_LIMIT", "5000"))
+PERSISTENT_LIVE_CANDLE_MAX_CACHE_AGE_SECONDS = int(os.getenv("PERSISTENT_LIVE_CANDLE_MAX_CACHE_AGE_SECONDS", str(7 * 24 * 60 * 60)))
+
+
+def live_price_payload_to_candle(live_payload: Any, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
+    if not isinstance(live_payload, dict):
+        return None
+
+    normalized_symbol = normalize_symbol(str(live_payload.get("symbol") or symbol))
+    normalized_timeframe = normalize_timeframe(str(live_payload.get("timeframe") or timeframe))
+    price = to_float(
+        live_payload.get("price")
+        or live_payload.get("livePrice")
+        or live_payload.get("currentPrice")
+        or live_payload.get("last")
+        or live_payload.get("close"),
+        0.0,
+    )
+
+    if price <= 0 or not is_price_valid_for_symbol(price, normalized_symbol):
+        return None
+
+    epoch = to_epoch_seconds(
+        live_payload.get("bucketEpoch")
+        or live_payload.get("epoch")
+        or live_payload.get("time")
+        or live_payload.get("timestamp")
+        or live_payload.get("createdAt")
+    )
+
+    if epoch <= 0:
+        epoch = datetime.now(timezone.utc).timestamp()
+
+    bucket_epoch = floor_epoch_to_timeframe(epoch, normalized_timeframe)
+    formatted_time = format_bar_time(bucket_epoch)
+
+    candle = {
+        "time": formatted_time,
+        "timestamp": formatted_time,
+        "epoch": bucket_epoch,
+        "open": price,
+        "high": price,
+        "low": price,
+        "close": price,
+        "volume": to_float(live_payload.get("volume"), 0.0),
+        "symbol": normalized_symbol,
+        "timeframe": normalized_timeframe,
+        "createdAt": now_iso(),
+        "provider": str(live_payload.get("provider") or "live_price"),
+        "source": str(live_payload.get("source") or "persistent_live_price_candle"),
+        "persistentLiveCandle": True,
+    }
+
+    return candle if is_candle_valid_for_symbol(candle, normalized_symbol) else None
+
+
+def merge_live_tick_with_existing_candle(existing: Optional[Dict[str, Any]], tick: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(existing, dict):
+        return dict(tick)
+
+    existing_epoch = int(to_epoch_seconds(existing.get("epoch") or existing.get("time") or existing.get("timestamp")))
+    tick_epoch = int(to_epoch_seconds(tick.get("epoch") or tick.get("time") or tick.get("timestamp")))
+
+    if existing_epoch != tick_epoch:
+        return dict(tick)
+
+    tick_close = to_float(tick.get("close"), 0.0)
+    existing_open = to_float(existing.get("open"), tick_close)
+    existing_high = to_float(existing.get("high"), tick_close)
+    existing_low = to_float(existing.get("low"), tick_close)
+    existing_volume = to_float(existing.get("volume"), 0.0)
+
+    merged = dict(existing)
+    merged.update({
+        "time": tick.get("time") or existing.get("time"),
+        "timestamp": tick.get("timestamp") or tick.get("time") or existing.get("timestamp"),
+        "epoch": tick_epoch,
+        "open": existing_open if existing_open > 0 else tick_close,
+        "high": max(existing_high, to_float(tick.get("high"), tick_close), tick_close),
+        "low": min(existing_low if existing_low > 0 else tick_close, to_float(tick.get("low"), tick_close), tick_close),
+        "close": tick_close,
+        "volume": max(existing_volume, 0.0) + max(to_float(tick.get("volume"), 0.0), 0.0),
+        "symbol": tick.get("symbol") or existing.get("symbol"),
+        "timeframe": tick.get("timeframe") or existing.get("timeframe"),
+        "provider": tick.get("provider") or existing.get("provider"),
+        "source": "persistent_live_candle_ohlc_update",
+        "persistentLiveCandle": True,
+        "updatedAt": now_iso(),
+    })
+
+    return merged
+
+
+def find_cached_candle_for_epoch(symbol: str, timeframe: str, epoch: int) -> Optional[Dict[str, Any]]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    target_epoch = int(epoch or 0)
+
+    if target_epoch <= 0:
+        return None
+
+    candidate_payloads: List[Any] = []
+
+    for route_name in ["dashboard", "historical"]:
+        for getter in [candle_cache_best, candle_cache_stale]:
+            try:
+                cached = getter(
+                    route_name,
+                    normalized_symbol,
+                    normalized_timeframe,
+                    1,
+                    PERSISTENT_LIVE_CANDLE_MAX_CACHE_AGE_SECONDS,
+                ) if getter is candle_cache_best else getter(route_name, normalized_symbol, normalized_timeframe, 1)
+                if cached:
+                    candidate_payloads.append(cached)
+            except Exception:
+                pass
+
+    candidate_payloads.append({"candles": RECENT_CANDLES})
+
+    for payload in candidate_payloads:
+        candles = payload.get("candles") if isinstance(payload, dict) else None
+        if not isinstance(candles, list):
+            continue
+
+        for candle in reversed(candles):
+            if not isinstance(candle, dict):
+                continue
+            if normalize_symbol(str(candle.get("symbol") or normalized_symbol)) != normalized_symbol:
+                continue
+            if normalize_timeframe(str(candle.get("timeframe") or normalized_timeframe)) != normalized_timeframe:
+                continue
+            candle_epoch = int(to_epoch_seconds(candle.get("epoch") or candle.get("time") or candle.get("timestamp")))
+            if candle_epoch == target_epoch:
+                return candle
+
+    return None
+
+
+def upsert_recent_live_candle(candle: Dict[str, Any]) -> None:
+    global RECENT_CANDLES
+
+    normalized_symbol = normalize_symbol(str(candle.get("symbol") or ""))
+    normalized_timeframe = normalize_timeframe(str(candle.get("timeframe") or "1m"))
+    candle_epoch = int(to_epoch_seconds(candle.get("epoch") or candle.get("time") or candle.get("timestamp")))
+
+    next_rows: List[Dict[str, Any]] = []
+    replaced = False
+
+    for existing in RECENT_CANDLES:
+        if not isinstance(existing, dict):
+            continue
+
+        existing_symbol = normalize_symbol(str(existing.get("symbol") or ""))
+        existing_timeframe = normalize_timeframe(str(existing.get("timeframe") or ""))
+        existing_epoch = int(to_epoch_seconds(existing.get("epoch") or existing.get("time") or existing.get("timestamp")))
+
+        if existing_symbol == normalized_symbol and existing_timeframe == normalized_timeframe and existing_epoch == candle_epoch:
+            next_rows.append(merge_live_tick_with_existing_candle(existing, candle))
+            replaced = True
+        else:
+            next_rows.append(existing)
+
+    if not replaced:
+        next_rows.append(candle)
+
+    RECENT_CANDLES = merge_candles_by_time(next_rows)[-MAX_RECENT_CANDLES:]
+
+
+def persist_live_candle_to_history_cache(symbol: str, timeframe: str, live_payload: Any) -> Optional[Dict[str, Any]]:
+    tick = live_price_payload_to_candle(live_payload, symbol, timeframe)
+    if not tick:
+        return None
+
+    normalized_symbol = normalize_symbol(str(tick.get("symbol") or symbol))
+    normalized_timeframe = normalize_timeframe(str(tick.get("timeframe") or timeframe))
+    tick_epoch = int(to_epoch_seconds(tick.get("epoch") or tick.get("time") or tick.get("timestamp")))
+    existing = find_cached_candle_for_epoch(normalized_symbol, normalized_timeframe, tick_epoch)
+    merged_tick = merge_live_tick_with_existing_candle(existing, tick)
+
+    if not is_candle_valid_for_symbol(merged_tick, normalized_symbol):
+        return None
+
+    upsert_recent_live_candle(merged_tick)
+
+    # Store the same live candle into both dashboard and historical cache families.
+    # Later historical requests return provider candles merged with these saved live
+    # candles, so the chart does not reload an old history tail and then jump to live.
+    for route_name in ["dashboard", "historical"]:
+        try:
+            candle_cache_set(
+                route_name,
+                normalized_symbol,
+                normalized_timeframe,
+                PERSISTENT_LIVE_CANDLE_CACHE_LIMIT,
+                {
+                    "symbol": normalized_symbol,
+                    "timeframe": normalized_timeframe,
+                    "count": 1,
+                    "candles": [merged_tick],
+                    "provider": merged_tick.get("provider"),
+                    "source": "persistent_live_candle_cache",
+                    "cache": "persistent_live_candle",
+                    "persistentLiveCandles": True,
+                    "createdAt": now_iso(),
+                },
+            )
+        except Exception as error:
+            print(f"[Persistent live candles] cache set failed for {route_name}: {error}")
+
+    return merged_tick
+
+
+def merge_saved_live_candles_with_history(symbol: str, timeframe: str, candles: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    safe_limit = max(1, min(int(limit or 500), 5000))
+
+    live_rows = filter_valid_candles_for_symbol(
+        get_live_recent_candles(normalized_symbol, normalized_timeframe),
+        normalized_symbol,
+    )
+
+    if not live_rows:
+        return filter_valid_candles_for_symbol(merge_candles_by_time(candles), normalized_symbol)[-safe_limit:]
+
+    return filter_valid_candles_for_symbol(
+        merge_candles_by_time([*(candles or []), *live_rows]),
+        normalized_symbol,
+    )[-safe_limit:]
+
+
+def rebuild_history_payload_with_saved_live_candles(
+    *,
+    route_source: str,
+    symbol: str,
+    timeframe: str,
+    payload: Dict[str, Any],
+    limit: int,
+) -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    safe_limit = max(1, min(int(limit or 500), 5000))
+    raw_candles = payload.get("candles") if isinstance(payload, dict) else []
+    candles = raw_candles if isinstance(raw_candles, list) else []
+    merged = merge_saved_live_candles_with_history(normalized_symbol, normalized_timeframe, candles, safe_limit)
+
+    rebuilt = build_candle_route_payload(
+        route_source=route_source,
+        symbol=normalized_symbol,
+        timeframe=normalized_timeframe,
+        candles=merged,
+        provider=str(payload.get("provider") or payload.get("source") or "insightsentry") if isinstance(payload, dict) else "insightsentry",
+        cache_label=str(payload.get("cache") or "provider_plus_persistent_live") if isinstance(payload, dict) else "provider_plus_persistent_live",
+    )
+
+    rebuilt["persistentLiveCandlesMerged"] = len(merged) != len(candles)
+    rebuilt["providerHistoryCount"] = len(candles)
+    rebuilt["savedLiveCandleCount"] = max(0, len(merged) - len(candles))
+
+    return rebuilt
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SIMPLE TECHNICAL / GHOST HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7748,7 +8015,20 @@ def live_candle(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]
 def live_price(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    return get_live_price_payload(normalized_symbol, normalized_timeframe)
+    payload = get_live_price_payload(normalized_symbol, normalized_timeframe)
+
+    saved_candle = persist_live_candle_to_history_cache(
+        normalized_symbol,
+        normalized_timeframe,
+        payload,
+    )
+
+    if saved_candle:
+        payload = dict(payload)
+        payload["persistentLiveCandleSaved"] = True
+        payload["persistentLiveCandle"] = saved_candle
+
+    return payload
 
 
 @app.get("/api/latest-sentiment")
@@ -8579,7 +8859,7 @@ def api_insightsentry_history(
             return fallback
 
     try:
-        return get_historical_ohlcv(
+        provider_payload = get_historical_ohlcv(
             symbol=normalized_symbol,
             timeframe=normalized_timeframe,
             start_ym=start_ym,
@@ -8589,6 +8869,20 @@ def api_insightsentry_history(
             dadj=dadj,
             force=provider_force,
         )
+
+        if isinstance(provider_payload, dict):
+            rebuilt = rebuild_history_payload_with_saved_live_candles(
+                route_source="insightsentry_history_plus_persistent_live",
+                symbol=normalized_symbol,
+                timeframe=normalized_timeframe,
+                payload=provider_payload,
+                limit=safe_limit,
+            )
+
+            if rebuilt.get("candles"):
+                return candle_cache_set("historical", normalized_symbol, normalized_timeframe, safe_limit, rebuilt)
+
+        return provider_payload
     except HTTPException as error:
         if error.status_code == 429 and is_futures_symbol(normalized_symbol):
             fallback = cached_futures_history_payload_for_rate_limit(
@@ -8597,7 +8891,14 @@ def api_insightsentry_history(
                 safe_limit,
             )
             if fallback:
-                return fallback
+                rebuilt = rebuild_history_payload_with_saved_live_candles(
+                    route_source="insightsentry_history_rate_limit_cache_plus_persistent_live",
+                    symbol=normalized_symbol,
+                    timeframe=normalized_timeframe,
+                    payload=fallback,
+                    limit=safe_limit,
+                )
+                return rebuilt
         raise
     except Exception as error:
         text = str(error).lower()
@@ -8608,7 +8909,14 @@ def api_insightsentry_history(
                 safe_limit,
             )
             if fallback:
-                return fallback
+                rebuilt = rebuild_history_payload_with_saved_live_candles(
+                    route_source="insightsentry_history_rate_limit_cache_plus_persistent_live",
+                    symbol=normalized_symbol,
+                    timeframe=normalized_timeframe,
+                    payload=fallback,
+                    limit=safe_limit,
+                )
+                return rebuilt
         raise
 
 
