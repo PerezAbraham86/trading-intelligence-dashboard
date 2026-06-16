@@ -4248,6 +4248,9 @@ function useChartCandles(
     let initialHistoricalReady = false
     let lastInitialHistoryRetryAt = 0
     let lastInitialHistoryWaitLoggedAt = 0
+    let fetchCandlesInFlight = false
+    let lastFetchInFlightLoggedAt = 0
+    let lastHistoryEmptyLoggedAt = 0
 
     setDebugLog([])
     addCandleDebugLog('mount', { enabled, limit, pollMs })
@@ -4439,6 +4442,20 @@ function useChartCandles(
         return
       }
 
+      if (fetchCandlesInFlight) {
+        const now = Date.now()
+        if (now - lastFetchInFlightLoggedAt >= LIVE_GAP_REPAIR_LOG_THROTTLE_MS) {
+          lastFetchInFlightLoggedAt = now
+          addCandleDebugLog('fetch-skip-in-flight', {
+            reason,
+            priority,
+          })
+        }
+        return
+      }
+
+      fetchCandlesInFlight = true
+
       try {
         const cacheReason = force ? `before-force-fetch:${reason}` : `before-fetch:${reason}`
         const cachedWasApplied = applyCachedPayload(cacheReason)
@@ -4491,18 +4508,33 @@ function useChartCandles(
           setUnifiedIntelligence(nextPayload.unifiedIntelligence ?? null)
         }
       } catch (error) {
-        console.error('Lightweight chart candle sync error:', error)
-        addCandleDebugLog('fetch-error', {
-          error: error instanceof Error ? error.message : 'Candle API error',
-        }, 'error')
+        if (cancelled) return
 
-        if (!cancelled) {
-          const cachedWasApplied = applyCachedPayload('after-fetch-error')
-          if (!cachedWasApplied) {
-            setErrorText(error instanceof Error ? error.message : 'Candle API error')
+        const message = error instanceof Error ? error.message : 'Candle API error'
+        const isZeroCandlePending = message.toLowerCase().includes('returned zero candles')
+
+        if (isZeroCandlePending) {
+          const now = Date.now()
+          if (now - lastHistoryEmptyLoggedAt >= LIVE_GAP_REPAIR_LOG_THROTTLE_MS) {
+            lastHistoryEmptyLoggedAt = now
+            addCandleDebugLog('history-empty-waiting', {
+              reason,
+              message,
+            }, 'warn')
           }
+        } else {
+          console.error('Lightweight chart candle sync error:', error)
+          addCandleDebugLog('fetch-error', {
+            error: message,
+          }, 'error')
+        }
+
+        const cachedWasApplied = applyCachedPayload('after-fetch-error')
+        if (!cachedWasApplied) {
+          setErrorText(isZeroCandlePending ? '' : message)
         }
       } finally {
+        fetchCandlesInFlight = false
         if (!cancelled) {
           setIsLoading(false)
         }
