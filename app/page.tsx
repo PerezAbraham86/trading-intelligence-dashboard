@@ -6014,7 +6014,7 @@ function DashboardBootScreen({
               Welcome to MarketBOS
             </h1>
             <p className="mt-3 max-w-2xl text-sm text-gray-400">
-              Waking the backend, preloading MES 3m / 5m / 10m historical candles, warming visible chart history, and syncing AI Trader state before the dashboard mounts.
+              Waking the backend, forcing MES 3m / 5m / 10m historical cache to load before charts mount, then syncing AI Trader state.
             </p>
           </div>
 
@@ -6561,6 +6561,68 @@ export default function Dashboard() {
       return null
     }
 
+    const warmRequiredMesHistoryBundle = async (requiredCoreHistory: Array<{ key: string; symbol: string; timeframe: string; limit: number; minimum: number }>) => {
+      requiredCoreHistory.forEach((chart) => {
+        setBootStep(chart.key, 'loading', `${chart.symbol} ${chart.timeframe} • requesting backend multi-timeframe historical preload`)
+      })
+
+      const preloadParams = new URLSearchParams({
+        symbols: 'MES1!',
+        timeframes: requiredCoreHistory.map((chart) => normalizeTimeframe(chart.timeframe)).join(','),
+        limit: String(Math.max(...requiredCoreHistory.map((chart) => chart.limit), 700)),
+        historicalOnly: 'true',
+      })
+
+      const response = await fetch(`${bootApiBaseUrl}/api/preload-candles?${preloadParams.toString()}`, {
+        cache: 'no-store',
+      })
+
+      if (!response.ok) {
+        throw new Error(`MES multi-timeframe preload failed: ${response.status}`)
+      }
+
+      const payload = await response.json()
+      const results = Array.isArray(payload?.results) ? payload.results : []
+      const resultByTimeframe = new Map<string, any>()
+
+      results.forEach((item: any) => {
+        const tf = normalizeTimeframe(item?.timeframe)
+        if (tf) resultByTimeframe.set(tf, item)
+      })
+
+      const missing: string[] = []
+
+      for (const chart of requiredCoreHistory) {
+        const tf = normalizeTimeframe(chart.timeframe)
+        const result = resultByTimeframe.get(tf)
+        const count = Number(result?.count ?? 0)
+        const source = String(result?.source ?? result?.provider ?? 'backend preload')
+
+        if (Number.isFinite(count) && count >= chart.minimum) {
+          setBootStep(chart.key, 'done', `${chart.symbol} ${tf} • ${count} historical candles preloaded from ${source}`)
+        } else {
+          missing.push(`${chart.symbol} ${tf}: ${Number.isFinite(count) ? count : 0}/${chart.minimum}`)
+          setBootStep(chart.key, 'warning', `${chart.symbol} ${tf} • only ${Number.isFinite(count) ? count : 0} candles returned; waiting for backend history`)
+        }
+      }
+
+      if (missing.length > 0) {
+        throw new Error(`MES historical preload incomplete — ${missing.join(' • ')}`)
+      }
+
+      // Pull the freshly warmed backend cache into the browser shared candle cache
+      // before charts mount. These snapshot calls should now read backend cache,
+      // not hit InsightSentry directly.
+      for (const chart of requiredCoreHistory) {
+        const entry = await warmSnapshot(chart)
+        const candleCount = Array.isArray(entry?.candles) ? entry.candles.length : 0
+        if (candleCount < chart.minimum) {
+          throw new Error(`${chart.symbol} ${chart.timeframe} backend cache warmed but browser received only ${candleCount}/${chart.minimum} candles`)
+        }
+        await sleep(250)
+      }
+    }
+
     async function runDashboardBoot() {
       setDashboardBootError('')
       setDashboardBootReady(false)
@@ -6582,10 +6644,7 @@ export default function Dashboard() {
           { key: 'hist10', symbol: 'MES1!', timeframe: '10m', limit: 700, minimum: CORE_MES_HISTORY_MIN_CANDLES },
         ]
 
-        for (const chart of requiredCoreHistory) {
-          await warmSnapshot(chart)
-          await sleep(350)
-        }
+        await warmRequiredMesHistoryBundle(requiredCoreHistory)
 
         const visibleCharts = [
           { key: 'main', symbol: selectedSymbol, timeframe: selectedTimeframe, limit: 700, minimum: 20 },
