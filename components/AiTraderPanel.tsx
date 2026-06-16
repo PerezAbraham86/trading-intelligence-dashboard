@@ -1694,7 +1694,7 @@ export default function AiTraderPanel({
     }
   }, [apiBaseUrl, candles, decision, liveActivePrice, saveClosedTrades, saveOpenTrades, symbol, timeframe])
 
-  const openDashboardTrade = useCallback(async (source: 'manual' | 'auto' = 'manual') => {
+  const openDashboardTrade = useCallback(async (source: 'auto' = 'auto') => {
     if (!apiBaseUrl) return
 
     const now = Date.now()
@@ -1760,7 +1760,7 @@ export default function AiTraderPanel({
     const timeout = createRequestTimeout(16000)
 
     try {
-      setActionStatus(source === 'auto' ? 'AI Auto Trade opening dashboard-only trade...' : 'Opening dashboard-only AI trade...')
+      setActionStatus('AI Trader opening dashboard-only trade...')
 
       const response = await fetch(`${apiBaseUrl}/api/ai-trader/open`, {
         method: 'POST',
@@ -2063,19 +2063,23 @@ export default function AiTraderPanel({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <label className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-black ${
-            autoPaperMode
-              ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-200'
-              : 'border-dark-600 bg-dark-900 text-gray-400'
-          }`}>
-            <input
-              type="checkbox"
-              checked={autoPaperMode}
-              onChange={(event) => setAutoPaperMode(event.target.checked)}
-              className="h-3 w-3"
-            />
-            AI Auto Trade
-          </label>
+          <button
+            type="button"
+            onClick={() => {
+              setAutoPaperMode((current) => {
+                const next = !current
+                setActionStatus(next ? 'AI Trader started. It will open and manage trades autonomously.' : 'AI Trader stopped. No new autonomous trades will open.')
+                return next
+              })
+            }}
+            className={`rounded-lg px-4 py-2 text-xs font-black transition ${
+              autoPaperMode
+                ? 'border border-red-400/40 bg-red-400/10 text-red-200 hover:bg-red-400/20'
+                : 'border border-emerald-400/40 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20'
+            }`}
+          >
+            {autoPaperMode ? 'Stop AI Trader' : 'Start AI Trader'}
+          </button>
 
           <label className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-gray-400">
             Conf Label
@@ -2117,18 +2121,6 @@ export default function AiTraderPanel({
           >
             Evaluate Open
           </button>
-          <button
-            type="button"
-            onClick={() => openDashboardTrade('manual')}
-            disabled={!decision?.allowedToTrade}
-            className={`rounded-lg px-3 py-2 text-xs font-black ${
-              decision?.allowedToTrade
-                ? 'border border-emerald-400/30 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20'
-                : 'cursor-not-allowed border border-dark-600 bg-dark-900 text-gray-600'
-            }`}
-          >
-            {autoPaperMode ? 'AI Auto Trade Armed' : 'Open AI Auto Trade'}
-          </button>
         </div>
       </div>
 
@@ -2156,7 +2148,7 @@ export default function AiTraderPanel({
           tone={rawDecision === 'BUY' ? 'bull' : rawDecision === 'SELL' ? 'bear' : 'neutral'}
         />
         <StatBox label="Confidence" value={`${toFiniteNumber(decision?.confidence, 0).toFixed(1)}% ${decision?.confidenceGrade ?? ''}`} />
-        <StatBox label="AI Auto Trade" value={autoPaperMode ? 'ARMED' : 'OFF'} tone={autoPaperMode ? 'bull' : 'neutral'} />
+        <StatBox label="AI Trader" value={autoPaperMode ? 'RUNNING' : 'OFF'} tone={autoPaperMode ? 'bull' : 'neutral'} />
         <StatBox label="Entry" value={formatPrice(decision?.entry)} />
         <StatBox label="Target" value={formatPrice(decision?.target)} />
         <StatBox label="Stop" value={formatPrice(decision?.stop)} tone="warn" />
