@@ -8150,15 +8150,24 @@ def _preload_mes_history_from_one_minute(timeframe_list: List[str], limit: int) 
             tf_candles = resample_candles_to_timeframe(one_minute, tf, safe_limit) if one_minute else []
             source = f"mes_preload_resampled_from_1m_{one_minute_source}"
 
-        if not tf_candles:
-            # Last resort: use the normal route for this timeframe. This can hit
-            # provider/cache, but only after the single 1m preload attempt failed.
+        required_tf_count = min(safe_limit, 300)
+
+        if len(tf_candles) < required_tf_count:
+            # Last resort / depth extender:
+            # If 1m history only returned a short session, resampling can produce
+            # too few 5m/10m bars. In that case ask the normal candle router for
+            # the requested timeframe and keep whichever source returns more real
+            # candles. This lets 10m load 300+ direct bars when InsightSentry has
+            # them, while still using the 1m-resampled path for unsupported custom
+            # timeframes like 3m.
             try:
                 fallback_payload = candles(symbol=normalized_symbol, timeframe=tf, limit=safe_limit, force=False)
                 fallback_candles = fallback_payload.get("candles") if isinstance(fallback_payload, dict) else []
                 if isinstance(fallback_candles, list):
-                    tf_candles = [item for item in fallback_candles if isinstance(item, dict)]
-                    source = str(fallback_payload.get("source") or "normal_route_fallback")
+                    clean_fallback = [item for item in fallback_candles if isinstance(item, dict)]
+                    if len(clean_fallback) > len(tf_candles):
+                        tf_candles = clean_fallback[-safe_limit:]
+                        source = str(fallback_payload.get("source") or "normal_route_fallback_depth_extender")
             except Exception as error:
                 print(f"[Preload candles] fallback route failed for {normalized_symbol} {tf}: {error}")
 
@@ -8173,14 +8182,16 @@ def _preload_mes_history_from_one_minute(timeframe_list: List[str], limit: int) 
 
         stored_candles = stored.get("candles") if isinstance(stored, dict) else []
         stored_count = len(stored_candles) if isinstance(stored_candles, list) else 0
+        required_tf_count = min(safe_limit, 300)
         results.append({
             "symbol": normalized_symbol,
             "timeframe": tf,
             "count": stored_count,
+            "requiredCount": required_tf_count,
             "cache": stored.get("cache") if isinstance(stored, dict) else None,
             "provider": stored.get("provider") if isinstance(stored, dict) else "insightsentry",
             "source": stored.get("source") if isinstance(stored, dict) else source,
-            "preloaded": stored_count > 0,
+            "preloaded": stored_count >= required_tf_count,
             "historicalOnly": True,
             "oneMinuteSource": one_minute_source,
             "oneMinuteCount": len(one_minute),
@@ -8225,7 +8236,7 @@ def preload_candles(
 
     return {
         "eventType": "CANDLE_PRELOAD",
-        "status": "Ready" if all(int(item.get("count", 0) or 0) > 0 for item in results) else "Partial",
+        "status": "Ready" if all(int(item.get("count", 0) or 0) >= int(item.get("requiredCount", min(safe_limit, 300)) or min(safe_limit, 300)) for item in results) else "Partial",
         "count": len(results),
         "results": results,
         "createdAt": now_iso(),
