@@ -2432,18 +2432,31 @@ export default function AiTraderPanel({
           /already active|already visible|one .*trade|open trade/i.test(
             backendMessage,
           );
+        const frontendHasNoRealOpenTrade =
+          getActiveOpenTrades(localOpenTrades).filter(
+            (trade: any) => !closedTradeKeysRef.current.has(getTradeKey(trade)),
+          ).length === 0 && trustedBackendOpenTrades.length === 0;
+        const fallbackDecisionText = normalizeDecision(
+          nextDecision?.rawDecision ??
+            nextDecision?.decision ??
+            decision?.rawDecision ??
+            decision?.decision,
+        );
+        const fallbackAllowedToTrade = Boolean(
+          nextDecision?.allowedToTrade ??
+            (nextDecision as any)?.allowed ??
+            decision?.allowedToTrade ??
+            (decision as any)?.allowed ??
+            true,
+        );
+        const backendOnlyStaleOpenBlock =
+          backendBlockedByOpenTrade && frontendHasNoRealOpenTrade;
         const canUseFrontendFallback =
           !json?.opened &&
           !json?.trade &&
-          backendBlockedByOpenTrade &&
-          getActiveOpenTrades(localOpenTrades).filter(
-            (trade: any) => !closedTradeKeysRef.current.has(getTradeKey(trade)),
-          ).length === 0 &&
-          trustedBackendOpenTrades.length === 0 &&
-          normalizeDecision(
-            nextDecision?.rawDecision ?? nextDecision?.decision,
-          ) !== "HOLD" &&
-          Boolean(nextDecision?.allowedToTrade);
+          backendOnlyStaleOpenBlock &&
+          fallbackDecisionText !== "HOLD" &&
+          fallbackAllowedToTrade;
 
         if (canUseFrontendFallback) {
           const fallbackTrade = buildFrontendOpenTradeFromDecision({
@@ -2456,15 +2469,27 @@ export default function AiTraderPanel({
           });
 
           if (fallbackTrade) {
+            activePaperTradeLockRef.current = true;
             saveOpenTrades([fallbackTrade]);
             if (openSetupKey)
               recentOpenSetupKeysRef.current.set(openSetupKey, now);
             lastOpenRequestAtRef.current = now;
             setActionStatus(
-              `Dashboard AI trade opened locally. Backend still has stale closed open references, so frontend opened the dashboard-only paper trade: ${describeAiOpenTradeForLog(fallbackTrade, liveActivePrice)}.`,
+              `Dashboard AI trade opened locally. Backend reported an active paper trade, but frontend verified visible/local/backend active trades are 0. Local dashboard-only paper trade opened: ${describeAiOpenTradeForLog(fallbackTrade, liveActivePrice)}.`,
             );
             return;
           }
+        }
+
+        if (backendOnlyStaleOpenBlock) {
+          activePaperTradeLockRef.current = false;
+          if (openSetupKey) {
+            recentOpenSetupKeysRef.current.delete(openSetupKey);
+          }
+          setActionStatus(
+            "Backend reported an active AI paper trade, but frontend verified no visible/local/backend active trade. Internal lock reset; next eligible tick may open.",
+          );
+          return;
         }
 
         if (!json?.opened && !json?.trade) {
