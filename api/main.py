@@ -8282,6 +8282,242 @@ def engine_state(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500
     }
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DASHBOARD SNAPSHOT ROUTES
+# One backend-for-frontend response so React does not coordinate 8-10 separate
+# polling calls and accidentally hammer InsightSentry.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _snapshot_bool(value: Any, fallback: bool = True) -> bool:
+    if value is None:
+        return fallback
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return fallback
+
+
+def _snapshot_int(value: Any, fallback: int, low: int, high: int) -> int:
+    try:
+        parsed = int(float(value))
+    except Exception:
+        parsed = fallback
+    return max(low, min(high, parsed))
+
+
+def _safe_snapshot_section(label: str, builder: Any) -> Dict[str, Any]:
+    try:
+        value = builder()
+        return value if isinstance(value, dict) else {"status": "Invalid", "value": value}
+    except Exception as error:
+        print(f"[Dashboard Snapshot] {label} failed: {error}")
+        return {
+            "eventType": f"DASHBOARD_SNAPSHOT_{label.upper()}_ERROR",
+            "status": "Error",
+            "error": str(error),
+            "createdAt": now_iso(),
+        }
+
+
+def build_dashboard_snapshot_payload(data: Dict[str, Any]) -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(str(data.get("symbol") or "MES1!"))
+    normalized_timeframe = normalize_timeframe(str(data.get("timeframe") or "1m"))
+    safe_limit = _snapshot_int(data.get("limit"), 700, 50, 5000)
+    include_live = _snapshot_bool(data.get("includeLivePrice"), True)
+    include_engine = _snapshot_bool(data.get("includeEngineState"), True)
+    include_projection = _snapshot_bool(data.get("includeProjectionEngine"), True)
+    include_ai = _snapshot_bool(data.get("includeAiTrader"), True)
+    include_candles = _snapshot_bool(data.get("includeCandles"), True)
+    force = _snapshot_bool(data.get("force"), False)
+
+    candle_payload: Dict[str, Any] = {}
+    candle_list: List[Dict[str, Any]] = []
+
+    if include_candles:
+        candle_payload = _safe_snapshot_section(
+            "candles",
+            lambda: candles(
+                symbol=normalized_symbol,
+                timeframe=normalized_timeframe,
+                limit=safe_limit,
+                force=force,
+            ),
+        )
+        raw_candles = candle_payload.get("candles") if isinstance(candle_payload, dict) else []
+        if isinstance(raw_candles, list):
+            candle_list = [item for item in raw_candles if isinstance(item, dict)]
+
+    live_payload: Dict[str, Any] = {}
+    if include_live:
+        # Exactly one live-price request per snapshot. This also persists the live
+        # candle into the historical/dashboard cache through live_price().
+        live_payload = _safe_snapshot_section(
+            "live_price",
+            lambda: live_price(symbol=normalized_symbol, timeframe=normalized_timeframe),
+        )
+
+    engine_payload: Dict[str, Any] = {}
+    if include_engine:
+        engine_payload = _safe_snapshot_section(
+            "engine_state",
+            lambda: engine_state(
+                symbol=normalized_symbol,
+                timeframe=normalized_timeframe,
+                limit=max(500, min(safe_limit, 1200)),
+            ),
+        )
+
+    # Prefer candles returned by the direct candle payload because those include the
+    # persistent live-tail bridge/backfill merge. Fall back to engine candles only
+    # through state fields if needed.
+    latest_price = to_float(
+        live_payload.get("price")
+        or live_payload.get("currentPrice")
+        or (candle_list[-1].get("close") if candle_list else 0)
+        or engine_payload.get("price"),
+        0,
+    )
+
+    projection_payload: Dict[str, Any] = {}
+    if include_projection:
+        def _build_projection() -> Dict[str, Any]:
+            projection_candles = candle_list[-700:] if candle_list else get_dashboard_candles(normalized_symbol, normalized_timeframe, min(safe_limit, 700))
+            overlay_payload = engine_payload.get("overlayPayload") or engine_payload.get("chartOverlays") or {}
+            sentiment_payload = engine_payload.get("sentiment") if isinstance(engine_payload, dict) else {}
+            scorecards_payload = engine_payload.get("scorecards") if isinstance(engine_payload, dict) else {}
+
+            return build_projection_engine_from_dashboard_payload({
+                "symbol": normalized_symbol,
+                "timeframe": normalized_timeframe,
+                "candles": projection_candles,
+                "limit": min(safe_limit, 700),
+                "ghostCount": _snapshot_int(data.get("ghostCount"), 3, 1, 10),
+                "autoRegister": _snapshot_bool(data.get("autoRegister"), True),
+                "currentPrice": latest_price,
+                "scorecards": scorecards_payload if isinstance(scorecards_payload, dict) else {},
+                "mlFeatures": (overlay_payload.get("mlFeatures") if isinstance(overlay_payload, dict) else {}) or {},
+                "overlayPayload": overlay_payload if isinstance(overlay_payload, dict) else {},
+                "unifiedIntelligence": data.get("unifiedIntelligence") if isinstance(data.get("unifiedIntelligence"), dict) else {},
+                "externalTables": {
+                    "technicalSentiment": sentiment_payload if isinstance(sentiment_payload, dict) else {},
+                },
+                "signal": {
+                    "symbol": normalized_symbol,
+                    "timeframe": normalized_timeframe,
+                    "price": latest_price,
+                    "current": latest_price,
+                    "sentiment": sentiment_payload.get("sentiment") if isinstance(sentiment_payload, dict) else None,
+                    "sentimentStatus": sentiment_payload.get("sentimentStatus") if isinstance(sentiment_payload, dict) else None,
+                },
+            })
+
+        projection_payload = _safe_snapshot_section("projection_engine", _build_projection)
+
+    ai_payload: Dict[str, Any] = {}
+    if include_ai:
+        control_payload = _safe_snapshot_section(
+            "ai_control",
+            lambda: get_ai_trader_control_state(symbol=normalized_symbol, timeframe=normalized_timeframe)
+            if get_ai_trader_control_state is not None
+            else {"status": "Unavailable", "error": "get_ai_trader_control_state unavailable"},
+        )
+        summary_payload = _safe_snapshot_section(
+            "ai_summary",
+            lambda: ai_trader_summary(symbol=normalized_symbol, timeframe=normalized_timeframe)
+            if ai_trader_summary is not None
+            else {"status": "Unavailable", "error": "ai_trader_summary unavailable"},
+        )
+        diagnostics_payload = _safe_snapshot_section(
+            "ai_diagnostics",
+            lambda: ai_trader_diagnostics(
+                symbol=normalized_symbol,
+                timeframe=normalized_timeframe,
+                currentPrice=latest_price,
+                candles=candle_list[-120:] if candle_list else [],
+                includeMemory=False,
+            )
+            if ai_trader_diagnostics is not None
+            else {"status": "Unavailable", "error": "ai_trader_diagnostics unavailable"},
+        )
+        ai_payload = {
+            "control": control_payload,
+            "summary": summary_payload,
+            "diagnostics": diagnostics_payload,
+        }
+
+    return {
+        "eventType": "DASHBOARD_SNAPSHOT",
+        "status": "Live",
+        "symbol": normalized_symbol,
+        "timeframe": normalized_timeframe,
+        "limit": safe_limit,
+        "price": latest_price,
+        "candles": candle_payload,
+        "livePrice": live_payload,
+        "engineState": engine_payload,
+        "projectionEngine": projection_payload,
+        "aiTrader": ai_payload,
+        "rateLimitGuard": {
+            "singleSnapshotRoute": True,
+            "frontendShouldPreferThisRoute": True,
+            "replacesTypicalCalls": [
+                "/api/candles",
+                "/api/live-price",
+                "/api/engine-state",
+                "/api/latest-sentiment",
+                "/api/projection-engine/build",
+                "/api/ai-trader/summary",
+                "/api/ai-trader/diagnostics",
+                "/api/ai-trader/control",
+            ],
+        },
+        "createdAt": now_iso(),
+    }
+
+
+@app.get("/api/dashboard/snapshot")
+@app.get("/api/ai-trader/snapshot")
+def dashboard_snapshot_get(
+    symbol: str = "MES1!",
+    timeframe: str = "1m",
+    limit: int = 700,
+    includeLivePrice: bool = True,
+    includeEngineState: bool = True,
+    includeProjectionEngine: bool = True,
+    includeAiTrader: bool = True,
+    includeCandles: bool = True,
+    force: bool = False,
+) -> Dict[str, Any]:
+    return build_dashboard_snapshot_payload({
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "limit": limit,
+        "includeLivePrice": includeLivePrice,
+        "includeEngineState": includeEngineState,
+        "includeProjectionEngine": includeProjectionEngine,
+        "includeAiTrader": includeAiTrader,
+        "includeCandles": includeCandles,
+        "force": force,
+    })
+
+
+@app.post("/api/dashboard/snapshot")
+@app.post("/api/ai-trader/snapshot")
+async def dashboard_snapshot_post(request: FastAPIRequest) -> Dict[str, Any]:
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    data = body if isinstance(body, dict) else {}
+    return build_dashboard_snapshot_payload(data)
+
+
 @app.get("/api/provider-debug")
 def provider_debug(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 20) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
