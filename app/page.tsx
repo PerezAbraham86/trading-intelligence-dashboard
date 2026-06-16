@@ -367,10 +367,28 @@ function toFiniteNumber(value: unknown, fallback = 0) {
 
 function extractCandleArray(payload: any): any[] {
   if (Array.isArray(payload)) return payload
+
+  // Standard candle payloads.
   if (Array.isArray(payload?.candles)) return payload.candles
   if (Array.isArray(payload?.data)) return payload.data
   if (Array.isArray(payload?.results)) return payload.results
   if (Array.isArray(payload?.series)) return payload.series
+
+  // Dashboard snapshot payloads return candle history as:
+  // { candles: { candles: [...] } }
+  // The previous frontend only checked payload.candles when it was already an
+  // array, so snapshot candles looked empty and mini charts fell through to
+  // legacy routes. This keeps /api/dashboard/snapshot as the first candle source.
+  if (Array.isArray(payload?.candles?.candles)) return payload.candles.candles
+  if (Array.isArray(payload?.candles?.data)) return payload.candles.data
+  if (Array.isArray(payload?.candles?.results)) return payload.candles.results
+  if (Array.isArray(payload?.candles?.series)) return payload.candles.series
+
+  if (Array.isArray(payload?.data?.candles)) return payload.data.candles
+  if (Array.isArray(payload?.data?.data)) return payload.data.data
+  if (Array.isArray(payload?.market?.candles)) return payload.market.candles
+  if (Array.isArray(payload?.history?.candles)) return payload.history.candles
+
   return []
 }
 
@@ -1693,8 +1711,18 @@ async function fetchSharedCandlePayload(
           unifiedIntelligence: snapshotUnifiedIntelligence ?? previous?.unifiedIntelligence ?? null,
           updatedAt: Date.now(),
           limit: Math.max(apiLimit, previous?.limit ?? 0, mergedCandles.length),
-          provider: typeof snapshot?.provider === 'string' ? snapshot.provider : 'dashboard_snapshot',
-          source: typeof snapshot?.source === 'string' ? snapshot.source : 'dashboard_snapshot_candles_live_engine',
+          provider:
+            typeof snapshot?.candles?.provider === 'string'
+              ? snapshot.candles.provider
+              : typeof snapshot?.provider === 'string'
+                ? snapshot.provider
+                : 'dashboard_snapshot',
+          source:
+            typeof snapshot?.candles?.source === 'string'
+              ? snapshot.candles.source
+              : typeof snapshot?.source === 'string'
+                ? snapshot.source
+                : 'dashboard_snapshot_candles_live_engine',
         }
 
         SHARED_CANDLE_CACHE.set(key, entry)
