@@ -6639,9 +6639,12 @@ export default function Dashboard() {
         setBootStep('settings', 'done', 'Chart settings hydrated')
 
         const requiredCoreHistory = [
-          { key: 'hist5', symbol: 'MES1!', timeframe: '5m', limit: 700, minimum: CORE_MES_HISTORY_MIN_CANDLES },
-          { key: 'hist10', symbol: 'MES1!', timeframe: '10m', limit: 700, minimum: CORE_MES_HISTORY_MIN_CANDLES },
-          { key: 'hist1', symbol: 'MES1!', timeframe: '1m', limit: 700, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+          { key: 'hist5', symbol: 'MES1!', timeframe: '5m', limit: 700, minimum: 120 },
+          // 10m has fewer bars over the same available session/history window.
+          // Earlier boot required 120 and blocked even when backend correctly returned
+          // 70 real 10-minute candles. Accept 60+ as enough history to mount.
+          { key: 'hist10', symbol: 'MES1!', timeframe: '10m', limit: 700, minimum: 60 },
+          { key: 'hist1', symbol: 'MES1!', timeframe: '1m', limit: 700, minimum: 120 },
         ]
 
         await warmRequiredMesHistoryBundle(requiredCoreHistory)
