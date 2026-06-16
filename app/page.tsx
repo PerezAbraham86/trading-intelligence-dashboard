@@ -1424,7 +1424,8 @@ function mergeLiveCandleIntoCandles(
   currentCandles: DashboardCandle[],
   rawCandle: any,
   limit: number,
-  timeframeSeconds = 60
+  timeframeSeconds = 60,
+  options?: { allowLargeGapAppend?: boolean }
 ): DashboardCandle[] {
   const liveCandle = normalizeLiveCandleToTimeframeBucket(rawCandle, timeframeSeconds)
   if (!liveCandle) return currentCandles
@@ -1439,7 +1440,7 @@ function mergeLiveCandleIntoCandles(
     // Never fill chart history with fake/flat bridge candles.
     // If live is ahead of history, the caller force-refreshes historical OHLCV.
     // This keeps BTCUSD history real instead of showing a blank/invisible gap.
-    if (gapSeconds > timeframeSeconds * 2) {
+    if (gapSeconds > timeframeSeconds * 2 && !options?.allowLargeGapAppend) {
       return currentCandles
     }
   }
@@ -1473,12 +1474,17 @@ function writeLiveCandleToSharedCache(
   rawCandle: any,
   previousOverlayPayload: any | null,
   previousUnifiedIntelligence: any | null,
-  timeframeSeconds = timeframeToSeconds(timeframe)
+  timeframeSeconds = timeframeToSeconds(timeframe),
+  options?: { allowLargeGapAppend?: boolean }
 ) {
   const key = sharedCandleKey(symbol, timeframe)
   const previous = SHARED_CANDLE_CACHE.get(key)
 
-  if (previous?.candles?.length && isLiveCandleTooFarFromHistory(symbol, previous.candles, rawCandle)) {
+  if (
+    previous?.candles?.length &&
+    isLiveCandleTooFarFromHistory(symbol, previous.candles, rawCandle) &&
+    !options?.allowLargeGapAppend
+  ) {
     return null
   }
 
@@ -1486,7 +1492,8 @@ function writeLiveCandleToSharedCache(
     previous?.candles ?? [],
     rawCandle,
     SHARED_CANDLE_CACHE_MAX_BARS,
-    timeframeSeconds
+    timeframeSeconds,
+    options
   )
 
   if (mergedCandles.length === 0) return null
@@ -4425,7 +4432,30 @@ function useChartCandles(
             }
 
             if (requestLiveGapRepairOnce(previousCandles, liveCandle, 'message')) {
-              return previousCandles
+              const merged = mergeLiveCandleIntoCandles(
+                previousCandles,
+                liveCandle,
+                limit,
+                timeframeSeconds,
+                { allowLargeGapAppend: true }
+              )
+              const cacheEntry = writeLiveCandleToSharedCache(
+                symbol,
+                timeframe,
+                limit,
+                liveCandle,
+                overlayPayload,
+                unifiedIntelligence,
+                timeframeSeconds,
+                { allowLargeGapAppend: true }
+              )
+
+              if (cacheEntry) {
+                setOverlayPayload(cacheEntry.overlayPayload ?? null)
+                setUnifiedIntelligence(cacheEntry.unifiedIntelligence ?? null)
+              }
+
+              return merged
             }
 
             const merged = mergeLiveCandleIntoCandles(
@@ -4480,7 +4510,30 @@ function useChartCandles(
             }
 
             if (requestLiveGapRepairOnce(previousCandles, liveCandle, 'candle')) {
-              return previousCandles
+              const merged = mergeLiveCandleIntoCandles(
+                previousCandles,
+                liveCandle,
+                limit,
+                timeframeSeconds,
+                { allowLargeGapAppend: true }
+              )
+              const cacheEntry = writeLiveCandleToSharedCache(
+                symbol,
+                timeframe,
+                limit,
+                liveCandle,
+                overlayPayload,
+                unifiedIntelligence,
+                timeframeSeconds,
+                { allowLargeGapAppend: true }
+              )
+
+              if (cacheEntry) {
+                setOverlayPayload(cacheEntry.overlayPayload ?? null)
+                setUnifiedIntelligence(cacheEntry.unifiedIntelligence ?? null)
+              }
+
+              return merged
             }
 
             const merged = mergeLiveCandleIntoCandles(
