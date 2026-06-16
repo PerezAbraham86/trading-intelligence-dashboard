@@ -80,6 +80,32 @@ type AiTraderSummary = {
     avgPnl?: number;
     avgR?: number;
   };
+  controlState?: AiTraderControlState | null;
+};
+
+type AiTraderControlState = {
+  eventType?: string;
+  status?: string;
+  enabled?: boolean;
+  symbol?: string;
+  timeframe?: string;
+  minConfidence?: number;
+  minRiskReward?: number;
+  maxRiskR?: number;
+  useAiTrailingStop?: boolean;
+  trailingStopR?: number;
+  settings?: {
+    minConfidence?: number;
+    minRiskReward?: number;
+    maxRiskR?: number;
+    useAiTrailingStop?: boolean;
+    trailingStopR?: number;
+  };
+  controlledBy?: string;
+  source?: string;
+  storage?: string;
+  updatedAt?: string;
+  createdAt?: string;
 };
 
 type AiTraderValidation = {
@@ -110,6 +136,7 @@ type AiTraderDiagnostics = {
   activeOpenTrades?: any[];
   evaluatedOpenTrades?: any[];
   memoryStatus?: any;
+  controlState?: AiTraderControlState | null;
   createdAt?: string;
 };
 
@@ -223,6 +250,68 @@ function formatAiStage(value: any) {
     .replace(/_/g, " ")
     .toLowerCase();
   return raw.replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+
+function normalizeControlNumber(value: any, fallback: number, min: number, max: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.abs(parsed)));
+}
+
+function buildAiTraderControlPayloadFromState({
+  enabled,
+  symbol,
+  timeframe,
+  minConfidence,
+  minRiskReward,
+  maxRiskR,
+  useAiTrailingStop,
+  trailingStopR,
+  source = "dashboard",
+}: {
+  enabled: boolean;
+  symbol: string;
+  timeframe: string;
+  minConfidence: number;
+  minRiskReward: number;
+  maxRiskR: number;
+  useAiTrailingStop: boolean;
+  trailingStopR: number;
+  source?: string;
+}) {
+  const settings = {
+    minConfidence: normalizeControlNumber(minConfidence, 62, 1, 100),
+    minRiskReward: normalizeControlNumber(minRiskReward, 1.25, 0.1, 10),
+    maxRiskR: normalizeControlNumber(maxRiskR, 1, 0.1, 10),
+    useAiTrailingStop: Boolean(useAiTrailingStop),
+    trailingStopR: normalizeControlNumber(trailingStopR, 0.5, 0.05, 5),
+  };
+
+  return {
+    enabled: Boolean(enabled),
+    symbol,
+    timeframe,
+    ...settings,
+    settings,
+    controlledBy: "dashboard",
+    source,
+  };
+}
+
+function getControlSignature(control: Partial<AiTraderControlState> | null | undefined) {
+  if (!control) return "";
+  const settings = control.settings ?? {};
+  return JSON.stringify({
+    enabled: Boolean(control.enabled),
+    symbol: String(control.symbol ?? ""),
+    timeframe: String(control.timeframe ?? ""),
+    minConfidence: normalizeControlNumber(control.minConfidence ?? settings.minConfidence, 62, 1, 100),
+    minRiskReward: normalizeControlNumber(control.minRiskReward ?? settings.minRiskReward, 1.25, 0.1, 10),
+    maxRiskR: normalizeControlNumber(control.maxRiskR ?? settings.maxRiskR, 1, 0.1, 10),
+    useAiTrailingStop: Boolean(control.useAiTrailingStop ?? settings.useAiTrailingStop),
+    trailingStopR: normalizeControlNumber(control.trailingStopR ?? settings.trailingStopR, 0.5, 0.05, 5),
+  });
 }
 
 function normalizeDecision(value: any): "BUY" | "SELL" | "HOLD" {
@@ -2276,6 +2365,8 @@ export default function AiTraderPanel({
   const [summary, setSummary] = useState<AiTraderSummary | null>(null);
   const [validation, setValidation] = useState<AiTraderValidation | null>(null);
   const [diagnostics, setDiagnostics] = useState<AiTraderDiagnostics | null>(null);
+  const [backendControlState, setBackendControlState] = useState<AiTraderControlState | null>(null);
+  const [backendControlHydrated, setBackendControlHydrated] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [actionStatus, setActionStatus] = useState("");
   const [errorText, setErrorText] = useState("");
@@ -2309,6 +2400,10 @@ export default function AiTraderPanel({
   const summaryRequestInFlightRef = useRef(false);
   const validateRequestInFlightRef = useRef(false);
   const diagnosticsRequestInFlightRef = useRef(false);
+  const controlRequestInFlightRef = useRef(false);
+  const controlPushInFlightRef = useRef(false);
+  const lastControlRequestAtRef = useRef(0);
+  const lastControlPushSignatureRef = useRef("");
   const evaluateRequestInFlightRef = useRef(false);
   const openRequestInFlightRef = useRef(false);
   const activePaperTradeLockRef = useRef(false);
@@ -2870,6 +2965,7 @@ export default function AiTraderPanel({
 
         const json = await response.json();
         setDiagnostics(json);
+        if (json?.controlState) applyBackendControlState(json.controlState);
         if (json?.validation) setValidation(json.validation);
       } catch {
         // Diagnostics are informational only. Do not block trading panel refresh.
@@ -2880,6 +2976,123 @@ export default function AiTraderPanel({
     },
     [apiBaseUrl, candles, liveActivePrice, safePayload, symbol, timeframe],
   );
+
+  const applyBackendControlState = useCallback((control: AiTraderControlState | null | undefined) => {
+    if (!control || typeof control !== "object") return;
+
+    const settings = control.settings ?? {};
+    const nextEnabled = Boolean(control.enabled);
+    const nextMinConfidence = normalizeControlNumber(control.minConfidence ?? settings.minConfidence, minConfidence, 1, 100);
+    const nextMinRiskReward = normalizeControlNumber(control.minRiskReward ?? settings.minRiskReward, minRiskReward, 0.1, 10);
+    const nextMaxRiskR = normalizeControlNumber(control.maxRiskR ?? settings.maxRiskR, maxRiskR, 0.1, 10);
+    const nextUseTrailing = Boolean(control.useAiTrailingStop ?? settings.useAiTrailingStop ?? useAiTrailingStop);
+    const nextTrailingStopR = normalizeControlNumber(control.trailingStopR ?? settings.trailingStopR, trailingStopR, 0.05, 5);
+
+    setBackendControlState(control);
+    setBackendControlHydrated(true);
+    setAutoPaperMode(nextEnabled);
+    setMinConfidence(nextMinConfidence);
+    setMinRiskReward(nextMinRiskReward);
+    setMaxRiskR(nextMaxRiskR);
+    setUseAiTrailingStop(nextUseTrailing);
+    setTrailingStopR(nextTrailingStopR);
+    lastControlPushSignatureRef.current = getControlSignature({
+      ...control,
+      enabled: nextEnabled,
+      symbol: control.symbol ?? symbol,
+      timeframe: control.timeframe ?? timeframe,
+      minConfidence: nextMinConfidence,
+      minRiskReward: nextMinRiskReward,
+      maxRiskR: nextMaxRiskR,
+      useAiTrailingStop: nextUseTrailing,
+      trailingStopR: nextTrailingStopR,
+    });
+  }, [maxRiskR, minConfidence, minRiskReward, symbol, timeframe, trailingStopR, useAiTrailingStop]);
+
+  const fetchBackendControlState = useCallback(async (force = false) => {
+    if (!apiBaseUrl || controlRequestInFlightRef.current) return;
+
+    const now = Date.now();
+    if (!force && now - lastControlRequestAtRef.current < 12000) return;
+
+    controlRequestInFlightRef.current = true;
+    lastControlRequestAtRef.current = now;
+    const timeout = createRequestTimeout(10000);
+
+    try {
+      const params = new URLSearchParams({ symbol, timeframe });
+      const response = await fetch(`${apiBaseUrl}/api/ai-trader/control?${params.toString()}`, {
+        cache: "no-store",
+        signal: timeout.signal,
+      });
+
+      if (!response.ok) return;
+
+      const json = await response.json();
+      applyBackendControlState(json);
+    } catch (error) {
+      // Keep local controls usable if backend control is briefly unavailable.
+      console.warn("AI Trader backend control fetch failed:", error);
+    } finally {
+      timeout.clear();
+      controlRequestInFlightRef.current = false;
+    }
+  }, [apiBaseUrl, applyBackendControlState, symbol, timeframe]);
+
+  const updateBackendControlState = useCallback(async (patch: Partial<AiTraderControlState>, statusMessage?: string) => {
+    const nextPayload = buildAiTraderControlPayloadFromState({
+      enabled: Boolean(patch.enabled ?? autoPaperMode),
+      symbol: String(patch.symbol ?? symbol),
+      timeframe: String(patch.timeframe ?? timeframe),
+      minConfidence: Number(patch.minConfidence ?? patch.settings?.minConfidence ?? minConfidence),
+      minRiskReward: Number(patch.minRiskReward ?? patch.settings?.minRiskReward ?? minRiskReward),
+      maxRiskR: Number(patch.maxRiskR ?? patch.settings?.maxRiskR ?? maxRiskR),
+      useAiTrailingStop: Boolean(patch.useAiTrailingStop ?? patch.settings?.useAiTrailingStop ?? useAiTrailingStop),
+      trailingStopR: Number(patch.trailingStopR ?? patch.settings?.trailingStopR ?? trailingStopR),
+      source: String(patch.source ?? "dashboard"),
+    });
+
+    const signature = getControlSignature(nextPayload);
+    setBackendControlState(nextPayload);
+    setBackendControlHydrated(true);
+    setAutoPaperMode(nextPayload.enabled);
+    setMinConfidence(nextPayload.minConfidence);
+    setMinRiskReward(nextPayload.minRiskReward);
+    setMaxRiskR(nextPayload.maxRiskR);
+    setUseAiTrailingStop(nextPayload.useAiTrailingStop);
+    setTrailingStopR(nextPayload.trailingStopR);
+    lastControlPushSignatureRef.current = signature;
+
+    if (!apiBaseUrl || controlPushInFlightRef.current) {
+      if (statusMessage) setActionStatus(statusMessage);
+      return;
+    }
+
+    controlPushInFlightRef.current = true;
+    const timeout = createRequestTimeout(10000);
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/ai-trader/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(nextPayload),
+        signal: timeout.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`AI Trader control failed: ${await readApiError(response)}`);
+      }
+
+      const json = await response.json();
+      applyBackendControlState(json);
+      if (statusMessage) setActionStatus(statusMessage);
+    } catch (error) {
+      setActionStatus(formatRequestError(error, "AI Trader backend control sync failed"));
+    } finally {
+      timeout.clear();
+      controlPushInFlightRef.current = false;
+    }
+  }, [apiBaseUrl, applyBackendControlState, autoPaperMode, maxRiskR, minConfidence, minRiskReward, symbol, timeframe, trailingStopR, useAiTrailingStop]);
 
   const fetchDecision = useCallback(
     async (force = false) => {
@@ -2981,6 +3194,7 @@ export default function AiTraderPanel({
 
         const json = await response.json();
         setSummary(json);
+        if (json?.controlState) applyBackendControlState(json.controlState);
         setPersistentLearningStats((current: any) =>
           mergeAiDecisionStats(current, getAiDecisionStatsFromSummary(json)),
         );
@@ -3367,10 +3581,11 @@ export default function AiTraderPanel({
   );
 
   useEffect(() => {
+    fetchBackendControlState(true);
     fetchDecision(true);
     fetchSummary(true);
     fetchDiagnostics(true);
-  }, [apiBaseUrl, symbol, timeframe, fetchDecision, fetchSummary, fetchDiagnostics]);
+  }, [apiBaseUrl, symbol, timeframe, fetchBackendControlState, fetchDecision, fetchSummary, fetchDiagnostics]);
 
   useEffect(() => {
     if (!autoPaperMode) return;
@@ -3416,6 +3631,7 @@ export default function AiTraderPanel({
 
   useEffect(() => {
     const id = window.setInterval(() => {
+      fetchBackendControlState(false);
       fetchDecision(false);
       fetchSummary(false);
       evaluateOpenTrades(false);
@@ -3423,7 +3639,33 @@ export default function AiTraderPanel({
     }, 20000);
 
     return () => window.clearInterval(id);
-  }, [fetchDecision, fetchSummary, evaluateOpenTrades, fetchDiagnostics]);
+  }, [fetchBackendControlState, fetchDecision, fetchSummary, evaluateOpenTrades, fetchDiagnostics]);
+
+  useEffect(() => {
+    if (!apiBaseUrl || !backendControlHydrated) return;
+
+    const nextPayload = buildAiTraderControlPayloadFromState({
+      enabled: autoPaperMode,
+      symbol,
+      timeframe,
+      minConfidence,
+      minRiskReward,
+      maxRiskR,
+      useAiTrailingStop,
+      trailingStopR,
+      source: "dashboard_settings_sync",
+    });
+    const signature = getControlSignature(nextPayload);
+
+    if (signature === lastControlPushSignatureRef.current) return;
+
+    const id = window.setTimeout(() => {
+      if (signature === lastControlPushSignatureRef.current) return;
+      updateBackendControlState(nextPayload);
+    }, 650);
+
+    return () => window.clearTimeout(id);
+  }, [apiBaseUrl, autoPaperMode, backendControlHydrated, maxRiskR, minConfidence, minRiskReward, symbol, timeframe, trailingStopR, updateBackendControlState, useAiTrailingStop]);
 
   const aiDecision = normalizeDecision(decision?.decision);
   const rawDecision = normalizeDecision(decision?.rawDecision);
@@ -3839,6 +4081,8 @@ export default function AiTraderPanel({
 
     pushRow(autoPaperMode ? "success" : "info", "mode", {
       enabled: autoPaperMode,
+      backendControl: backendControlState?.enabled === true ? "ON" : backendControlState?.enabled === false ? "OFF" : "WAITING",
+      controlHydrated: backendControlHydrated,
       symbol,
       timeframe,
       live: formatPrice(liveActivePrice),
@@ -4066,6 +4310,8 @@ export default function AiTraderPanel({
     actionStatus,
     aiActivityLog,
     autoPaperMode,
+    backendControlHydrated,
+    backendControlState,
     backendOpenTrades,
     blockers,
     decision,
@@ -4144,9 +4390,9 @@ export default function AiTraderPanel({
             type="button"
             onClick={() => {
               if (autoPaperMode) {
-                setAutoPaperMode(false);
-                setActionStatus(
-                  "AI Trader stopped. No new autonomous trades will open.",
+                void updateBackendControlState(
+                  { enabled: false, source: "dashboard_stop_button" },
+                  "AI Trader stopped from backend control. No computer will keep autonomous entries ON.",
                 );
                 return;
               }
@@ -4179,9 +4425,9 @@ export default function AiTraderPanel({
               }
 
               setLastAutoOpenKey("");
-              setAutoPaperMode(true);
-              setActionStatus(
-                "AI Trader started. Waiting for an eligible autonomous setup.",
+              void updateBackendControlState(
+                { enabled: true, source: "dashboard_start_button" },
+                "AI Trader started from backend control. Every computer will show AI Trader ON after sync.",
               );
             }}
             className={`rounded-lg px-4 py-2 text-xs font-black transition ${
