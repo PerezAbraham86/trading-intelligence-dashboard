@@ -1831,6 +1831,23 @@ async function fetchSharedCandlePayload(
     }
 
     const candles = normalizeCandlePayload(json)
+
+    // A backend 200 response with zero candles is not a usable history payload.
+    // Do not cache it and do not log it as a successful candle load; otherwise
+    // mini charts can get stuck showing "0 plotted" until another retry wins.
+    if (candles.length === 0) {
+      if (previous?.candles?.length) {
+        return {
+          ...previous,
+          candles: previous.candles.slice(-requestedLimit),
+          updatedAt: Date.now(),
+          source: `${previous.source ?? 'frontend_cached_history'}_after_zero_candle_response`,
+        }
+      }
+
+      throw new Error(`${providerLabel} returned zero candles for ${normalizedSymbol} ${normalizedTimeframe}`)
+    }
+
     const overlayPayload = getUnifiedOverlayPayload(json)
     const unifiedIntelligence = getUnifiedIntelligencePayload(json)
     const mergedCandles = mergeHistoricalCandles(previous?.candles, candles)
