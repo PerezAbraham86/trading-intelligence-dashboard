@@ -87,6 +87,7 @@ type AiTradeCloseReason =
   | "STOP_HIT"
   | "AI_REVERSAL_EXIT"
   | "AI_CONFIDENCE_EXIT"
+  | "MAX_RISK_R_HIT"
   | "MANUAL_CLOSE";
 
 function toFiniteNumber(value: any, fallback = 0) {
@@ -1278,6 +1279,7 @@ function getAiTradeSettlement(
   livePrice: number,
   decision: AiTraderDecision | null,
   minConfidence: number,
+  maxRiskR: number,
   candles?: any[],
 ): {
   shouldClose: boolean;
@@ -1291,6 +1293,21 @@ function getAiTradeSettlement(
     return {
       shouldClose: false,
       closePrice: hit.current,
+    };
+  }
+
+  const live = calculateLiveTradePnl(trade, hit.current);
+  const activeMaxRiskR = Math.max(0.1, Math.abs(toFiniteNumber(maxRiskR, 1)));
+
+  // User-controlled risk guard. This is not a trailing stop. It is a hard
+  // emergency close if the live R multiple moves beyond the allowed loss.
+  // Example: Max Risk R = 1.00 closes when Live R <= -1.00R.
+  if (Number.isFinite(live.rMultiple) && live.rMultiple <= -activeMaxRiskR) {
+    return {
+      shouldClose: true,
+      closePrice: hit.current,
+      closeReason: "MAX_RISK_R_HIT",
+      closeLabel: `Max risk ${activeMaxRiskR.toFixed(2)}R hit from shared live price`,
     };
   }
 
@@ -2039,6 +2056,7 @@ export default function AiTraderPanel({
   const [autoPaperMode, setAutoPaperMode] = useState(false);
   const [minConfidence, setMinConfidence] = useState(62);
   const [minRiskReward, setMinRiskReward] = useState(1.25);
+  const [maxRiskR, setMaxRiskR] = useState(1);
   const [lastAutoOpenKey, setLastAutoOpenKey] = useState("");
   const [localOpenTrades, setLocalOpenTrades] = useState<any[]>([]);
   const [hydratedLocalOpenTrades, setHydratedLocalOpenTrades] = useState(false);
@@ -2401,6 +2419,7 @@ export default function AiTraderPanel({
       },
       minConfidence,
       minRiskReward,
+      maxRiskR,
     };
   }, [
     liveActivePrice,
@@ -2412,6 +2431,7 @@ export default function AiTraderPanel({
     timeframe,
     minConfidence,
     minRiskReward,
+    maxRiskR,
     activeProjectionEngine,
     projectionSnapshot,
     candles,
@@ -2702,6 +2722,7 @@ export default function AiTraderPanel({
               liveActivePrice,
               decision,
               minConfidence,
+              maxRiskR,
               candles,
             );
 
@@ -2751,6 +2772,7 @@ export default function AiTraderPanel({
       liveActivePrice,
       localOpenTrades,
       minConfidence,
+      maxRiskR,
       summary,
     ],
   );
@@ -3185,6 +3207,7 @@ export default function AiTraderPanel({
         liveActivePrice,
         decision,
         minConfidence,
+        maxRiskR,
         candles,
       );
       const live = calculateLiveTradePnl(
@@ -3508,6 +3531,12 @@ export default function AiTraderPanel({
       closedSaved: displayClosedCount,
     });
 
+    pushRow("warn", "risk-control-table", {
+      maxRiskR: `-${maxRiskR.toFixed(2)}R`,
+      action: "Close open AI trade when Live R is less than or equal to max risk",
+      trailingStop: "OFF",
+    });
+
     liveOpenTrades.slice(0, 5).forEach((trade: any, index: number) => {
       const side = normalizeTradeSide(
         trade?.side ?? trade?.decision ?? trade?.rawDecision,
@@ -3659,6 +3688,7 @@ export default function AiTraderPanel({
     liveOpenTrades,
     localOpenTrades,
     projectionSnapshot,
+    maxRiskR,
     staleOpenTradeCount,
     stats,
     symbol,
@@ -3783,6 +3813,29 @@ export default function AiTraderPanel({
                 )
               }
               className="ml-2 w-16 rounded border border-dark-600 bg-dark-800 px-2 py-1 text-xs text-white"
+            />
+          </label>
+
+          <label
+            className="rounded-lg border border-red-400/30 bg-red-400/10 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-red-200"
+            title="Hard risk guard. Example: 1.00 closes the AI trade when Live R reaches -1.00R. This is not a trailing stop."
+          >
+            Max Risk R
+            <input
+              type="number"
+              min={0.1}
+              max={10}
+              step={0.05}
+              value={maxRiskR}
+              onChange={(event) =>
+                setMaxRiskR(
+                  Math.max(
+                    0.1,
+                    Math.min(10, Math.abs(Number(event.target.value) || 1)),
+                  ),
+                )
+              }
+              className="ml-2 w-16 rounded border border-red-400/30 bg-dark-800 px-2 py-1 text-xs text-white"
             />
           </label>
 
@@ -3915,6 +3968,11 @@ export default function AiTraderPanel({
                 : "bear"
               : "neutral"
           }
+        />
+        <StatBox
+          label="Max Risk"
+          value={`-${maxRiskR.toFixed(2)}R`}
+          tone="warn"
         />
         <StatBox
           label="Projection"
