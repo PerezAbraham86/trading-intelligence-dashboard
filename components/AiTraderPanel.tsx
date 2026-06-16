@@ -1,252 +1,263 @@
-'use client'
+"use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { motion } from 'framer-motion'
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { motion } from "framer-motion";
 
 type AiTraderPanelProps = {
-  apiBaseUrl?: string
-  symbol: string
-  timeframe: string
-  activePrice?: number
-  signal?: any
-  scorecards?: any
-  overlayPayload?: any
-  unifiedIntelligence?: any
-  projectionEngine?: any
-  candles?: any[]
-  strategyTesterResults?: any
-}
+  apiBaseUrl?: string;
+  symbol: string;
+  timeframe: string;
+  activePrice?: number;
+  signal?: any;
+  scorecards?: any;
+  overlayPayload?: any;
+  unifiedIntelligence?: any;
+  projectionEngine?: any;
+  candles?: any[];
+  strategyTesterResults?: any;
+};
 
 type AiTraderDecision = {
-  eventType?: string
-  status?: string
-  dashboardOnly?: boolean
-  brokerConnected?: boolean
-  allowedToTrade?: boolean
-  decision?: 'BUY' | 'SELL' | 'HOLD' | string
-  rawDecision?: 'BUY' | 'SELL' | 'HOLD' | string
-  confidence?: number
-  baseConfidence?: number
-  learningAdjustment?: number
-  confidenceGrade?: string
-  symbol?: string
-  timeframe?: string
-  entry?: number
-  target?: number
-  stop?: number
-  riskReward?: number
-  currentPrice?: number
-  currentPnl?: number
-  maxPnl?: number
-  riskPnl?: number
-  reason?: string
-  reasons?: string[]
-  details?: any
-  createdAt?: string
-}
+  eventType?: string;
+  status?: string;
+  dashboardOnly?: boolean;
+  brokerConnected?: boolean;
+  allowedToTrade?: boolean;
+  decision?: "BUY" | "SELL" | "HOLD" | string;
+  rawDecision?: "BUY" | "SELL" | "HOLD" | string;
+  confidence?: number;
+  baseConfidence?: number;
+  learningAdjustment?: number;
+  confidenceGrade?: string;
+  symbol?: string;
+  timeframe?: string;
+  entry?: number;
+  target?: number;
+  stop?: number;
+  riskReward?: number;
+  currentPrice?: number;
+  currentPnl?: number;
+  maxPnl?: number;
+  riskPnl?: number;
+  reason?: string;
+  reasons?: string[];
+  details?: any;
+  createdAt?: string;
+};
 
 type AiTraderSummary = {
-  eventType?: string
-  status?: string
-  dashboardOnly?: boolean
-  brokerConnected?: boolean
-  openTrades?: any[]
-  closedTrades?: any[]
-  recentClosedTrades?: any[]
-  openCount?: number
-  closedCount?: number
+  eventType?: string;
+  status?: string;
+  dashboardOnly?: boolean;
+  brokerConnected?: boolean;
+  openTrades?: any[];
+  closedTrades?: any[];
+  recentClosedTrades?: any[];
+  openCount?: number;
+  closedCount?: number;
   decisionStats?: {
-    samples?: number
-    buyBias?: number
-    sellBias?: number
-    holdCount?: number
-    tradeReadyCount?: number
-    avgConfidence?: number
-  }
+    samples?: number;
+    buyBias?: number;
+    sellBias?: number;
+    holdCount?: number;
+    tradeReadyCount?: number;
+    avgConfidence?: number;
+  };
   memoryStatus?: {
-    stage?: string
-    message?: string
-    bucketDecisionStats?: any
-    overallDecisionStats?: any
-    bucketClosedStats?: any
-    overallClosedStats?: any
-  }
+    stage?: string;
+    message?: string;
+    bucketDecisionStats?: any;
+    overallDecisionStats?: any;
+    bucketClosedStats?: any;
+    overallClosedStats?: any;
+  };
   stats?: {
-    samples?: number
-    wins?: number
-    losses?: number
-    winRate?: number
-    profitFactor?: number
-    avgPnl?: number
-    avgR?: number
-  }
-}
+    samples?: number;
+    wins?: number;
+    losses?: number;
+    winRate?: number;
+    profitFactor?: number;
+    avgPnl?: number;
+    avgR?: number;
+  };
+};
 
 type AiTradeCloseReason =
-  | 'TARGET_HIT'
-  | 'STOP_HIT'
-  | 'AI_REVERSAL_EXIT'
-  | 'AI_CONFIDENCE_EXIT'
+  | "TARGET_HIT"
+  | "STOP_HIT"
+  | "AI_REVERSAL_EXIT"
+  | "AI_CONFIDENCE_EXIT";
 
 function toFiniteNumber(value: any, fallback = 0) {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : fallback
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function formatPrice(value: any) {
-  const parsed = Number(value)
+  const parsed = Number(value);
 
-  if (!Number.isFinite(parsed) || parsed <= 0) return '—'
+  if (!Number.isFinite(parsed) || parsed <= 0) return "—";
 
   return parsed.toLocaleString(undefined, {
     minimumFractionDigits: parsed > 100 ? 2 : 4,
     maximumFractionDigits: parsed > 100 ? 2 : 6,
-  })
+  });
 }
 
 function formatMoney(value: any) {
-  const parsed = Number(value)
+  const parsed = Number(value);
 
-  if (!Number.isFinite(parsed)) return '—'
+  if (!Number.isFinite(parsed)) return "—";
 
-  const sign = parsed > 0 ? '+' : parsed < 0 ? '-' : ''
+  const sign = parsed > 0 ? "+" : parsed < 0 ? "-" : "";
 
   return `${sign}$${Math.abs(parsed).toLocaleString(undefined, {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  })}`
+  })}`;
 }
 
 function formatPercent(value: any) {
-  const parsed = Number(value)
+  const parsed = Number(value);
 
-  if (!Number.isFinite(parsed)) return '—'
+  if (!Number.isFinite(parsed)) return "—";
 
-  return `${(parsed * 100).toFixed(2)}%`
+  return `${(parsed * 100).toFixed(2)}%`;
 }
 
 function formatCount(value: any) {
-  const parsed = Number(value)
+  const parsed = Number(value);
 
-  if (!Number.isFinite(parsed)) return '0'
+  if (!Number.isFinite(parsed)) return "0";
 
-  return Math.max(0, Math.round(parsed)).toLocaleString()
+  return Math.max(0, Math.round(parsed)).toLocaleString();
 }
 
 function formatTradeDateTime(value: any) {
-  if (!value) return '—'
+  if (!value) return "—";
 
-  const date = new Date(value)
+  const date = new Date(value);
 
-  if (Number.isNaN(date.getTime())) return '—'
+  if (Number.isNaN(date.getTime())) return "—";
 
-  return date.toLocaleString('en-US', {
-    month: '2-digit',
-    day: '2-digit',
-    year: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    second: '2-digit',
+  return date.toLocaleString("en-US", {
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
     hour12: true,
-  })
+  });
 }
 
 function formatAiStage(value: any) {
-  const raw = String(value ?? 'WARMING_UP').replace(/_/g, ' ').toLowerCase()
-  return raw.replace(/\b\w/g, (letter) => letter.toUpperCase())
+  const raw = String(value ?? "WARMING_UP")
+    .replace(/_/g, " ")
+    .toLowerCase();
+  return raw.replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function normalizeDecision(value: any): 'BUY' | 'SELL' | 'HOLD' {
-  const raw = String(value ?? '').toUpperCase()
+function normalizeDecision(value: any): "BUY" | "SELL" | "HOLD" {
+  const raw = String(value ?? "").toUpperCase();
 
-  if (raw.includes('BUY') || raw.includes('LONG') || raw.includes('BULL')) return 'BUY'
-  if (raw.includes('SELL') || raw.includes('SHORT') || raw.includes('BEAR')) return 'SELL'
+  if (raw.includes("BUY") || raw.includes("LONG") || raw.includes("BULL"))
+    return "BUY";
+  if (raw.includes("SELL") || raw.includes("SHORT") || raw.includes("BEAR"))
+    return "SELL";
 
-  return 'HOLD'
+  return "HOLD";
 }
 
-function normalizeTradeSide(value: any): 'BUY' | 'SELL' {
-  const side = normalizeDecision(value)
-  return side === 'SELL' ? 'SELL' : 'BUY'
+function normalizeTradeSide(value: any): "BUY" | "SELL" {
+  const side = normalizeDecision(value);
+  return side === "SELL" ? "SELL" : "BUY";
 }
 
 function sanitizeAiTraderPayload(value: any, depth = 0): any {
-  if (depth > 6) return null
-  if (value === undefined || value === null) return null
+  if (depth > 6) return null;
+  if (value === undefined || value === null) return null;
 
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : null
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
   }
 
-  if (typeof value === 'string' || typeof value === 'boolean') {
-    return value
+  if (typeof value === "string" || typeof value === "boolean") {
+    return value;
   }
 
   if (Array.isArray(value)) {
-    return value.slice(0, 80).map((item) => sanitizeAiTraderPayload(item, depth + 1))
+    return value
+      .slice(0, 80)
+      .map((item) => sanitizeAiTraderPayload(item, depth + 1));
   }
 
-  if (typeof value === 'object') {
-    const result: Record<string, any> = {}
+  if (typeof value === "object") {
+    const result: Record<string, any> = {};
 
     Object.entries(value).forEach(([key, entry]) => {
-      if (typeof entry === 'function') return
-      if (typeof entry === 'symbol') return
-      result[key] = sanitizeAiTraderPayload(entry, depth + 1)
-    })
+      if (typeof entry === "function") return;
+      if (typeof entry === "symbol") return;
+      result[key] = sanitizeAiTraderPayload(entry, depth + 1);
+    });
 
-    return result
+    return result;
   }
 
-  return null
+  return null;
 }
 
 async function readApiError(response: Response) {
-  const text = await response.text().catch(() => '')
+  const text = await response.text().catch(() => "");
 
-  if (!text) return `${response.status}`
+  if (!text) return `${response.status}`;
 
   try {
-    const json = JSON.parse(text)
-    return `${response.status}: ${JSON.stringify(json).slice(0, 500)}`
+    const json = JSON.parse(text);
+    return `${response.status}: ${JSON.stringify(json).slice(0, 500)}`;
   } catch {
-    return `${response.status}: ${text.slice(0, 500)}`
+    return `${response.status}: ${text.slice(0, 500)}`;
   }
 }
 
 function createRequestTimeout(timeoutMs = 12000) {
-  const controller = new AbortController()
-  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs)
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
 
   return {
     signal: controller.signal,
     clear: () => window.clearTimeout(timeoutId),
-  }
+  };
 }
 
 function formatRequestError(error: any, fallback: string) {
-  if (error?.name === 'AbortError') {
-    return `${fallback}: request timed out. Backend may be busy; try again after the current refresh finishes.`
+  if (error?.name === "AbortError") {
+    return `${fallback}: request timed out. Backend may be busy; try again after the current refresh finishes.`;
   }
 
-  return error instanceof Error ? error.message : fallback
+  return error instanceof Error ? error.message : fallback;
 }
 
 function readNumberPath(source: any, paths: string[]) {
   for (const path of paths) {
-    const value = path.split('.').reduce((current: any, key: string) => {
-      if (current && typeof current === 'object' && key in current) return current[key]
-      return undefined
-    }, source)
+    const value = path.split(".").reduce((current: any, key: string) => {
+      if (current && typeof current === "object" && key in current)
+        return current[key];
+      return undefined;
+    }, source);
 
-    const parsed = Number(value)
-    if (Number.isFinite(parsed) && parsed > 0) return parsed
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
   }
 
-  return undefined
+  return undefined;
 }
 
-function readProjectionEngine(signal: any, overlayPayload: any, unifiedIntelligence: any) {
+function readProjectionEngine(
+  signal: any,
+  overlayPayload: any,
+  unifiedIntelligence: any,
+) {
   const candidates = [
     unifiedIntelligence?.projectionEngine,
     unifiedIntelligence?.unifiedProjectionEngine,
@@ -259,65 +270,64 @@ function readProjectionEngine(signal: any, overlayPayload: any, unifiedIntellige
     overlayPayload?.unifiedIntelligence?.projectionEngine,
     overlayPayload?.unifiedIntelligence?.unifiedProjectionEngine,
     unifiedIntelligence,
-  ]
+  ];
 
   for (const candidate of candidates) {
     if (
       candidate &&
-      typeof candidate === 'object' &&
-      (
-        candidate.eventType === 'UNIFIED_PROJECTION_ENGINE' ||
+      typeof candidate === "object" &&
+      (candidate.eventType === "UNIFIED_PROJECTION_ENGINE" ||
         candidate.ghostPath ||
         candidate.target ||
         candidate.alignment ||
-        candidate.activeTargetPrice
-      )
+        candidate.activeTargetPrice)
     ) {
-      return candidate
+      return candidate;
     }
   }
 
-  return null
+  return null;
 }
 
 function readProjectionTarget(projectionEngine: any) {
-  if (!projectionEngine || typeof projectionEngine !== 'object') return undefined
+  if (!projectionEngine || typeof projectionEngine !== "object")
+    return undefined;
 
   return readNumberPath(projectionEngine, [
-    'activeTargetPrice',
-    'target.price',
-    'targetPrice',
-    'targetPlan.targetPrice',
-    'targetPlan.finalTargetPrice',
-    'targetMl.targetPrice',
-    'finalTargetPrice',
-    'ghostOverlayTargetPrice',
-    'ghostPath.targetPrice',
-    'ghostPath.endPrice',
-  ])
+    "activeTargetPrice",
+    "target.price",
+    "targetPrice",
+    "targetPlan.targetPrice",
+    "targetPlan.finalTargetPrice",
+    "targetMl.targetPrice",
+    "finalTargetPrice",
+    "ghostOverlayTargetPrice",
+    "ghostPath.targetPrice",
+    "ghostPath.endPrice",
+  ]);
 }
 
 function readProjectionGhostConfidence(projectionEngine: any) {
-  if (!projectionEngine || typeof projectionEngine !== 'object') return 0
+  if (!projectionEngine || typeof projectionEngine !== "object") return 0;
 
   return Math.max(
     toFiniteNumber(projectionEngine?.ghostConfidence, 0),
     toFiniteNumber(projectionEngine?.ghostPath?.confidence, 0),
     toFiniteNumber(projectionEngine?.alignment?.score, 0),
-  )
+  );
 }
 
 function readProjectionTargetConfidence(projectionEngine: any) {
-  if (!projectionEngine || typeof projectionEngine !== 'object') return 0
+  if (!projectionEngine || typeof projectionEngine !== "object") return 0;
 
   const targetType = String(
     projectionEngine?.activeTargetType ??
       projectionEngine?.target?.type ??
       projectionEngine?.targetPlan?.type ??
-      ''
-  )
+      "",
+  );
 
-  if (targetType === 'GHOST_OVERLAY_TARGET') return 0
+  if (targetType === "GHOST_OVERLAY_TARGET") return 0;
 
   return Math.max(
     toFiniteNumber(projectionEngine?.targetConfidence, 0),
@@ -325,7 +335,7 @@ function readProjectionTargetConfidence(projectionEngine: any) {
     toFiniteNumber(projectionEngine?.target?.confidence, 0),
     toFiniteNumber(projectionEngine?.targetPlan?.targetConfidence, 0),
     toFiniteNumber(projectionEngine?.targetMl?.targetConfidence, 0),
-  )
+  );
 }
 
 function readProjectionSide(projectionEngine: any, fallback: any) {
@@ -334,37 +344,49 @@ function readProjectionSide(projectionEngine: any, fallback: any) {
       projectionEngine?.ghostPath?.direction ??
       projectionEngine?.marketState?.direction ??
       projectionEngine?.targetDirection ??
-      ''
-  ).toUpperCase()
+      "",
+  ).toUpperCase();
 
-  if (direction.includes('BULL') || direction.includes('UP') || direction.includes('BUY')) return 'BUY'
-  if (direction.includes('BEAR') || direction.includes('DOWN') || direction.includes('SELL')) return 'SELL'
+  if (
+    direction.includes("BULL") ||
+    direction.includes("UP") ||
+    direction.includes("BUY")
+  )
+    return "BUY";
+  if (
+    direction.includes("BEAR") ||
+    direction.includes("DOWN") ||
+    direction.includes("SELL")
+  )
+    return "SELL";
 
-  return normalizeDecision(fallback)
+  return normalizeDecision(fallback);
 }
 
 function buildProjectionEngineSnapshot(projectionEngine: any) {
-  if (!projectionEngine || typeof projectionEngine !== 'object') {
+  if (!projectionEngine || typeof projectionEngine !== "object") {
     return {
       available: false,
       targetPrice: undefined,
       targetConfidence: 0,
       ghostConfidence: 0,
       alignmentScore: 0,
-      alignmentLabel: 'Waiting',
-      projectionMode: 'WAITING',
-      projectionModeLabel: 'Waiting',
-      aiPermission: 'WAIT',
+      alignmentLabel: "Waiting",
+      projectionMode: "WAITING",
+      projectionModeLabel: "Waiting",
+      aiPermission: "WAIT",
       conflict: false,
-      source: 'Unified Projection Engine',
-    }
+      source: "Unified Projection Engine",
+    };
   }
 
-  const targetPrice = readProjectionTarget(projectionEngine)
-  const targetConfidence = readProjectionTargetConfidence(projectionEngine)
-  const ghostConfidence = readProjectionGhostConfidence(projectionEngine)
-  const alignmentScore = toFiniteNumber(projectionEngine?.alignment?.score, 0)
-  const conflict = Boolean(projectionEngine?.alignment?.conflict || projectionEngine?.mode?.conflict)
+  const targetPrice = readProjectionTarget(projectionEngine);
+  const targetConfidence = readProjectionTargetConfidence(projectionEngine);
+  const ghostConfidence = readProjectionGhostConfidence(projectionEngine);
+  const alignmentScore = toFiniteNumber(projectionEngine?.alignment?.score, 0);
+  const conflict = Boolean(
+    projectionEngine?.alignment?.conflict || projectionEngine?.mode?.conflict,
+  );
 
   return {
     available: Boolean(targetPrice),
@@ -372,113 +394,156 @@ function buildProjectionEngineSnapshot(projectionEngine: any) {
     targetConfidence,
     ghostConfidence,
     alignmentScore,
-    alignmentLabel: String(projectionEngine?.alignment?.label ?? 'Waiting'),
-    projectionMode: String(projectionEngine?.projectionMode ?? projectionEngine?.mode?.mode ?? 'WAITING'),
-    projectionModeLabel: String(projectionEngine?.projectionModeLabel ?? projectionEngine?.mode?.label ?? 'Waiting'),
-    aiPermission: String(projectionEngine?.aiPermission ?? 'WAIT'),
+    alignmentLabel: String(projectionEngine?.alignment?.label ?? "Waiting"),
+    projectionMode: String(
+      projectionEngine?.projectionMode ??
+        projectionEngine?.mode?.mode ??
+        "WAITING",
+    ),
+    projectionModeLabel: String(
+      projectionEngine?.projectionModeLabel ??
+        projectionEngine?.mode?.label ??
+        "Waiting",
+    ),
+    aiPermission: String(projectionEngine?.aiPermission ?? "WAIT"),
     conflict,
-    source: String(projectionEngine?.activeTargetSource ?? projectionEngine?.target?.source ?? 'Unified Projection Engine'),
-    targetType: String(projectionEngine?.activeTargetType ?? projectionEngine?.target?.type ?? ''),
+    source: String(
+      projectionEngine?.activeTargetSource ??
+        projectionEngine?.target?.source ??
+        "Unified Projection Engine",
+    ),
+    targetType: String(
+      projectionEngine?.activeTargetType ??
+        projectionEngine?.target?.type ??
+        "",
+    ),
     targetSourceLockActive: Boolean(projectionEngine?.targetSourceLockActive),
-    targetLockedConfidence: toFiniteNumber(projectionEngine?.targetLockedConfidence ?? projectionEngine?.target?.lockedConfidence ?? targetConfidence, targetConfidence),
-    targetLiveConfidence: toFiniteNumber(projectionEngine?.targetLiveConfidence ?? projectionEngine?.target?.liveConfidence ?? targetConfidence, targetConfidence),
-    learnedReliability: toFiniteNumber(projectionEngine?.targetMl?.learnedReliability ?? projectionEngine?.targetPlan?.learnedReliability ?? 0, 0),
+    targetLockedConfidence: toFiniteNumber(
+      projectionEngine?.targetLockedConfidence ??
+        projectionEngine?.target?.lockedConfidence ??
+        targetConfidence,
+      targetConfidence,
+    ),
+    targetLiveConfidence: toFiniteNumber(
+      projectionEngine?.targetLiveConfidence ??
+        projectionEngine?.target?.liveConfidence ??
+        targetConfidence,
+      targetConfidence,
+    ),
+    learnedReliability: toFiniteNumber(
+      projectionEngine?.targetMl?.learnedReliability ??
+        projectionEngine?.targetPlan?.learnedReliability ??
+        0,
+      0,
+    ),
     marketState: projectionEngine?.marketState,
     target: projectionEngine?.target,
     ghostPath: projectionEngine?.ghostPath,
     alignment: projectionEngine?.alignment,
     mode: projectionEngine?.mode,
     learning: projectionEngine?.learning,
-  }
+  };
 }
 
 function inferTargetFromSignal(signal: any) {
   return readNumberPath(signal, [
-    'projectionEngine.activeTargetPrice',
-    'projectionEngine.target.price',
-    'projectionEngine.targetPrice',
-    'projectionEngine.targetPlan.targetPrice',
-    'projectionEngine.targetMl.targetPrice',
-    'projectionEngine.finalTargetPrice',
-    'projectionEngine.ghostOverlayTargetPrice',
-    'unifiedProjectionEngine.activeTargetPrice',
-    'unifiedProjectionEngine.target.price',
-    'unifiedProjectionEngine.targetPrice',
-    'unifiedProjectionEngine.targetPlan.targetPrice',
-    'unifiedProjectionEngine.targetMl.targetPrice',
-    'unifiedProjectionEngine.finalTargetPrice',
-    'unifiedProjectionEngine.ghostOverlayTargetPrice',
-    'finalTargetPrice',
-    'overallTargetPrice',
-    'targetMl.finalTargetPrice',
-    'targetMl.overallTargetPrice',
-    'targetMl.targetPrice',
-    'targetPlan.finalTargetPrice',
-    'targetPlan.overallTargetPrice',
-    'targetPlan.targetPrice',
-    'activeTargetPrice',
-    'ghostOverlayTargetPrice',
-    'targetMl.activeTargetPrice',
-    'targetMl.ghostOverlayTargetPrice',
-    'targetPlan.activeTargetPrice',
-    'targetPlan.ghostOverlayTargetPrice',
-    'overlayPayload.finalTargetPrice',
-    'overlayPayload.overallTargetPrice',
-    'overlayPayload.targetMl.finalTargetPrice',
-    'overlayPayload.targetMl.overallTargetPrice',
-    'overlayPayload.targetMl.targetPrice',
-    'overlayPayload.activeTargetPrice',
-    'overlayPayload.ghostOverlayTargetPrice',
-  ])
+    "projectionEngine.activeTargetPrice",
+    "projectionEngine.target.price",
+    "projectionEngine.targetPrice",
+    "projectionEngine.targetPlan.targetPrice",
+    "projectionEngine.targetMl.targetPrice",
+    "projectionEngine.finalTargetPrice",
+    "projectionEngine.ghostOverlayTargetPrice",
+    "unifiedProjectionEngine.activeTargetPrice",
+    "unifiedProjectionEngine.target.price",
+    "unifiedProjectionEngine.targetPrice",
+    "unifiedProjectionEngine.targetPlan.targetPrice",
+    "unifiedProjectionEngine.targetMl.targetPrice",
+    "unifiedProjectionEngine.finalTargetPrice",
+    "unifiedProjectionEngine.ghostOverlayTargetPrice",
+    "finalTargetPrice",
+    "overallTargetPrice",
+    "targetMl.finalTargetPrice",
+    "targetMl.overallTargetPrice",
+    "targetMl.targetPrice",
+    "targetPlan.finalTargetPrice",
+    "targetPlan.overallTargetPrice",
+    "targetPlan.targetPrice",
+    "activeTargetPrice",
+    "ghostOverlayTargetPrice",
+    "targetMl.activeTargetPrice",
+    "targetMl.ghostOverlayTargetPrice",
+    "targetPlan.activeTargetPrice",
+    "targetPlan.ghostOverlayTargetPrice",
+    "overlayPayload.finalTargetPrice",
+    "overlayPayload.overallTargetPrice",
+    "overlayPayload.targetMl.finalTargetPrice",
+    "overlayPayload.targetMl.overallTargetPrice",
+    "overlayPayload.targetMl.targetPrice",
+    "overlayPayload.activeTargetPrice",
+    "overlayPayload.ghostOverlayTargetPrice",
+  ]);
 }
 
 function inferEntryFromSignal(signal: any, activePrice?: number) {
-  return readNumberPath(signal, [
-    'entryPrice',
-    'entry',
-    'nrtrEntryPrice',
-    'strategyEntryPrice',
-    'price',
-    'close',
-  ]) ?? activePrice
+  return (
+    readNumberPath(signal, [
+      "entryPrice",
+      "entry",
+      "nrtrEntryPrice",
+      "strategyEntryPrice",
+      "price",
+      "close",
+    ]) ?? activePrice
+  );
 }
 
-function buildTargetMlSnapshot(signal: any, overlayPayload: any, unifiedIntelligence?: any) {
-  const projectionEngine = readProjectionEngine(signal, overlayPayload, unifiedIntelligence)
-  const projectionSnapshot = buildProjectionEngineSnapshot(projectionEngine)
+function buildTargetMlSnapshot(
+  signal: any,
+  overlayPayload: any,
+  unifiedIntelligence?: any,
+) {
+  const projectionEngine = readProjectionEngine(
+    signal,
+    overlayPayload,
+    unifiedIntelligence,
+  );
+  const projectionSnapshot = buildProjectionEngineSnapshot(projectionEngine);
   const targetPrice =
     projectionSnapshot.targetPrice ??
     inferTargetFromSignal(signal) ??
     readNumberPath(overlayPayload, [
-      'finalTargetPrice',
-      'overallTargetPrice',
-      'targetPrice',
-      'targetMl.targetPrice',
-      'targetPlan.targetPrice',
-    ])
+      "finalTargetPrice",
+      "overallTargetPrice",
+      "targetPrice",
+      "targetMl.targetPrice",
+      "targetPlan.targetPrice",
+    ]);
 
   const targetConfidence = Math.max(
     toFiniteNumber(projectionSnapshot.targetConfidence, 0),
     toFiniteNumber(
       signal?.targetConfidence ??
-      signal?.targetMl?.targetConfidence ??
-      overlayPayload?.targetConfidence ??
-      overlayPayload?.targetMl?.targetConfidence,
+        signal?.targetMl?.targetConfidence ??
+        overlayPayload?.targetConfidence ??
+        overlayPayload?.targetMl?.targetConfidence,
       0,
     ),
-  )
+  );
 
   const targetMlAligned = Boolean(
     projectionSnapshot.available ||
-      signal?.targetMlAligned ||
-      signal?.targetMl?.targetMlAligned ||
-      overlayPayload?.targetMlAligned ||
-      overlayPayload?.targetMl?.targetMlAligned
-  )
+    signal?.targetMlAligned ||
+    signal?.targetMl?.targetMlAligned ||
+    overlayPayload?.targetMlAligned ||
+    overlayPayload?.targetMl?.targetMlAligned,
+  );
 
   return {
     targetConfidence,
-    targetMlReady: Boolean(targetPrice || targetConfidence > 0 || targetMlAligned),
+    targetMlReady: Boolean(
+      targetPrice || targetConfidence > 0 || targetMlAligned,
+    ),
     targetMlAligned,
     targetPrice,
     source:
@@ -487,14 +552,22 @@ function buildTargetMlSnapshot(signal: any, overlayPayload: any, unifiedIntellig
       signal?.targetMl?.source ??
       overlayPayload?.targetSource ??
       overlayPayload?.targetMl?.source ??
-      'ghost_target_ml_context',
+      "ghost_target_ml_context",
     projectionEngine: projectionSnapshot,
-  }
+  };
 }
 
-function buildGhostMlSnapshot(signal: any, overlayPayload: any, unifiedIntelligence?: any) {
-  const projectionEngine = readProjectionEngine(signal, overlayPayload, unifiedIntelligence)
-  const projectionSnapshot = buildProjectionEngineSnapshot(projectionEngine)
+function buildGhostMlSnapshot(
+  signal: any,
+  overlayPayload: any,
+  unifiedIntelligence?: any,
+) {
+  const projectionEngine = readProjectionEngine(
+    signal,
+    overlayPayload,
+    unifiedIntelligence,
+  );
+  const projectionSnapshot = buildProjectionEngineSnapshot(projectionEngine);
 
   return {
     confidence: Math.max(
@@ -505,58 +578,75 @@ function buildGhostMlSnapshot(signal: any, overlayPayload: any, unifiedIntellige
           signal?.mlConfidence ??
           overlayPayload?.ghostConfidence,
         0,
-      )
+      ),
     ),
     mlReady: Boolean(
       projectionSnapshot.available ||
-        Boolean(signal?.mlReady ?? signal?.ghostMlReady ?? overlayPayload?.mlReady)
+      Boolean(
+        signal?.mlReady ?? signal?.ghostMlReady ?? overlayPayload?.mlReady,
+      ),
     ),
-    ghostConfidenceBoost: toFiniteNumber(signal?.ghostConfidenceBoost ?? overlayPayload?.ghostConfidenceBoost, 0),
-  }
+    ghostConfidenceBoost: toFiniteNumber(
+      signal?.ghostConfidenceBoost ?? overlayPayload?.ghostConfidenceBoost,
+      0,
+    ),
+  };
 }
 
 function buildEntryMlSnapshot(signal: any) {
   return {
-    entryConfidence: toFiniteNumber(signal?.entryConfidence ?? signal?.entryMlConfidence, 0),
-    confidence: toFiniteNumber(signal?.entryConfidence ?? signal?.entryMlConfidence, 0),
-  }
+    entryConfidence: toFiniteNumber(
+      signal?.entryConfidence ?? signal?.entryMlConfidence,
+      0,
+    ),
+    confidence: toFiniteNumber(
+      signal?.entryConfidence ?? signal?.entryMlConfidence,
+      0,
+    ),
+  };
 }
 
 function getLatestCandleClose(candles: any[] | undefined) {
-  if (!Array.isArray(candles) || candles.length === 0) return undefined
+  if (!Array.isArray(candles) || candles.length === 0) return undefined;
 
   for (let index = candles.length - 1; index >= 0; index -= 1) {
-    const candle = candles[index]
-    const close = toFiniteNumber(candle?.close ?? candle?.c, 0)
+    const candle = candles[index];
+    const close = toFiniteNumber(candle?.close ?? candle?.c, 0);
 
-    if (close > 0) return close
+    if (close > 0) return close;
   }
 
-  return undefined
+  return undefined;
 }
 
 function getLatestCandleTime(candles: any[] | undefined) {
-  if (!Array.isArray(candles) || candles.length === 0) return new Date().toISOString()
+  if (!Array.isArray(candles) || candles.length === 0)
+    return new Date().toISOString();
 
-  const candle = candles[candles.length - 1]
-  const raw = candle?.time ?? candle?.timestamp ?? candle?.t ?? candle?.datetime ?? candle?.date
+  const candle = candles[candles.length - 1];
+  const raw =
+    candle?.time ??
+    candle?.timestamp ??
+    candle?.t ??
+    candle?.datetime ??
+    candle?.date;
 
-  if (typeof raw === 'number') {
-    return new Date(raw > 10_000_000_000 ? raw : raw * 1000).toISOString()
+  if (typeof raw === "number") {
+    return new Date(raw > 10_000_000_000 ? raw : raw * 1000).toISOString();
   }
 
-  if (typeof raw === 'string') {
-    const parsed = Date.parse(raw)
-    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : raw
+  if (typeof raw === "string") {
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : raw;
   }
 
-  return new Date().toISOString()
+  return new Date().toISOString();
 }
 
 function getLatestCandleAutoKey(candles: any[] | undefined) {
-  if (!Array.isArray(candles) || candles.length === 0) return 'no-candle'
+  if (!Array.isArray(candles) || candles.length === 0) return "no-candle";
 
-  const candle = candles[candles.length - 1]
+  const candle = candles[candles.length - 1];
   return String(
     candle?.time ??
       candle?.timestamp ??
@@ -564,8 +654,8 @@ function getLatestCandleAutoKey(candles: any[] | undefined) {
       candle?.datetime ??
       candle?.date ??
       candle?.epoch ??
-      'no-candle'
-  )
+      "no-candle",
+  );
 }
 
 function buildAiTradeSetupKey({
@@ -577,34 +667,42 @@ function buildAiTradeSetupKey({
   target,
   stop,
 }: {
-  symbol: string
-  timeframe: string
-  candles?: any[]
-  side: any
-  entry: any
-  target: any
-  stop: any
+  symbol: string;
+  timeframe: string;
+  candles?: any[];
+  side: any;
+  entry: any;
+  target: any;
+  stop: any;
 }) {
   return [
-    String(symbol ?? 'UNKNOWN').toUpperCase(),
-    String(timeframe ?? 'UNKNOWN'),
+    String(symbol ?? "UNKNOWN").toUpperCase(),
+    String(timeframe ?? "UNKNOWN"),
     getLatestCandleAutoKey(candles),
     normalizeDecision(side),
     Number(entry ?? 0).toFixed(4),
     Number(target ?? 0).toFixed(4),
     Number(stop ?? 0).toFixed(4),
-  ].join('|')
+  ].join("|");
 }
 
-function pruneRecentSetupKeys(map: Map<string, number>, now = Date.now(), ttlMs = 5 * 60 * 1000) {
+function pruneRecentSetupKeys(
+  map: Map<string, number>,
+  now = Date.now(),
+  ttlMs = 5 * 60 * 1000,
+) {
   Array.from(map.entries()).forEach(([key, timestamp]) => {
     if (!Number.isFinite(timestamp) || now - timestamp > ttlMs) {
-      map.delete(key)
+      map.delete(key);
     }
-  })
+  });
 }
 
-function getLiveAiCurrentPrice(activePrice: any, signal: any, candles: any[] | undefined) {
+function getLiveAiCurrentPrice(
+  activePrice: any,
+  signal: any,
+  candles: any[] | undefined,
+) {
   const candidates = [
     activePrice,
     getLatestCandleClose(candles),
@@ -613,19 +711,19 @@ function getLiveAiCurrentPrice(activePrice: any, signal: any, candles: any[] | u
     signal?.entry,
     signal?.close,
     signal?.last,
-  ]
+  ];
 
   for (const candidate of candidates) {
-    const value = toFiniteNumber(candidate, 0)
-    if (value > 0) return value
+    const value = toFiniteNumber(candidate, 0);
+    if (value > 0) return value;
   }
 
-  return 0
+  return 0;
 }
 
 function getTradeLiveCurrentPrice(trade: any, livePrice: number) {
-  const live = toFiniteNumber(livePrice, 0)
-  if (live > 0) return live
+  const live = toFiniteNumber(livePrice, 0);
+  if (live > 0) return live;
 
   return toFiniteNumber(
     trade?.currentPrice ??
@@ -633,16 +731,31 @@ function getTradeLiveCurrentPrice(trade: any, livePrice: number) {
       trade?.lastPrice ??
       trade?.markPrice ??
       trade?.entry,
-    0
-  )
+    0,
+  );
 }
 
 function calculateLiveTradePnl(trade: any, livePrice: number) {
-  const current = getTradeLiveCurrentPrice(trade, livePrice)
-  const entry = toFiniteNumber(trade?.entry ?? trade?.entryPrice, 0)
-  const side = normalizeTradeSide(trade?.side ?? trade?.decision ?? trade?.rawDecision)
-  const quantity = Math.max(1, toFiniteNumber(trade?.quantity ?? trade?.qty ?? trade?.contracts, 1))
-  const pointValue = Math.max(1, toFiniteNumber(trade?.pointValue ?? trade?.dollarPerPoint ?? trade?.multiplier, String(trade?.symbol ?? '').toUpperCase().includes('MES') ? 5 : 1))
+  const current = getTradeLiveCurrentPrice(trade, livePrice);
+  const entry = toFiniteNumber(trade?.entry ?? trade?.entryPrice, 0);
+  const side = normalizeTradeSide(
+    trade?.side ?? trade?.decision ?? trade?.rawDecision,
+  );
+  const quantity = Math.max(
+    1,
+    toFiniteNumber(trade?.quantity ?? trade?.qty ?? trade?.contracts, 1),
+  );
+  const pointValue = Math.max(
+    1,
+    toFiniteNumber(
+      trade?.pointValue ?? trade?.dollarPerPoint ?? trade?.multiplier,
+      String(trade?.symbol ?? "")
+        .toUpperCase()
+        .includes("MES")
+        ? 5
+        : 1,
+    ),
+  );
 
   if (entry <= 0 || current <= 0) {
     return {
@@ -651,16 +764,19 @@ function calculateLiveTradePnl(trade: any, livePrice: number) {
       pnlPercent: toFiniteNumber(trade?.pnlPercent ?? trade?.percent, 0),
       points: 0,
       rMultiple: toFiniteNumber(trade?.rMultiple ?? trade?.r, 0),
-    }
+    };
   }
 
-  const points = side === 'SELL' ? entry - current : current - entry
-  const pnl = points * pointValue * quantity
-  const pnlPercent = entry > 0 ? points / entry : 0
+  const points = side === "SELL" ? entry - current : current - entry;
+  const pnl = points * pointValue * quantity;
+  const pnlPercent = entry > 0 ? points / entry : 0;
 
-  const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0)
-  const riskPoints = stop > 0 ? Math.abs(entry - stop) : 0
-  const rMultiple = riskPoints > 0 ? points / riskPoints : toFiniteNumber(trade?.rMultiple ?? trade?.r, 0)
+  const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0);
+  const riskPoints = stop > 0 ? Math.abs(entry - stop) : 0;
+  const rMultiple =
+    riskPoints > 0
+      ? points / riskPoints
+      : toFiniteNumber(trade?.rMultiple ?? trade?.r, 0);
 
   return {
     current,
@@ -668,7 +784,7 @@ function calculateLiveTradePnl(trade: any, livePrice: number) {
     pnlPercent,
     points,
     rMultiple,
-  }
+  };
 }
 
 function getTradeKey(trade: any) {
@@ -684,151 +800,187 @@ function getTradeKey(trade: any) {
         trade?.entry,
         trade?.target,
         trade?.stop,
-      ].join('|')
-  )
+      ].join("|"),
+  );
 }
 
 function mergeTrades(existing: any[], incoming: any[]) {
-  const map = new Map<string, any>()
+  const map = new Map<string, any>();
 
   existing.forEach((trade) => {
-    if (!trade || typeof trade !== 'object') return
-    map.set(getTradeKey(trade), trade)
-  })
+    if (!trade || typeof trade !== "object") return;
+    map.set(getTradeKey(trade), trade);
+  });
 
   incoming.forEach((trade) => {
-    if (!trade || typeof trade !== 'object') return
-    const key = getTradeKey(trade)
+    if (!trade || typeof trade !== "object") return;
+    const key = getTradeKey(trade);
     map.set(key, {
       ...(map.get(key) ?? {}),
       ...trade,
-    })
-  })
+    });
+  });
 
   return Array.from(map.values())
     .sort((left, right) => {
-      const leftTime = Date.parse(String(left.exitTime ?? left.closedAt ?? left.updatedAt ?? left.entryTime ?? 0))
-      const rightTime = Date.parse(String(right.exitTime ?? right.closedAt ?? right.updatedAt ?? right.entryTime ?? 0))
-      return rightTime - leftTime
+      const leftTime = Date.parse(
+        String(
+          left.exitTime ??
+            left.closedAt ??
+            left.updatedAt ??
+            left.entryTime ??
+            0,
+        ),
+      );
+      const rightTime = Date.parse(
+        String(
+          right.exitTime ??
+            right.closedAt ??
+            right.updatedAt ??
+            right.entryTime ??
+            0,
+        ),
+      );
+      return rightTime - leftTime;
     })
-    .slice(0, 500)
+    .slice(0, 500);
 }
 
-
 function isActiveAiOpenTrade(trade: any) {
-  if (!trade || typeof trade !== 'object') return false
+  if (!trade || typeof trade !== "object") return false;
 
-  const status = String(trade?.status ?? 'OPEN').toUpperCase()
-  return status.includes('OPEN') && !status.includes('CLOSED')
+  const status = String(trade?.status ?? "OPEN").toUpperCase();
+  return status.includes("OPEN") && !status.includes("CLOSED");
 }
 
 function getActiveOpenTrades(trades: any[]) {
-  return (Array.isArray(trades) ? trades : []).filter(isActiveAiOpenTrade)
+  return (Array.isArray(trades) ? trades : []).filter(isActiveAiOpenTrade);
 }
 
 function describeAiOpenTradeForLog(trade: any, livePrice = 0) {
-  if (!trade || typeof trade !== 'object') return 'unknown open trade'
+  if (!trade || typeof trade !== "object") return "unknown open trade";
 
-  const live = calculateLiveTradePnl(trade, livePrice)
-  const symbolLabel = String(trade?.symbol ?? 'UNKNOWN').toUpperCase()
-  const timeframeLabel = String(trade?.timeframe ?? '')
-  const side = normalizeTradeSide(trade?.side ?? trade?.decision ?? trade?.rawDecision)
-  const entry = toFiniteNumber(trade?.entry ?? trade?.entryPrice, 0)
-  const target = toFiniteNumber(trade?.target ?? trade?.targetPrice ?? trade?.takeProfitPrice ?? trade?.tp1, 0)
-  const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0)
-  const key = getTradeKey(trade).slice(0, 72)
+  const live = calculateLiveTradePnl(trade, livePrice);
+  const symbolLabel = String(trade?.symbol ?? "UNKNOWN").toUpperCase();
+  const timeframeLabel = String(trade?.timeframe ?? "");
+  const side = normalizeTradeSide(
+    trade?.side ?? trade?.decision ?? trade?.rawDecision,
+  );
+  const entry = toFiniteNumber(trade?.entry ?? trade?.entryPrice, 0);
+  const target = toFiniteNumber(
+    trade?.target ?? trade?.targetPrice ?? trade?.takeProfitPrice ?? trade?.tp1,
+    0,
+  );
+  const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0);
+  const key = getTradeKey(trade).slice(0, 72);
 
   return [
-    `${symbolLabel}${timeframeLabel ? ` ${timeframeLabel}` : ''} ${side}`,
+    `${symbolLabel}${timeframeLabel ? ` ${timeframeLabel}` : ""} ${side}`,
     `entry ${formatPrice(entry)}`,
     `target ${formatPrice(target)}`,
     `stop ${formatPrice(stop)}`,
     `live ${formatPrice(live.current)}`,
     `P&L ${formatMoney(live.pnl)}`,
     `key ${key}`,
-  ].join(' • ')
+  ].join(" • ");
 }
 
 function keepNewestActiveOpenTrade(trades: any[]) {
-  const active = getActiveOpenTrades(trades)
+  const active = getActiveOpenTrades(trades);
 
-  if (active.length <= 1) return active
+  if (active.length <= 1) return active;
 
   return [
     active.reduce((newest, trade) => {
-      const newestTime = Date.parse(String(newest?.createdAt ?? newest?.entryTime ?? newest?.updatedAt ?? 0)) || 0
-      const tradeTime = Date.parse(String(trade?.createdAt ?? trade?.entryTime ?? trade?.updatedAt ?? 0)) || 0
-      return tradeTime >= newestTime ? trade : newest
+      const newestTime =
+        Date.parse(
+          String(
+            newest?.createdAt ?? newest?.entryTime ?? newest?.updatedAt ?? 0,
+          ),
+        ) || 0;
+      const tradeTime =
+        Date.parse(
+          String(trade?.createdAt ?? trade?.entryTime ?? trade?.updatedAt ?? 0),
+        ) || 0;
+      return tradeTime >= newestTime ? trade : newest;
     }, active[0]),
-  ]
+  ];
 }
 
 function getAiTradeSettlement(
   trade: any,
   livePrice: number,
   decision: AiTraderDecision | null,
-  minConfidence: number
+  minConfidence: number,
 ): {
-  shouldClose: boolean
-  closePrice: number
-  closeReason?: AiTradeCloseReason
-  closeLabel?: string
+  shouldClose: boolean;
+  closePrice: number;
+  closeReason?: AiTradeCloseReason;
+  closeLabel?: string;
 } {
-  const current = getTradeLiveCurrentPrice(trade, livePrice)
-  const side = normalizeTradeSide(trade?.side ?? trade?.decision ?? trade?.rawDecision)
-  const target = toFiniteNumber(trade?.target ?? trade?.targetPrice ?? trade?.takeProfitPrice ?? trade?.tp1, 0)
-  const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0)
+  const current = getTradeLiveCurrentPrice(trade, livePrice);
+  const side = normalizeTradeSide(
+    trade?.side ?? trade?.decision ?? trade?.rawDecision,
+  );
+  const target = toFiniteNumber(
+    trade?.target ?? trade?.targetPrice ?? trade?.takeProfitPrice ?? trade?.tp1,
+    0,
+  );
+  const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0);
 
   if (current <= 0) {
     return {
       shouldClose: false,
       closePrice: current,
-    }
+    };
   }
 
-  const buyTargetHit = target > 0 && side === 'BUY' && current >= target
-  const buyStopHit = stop > 0 && side === 'BUY' && current <= stop
+  const buyTargetHit = target > 0 && side === "BUY" && current >= target;
+  const buyStopHit = stop > 0 && side === "BUY" && current <= stop;
 
-  const sellTargetHit = target > 0 && side === 'SELL' && current <= target
-  const sellStopHit = stop > 0 && side === 'SELL' && current >= stop
+  const sellTargetHit = target > 0 && side === "SELL" && current <= target;
+  const sellStopHit = stop > 0 && side === "SELL" && current >= stop;
 
   if (buyTargetHit || sellTargetHit) {
     return {
       shouldClose: true,
       closePrice: target,
-      closeReason: 'TARGET_HIT',
-      closeLabel: 'Target hit',
-    }
+      closeReason: "TARGET_HIT",
+      closeLabel: "Target hit",
+    };
   }
 
   if (buyStopHit || sellStopHit) {
     return {
       shouldClose: true,
       closePrice: stop,
-      closeReason: 'STOP_HIT',
-      closeLabel: 'Stop hit',
-    }
+      closeReason: "STOP_HIT",
+      closeLabel: "Stop hit",
+    };
   }
 
-  const nextDecision = normalizeDecision(decision?.rawDecision ?? decision?.decision)
-  const confidence = toFiniteNumber(decision?.confidence, 0)
+  const nextDecision = normalizeDecision(
+    decision?.rawDecision ?? decision?.decision,
+  );
+  const confidence = toFiniteNumber(decision?.confidence, 0);
 
   if (
-    nextDecision !== 'HOLD' &&
-    ((side === 'BUY' && nextDecision === 'SELL') || (side === 'SELL' && nextDecision === 'BUY'))
+    nextDecision !== "HOLD" &&
+    ((side === "BUY" && nextDecision === "SELL") ||
+      (side === "SELL" && nextDecision === "BUY"))
   ) {
     return {
       shouldClose: true,
       closePrice: current,
-      closeReason: 'AI_REVERSAL_EXIT',
-      closeLabel: 'AI reversal exit',
-    }
+      closeReason: "AI_REVERSAL_EXIT",
+      closeLabel: "AI reversal exit",
+    };
   }
 
   return {
     shouldClose: false,
     closePrice: current,
-  }
+  };
 }
 
 function buildClosedTradeFromOpenTrade({
@@ -839,32 +991,33 @@ function buildClosedTradeFromOpenTrade({
   closeLabel,
   candles,
 }: {
-  trade: any
-  livePrice: number
-  closePrice: number
-  closeReason?: AiTradeCloseReason
-  closeLabel?: string
-  candles?: any[]
+  trade: any;
+  livePrice: number;
+  closePrice: number;
+  closeReason?: AiTradeCloseReason;
+  closeLabel?: string;
+  candles?: any[];
 }) {
-  const live = calculateLiveTradePnl(trade, closePrice || livePrice)
-  const closedAt = getLatestCandleTime(candles)
-  const result = live.pnl > 0 ? 'WIN' : live.pnl < 0 ? 'LOSS' : 'BREAKEVEN'
+  const live = calculateLiveTradePnl(trade, closePrice || livePrice);
+  const closedAt = getLatestCandleTime(candles);
+  const result = live.pnl > 0 ? "WIN" : live.pnl < 0 ? "LOSS" : "BREAKEVEN";
 
   const maxPnl = Math.max(
     toFiniteNumber(trade?.maxPnl ?? trade?.maxPnlDollar, live.pnl),
     live.pnl,
-  )
+  );
 
   return {
     ...trade,
     id: getTradeKey(trade),
-    status: 'CLOSED',
+    status: "CLOSED",
     result,
     exit: closePrice || live.current,
     exitPrice: closePrice || live.current,
     exitTime: closedAt,
     closedAt,
-    exitReason: closeLabel ?? closeReason ?? 'Closed from live chart settlement',
+    exitReason:
+      closeLabel ?? closeReason ?? "Closed from live chart settlement",
     closeReason,
     closeLabel,
     currentPrice: closePrice || live.current,
@@ -879,184 +1032,228 @@ function buildClosedTradeFromOpenTrade({
     rMultiple: live.rMultiple,
     r: live.rMultiple,
     frontendSaved: true,
-  }
+  };
 }
 
 function calculateClosedTradeStats(closedTrades: any[]) {
-  const closed = closedTrades.filter((trade) => trade && typeof trade === 'object')
-  const samples = closed.length
-  const wins = closed.filter((trade) => toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0) > 0).length
-  const losses = closed.filter((trade) => toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0) < 0).length
+  const closed = closedTrades.filter(
+    (trade) => trade && typeof trade === "object",
+  );
+  const samples = closed.length;
+  const wins = closed.filter(
+    (trade) => toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0) > 0,
+  ).length;
+  const losses = closed.filter(
+    (trade) => toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0) < 0,
+  ).length;
   const grossProfit = closed
     .filter((trade) => toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0) > 0)
-    .reduce((sum, trade) => sum + toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0), 0)
+    .reduce(
+      (sum, trade) => sum + toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0),
+      0,
+    );
   const grossLoss = Math.abs(
     closed
       .filter((trade) => toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0) < 0)
-      .reduce((sum, trade) => sum + toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0), 0)
-  )
+      .reduce(
+        (sum, trade) => sum + toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0),
+        0,
+      ),
+  );
   const avgPnl =
     samples > 0
-      ? closed.reduce((sum, trade) => sum + toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0), 0) / samples
-      : 0
+      ? closed.reduce(
+          (sum, trade) => sum + toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0),
+          0,
+        ) / samples
+      : 0;
   const avgR =
     samples > 0
-      ? closed.reduce((sum, trade) => sum + toFiniteNumber(trade.rMultiple ?? trade.r, 0), 0) / samples
-      : 0
+      ? closed.reduce(
+          (sum, trade) => sum + toFiniteNumber(trade.rMultiple ?? trade.r, 0),
+          0,
+        ) / samples
+      : 0;
 
   return {
     samples,
     wins,
     losses,
     winRate: samples > 0 ? wins / samples : 0,
-    profitFactor: grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? grossProfit : 0,
+    profitFactor:
+      grossLoss > 0
+        ? grossProfit / grossLoss
+        : grossProfit > 0
+          ? grossProfit
+          : 0,
     avgPnl,
     avgR,
-  }
+  };
 }
 
-function getBlockerAnalysis(decision: AiTraderDecision | null, summary: AiTraderSummary | null, minConfidence: number, minRiskReward: number) {
-  const blockers: Array<{ label: string; detail: string; severity: 'high' | 'medium' | 'low' }> = []
-  const confidence = toFiniteNumber(decision?.confidence, 0)
-  const riskReward = toFiniteNumber(decision?.riskReward, 0)
-  const directional = decision?.details?.directionalContext ?? {}
-  const memoryStatus = summary?.memoryStatus ?? decision?.details?.memoryStatus ?? {}
-  const targetConfidence = toFiniteNumber(directional?.targetConfidence, 0)
-  const ghostConfidence = toFiniteNumber(directional?.ghostConfidence, 0)
-  const entryConfidence = toFiniteNumber(directional?.entryConfidence, 0)
-  const nrtrConflicts = toFiniteNumber(directional?.nrtrConflictCount, 0)
-  const nrtrAgreements = toFiniteNumber(directional?.nrtrAgreementCount, 0)
+function getBlockerAnalysis(
+  decision: AiTraderDecision | null,
+  summary: AiTraderSummary | null,
+  minConfidence: number,
+  minRiskReward: number,
+) {
+  const blockers: Array<{
+    label: string;
+    detail: string;
+    severity: "high" | "medium" | "low";
+  }> = [];
+  const confidence = toFiniteNumber(decision?.confidence, 0);
+  const riskReward = toFiniteNumber(decision?.riskReward, 0);
+  const directional = decision?.details?.directionalContext ?? {};
+  const memoryStatus =
+    summary?.memoryStatus ?? decision?.details?.memoryStatus ?? {};
+  const targetConfidence = toFiniteNumber(directional?.targetConfidence, 0);
+  const ghostConfidence = toFiniteNumber(directional?.ghostConfidence, 0);
+  const entryConfidence = toFiniteNumber(directional?.entryConfidence, 0);
+  const nrtrConflicts = toFiniteNumber(directional?.nrtrConflictCount, 0);
+  const nrtrAgreements = toFiniteNumber(directional?.nrtrAgreementCount, 0);
 
-  const learningMode = decision?.details?.entryPermission?.learningMode !== false
+  const learningMode =
+    decision?.details?.entryPermission?.learningMode !== false;
 
   if (confidence < minConfidence) {
     blockers.push({
-      label: learningMode ? 'Confidence learning label' : 'Confidence below threshold',
+      label: learningMode
+        ? "Confidence learning label"
+        : "Confidence below threshold",
       detail: learningMode
         ? `${confidence.toFixed(1)}% saved for learning; it does not block AI Auto Trade entries.`
         : `${confidence.toFixed(1)}% / required ${minConfidence.toFixed(1)}%`,
-      severity: learningMode ? 'low' : 'high',
-    })
+      severity: learningMode ? "low" : "high",
+    });
   }
 
   if (riskReward > 0 && riskReward < minRiskReward) {
     blockers.push({
-      label: learningMode ? 'Risk/Reward learning label' : 'Risk/Reward below minimum',
+      label: learningMode
+        ? "Risk/Reward learning label"
+        : "Risk/Reward below minimum",
       detail: learningMode
         ? `${riskReward.toFixed(2)}R saved for learning; NRTR/internal exits can still manage the trade.`
         : `${riskReward.toFixed(2)}R / required ${minRiskReward.toFixed(2)}R`,
-      severity: learningMode ? 'low' : 'high',
-    })
+      severity: learningMode ? "low" : "high",
+    });
   }
 
   if (targetConfidence <= 0) {
     blockers.push({
-      label: 'Target ML confidence missing',
-      detail: 'Target exists, but confidence is not flowing into the AI context yet.',
-      severity: 'medium',
-    })
+      label: "Target ML confidence missing",
+      detail:
+        "Target exists, but confidence is not flowing into the AI context yet.",
+      severity: "medium",
+    });
   } else if (targetConfidence < 50) {
     blockers.push({
-      label: 'Target ML is weak',
+      label: "Target ML is weak",
       detail: `${targetConfidence.toFixed(1)} confidence`,
-      severity: 'medium',
-    })
+      severity: "medium",
+    });
   }
 
   if (ghostConfidence > 0 && ghostConfidence < 45) {
     blockers.push({
-      label: 'Ghost ML is weak',
+      label: "Ghost ML is weak",
       detail: `${ghostConfidence.toFixed(1)} confidence`,
-      severity: 'medium',
-    })
+      severity: "medium",
+    });
   }
 
   if (entryConfidence > 0 && entryConfidence < 55) {
     blockers.push({
-      label: 'Entry ML is weak',
+      label: "Entry ML is weak",
       detail: `${entryConfidence.toFixed(1)} confidence`,
-      severity: 'medium',
-    })
+      severity: "medium",
+    });
   }
 
   if (nrtrConflicts > 0) {
     blockers.push({
-      label: 'NRTR conflict',
+      label: "NRTR conflict",
       detail: `${nrtrConflicts} chart(s) conflict, ${nrtrAgreements} agree`,
-      severity: 'medium',
-    })
+      severity: "medium",
+    });
   }
 
   if (toFiniteNumber(summary?.closedCount, 0) < 8) {
     blockers.push({
-      label: 'Trade memory not mature',
-      detail: String(memoryStatus?.message ?? 'Need more closed dashboard AI trades.'),
-      severity: 'low',
-    })
+      label: "Trade memory not mature",
+      detail: String(
+        memoryStatus?.message ?? "Need more closed dashboard AI trades.",
+      ),
+      severity: "low",
+    });
   }
 
   if (blockers.length === 0 && decision?.allowedToTrade) {
     blockers.push({
-      label: 'No active blocker',
-      detail: 'AI is allowed to open dashboard paper trades.',
-      severity: 'low',
-    })
+      label: "No active blocker",
+      detail: "AI is allowed to open dashboard paper trades.",
+      severity: "low",
+    });
   }
 
   if (blockers.length === 0) {
     blockers.push({
-      label: 'Waiting for clean setup',
-      detail: 'No major blocker found, but AI has not confirmed trade readiness.',
-      severity: 'low',
-    })
+      label: "Waiting for clean setup",
+      detail:
+        "No major blocker found, but AI has not confirmed trade readiness.",
+      severity: "low",
+    });
   }
 
-  return blockers
+  return blockers;
 }
 
 function getMlStrengthLabel(value: any) {
-  const score = toFiniteNumber(value, 0)
+  const score = toFiniteNumber(value, 0);
 
-  if (score >= 75) return 'Strong'
-  if (score >= 55) return 'Active'
-  if (score > 0) return 'Learning'
+  if (score >= 75) return "Strong";
+  if (score >= 55) return "Active";
+  if (score > 0) return "Learning";
 
-  return 'Waiting'
+  return "Waiting";
 }
 
-function getMlStrengthTone(value: any): 'neutral' | 'bull' | 'bear' | 'warn' {
-  const score = toFiniteNumber(value, 0)
+function getMlStrengthTone(value: any): "neutral" | "bull" | "bear" | "warn" {
+  const score = toFiniteNumber(value, 0);
 
-  if (score >= 55) return 'bull'
-  if (score > 0) return 'warn'
+  if (score >= 55) return "bull";
+  if (score > 0) return "warn";
 
-  return 'neutral'
+  return "neutral";
 }
 
 function StatBox({
   label,
   value,
-  tone = 'neutral',
+  tone = "neutral",
 }: {
-  label: string
-  value: string
-  tone?: 'neutral' | 'bull' | 'bear' | 'warn'
+  label: string;
+  value: string;
+  tone?: "neutral" | "bull" | "bear" | "warn";
 }) {
   const toneClass =
-    tone === 'bull'
-      ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
-      : tone === 'bear'
-        ? 'border-red-400/30 bg-red-400/10 text-red-200'
-        : tone === 'warn'
-          ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
-          : 'border-dark-600 bg-dark-800/80 text-gray-200'
+    tone === "bull"
+      ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
+      : tone === "bear"
+        ? "border-red-400/30 bg-red-400/10 text-red-200"
+        : tone === "warn"
+          ? "border-amber-400/30 bg-amber-400/10 text-amber-200"
+          : "border-dark-600 bg-dark-800/80 text-gray-200";
 
   return (
     <div className={`rounded-xl border px-3 py-2 ${toneClass}`}>
-      <div className="text-[10px] uppercase tracking-wide text-gray-400">{label}</div>
+      <div className="text-[10px] uppercase tracking-wide text-gray-400">
+        {label}
+      </div>
       <div className="mt-1 text-sm font-black">{value}</div>
     </div>
-  )
+  );
 }
 
 function MlStatusCard({
@@ -1064,76 +1261,93 @@ function MlStatusCard({
   status,
   confidence,
   detail,
-  tone = 'neutral',
+  tone = "neutral",
 }: {
-  title: string
-  status: string
-  confidence: number
-  detail: string
-  tone?: 'neutral' | 'bull' | 'bear' | 'warn'
+  title: string;
+  status: string;
+  confidence: number;
+  detail: string;
+  tone?: "neutral" | "bull" | "bear" | "warn";
 }) {
   const border =
-    tone === 'bull'
-      ? 'border-emerald-400/30 bg-emerald-400/10'
-      : tone === 'bear'
-        ? 'border-red-400/30 bg-red-400/10'
-        : tone === 'warn'
-          ? 'border-amber-400/30 bg-amber-400/10'
-          : 'border-dark-700 bg-dark-900/70'
+    tone === "bull"
+      ? "border-emerald-400/30 bg-emerald-400/10"
+      : tone === "bear"
+        ? "border-red-400/30 bg-red-400/10"
+        : tone === "warn"
+          ? "border-amber-400/30 bg-amber-400/10"
+          : "border-dark-700 bg-dark-900/70";
 
   const text =
-    tone === 'bull'
-      ? 'text-emerald-200'
-      : tone === 'bear'
-        ? 'text-red-200'
-        : tone === 'warn'
-          ? 'text-amber-200'
-          : 'text-gray-200'
+    tone === "bull"
+      ? "text-emerald-200"
+      : tone === "bear"
+        ? "text-red-200"
+        : tone === "warn"
+          ? "text-amber-200"
+          : "text-gray-200";
 
   return (
     <div className={`rounded-xl border p-4 ${border}`}>
       <div className="mb-2 flex items-center justify-between gap-3">
-        <div className="text-xs font-black uppercase tracking-wide text-gray-400">{title}</div>
-        <span className={`rounded-full border border-current/30 px-2 py-1 text-[10px] font-black uppercase tracking-wide ${text}`}>
+        <div className="text-xs font-black uppercase tracking-wide text-gray-400">
+          {title}
+        </div>
+        <span
+          className={`rounded-full border border-current/30 px-2 py-1 text-[10px] font-black uppercase tracking-wide ${text}`}
+        >
           {status}
         </span>
       </div>
-      <div className={`text-2xl font-black ${text}`}>{confidence.toFixed(1)}%</div>
+      <div className={`text-2xl font-black ${text}`}>
+        {confidence.toFixed(1)}%
+      </div>
       <div className="mt-2 text-xs leading-5 text-gray-400">{detail}</div>
     </div>
-  )
+  );
 }
 
-function BlockerBadge({ severity }: { severity: 'high' | 'medium' | 'low' }) {
+function BlockerBadge({ severity }: { severity: "high" | "medium" | "low" }) {
   const className =
-    severity === 'high'
-      ? 'border-red-400/30 bg-red-400/10 text-red-200'
-      : severity === 'medium'
-        ? 'border-amber-400/30 bg-amber-400/10 text-amber-200'
-        : 'border-blue-400/30 bg-blue-400/10 text-blue-200'
+    severity === "high"
+      ? "border-red-400/30 bg-red-400/10 text-red-200"
+      : severity === "medium"
+        ? "border-amber-400/30 bg-amber-400/10 text-amber-200"
+        : "border-blue-400/30 bg-blue-400/10 text-blue-200";
 
   return (
-    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-black uppercase tracking-wide ${className}`}>
+    <span
+      className={`rounded-full border px-2 py-0.5 text-[10px] font-black uppercase tracking-wide ${className}`}
+    >
       {severity}
     </span>
-  )
+  );
 }
 
-
 function normalizeAiDecisionStats(source: any) {
-  const samples = Math.max(0, Math.round(toFiniteNumber(source?.samples, 0)))
-  const buyBias = Math.max(0, Math.round(toFiniteNumber(source?.buyBias, 0)))
-  const sellBias = Math.max(0, Math.round(toFiniteNumber(source?.sellBias, 0)))
-  const holdCount = Math.max(0, Math.round(toFiniteNumber(source?.holdCount, 0)))
-  const tradeReadyCount = Math.max(0, Math.round(toFiniteNumber(source?.tradeReadyCount, 0)))
+  const samples = Math.max(0, Math.round(toFiniteNumber(source?.samples, 0)));
+  const buyBias = Math.max(0, Math.round(toFiniteNumber(source?.buyBias, 0)));
+  const sellBias = Math.max(0, Math.round(toFiniteNumber(source?.sellBias, 0)));
+  const holdCount = Math.max(
+    0,
+    Math.round(toFiniteNumber(source?.holdCount, 0)),
+  );
+  const tradeReadyCount = Math.max(
+    0,
+    Math.round(toFiniteNumber(source?.tradeReadyCount, 0)),
+  );
   const confidenceSum = Math.max(
     0,
-    toFiniteNumber(source?.confidenceSum, 0) || samples * toFiniteNumber(source?.avgConfidence, 0)
-  )
-  const avgConfidence = samples > 0 ? confidenceSum / samples : toFiniteNumber(source?.avgConfidence, 0)
+    toFiniteNumber(source?.confidenceSum, 0) ||
+      samples * toFiniteNumber(source?.avgConfidence, 0),
+  );
+  const avgConfidence =
+    samples > 0
+      ? confidenceSum / samples
+      : toFiniteNumber(source?.avgConfidence, 0);
 
   return {
-    ...(source && typeof source === 'object' ? source : {}),
+    ...(source && typeof source === "object" ? source : {}),
     samples,
     buyBias,
     sellBias,
@@ -1141,26 +1355,37 @@ function normalizeAiDecisionStats(source: any) {
     tradeReadyCount,
     confidenceSum,
     avgConfidence: Number.isFinite(avgConfidence) ? avgConfidence : 0,
-    observationKeys: Array.isArray(source?.observationKeys) ? source.observationKeys.slice(-1500) : [],
+    observationKeys: Array.isArray(source?.observationKeys)
+      ? source.observationKeys.slice(-1500)
+      : [],
     lastUpdatedAt: source?.lastUpdatedAt ?? null,
-  }
+  };
 }
 
 function mergeAiDecisionStats(current: any, incoming: any) {
-  const base = normalizeAiDecisionStats(current)
-  const next = normalizeAiDecisionStats(incoming)
+  const base = normalizeAiDecisionStats(current);
+  const next = normalizeAiDecisionStats(incoming);
 
-  if (next.samples <= 0) return base
-  if (base.samples <= 0) return next
+  if (next.samples <= 0) return base;
+  if (base.samples <= 0) return next;
 
-  const samples = Math.max(base.samples, next.samples)
-  const avgConfidence = Math.max(toFiniteNumber(base.avgConfidence, 0), toFiniteNumber(next.avgConfidence, 0))
-  const confidenceSum = Math.max(toFiniteNumber(base.confidenceSum, 0), toFiniteNumber(next.confidenceSum, 0), samples * avgConfidence)
+  const samples = Math.max(base.samples, next.samples);
+  const avgConfidence = Math.max(
+    toFiniteNumber(base.avgConfidence, 0),
+    toFiniteNumber(next.avgConfidence, 0),
+  );
+  const confidenceSum = Math.max(
+    toFiniteNumber(base.confidenceSum, 0),
+    toFiniteNumber(next.confidenceSum, 0),
+    samples * avgConfidence,
+  );
 
-  const mergedKeys = Array.from(new Set([
-    ...(Array.isArray(base.observationKeys) ? base.observationKeys : []),
-    ...(Array.isArray(next.observationKeys) ? next.observationKeys : []),
-  ])).slice(-1500)
+  const mergedKeys = Array.from(
+    new Set([
+      ...(Array.isArray(base.observationKeys) ? base.observationKeys : []),
+      ...(Array.isArray(next.observationKeys) ? next.observationKeys : []),
+    ]),
+  ).slice(-1500);
 
   return {
     ...base,
@@ -1174,7 +1399,7 @@ function mergeAiDecisionStats(current: any, incoming: any) {
     avgConfidence,
     observationKeys: mergedKeys,
     lastUpdatedAt: new Date().toISOString(),
-  }
+  };
 }
 
 function readAiDecisionStatsFromMemoryStatus(memoryStatus: any) {
@@ -1183,11 +1408,11 @@ function readAiDecisionStatsFromMemoryStatus(memoryStatus: any) {
     memoryStatus?.bucketDecisionStats ??
     memoryStatus?.decisionStats ??
     {}
-  )
+  );
 }
 
 function getAiDecisionStatsFromDecision(decision: any) {
-  return readAiDecisionStatsFromMemoryStatus(decision?.details?.memoryStatus)
+  return readAiDecisionStatsFromMemoryStatus(decision?.details?.memoryStatus);
 }
 
 function getAiDecisionStatsFromSummary(summary: any) {
@@ -1195,62 +1420,83 @@ function getAiDecisionStatsFromSummary(summary: any) {
     summary?.decisionStats ??
     readAiDecisionStatsFromMemoryStatus(summary?.memoryStatus) ??
     {}
-  )
+  );
 }
 
-function getDecisionObservationKey(decision: any, symbol: string, timeframe: string, candles: any[] | undefined) {
-  const candleTime = getLatestCandleTime(candles)
-  const side = normalizeDecision(decision?.rawDecision ?? decision?.decision)
-  const entry = toFiniteNumber(decision?.entry, 0).toFixed(4)
-  const target = toFiniteNumber(decision?.target, 0).toFixed(4)
-  const stop = toFiniteNumber(decision?.stop, 0).toFixed(4)
+function getDecisionObservationKey(
+  decision: any,
+  symbol: string,
+  timeframe: string,
+  candles: any[] | undefined,
+) {
+  const candleTime = getLatestCandleTime(candles);
+  const side = normalizeDecision(decision?.rawDecision ?? decision?.decision);
+  const entry = toFiniteNumber(decision?.entry, 0).toFixed(4);
+  const target = toFiniteNumber(decision?.target, 0).toFixed(4);
+  const stop = toFiniteNumber(decision?.stop, 0).toFixed(4);
 
   return [
-    String(symbol ?? 'UNKNOWN').toUpperCase(),
-    String(timeframe ?? 'UNKNOWN'),
+    String(symbol ?? "UNKNOWN").toUpperCase(),
+    String(timeframe ?? "UNKNOWN"),
     candleTime,
     side,
     entry,
     target,
     stop,
-  ].join('|')
+  ].join("|");
 }
 
-function addLiveDecisionObservation(current: any, decision: any, symbol: string, timeframe: string, candles: any[] | undefined) {
-  if (!decision || typeof decision !== 'object') return normalizeAiDecisionStats(current)
+function addLiveDecisionObservation(
+  current: any,
+  decision: any,
+  symbol: string,
+  timeframe: string,
+  candles: any[] | undefined,
+) {
+  if (!decision || typeof decision !== "object")
+    return normalizeAiDecisionStats(current);
 
-  const base = normalizeAiDecisionStats(current)
-  const key = getDecisionObservationKey(decision, symbol, timeframe, candles)
-  const currentKeys = Array.isArray(base.observationKeys) ? base.observationKeys : []
+  const base = normalizeAiDecisionStats(current);
+  const key = getDecisionObservationKey(decision, symbol, timeframe, candles);
+  const currentKeys = Array.isArray(base.observationKeys)
+    ? base.observationKeys
+    : [];
 
   if (currentKeys.includes(key)) {
-    return base
+    return base;
   }
 
-  const side = normalizeDecision(decision?.rawDecision ?? decision?.decision)
-  const confidence = toFiniteNumber(decision?.confidence, 0)
-  const samples = base.samples + 1
-  const confidenceSum = toFiniteNumber(base.confidenceSum, 0) + confidence
+  const side = normalizeDecision(decision?.rawDecision ?? decision?.decision);
+  const confidence = toFiniteNumber(decision?.confidence, 0);
+  const samples = base.samples + 1;
+  const confidenceSum = toFiniteNumber(base.confidenceSum, 0) + confidence;
 
   return {
     ...base,
     samples,
-    buyBias: base.buyBias + (side === 'BUY' ? 1 : 0),
-    sellBias: base.sellBias + (side === 'SELL' ? 1 : 0),
-    holdCount: base.holdCount + (side === 'HOLD' ? 1 : 0),
+    buyBias: base.buyBias + (side === "BUY" ? 1 : 0),
+    sellBias: base.sellBias + (side === "SELL" ? 1 : 0),
+    holdCount: base.holdCount + (side === "HOLD" ? 1 : 0),
     tradeReadyCount: base.tradeReadyCount + (decision?.allowedToTrade ? 1 : 0),
     confidenceSum,
     avgConfidence: samples > 0 ? confidenceSum / samples : 0,
     observationKeys: [...currentKeys, key].slice(-1500),
     lastUpdatedAt: new Date().toISOString(),
-  }
+  };
 }
 
-function buildStableAiDecisionStats(persisted: any, summary: any, decision: any) {
-  let stable = normalizeAiDecisionStats(persisted)
-  stable = mergeAiDecisionStats(stable, getAiDecisionStatsFromSummary(summary))
-  stable = mergeAiDecisionStats(stable, getAiDecisionStatsFromDecision(decision))
-  return stable
+function buildStableAiDecisionStats(
+  persisted: any,
+  summary: any,
+  decision: any,
+) {
+  let stable = normalizeAiDecisionStats(persisted);
+  stable = mergeAiDecisionStats(stable, getAiDecisionStatsFromSummary(summary));
+  stable = mergeAiDecisionStats(
+    stable,
+    getAiDecisionStatsFromDecision(decision),
+  );
+  return stable;
 }
 
 export default function AiTraderPanel({
@@ -1266,228 +1512,270 @@ export default function AiTraderPanel({
   candles,
   strategyTesterResults,
 }: AiTraderPanelProps) {
-  const [decision, setDecision] = useState<AiTraderDecision | null>(null)
-  const [summary, setSummary] = useState<AiTraderSummary | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
-  const [actionStatus, setActionStatus] = useState('')
-  const [errorText, setErrorText] = useState('')
-  const [autoPaperMode, setAutoPaperMode] = useState(false)
-  const [minConfidence, setMinConfidence] = useState(62)
-  const [minRiskReward, setMinRiskReward] = useState(1.25)
-  const [lastAutoOpenKey, setLastAutoOpenKey] = useState('')
-  const [localOpenTrades, setLocalOpenTrades] = useState<any[]>([])
-  const [hydratedLocalOpenTrades, setHydratedLocalOpenTrades] = useState(false)
-  const [localClosedTrades, setLocalClosedTrades] = useState<any[]>([])
-  const [hydratedLocalClosedTrades, setHydratedLocalClosedTrades] = useState(false)
-  const [persistentLearningStats, setPersistentLearningStats] = useState<any>(() => normalizeAiDecisionStats({}))
-  const [hydratedLearningStats, setHydratedLearningStats] = useState(false)
-  const [directLivePrice, setDirectLivePrice] = useState(0)
-  const [directLivePriceUpdatedAt, setDirectLivePriceUpdatedAt] = useState('')
-  const [aiActivityLog, setAiActivityLog] = useState<Array<{
-    time: string
-    message: string
-    tone: 'info' | 'success' | 'warn' | 'error'
-  }>>([])
+  const [decision, setDecision] = useState<AiTraderDecision | null>(null);
+  const [summary, setSummary] = useState<AiTraderSummary | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [actionStatus, setActionStatus] = useState("");
+  const [errorText, setErrorText] = useState("");
+  const [autoPaperMode, setAutoPaperMode] = useState(false);
+  const [minConfidence, setMinConfidence] = useState(62);
+  const [minRiskReward, setMinRiskReward] = useState(1.25);
+  const [lastAutoOpenKey, setLastAutoOpenKey] = useState("");
+  const [localOpenTrades, setLocalOpenTrades] = useState<any[]>([]);
+  const [hydratedLocalOpenTrades, setHydratedLocalOpenTrades] = useState(false);
+  const [localClosedTrades, setLocalClosedTrades] = useState<any[]>([]);
+  const [hydratedLocalClosedTrades, setHydratedLocalClosedTrades] =
+    useState(false);
+  const [persistentLearningStats, setPersistentLearningStats] = useState<any>(
+    () => normalizeAiDecisionStats({}),
+  );
+  const [hydratedLearningStats, setHydratedLearningStats] = useState(false);
+  const [directLivePrice, setDirectLivePrice] = useState(0);
+  const [directLivePriceUpdatedAt, setDirectLivePriceUpdatedAt] = useState("");
+  const [aiActivityLog, setAiActivityLog] = useState<
+    Array<{
+      time: string;
+      message: string;
+      tone: "info" | "success" | "warn" | "error";
+    }>
+  >([]);
 
-  const decisionRequestInFlightRef = useRef(false)
-  const summaryRequestInFlightRef = useRef(false)
-  const evaluateRequestInFlightRef = useRef(false)
-  const openRequestInFlightRef = useRef(false)
-  const activePaperTradeLockRef = useRef(false)
-  const closedTradeKeysRef = useRef<Set<string>>(new Set())
-  const recentOpenSetupKeysRef = useRef<Map<string, number>>(new Map())
-  const lastDecisionRequestAtRef = useRef(0)
-  const lastSummaryRequestAtRef = useRef(0)
-  const lastEvaluateRequestAtRef = useRef(0)
-  const lastOpenRequestAtRef = useRef(0)
-  const lastLoggedActionStatusRef = useRef('')
+  const decisionRequestInFlightRef = useRef(false);
+  const summaryRequestInFlightRef = useRef(false);
+  const evaluateRequestInFlightRef = useRef(false);
+  const openRequestInFlightRef = useRef(false);
+  const activePaperTradeLockRef = useRef(false);
+  const closedTradeKeysRef = useRef<Set<string>>(new Set());
+  const recentOpenSetupKeysRef = useRef<Map<string, number>>(new Map());
+  const lastDecisionRequestAtRef = useRef(0);
+  const lastSummaryRequestAtRef = useRef(0);
+  const lastEvaluateRequestAtRef = useRef(0);
+  const lastOpenRequestAtRef = useRef(0);
+  const lastLoggedActionStatusRef = useRef("");
 
-  const pushAiActivityLog = useCallback((message: string, tone: 'info' | 'success' | 'warn' | 'error' = 'info') => {
-    const cleanMessage = String(message ?? '').trim()
-    if (!cleanMessage) return
+  const pushAiActivityLog = useCallback(
+    (message: string, tone: "info" | "success" | "warn" | "error" = "info") => {
+      const cleanMessage = String(message ?? "").trim();
+      if (!cleanMessage) return;
 
-    setAiActivityLog((current) => [
-      {
-        time: new Date().toLocaleTimeString('en-US', {
-          hour: 'numeric',
-          minute: '2-digit',
-          second: '2-digit',
-          hour12: true,
-        }),
-        message: cleanMessage,
-        tone,
-      },
-      ...current,
-    ].slice(0, 30))
-  }, [])
+      setAiActivityLog((current) =>
+        [
+          {
+            time: new Date().toLocaleTimeString("en-US", {
+              hour: "numeric",
+              minute: "2-digit",
+              second: "2-digit",
+              hour12: true,
+            }),
+            message: cleanMessage,
+            tone,
+          },
+          ...current,
+        ].slice(0, 30),
+      );
+    },
+    [],
+  );
 
   useEffect(() => {
-    if (!actionStatus) return
-    if (lastLoggedActionStatusRef.current === actionStatus) return
+    if (!actionStatus) return;
+    if (lastLoggedActionStatusRef.current === actionStatus) return;
 
-    lastLoggedActionStatusRef.current = actionStatus
+    lastLoggedActionStatusRef.current = actionStatus;
 
-    const normalized = actionStatus.toLowerCase()
+    const normalized = actionStatus.toLowerCase();
     const tone =
-      normalized.includes('failed') ||
-      normalized.includes('error') ||
-      normalized.includes('timed out')
-        ? 'error'
-        : normalized.includes('blocked') ||
-            normalized.includes('waiting') ||
-            normalized.includes('cooldown') ||
-            normalized.includes('not opened')
-          ? 'warn'
-          : normalized.includes('opened') ||
-              normalized.includes('started') ||
-              normalized.includes('closed') ||
-              normalized.includes('evaluated')
-            ? 'success'
-            : 'info'
+      normalized.includes("failed") ||
+      normalized.includes("error") ||
+      normalized.includes("timed out")
+        ? "error"
+        : normalized.includes("blocked") ||
+            normalized.includes("waiting") ||
+            normalized.includes("cooldown") ||
+            normalized.includes("not opened")
+          ? "warn"
+          : normalized.includes("opened") ||
+              normalized.includes("started") ||
+              normalized.includes("closed") ||
+              normalized.includes("evaluated")
+            ? "success"
+            : "info";
 
-    pushAiActivityLog(actionStatus, tone)
-  }, [actionStatus, pushAiActivityLog])
+    pushAiActivityLog(actionStatus, tone);
+  }, [actionStatus, pushAiActivityLog]);
 
   const openStorageKey = useMemo(() => {
-    return `marketbos:ai-trader:open:${String(symbol ?? 'ALL').toUpperCase()}:${String(timeframe ?? 'ALL')}`
-  }, [symbol, timeframe])
+    return `marketbos:ai-trader:open:${String(symbol ?? "ALL").toUpperCase()}:${String(timeframe ?? "ALL")}`;
+  }, [symbol, timeframe]);
 
   const closedStorageKey = useMemo(() => {
-    return `marketbos:ai-trader:closed:${String(symbol ?? 'ALL').toUpperCase()}:${String(timeframe ?? 'ALL')}`
-  }, [symbol, timeframe])
+    return `marketbos:ai-trader:closed:${String(symbol ?? "ALL").toUpperCase()}:${String(timeframe ?? "ALL")}`;
+  }, [symbol, timeframe]);
 
   const learningStorageKey = useMemo(() => {
-    return `marketbos:ai-trader:learning:${String(symbol ?? 'ALL').toUpperCase()}:${String(timeframe ?? 'ALL')}`
-  }, [symbol, timeframe])
+    return `marketbos:ai-trader:learning:${String(symbol ?? "ALL").toUpperCase()}:${String(timeframe ?? "ALL")}`;
+  }, [symbol, timeframe]);
 
   useEffect(() => {
     try {
-      const raw = window.localStorage.getItem(openStorageKey)
-      const parsed = raw ? JSON.parse(raw) : []
-      setLocalOpenTrades(Array.isArray(parsed) ? parsed : [])
+      const raw = window.localStorage.getItem(openStorageKey);
+      const parsed = raw ? JSON.parse(raw) : [];
+      setLocalOpenTrades(Array.isArray(parsed) ? parsed : []);
     } catch {
-      setLocalOpenTrades([])
+      setLocalOpenTrades([]);
     } finally {
-      setHydratedLocalOpenTrades(true)
+      setHydratedLocalOpenTrades(true);
     }
-  }, [openStorageKey])
+  }, [openStorageKey]);
 
   useEffect(() => {
-    if (!hydratedLocalOpenTrades) return
+    if (!hydratedLocalOpenTrades) return;
 
     try {
-      window.localStorage.setItem(openStorageKey, JSON.stringify(localOpenTrades.slice(0, 100)))
+      window.localStorage.setItem(
+        openStorageKey,
+        JSON.stringify(localOpenTrades.slice(0, 100)),
+      );
     } catch {
       // Browser storage can fail in private mode; backend/Supabase memory still remains primary.
     }
-  }, [openStorageKey, hydratedLocalOpenTrades, localOpenTrades])
+  }, [openStorageKey, hydratedLocalOpenTrades, localOpenTrades]);
 
   useEffect(() => {
     try {
-      const raw = window.localStorage.getItem(closedStorageKey)
-      const parsed = raw ? JSON.parse(raw) : []
-      setLocalClosedTrades(Array.isArray(parsed) ? parsed : [])
+      const raw = window.localStorage.getItem(closedStorageKey);
+      const parsed = raw ? JSON.parse(raw) : [];
+      setLocalClosedTrades(Array.isArray(parsed) ? parsed : []);
     } catch {
-      setLocalClosedTrades([])
+      setLocalClosedTrades([]);
     } finally {
-      setHydratedLocalClosedTrades(true)
+      setHydratedLocalClosedTrades(true);
     }
-  }, [closedStorageKey])
+  }, [closedStorageKey]);
 
   useEffect(() => {
-    if (!hydratedLocalClosedTrades) return
+    if (!hydratedLocalClosedTrades) return;
 
     try {
-      window.localStorage.setItem(closedStorageKey, JSON.stringify(localClosedTrades.slice(0, 500)))
+      window.localStorage.setItem(
+        closedStorageKey,
+        JSON.stringify(localClosedTrades.slice(0, 500)),
+      );
     } catch {
       // Browser storage can fail in private mode; the dashboard should continue.
     }
-  }, [closedStorageKey, hydratedLocalClosedTrades, localClosedTrades])
+  }, [closedStorageKey, hydratedLocalClosedTrades, localClosedTrades]);
 
   useEffect(() => {
     try {
-      const raw = window.localStorage.getItem(learningStorageKey)
-      const parsed = raw ? JSON.parse(raw) : {}
-      setPersistentLearningStats(normalizeAiDecisionStats(parsed))
+      const raw = window.localStorage.getItem(learningStorageKey);
+      const parsed = raw ? JSON.parse(raw) : {};
+      setPersistentLearningStats(normalizeAiDecisionStats(parsed));
     } catch {
-      setPersistentLearningStats(normalizeAiDecisionStats({}))
+      setPersistentLearningStats(normalizeAiDecisionStats({}));
     } finally {
-      setHydratedLearningStats(true)
+      setHydratedLearningStats(true);
     }
-  }, [learningStorageKey])
+  }, [learningStorageKey]);
 
   useEffect(() => {
-    if (!hydratedLearningStats) return
+    if (!hydratedLearningStats) return;
 
     try {
-      window.localStorage.setItem(learningStorageKey, JSON.stringify(normalizeAiDecisionStats(persistentLearningStats)))
+      window.localStorage.setItem(
+        learningStorageKey,
+        JSON.stringify(normalizeAiDecisionStats(persistentLearningStats)),
+      );
     } catch {
       // Browser storage can fail in private mode; backend/Supabase memory still remains primary.
     }
-  }, [hydratedLearningStats, learningStorageKey, persistentLearningStats])
+  }, [hydratedLearningStats, learningStorageKey, persistentLearningStats]);
 
   useEffect(() => {
-    if (!apiBaseUrl || !symbol) return
+    if (!apiBaseUrl || !symbol) return;
 
-    let cancelled = false
+    let cancelled = false;
 
     async function fetchDirectLivePrice() {
       try {
         const params = new URLSearchParams({
-          symbol: String(symbol ?? ''),
-          timeframe: String(timeframe ?? '1m'),
-        })
-        const response = await fetch(`${apiBaseUrl}/api/live-price?${params.toString()}`, { cache: 'no-store' })
+          symbol: String(symbol ?? ""),
+          timeframe: String(timeframe ?? "1m"),
+        });
+        const response = await fetch(
+          `${apiBaseUrl}/api/live-price?${params.toString()}`,
+          { cache: "no-store" },
+        );
 
-        if (!response.ok) return
+        if (!response.ok) return;
 
-        const json = await response.json()
-        const price = toFiniteNumber(json?.price ?? json?.last ?? json?.currentPrice, 0)
+        const json = await response.json();
+        const price = toFiniteNumber(
+          json?.price ?? json?.last ?? json?.currentPrice,
+          0,
+        );
 
         if (!cancelled && price > 0) {
-          setDirectLivePrice(price)
-          setDirectLivePriceUpdatedAt(String(json?.time ?? json?.timestamp ?? json?.createdAt ?? new Date().toISOString()))
+          setDirectLivePrice(price);
+          setDirectLivePriceUpdatedAt(
+            String(
+              json?.time ??
+                json?.timestamp ??
+                json?.createdAt ??
+                new Date().toISOString(),
+            ),
+          );
         }
       } catch {
         // Keep the last known direct live price. The chart activePrice still remains as fallback.
       }
     }
 
-    fetchDirectLivePrice()
-    const intervalMs = autoPaperMode ? 5000 : 10000
-    const intervalId = window.setInterval(fetchDirectLivePrice, intervalMs)
+    fetchDirectLivePrice();
+    const intervalMs = autoPaperMode ? 5000 : 10000;
+    const intervalId = window.setInterval(fetchDirectLivePrice, intervalMs);
 
     return () => {
-      cancelled = true
-      window.clearInterval(intervalId)
-    }
-  }, [apiBaseUrl, autoPaperMode, symbol, timeframe])
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [apiBaseUrl, autoPaperMode, symbol, timeframe]);
 
   const bestLivePriceForTrades = useMemo(() => {
-    const direct = toFiniteNumber(directLivePrice, 0)
-    if (direct > 0) return direct
+    const direct = toFiniteNumber(directLivePrice, 0);
+    if (direct > 0) return direct;
 
-    return toFiniteNumber(activePrice, 0)
-  }, [activePrice, directLivePrice])
+    return toFiniteNumber(activePrice, 0);
+  }, [activePrice, directLivePrice]);
 
   const liveActivePrice = useMemo(() => {
-    return getLiveAiCurrentPrice(bestLivePriceForTrades, signal, candles)
-  }, [bestLivePriceForTrades, signal, candles])
+    return getLiveAiCurrentPrice(bestLivePriceForTrades, signal, candles);
+  }, [bestLivePriceForTrades, signal, candles]);
 
   const activeProjectionEngine = useMemo(() => {
-    return directProjectionEngine ?? readProjectionEngine(signal, overlayPayload, unifiedIntelligence)
-  }, [directProjectionEngine, signal, overlayPayload, unifiedIntelligence])
+    return (
+      directProjectionEngine ??
+      readProjectionEngine(signal, overlayPayload, unifiedIntelligence)
+    );
+  }, [directProjectionEngine, signal, overlayPayload, unifiedIntelligence]);
 
   const projectionSnapshot = useMemo(() => {
-    return buildProjectionEngineSnapshot(activeProjectionEngine)
-  }, [activeProjectionEngine])
+    return buildProjectionEngineSnapshot(activeProjectionEngine);
+  }, [activeProjectionEngine]);
 
   const payload = useMemo(() => {
-    const targetSnapshot = buildTargetMlSnapshot(signal, overlayPayload, unifiedIntelligence)
-    const target = projectionSnapshot.targetPrice ?? targetSnapshot.targetPrice
-    const entry = inferEntryFromSignal(signal, liveActivePrice)
-    const side = readProjectionSide(activeProjectionEngine, signal?.signal ?? signal?.type ?? signal?.direction)
-    const entryTime = getLatestCandleTime(candles)
+    const targetSnapshot = buildTargetMlSnapshot(
+      signal,
+      overlayPayload,
+      unifiedIntelligence,
+    );
+    const target = projectionSnapshot.targetPrice ?? targetSnapshot.targetPrice;
+    const entry = inferEntryFromSignal(signal, liveActivePrice);
+    const side = readProjectionSide(
+      activeProjectionEngine,
+      signal?.signal ?? signal?.type ?? signal?.direction,
+    );
+    const entryTime = getLatestCandleTime(candles);
     const setupKey = buildAiTradeSetupKey({
       symbol,
       timeframe,
@@ -1495,8 +1783,9 @@ export default function AiTraderPanel({
       side,
       entry,
       target,
-      stop: signal?.stop ?? signal?.stopPrice ?? signal?.nrtrStopPrice ?? undefined,
-    })
+      stop:
+        signal?.stop ?? signal?.stopPrice ?? signal?.nrtrStopPrice ?? undefined,
+    });
 
     return {
       symbol,
@@ -1519,15 +1808,22 @@ export default function AiTraderPanel({
         targetGhostAlignment: projectionSnapshot.alignment,
       },
       scorecards,
-      ghostMl: buildGhostMlSnapshot(signal, overlayPayload, unifiedIntelligence),
+      ghostMl: buildGhostMlSnapshot(
+        signal,
+        overlayPayload,
+        unifiedIntelligence,
+      ),
       targetMl: {
         ...targetSnapshot,
         targetPrice: target,
-        targetConfidence: projectionSnapshot.targetConfidence || targetSnapshot.targetConfidence,
+        targetConfidence:
+          projectionSnapshot.targetConfidence ||
+          targetSnapshot.targetConfidence,
         projectionEngine: projectionSnapshot,
       },
       entryMl: buildEntryMlSnapshot(signal),
-      nrtrContext: scorecards?.nrtrStrategyFeeds ?? scorecards?.nrtrCharts ?? {},
+      nrtrContext:
+        scorecards?.nrtrStrategyFeeds ?? scorecards?.nrtrCharts ?? {},
       unifiedIntelligence: {
         ...(unifiedIntelligence ?? {}),
         projectionEngine: activeProjectionEngine,
@@ -1539,21 +1835,21 @@ export default function AiTraderPanel({
       strategyTesterContext: strategyTesterResults,
       candles: Array.isArray(candles) ? candles.slice(-80) : [],
       context: {
-        mode: 'dashboard_only_ai_paper_trader',
+        mode: "dashboard_only_ai_paper_trader",
         dashboardOnly: true,
         noBroker: true,
         projectionEngineMode: projectionSnapshot.projectionMode,
         projectionEngineLabel: projectionSnapshot.projectionModeLabel,
         aiPermission: projectionSnapshot.aiPermission,
         targetGhostConflict: projectionSnapshot.conflict,
-        strategyTesterScope: strategyTesterResults?.scope ?? 'MAIN_CHART_ONLY',
+        strategyTesterScope: strategyTesterResults?.scope ?? "MAIN_CHART_ONLY",
         strategyTesterMode: strategyTesterResults?.strategyMode,
         strategyTesterBestSettings: strategyTesterResults?.bestSettings,
         strategyTesterBestResult: strategyTesterResults?.bestResult,
       },
       minConfidence,
       minRiskReward,
-    }
+    };
   }, [
     liveActivePrice,
     signal,
@@ -1568,336 +1864,471 @@ export default function AiTraderPanel({
     projectionSnapshot,
     candles,
     strategyTesterResults,
-  ])
+  ]);
 
-  const safePayload = useMemo(() => sanitizeAiTraderPayload(payload), [payload])
+  const safePayload = useMemo(
+    () => sanitizeAiTraderPayload(payload),
+    [payload],
+  );
 
   const saveOpenTrades = useCallback((incomingTrades: any[]) => {
-    if (!Array.isArray(incomingTrades) || incomingTrades.length === 0) return
+    if (!Array.isArray(incomingTrades) || incomingTrades.length === 0) return;
 
-    setLocalOpenTrades((current) => keepNewestActiveOpenTrade(mergeTrades(current, incomingTrades)))
-  }, [])
+    setLocalOpenTrades((current) =>
+      keepNewestActiveOpenTrade(mergeTrades(current, incomingTrades)),
+    );
+  }, []);
 
   const forgetOpenTrades = useCallback((closedOrRemovedTrades: any[]) => {
-    if (!Array.isArray(closedOrRemovedTrades) || closedOrRemovedTrades.length === 0) return
+    if (
+      !Array.isArray(closedOrRemovedTrades) ||
+      closedOrRemovedTrades.length === 0
+    )
+      return;
 
-    const closedKeys = new Set(closedOrRemovedTrades.map(getTradeKey))
-    setLocalOpenTrades((current) => current.filter((trade) => !closedKeys.has(getTradeKey(trade))))
-  }, [])
+    const closedKeys = new Set(closedOrRemovedTrades.map(getTradeKey));
+    setLocalOpenTrades((current) =>
+      current.filter((trade) => !closedKeys.has(getTradeKey(trade))),
+    );
+  }, []);
 
-  const saveClosedTrades = useCallback((incomingTrades: any[]) => {
-    if (!Array.isArray(incomingTrades) || incomingTrades.length === 0) return
+  const saveClosedTrades = useCallback(
+    (incomingTrades: any[]) => {
+      if (!Array.isArray(incomingTrades) || incomingTrades.length === 0) return;
 
-    setLocalClosedTrades((current) => mergeTrades(current, incomingTrades))
-    forgetOpenTrades(incomingTrades)
-  }, [forgetOpenTrades])
+      setLocalClosedTrades((current) => mergeTrades(current, incomingTrades));
+      forgetOpenTrades(incomingTrades);
+    },
+    [forgetOpenTrades],
+  );
 
-  const fetchDecision = useCallback(async (force = false) => {
-    if (!apiBaseUrl) {
-      setErrorText('AI Trader is waiting for apiBaseUrl.')
-      return
-    }
-
-    if (!liveActivePrice || liveActivePrice <= 0) {
-      setErrorText('AI Trader is waiting for live price. Check mainChartCandles, activePrice, or latest signal price.')
-      return
-    }
-
-    const now = Date.now()
-
-    if (decisionRequestInFlightRef.current) {
-      if (force) setActionStatus('AI decision request already running...')
-      return
-    }
-
-    if (!force && now - lastDecisionRequestAtRef.current < 8000) {
-      return
-    }
-
-    decisionRequestInFlightRef.current = true
-    lastDecisionRequestAtRef.current = now
-    const timeout = createRequestTimeout(14000)
-
-    try {
-      setIsLoading(true)
-      setErrorText('')
-
-      const response = await fetch(`${apiBaseUrl}/api/ai-trader/decision`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(safePayload),
-        signal: timeout.signal,
-      })
-
-      if (!response.ok) {
-        throw new Error(`AI trader decision failed: ${await readApiError(response)}`)
+  const fetchDecision = useCallback(
+    async (force = false) => {
+      if (!apiBaseUrl) {
+        setErrorText("AI Trader is waiting for apiBaseUrl.");
+        return;
       }
 
-      const json = await response.json()
-      setDecision(json)
-      setPersistentLearningStats((current: any) => {
-        const withBackendStats = mergeAiDecisionStats(current, getAiDecisionStatsFromDecision(json))
-        return addLiveDecisionObservation(withBackendStats, json, symbol, timeframe, candles)
-      })
-    } catch (error) {
-      setErrorText(formatRequestError(error, 'AI trader decision failed'))
-    } finally {
-      timeout.clear()
-      decisionRequestInFlightRef.current = false
-      setIsLoading(false)
-    }
-  }, [apiBaseUrl, liveActivePrice, safePayload, symbol, timeframe, candles])
-
-  const fetchSummary = useCallback(async (force = false) => {
-    if (!apiBaseUrl) return
-
-    const now = Date.now()
-
-    if (summaryRequestInFlightRef.current) return
-    if (!force && now - lastSummaryRequestAtRef.current < 12000) return
-
-    summaryRequestInFlightRef.current = true
-    lastSummaryRequestAtRef.current = now
-    const timeout = createRequestTimeout(12000)
-
-    try {
-      // Closed trade history should be global across all symbols/timeframes.
-      // Open-trade locking is already handled by the backend one-trade-at-a-time rule.
-      const response = await fetch(`${apiBaseUrl}/api/ai-trader/summary`, {
-        cache: 'no-store',
-        signal: timeout.signal,
-      })
-
-      if (!response.ok) return
-
-      const json = await response.json()
-      setSummary(json)
-      setPersistentLearningStats((current: any) => mergeAiDecisionStats(current, getAiDecisionStatsFromSummary(json)))
-
-      const backendOpenPayload = [
-        ...(Array.isArray(json?.globalOpenTrades) ? json.globalOpenTrades : []),
-        ...(Array.isArray(json?.openTrades) ? json.openTrades : []),
-      ]
-
-      if (backendOpenPayload.length > 0) {
-        saveOpenTrades(backendOpenPayload)
+      if (!liveActivePrice || liveActivePrice <= 0) {
+        setErrorText(
+          "AI Trader is waiting for live price. Check mainChartCandles, activePrice, or latest signal price.",
+        );
+        return;
       }
 
-      const backendClosedTrades = [
-        ...(Array.isArray(json?.closedTrades) ? json.closedTrades : []),
-        ...(Array.isArray(json?.recentClosedTrades) ? json.recentClosedTrades : []),
-      ]
-      saveClosedTrades(backendClosedTrades)
-    } catch {
-      // Keep the panel usable even if summary temporarily fails.
-    } finally {
-      timeout.clear()
-      summaryRequestInFlightRef.current = false
-    }
-  }, [apiBaseUrl, saveClosedTrades, saveOpenTrades])
+      const now = Date.now();
 
-  const evaluateOpenTrades = useCallback(async (force = false) => {
-    if (!apiBaseUrl) return
-
-    const now = Date.now()
-
-    if (evaluateRequestInFlightRef.current) return
-    if (!force && now - lastEvaluateRequestAtRef.current < 15000) return
-
-    evaluateRequestInFlightRef.current = true
-    lastEvaluateRequestAtRef.current = now
-    const timeout = createRequestTimeout(14000)
-
-    try {
-      setActionStatus(force ? 'Evaluating open AI trades...' : '')
-
-      const response = await fetch(`${apiBaseUrl}/api/ai-trader/evaluate`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(sanitizeAiTraderPayload({
-          symbol,
-          timeframe,
-          currentPrice: liveActivePrice,
-          livePrice: liveActivePrice,
-          markPrice: liveActivePrice,
-          decision,
-          candles: Array.isArray(candles) ? candles.slice(-120) : [],
-        })),
-        signal: timeout.signal,
-      })
-
-      if (!response.ok) {
-        throw new Error(`AI trader evaluate failed: ${await readApiError(response)}`)
+      if (decisionRequestInFlightRef.current) {
+        if (force) setActionStatus("AI decision request already running...");
+        return;
       }
 
-      const json = await response.json()
-      const nextSummary = json?.summary ?? null
-      setSummary(nextSummary)
-      setPersistentLearningStats((current: any) => mergeAiDecisionStats(current, getAiDecisionStatsFromSummary(nextSummary)))
-
-      const backendOpenPayload = [
-        ...(Array.isArray(json?.globalOpenTrades) ? json.globalOpenTrades : []),
-        ...(Array.isArray(json?.openTrades) ? json.openTrades : []),
-        ...(Array.isArray(nextSummary?.globalOpenTrades) ? nextSummary.globalOpenTrades : []),
-        ...(Array.isArray(nextSummary?.openTrades) ? nextSummary.openTrades : []),
-      ]
-
-      if (backendOpenPayload.length > 0) {
-        saveOpenTrades(backendOpenPayload)
+      if (!force && now - lastDecisionRequestAtRef.current < 8000) {
+        return;
       }
 
-      const backendClosedTrades = [
-        ...(Array.isArray(json?.closedTrades) ? json.closedTrades : []),
-        ...(Array.isArray(json?.recentClosedTrades) ? json.recentClosedTrades : []),
-        ...(Array.isArray(nextSummary?.closedTrades) ? nextSummary.closedTrades : []),
-        ...(Array.isArray(nextSummary?.recentClosedTrades) ? nextSummary.recentClosedTrades : []),
-      ]
-      saveClosedTrades(backendClosedTrades)
+      decisionRequestInFlightRef.current = true;
+      lastDecisionRequestAtRef.current = now;
+      const timeout = createRequestTimeout(14000);
 
-      if (force || backendClosedTrades.length > 0) {
-        setActionStatus(`Evaluated • Closed ${json?.closedCount ?? backendClosedTrades.length ?? 0} trade(s)`)
+      try {
+        setIsLoading(true);
+        setErrorText("");
+
+        const response = await fetch(`${apiBaseUrl}/api/ai-trader/decision`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(safePayload),
+          signal: timeout.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(
+            `AI trader decision failed: ${await readApiError(response)}`,
+          );
+        }
+
+        const json = await response.json();
+        setDecision(json);
+        setPersistentLearningStats((current: any) => {
+          const withBackendStats = mergeAiDecisionStats(
+            current,
+            getAiDecisionStatsFromDecision(json),
+          );
+          return addLiveDecisionObservation(
+            withBackendStats,
+            json,
+            symbol,
+            timeframe,
+            candles,
+          );
+        });
+      } catch (error) {
+        setErrorText(formatRequestError(error, "AI trader decision failed"));
+      } finally {
+        timeout.clear();
+        decisionRequestInFlightRef.current = false;
+        setIsLoading(false);
       }
-    } catch (error) {
-      setActionStatus(formatRequestError(error, 'Evaluate failed'))
-    } finally {
-      timeout.clear()
-      evaluateRequestInFlightRef.current = false
-    }
-  }, [apiBaseUrl, candles, decision, liveActivePrice, saveClosedTrades, saveOpenTrades, symbol, timeframe])
+    },
+    [apiBaseUrl, liveActivePrice, safePayload, symbol, timeframe, candles],
+  );
 
-  const openDashboardTrade = useCallback(async (source: 'auto' = 'auto') => {
-    if (!apiBaseUrl) return
+  const fetchSummary = useCallback(
+    async (force = false) => {
+      if (!apiBaseUrl) return;
 
-    const now = Date.now()
+      const now = Date.now();
 
-    if (openRequestInFlightRef.current) {
-      setActionStatus('Open trade request already running...')
-      return
-    }
+      if (summaryRequestInFlightRef.current) return;
+      if (!force && now - lastSummaryRequestAtRef.current < 12000) return;
 
-    if (now - lastOpenRequestAtRef.current < 20000) {
-      setActionStatus('Open trade cooldown active. Waiting before another open attempt.')
-      return
-    }
+      summaryRequestInFlightRef.current = true;
+      lastSummaryRequestAtRef.current = now;
+      const timeout = createRequestTimeout(12000);
 
-    const openSetupKey = String((safePayload as any)?.setupKey ?? '')
-    pruneRecentSetupKeys(recentOpenSetupKeysRef.current, now)
+      try {
+        // Closed trade history should be global across all symbols/timeframes.
+        // Open-trade locking is already handled by the backend one-trade-at-a-time rule.
+        const response = await fetch(`${apiBaseUrl}/api/ai-trader/summary`, {
+          cache: "no-store",
+          signal: timeout.signal,
+        });
 
-    if (activePaperTradeLockRef.current) {
-      const localCount = getActiveOpenTrades(localOpenTrades).length
-      const backendCount = getActiveOpenTrades([
-        ...(Array.isArray((summary as any)?.globalOpenTrades) ? (summary as any).globalOpenTrades : []),
+        if (!response.ok) return;
+
+        const json = await response.json();
+        setSummary(json);
+        setPersistentLearningStats((current: any) =>
+          mergeAiDecisionStats(current, getAiDecisionStatsFromSummary(json)),
+        );
+
+        const backendOpenPayload = [
+          ...(Array.isArray(json?.globalOpenTrades)
+            ? json.globalOpenTrades
+            : []),
+          ...(Array.isArray(json?.openTrades) ? json.openTrades : []),
+        ];
+
+        if (backendOpenPayload.length > 0) {
+          saveOpenTrades(backendOpenPayload);
+        }
+
+        const backendClosedTrades = [
+          ...(Array.isArray(json?.closedTrades) ? json.closedTrades : []),
+          ...(Array.isArray(json?.recentClosedTrades)
+            ? json.recentClosedTrades
+            : []),
+        ];
+        saveClosedTrades(backendClosedTrades);
+      } catch {
+        // Keep the panel usable even if summary temporarily fails.
+      } finally {
+        timeout.clear();
+        summaryRequestInFlightRef.current = false;
+      }
+    },
+    [apiBaseUrl, saveClosedTrades, saveOpenTrades],
+  );
+
+  const evaluateOpenTrades = useCallback(
+    async (force = false) => {
+      if (!apiBaseUrl) return;
+
+      const now = Date.now();
+
+      if (evaluateRequestInFlightRef.current) return;
+      if (!force && now - lastEvaluateRequestAtRef.current < 15000) return;
+
+      evaluateRequestInFlightRef.current = true;
+      lastEvaluateRequestAtRef.current = now;
+      const timeout = createRequestTimeout(14000);
+
+      try {
+        setActionStatus(force ? "Evaluating open AI trades..." : "");
+
+        const response = await fetch(`${apiBaseUrl}/api/ai-trader/evaluate`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(
+            sanitizeAiTraderPayload({
+              symbol,
+              timeframe,
+              currentPrice: liveActivePrice,
+              livePrice: liveActivePrice,
+              markPrice: liveActivePrice,
+              decision,
+              candles: Array.isArray(candles) ? candles.slice(-120) : [],
+            }),
+          ),
+          signal: timeout.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(
+            `AI trader evaluate failed: ${await readApiError(response)}`,
+          );
+        }
+
+        const json = await response.json();
+        const nextSummary = json?.summary ?? null;
+        setSummary(nextSummary);
+        setPersistentLearningStats((current: any) =>
+          mergeAiDecisionStats(
+            current,
+            getAiDecisionStatsFromSummary(nextSummary),
+          ),
+        );
+
+        const backendOpenPayload = [
+          ...(Array.isArray(json?.globalOpenTrades)
+            ? json.globalOpenTrades
+            : []),
+          ...(Array.isArray(json?.openTrades) ? json.openTrades : []),
+          ...(Array.isArray(nextSummary?.globalOpenTrades)
+            ? nextSummary.globalOpenTrades
+            : []),
+          ...(Array.isArray(nextSummary?.openTrades)
+            ? nextSummary.openTrades
+            : []),
+        ];
+
+        if (backendOpenPayload.length > 0) {
+          saveOpenTrades(backendOpenPayload);
+        }
+
+        const backendClosedTrades = [
+          ...(Array.isArray(json?.closedTrades) ? json.closedTrades : []),
+          ...(Array.isArray(json?.recentClosedTrades)
+            ? json.recentClosedTrades
+            : []),
+          ...(Array.isArray(nextSummary?.closedTrades)
+            ? nextSummary.closedTrades
+            : []),
+          ...(Array.isArray(nextSummary?.recentClosedTrades)
+            ? nextSummary.recentClosedTrades
+            : []),
+        ];
+        saveClosedTrades(backendClosedTrades);
+
+        if (force || backendClosedTrades.length > 0) {
+          setActionStatus(
+            `Evaluated • Closed ${json?.closedCount ?? backendClosedTrades.length ?? 0} trade(s)`,
+          );
+        }
+      } catch (error) {
+        setActionStatus(formatRequestError(error, "Evaluate failed"));
+      } finally {
+        timeout.clear();
+        evaluateRequestInFlightRef.current = false;
+      }
+    },
+    [
+      apiBaseUrl,
+      candles,
+      decision,
+      liveActivePrice,
+      saveClosedTrades,
+      saveOpenTrades,
+      symbol,
+      timeframe,
+    ],
+  );
+
+  const openDashboardTrade = useCallback(
+    async (source: "auto" = "auto") => {
+      if (!apiBaseUrl) return;
+
+      const now = Date.now();
+
+      if (openRequestInFlightRef.current) {
+        setActionStatus("Open trade request already running...");
+        return;
+      }
+
+      if (now - lastOpenRequestAtRef.current < 20000) {
+        setActionStatus(
+          "Open trade cooldown active. Waiting before another open attempt.",
+        );
+        return;
+      }
+
+      const openSetupKey = String((safePayload as any)?.setupKey ?? "");
+      pruneRecentSetupKeys(recentOpenSetupKeysRef.current, now);
+
+      if (activePaperTradeLockRef.current) {
+        const localCount = getActiveOpenTrades(localOpenTrades).length;
+        const backendCount = getActiveOpenTrades([
+          ...(Array.isArray((summary as any)?.globalOpenTrades)
+            ? (summary as any).globalOpenTrades
+            : []),
+          ...(Array.isArray(summary?.openTrades) ? summary.openTrades : []),
+        ]).length;
+        setActionStatus(
+          `Open blocked: internal AI trade lock is active. Debug: visibleLocal=${localCount}, backendOpen=${backendCount}. Run Evaluate Open or wait for the active trade to close.`,
+        );
+        return;
+      }
+
+      if (openSetupKey && recentOpenSetupKeysRef.current.has(openSetupKey)) {
+        setActionStatus(
+          "Open blocked: this exact AI setup was already sent recently. Waiting for a fresh candle/setup.",
+        );
+        return;
+      }
+
+      const trustedBackendOpenTrades = getActiveOpenTrades([
+        ...(Array.isArray((summary as any)?.globalOpenTrades)
+          ? (summary as any).globalOpenTrades
+          : []),
         ...(Array.isArray(summary?.openTrades) ? summary.openTrades : []),
-      ]).length
-      setActionStatus(`Open blocked: internal AI trade lock is active. Debug: visibleLocal=${localCount}, backendOpen=${backendCount}. Run Evaluate Open or wait for the active trade to close.`)
-      return
-    }
+      ]).filter(
+        (trade: any) => !closedTradeKeysRef.current.has(getTradeKey(trade)),
+      );
 
-    if (openSetupKey && recentOpenSetupKeysRef.current.has(openSetupKey)) {
-      setActionStatus('Open blocked: this exact AI setup was already sent recently. Waiting for a fresh candle/setup.')
-      return
-    }
-
-    const trustedBackendOpenTrades = getActiveOpenTrades([
-      ...(Array.isArray((summary as any)?.globalOpenTrades) ? (summary as any).globalOpenTrades : []),
-      ...(Array.isArray(summary?.openTrades) ? summary.openTrades : []),
-    ]).filter((trade: any) => !closedTradeKeysRef.current.has(getTradeKey(trade)))
-
-    if (trustedBackendOpenTrades.length > 0) {
-      activePaperTradeLockRef.current = true
-      const blocker = trustedBackendOpenTrades[trustedBackendOpenTrades.length - 1]
-      const blockerSymbol = String(blocker?.symbol ?? 'another symbol')
-      const blockerSide = normalizeTradeSide(blocker?.side ?? blocker?.decision ?? blocker?.rawDecision)
-      setActionStatus(`Open blocked: one AI Auto Trade is already active (${blockerSymbol} ${blockerSide}). Learning mode is one trade at a time.`)
-      saveOpenTrades(trustedBackendOpenTrades)
-      return
-    }
-
-    const visibleLocalOpenTrades = getActiveOpenTrades(localOpenTrades)
-
-    if (visibleLocalOpenTrades.length > 0) {
-      activePaperTradeLockRef.current = true
-      const visibleDetails = visibleLocalOpenTrades
-        .map((trade: any) => describeAiOpenTradeForLog(trade, liveActivePrice))
-        .join(' || ')
-      setActionStatus(`Open blocked: ${visibleLocalOpenTrades.length} dashboard AI trade is already visible. ${visibleDetails}. Learning mode is one trade at a time.`)
-      return
-    }
-
-    if (decisionRequestInFlightRef.current || evaluateRequestInFlightRef.current) {
-      setActionStatus('Waiting for current AI refresh/evaluation to finish before opening trade.')
-      return
-    }
-
-    if (openSetupKey) {
-      recentOpenSetupKeysRef.current.set(openSetupKey, now)
-    }
-
-    activePaperTradeLockRef.current = true
-    openRequestInFlightRef.current = true
-    lastOpenRequestAtRef.current = now
-    const timeout = createRequestTimeout(16000)
-
-    try {
-      setActionStatus('AI Trader opening dashboard-only trade...')
-
-      const response = await fetch(`${apiBaseUrl}/api/ai-trader/open`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(safePayload),
-        signal: timeout.signal,
-      })
-
-      if (!response.ok) {
-        throw new Error(`AI trader open failed: ${await readApiError(response)}`)
+      if (trustedBackendOpenTrades.length > 0) {
+        activePaperTradeLockRef.current = true;
+        const blocker =
+          trustedBackendOpenTrades[trustedBackendOpenTrades.length - 1];
+        const blockerSymbol = String(blocker?.symbol ?? "another symbol");
+        const blockerSide = normalizeTradeSide(
+          blocker?.side ?? blocker?.decision ?? blocker?.rawDecision,
+        );
+        setActionStatus(
+          `Open blocked: one AI Auto Trade is already active (${blockerSymbol} ${blockerSide}). Learning mode is one trade at a time.`,
+        );
+        saveOpenTrades(trustedBackendOpenTrades);
+        return;
       }
 
-      const json = await response.json()
-      const nextDecision = json?.decision ?? decision
-      const nextSummary = json?.summary ?? summary
-      setDecision(nextDecision)
-      setSummary(nextSummary)
-      if (Array.isArray(nextSummary?.openTrades) && nextSummary.openTrades.length > 0) {
-        saveOpenTrades(nextSummary.openTrades)
+      const visibleLocalOpenTrades = getActiveOpenTrades(localOpenTrades);
+
+      if (visibleLocalOpenTrades.length > 0) {
+        activePaperTradeLockRef.current = true;
+        const visibleDetails = visibleLocalOpenTrades
+          .map((trade: any) =>
+            describeAiOpenTradeForLog(trade, liveActivePrice),
+          )
+          .join(" || ");
+        setActionStatus(
+          `Open blocked: ${visibleLocalOpenTrades.length} dashboard AI trade is already visible. ${visibleDetails}. Learning mode is one trade at a time.`,
+        );
+        return;
       }
-      if (json?.trade) {
-        saveOpenTrades([json.trade])
+
+      if (
+        decisionRequestInFlightRef.current ||
+        evaluateRequestInFlightRef.current
+      ) {
+        setActionStatus(
+          "Waiting for current AI refresh/evaluation to finish before opening trade.",
+        );
+        return;
       }
-      setPersistentLearningStats((current: any) => {
-        const withSummaryStats = mergeAiDecisionStats(current, getAiDecisionStatsFromSummary(nextSummary))
-        const withDecisionStats = mergeAiDecisionStats(withSummaryStats, getAiDecisionStatsFromDecision(nextDecision))
-        return addLiveDecisionObservation(withDecisionStats, nextDecision, symbol, timeframe, candles)
-      })
-      if (!json?.opened && !json?.trade) {
-        activePaperTradeLockRef.current = false
+
+      if (openSetupKey) {
+        recentOpenSetupKeysRef.current.set(openSetupKey, now);
       }
-      setActionStatus(json?.opened ? 'Dashboard AI trade opened' : json?.message ?? 'AI trade not opened')
-    } catch (error) {
-      activePaperTradeLockRef.current = false
-      setActionStatus(formatRequestError(error, 'Open failed'))
-    } finally {
-      timeout.clear()
-      openRequestInFlightRef.current = false
-    }
-  }, [apiBaseUrl, safePayload, decision, summary, symbol, timeframe, candles, localOpenTrades, liveActivePrice, saveOpenTrades])
+
+      activePaperTradeLockRef.current = true;
+      openRequestInFlightRef.current = true;
+      lastOpenRequestAtRef.current = now;
+      const timeout = createRequestTimeout(16000);
+
+      try {
+        setActionStatus("AI Trader opening dashboard-only trade...");
+
+        const response = await fetch(`${apiBaseUrl}/api/ai-trader/open`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(safePayload),
+          signal: timeout.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(
+            `AI trader open failed: ${await readApiError(response)}`,
+          );
+        }
+
+        const json = await response.json();
+        const nextDecision = json?.decision ?? decision;
+        const nextSummary = json?.summary ?? summary;
+        setDecision(nextDecision);
+        setSummary(nextSummary);
+        if (
+          Array.isArray(nextSummary?.openTrades) &&
+          nextSummary.openTrades.length > 0
+        ) {
+          saveOpenTrades(nextSummary.openTrades);
+        }
+        if (json?.trade) {
+          saveOpenTrades([json.trade]);
+        }
+        setPersistentLearningStats((current: any) => {
+          const withSummaryStats = mergeAiDecisionStats(
+            current,
+            getAiDecisionStatsFromSummary(nextSummary),
+          );
+          const withDecisionStats = mergeAiDecisionStats(
+            withSummaryStats,
+            getAiDecisionStatsFromDecision(nextDecision),
+          );
+          return addLiveDecisionObservation(
+            withDecisionStats,
+            nextDecision,
+            symbol,
+            timeframe,
+            candles,
+          );
+        });
+        if (!json?.opened && !json?.trade) {
+          activePaperTradeLockRef.current = false;
+        }
+        setActionStatus(
+          json?.opened
+            ? "Dashboard AI trade opened"
+            : (json?.message ?? "AI trade not opened"),
+        );
+      } catch (error) {
+        activePaperTradeLockRef.current = false;
+        setActionStatus(formatRequestError(error, "Open failed"));
+      } finally {
+        timeout.clear();
+        openRequestInFlightRef.current = false;
+      }
+    },
+    [
+      apiBaseUrl,
+      safePayload,
+      decision,
+      summary,
+      symbol,
+      timeframe,
+      candles,
+      localOpenTrades,
+      liveActivePrice,
+      saveOpenTrades,
+    ],
+  );
 
   useEffect(() => {
-    fetchDecision(true)
-    fetchSummary(true)
-  }, [apiBaseUrl, symbol, timeframe])
+    fetchDecision(true);
+    fetchSummary(true);
+  }, [apiBaseUrl, symbol, timeframe]);
 
   useEffect(() => {
-    if (!autoPaperMode) return
-    if (!decision?.allowedToTrade) return
+    if (!autoPaperMode) return;
+    if (!decision?.allowedToTrade) return;
 
-    const side = normalizeDecision(decision.rawDecision ?? decision.decision)
-    if (side === 'HOLD') return
+    const side = normalizeDecision(decision.rawDecision ?? decision.decision);
+    if (side === "HOLD") return;
 
     const key = buildAiTradeSetupKey({
       symbol,
@@ -1907,148 +2338,189 @@ export default function AiTraderPanel({
       entry: decision.entry,
       target: decision.target,
       stop: decision.stop,
-    })
+    });
 
-    if (key === lastAutoOpenKey) return
+    if (key === lastAutoOpenKey) return;
 
-    setLastAutoOpenKey(key)
-    openDashboardTrade('auto')
-  }, [autoPaperMode, candles, decision, lastAutoOpenKey, openDashboardTrade, symbol, timeframe])
+    setLastAutoOpenKey(key);
+    openDashboardTrade("auto");
+  }, [
+    autoPaperMode,
+    candles,
+    decision,
+    lastAutoOpenKey,
+    openDashboardTrade,
+    symbol,
+    timeframe,
+  ]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
-      fetchDecision(false)
-      fetchSummary(false)
-      evaluateOpenTrades(false)
-    }, 20000)
+      fetchDecision(false);
+      fetchSummary(false);
+      evaluateOpenTrades(false);
+    }, 20000);
 
-    return () => window.clearInterval(id)
-  }, [fetchDecision, fetchSummary, evaluateOpenTrades])
+    return () => window.clearInterval(id);
+  }, [fetchDecision, fetchSummary, evaluateOpenTrades]);
 
-  const aiDecision = normalizeDecision(decision?.decision)
-  const rawDecision = normalizeDecision(decision?.rawDecision)
+  const aiDecision = normalizeDecision(decision?.decision);
+  const rawDecision = normalizeDecision(decision?.rawDecision);
   const decisionTone =
-    aiDecision === 'BUY'
-      ? 'bull'
-      : aiDecision === 'SELL'
-        ? 'bear'
-        : rawDecision === 'BUY' || rawDecision === 'SELL'
-          ? 'warn'
-          : 'neutral'
+    aiDecision === "BUY"
+      ? "bull"
+      : aiDecision === "SELL"
+        ? "bear"
+        : rawDecision === "BUY" || rawDecision === "SELL"
+          ? "warn"
+          : "neutral";
 
   const activeMemoryStatus =
-    summary?.memoryStatus ??
-    decision?.details?.memoryStatus ??
-    {}
+    summary?.memoryStatus ?? decision?.details?.memoryStatus ?? {};
 
   const activeDecisionStats = useMemo(() => {
-    return buildStableAiDecisionStats(persistentLearningStats, summary, decision)
-  }, [persistentLearningStats, summary, decision])
+    return buildStableAiDecisionStats(
+      persistentLearningStats,
+      summary,
+      decision,
+    );
+  }, [persistentLearningStats, summary, decision]);
 
   const backendClosedTrades = useMemo(() => {
     return [
-      ...(Array.isArray(summary?.closedTrades) ? summary?.closedTrades ?? [] : []),
-      ...(Array.isArray(summary?.recentClosedTrades) ? summary?.recentClosedTrades ?? [] : []),
-    ]
-  }, [summary])
+      ...(Array.isArray(summary?.closedTrades)
+        ? (summary?.closedTrades ?? [])
+        : []),
+      ...(Array.isArray(summary?.recentClosedTrades)
+        ? (summary?.recentClosedTrades ?? [])
+        : []),
+    ];
+  }, [summary]);
 
   const closedTrades = useMemo(() => {
-    return mergeTrades(localClosedTrades, backendClosedTrades)
-  }, [backendClosedTrades, localClosedTrades])
+    return mergeTrades(localClosedTrades, backendClosedTrades);
+  }, [backendClosedTrades, localClosedTrades]);
 
   const frontendClosedStats = useMemo(() => {
-    return calculateClosedTradeStats(closedTrades)
-  }, [closedTrades])
+    return calculateClosedTradeStats(closedTrades);
+  }, [closedTrades]);
 
   const activeClosedStats =
     closedTrades.length > 0
       ? frontendClosedStats
-      : activeMemoryStatus?.bucketClosedStats ??
+      : (activeMemoryStatus?.bucketClosedStats ??
         activeMemoryStatus?.overallClosedStats ??
         summary?.stats ??
-        {}
+        {});
 
-  const stats = activeClosedStats
-  const decisionStats = activeDecisionStats
-  const memoryStatus = activeMemoryStatus
+  const stats = activeClosedStats;
+  const decisionStats = activeDecisionStats;
+  const memoryStatus = activeMemoryStatus;
   const mergedSummaryForStats: AiTraderSummary = {
     ...(summary ?? {}),
     memoryStatus: activeMemoryStatus,
     decisionStats: activeDecisionStats,
     stats: activeClosedStats,
     closedCount: closedTrades.length,
-  }
+  };
 
   const blockers = getBlockerAnalysis(
     decision,
     mergedSummaryForStats,
     minConfidence,
-    minRiskReward
-  )
+    minRiskReward,
+  );
 
-  const directionalContext = decision?.details?.directionalContext ?? {}
+  const directionalContext = decision?.details?.directionalContext ?? {};
   const ghostMlConfidence = Math.max(
     toFiniteNumber(projectionSnapshot.ghostConfidence, 0),
-    toFiniteNumber(directionalContext.ghostConfidence, 0)
-  )
+    toFiniteNumber(directionalContext.ghostConfidence, 0),
+  );
   const targetMlConfidence = Math.max(
     toFiniteNumber(projectionSnapshot.targetConfidence, 0),
-    toFiniteNumber(directionalContext.targetConfidence, 0)
-  )
-  const entryMlConfidence = toFiniteNumber(directionalContext.entryConfidence, 0)
-  const aiConfidence = toFiniteNumber(decision?.confidence, 0)
-  const liveTargetConfidence = toFiniteNumber((projectionSnapshot as any).targetLiveConfidence ?? targetMlConfidence, targetMlConfidence)
-  const lockedTargetConfidence = toFiniteNumber((projectionSnapshot as any).targetLockedConfidence ?? targetMlConfidence, targetMlConfidence)
+    toFiniteNumber(directionalContext.targetConfidence, 0),
+  );
+  const entryMlConfidence = toFiniteNumber(
+    directionalContext.entryConfidence,
+    0,
+  );
+  const aiConfidence = toFiniteNumber(decision?.confidence, 0);
+  const liveTargetConfidence = toFiniteNumber(
+    (projectionSnapshot as any).targetLiveConfidence ?? targetMlConfidence,
+    targetMlConfidence,
+  );
+  const lockedTargetConfidence = toFiniteNumber(
+    (projectionSnapshot as any).targetLockedConfidence ?? targetMlConfidence,
+    targetMlConfidence,
+  );
   const targetLearnedReliability = Math.max(
     toFiniteNumber((projectionSnapshot as any).learnedReliability, 0),
     toFiniteNumber((payload as any)?.targetMl?.learnedReliability, 0),
     lockedTargetConfidence,
-  )
-  const aiSetupConfidence = aiConfidence
-  const rrTargetPlan = decision?.details?.rrTargetPlan ?? {}
-  const rrPlanMethod = String(rrTargetPlan?.method ?? 'original_target')
-  const rrPlanUpgraded = Boolean(rrTargetPlan?.upgraded)
-  const rrRequiredTarget = toFiniteNumber(rrTargetPlan?.requiredTarget, 0)
-  const originalRiskReward = toFiniteNumber(rrTargetPlan?.originalRiskReward, decision?.riskReward ?? 0)
-  const aiMemorySamples = toFiniteNumber(decisionStats.samples, 0)
-  const aiMemoryProgress = Math.min(100, (aiMemorySamples / 400) * 100)
+  );
+  const aiSetupConfidence = aiConfidence;
+  const rrTargetPlan = decision?.details?.rrTargetPlan ?? {};
+  const rrPlanMethod = String(rrTargetPlan?.method ?? "original_target");
+  const rrPlanUpgraded = Boolean(rrTargetPlan?.upgraded);
+  const rrRequiredTarget = toFiniteNumber(rrTargetPlan?.requiredTarget, 0);
+  const originalRiskReward = toFiniteNumber(
+    rrTargetPlan?.originalRiskReward,
+    decision?.riskReward ?? 0,
+  );
+  const aiMemorySamples = toFiniteNumber(decisionStats.samples, 0);
+  const aiMemoryProgress = Math.min(100, (aiMemorySamples / 400) * 100);
   const aiLearnedReliability = Math.max(
     toFiniteNumber(stats.winRate, 0) * 100,
-    aiMemorySamples > 0 ? Math.min(100, toFiniteNumber(decisionStats.avgConfidence, 0)) : 0,
-  )
+    aiMemorySamples > 0
+      ? Math.min(100, toFiniteNumber(decisionStats.avgConfidence, 0))
+      : 0,
+  );
 
-  const locallyClosedKeys = useMemo(() => new Set(closedTrades.map(getTradeKey)), [closedTrades])
+  const locallyClosedKeys = useMemo(
+    () => new Set(closedTrades.map(getTradeKey)),
+    [closedTrades],
+  );
 
   useEffect(() => {
-    closedTradeKeysRef.current = locallyClosedKeys
-  }, [locallyClosedKeys])
+    closedTradeKeysRef.current = locallyClosedKeys;
+  }, [locallyClosedKeys]);
 
   const backendOpenTrades = useMemo(() => {
     return [
-      ...(Array.isArray((summary as any)?.globalOpenTrades) ? (summary as any).globalOpenTrades : []),
-      ...(Array.isArray(summary?.openTrades) ? summary?.openTrades ?? [] : []),
-    ]
-  }, [summary])
+      ...(Array.isArray((summary as any)?.globalOpenTrades)
+        ? (summary as any).globalOpenTrades
+        : []),
+      ...(Array.isArray(summary?.openTrades)
+        ? (summary?.openTrades ?? [])
+        : []),
+    ];
+  }, [summary]);
 
   const rawOpenTrades = useMemo(() => {
-    const merged = mergeTrades(localOpenTrades, backendOpenTrades)
-      .filter((trade: any) => !locallyClosedKeys.has(getTradeKey(trade)))
-    return keepNewestActiveOpenTrade(merged)
-  }, [localOpenTrades, backendOpenTrades, locallyClosedKeys])
+    const merged = mergeTrades(localOpenTrades, backendOpenTrades).filter(
+      (trade: any) => !locallyClosedKeys.has(getTradeKey(trade)),
+    );
+    return keepNewestActiveOpenTrade(merged);
+  }, [localOpenTrades, backendOpenTrades, locallyClosedKeys]);
 
   const liveOpenTrades = rawOpenTrades
     .filter((trade: any) => !locallyClosedKeys.has(getTradeKey(trade)))
     .map((trade: any) => {
-      const settlement = getAiTradeSettlement(trade, liveActivePrice, decision, minConfidence)
+      const settlement = getAiTradeSettlement(
+        trade,
+        liveActivePrice,
+        decision,
+        minConfidence,
+      );
       const live = calculateLiveTradePnl(
         trade,
-        settlement.shouldClose ? settlement.closePrice : liveActivePrice
-      )
+        settlement.shouldClose ? settlement.closePrice : liveActivePrice,
+      );
 
       const maxPnl = Math.max(
         toFiniteNumber(trade?.maxPnl ?? trade?.maxPnlDollar, live.pnl),
         live.pnl,
-      )
+      );
 
       return {
         ...trade,
@@ -2063,61 +2535,273 @@ export default function AiTraderPanel({
         livePoints: live.points,
         rMultiple: live.rMultiple,
         liveUpdatedFromChart: live.current > 0,
-        livePriceSource: directLivePrice > 0 ? 'backend_live_price' : 'chart_active_price',
+        livePriceSource:
+          directLivePrice > 0 ? "backend_live_price" : "chart_active_price",
         livePriceUpdatedAt: directLivePriceUpdatedAt,
 
         shouldCloseNow: settlement.shouldClose,
-        closePrice: settlement.shouldClose ? settlement.closePrice : trade.closePrice,
-        closeReason: settlement.shouldClose ? settlement.closeReason : trade.closeReason,
-        closeLabel: settlement.shouldClose ? settlement.closeLabel : trade.closeLabel,
-      }
-    })
+        closePrice: settlement.shouldClose
+          ? settlement.closePrice
+          : trade.closePrice,
+        closeReason: settlement.shouldClose
+          ? settlement.closeReason
+          : trade.closeReason,
+        closeLabel: settlement.shouldClose
+          ? settlement.closeLabel
+          : trade.closeLabel,
+      };
+    });
 
   useEffect(() => {
-    const hasActiveOpenTrade = getActiveOpenTrades(liveOpenTrades).length > 0
+    const hasActiveOpenTrade = getActiveOpenTrades(liveOpenTrades).length > 0;
 
     if (hasActiveOpenTrade) {
-      activePaperTradeLockRef.current = true
-      return
+      activePaperTradeLockRef.current = true;
+      return;
     }
 
     if (!openRequestInFlightRef.current) {
-      activePaperTradeLockRef.current = false
+      activePaperTradeLockRef.current = false;
     }
-  }, [liveOpenTrades])
+  }, [liveOpenTrades]);
 
   useEffect(() => {
-    setLastAutoOpenKey('')
-    recentOpenSetupKeysRef.current.clear()
-  }, [symbol, timeframe])
+    setLastAutoOpenKey("");
+    recentOpenSetupKeysRef.current.clear();
+  }, [symbol, timeframe]);
 
   const settlementAutoEvaluateKey = liveOpenTrades
     .filter((trade: any) => trade.shouldCloseNow)
-    .map((trade: any) => `${getTradeKey(trade)}:${trade.closeReason}:${trade.closePrice}`)
-    .join('|')
+    .map(
+      (trade: any) =>
+        `${getTradeKey(trade)}:${trade.closeReason}:${trade.closePrice}`,
+    )
+    .join("|");
 
   useEffect(() => {
-    if (!settlementAutoEvaluateKey) return
+    if (!settlementAutoEvaluateKey) return;
 
     const tradesToClose = liveOpenTrades
       .filter((trade: any) => trade.shouldCloseNow)
-      .map((trade: any) => buildClosedTradeFromOpenTrade({
-        trade,
-        livePrice: liveActivePrice,
-        closePrice: toFiniteNumber(trade.closePrice, liveActivePrice),
-        closeReason: trade.closeReason,
-        closeLabel: trade.closeLabel,
-        candles,
-      }))
+      .map((trade: any) =>
+        buildClosedTradeFromOpenTrade({
+          trade,
+          livePrice: liveActivePrice,
+          closePrice: toFiniteNumber(trade.closePrice, liveActivePrice),
+          closeReason: trade.closeReason,
+          closeLabel: trade.closeLabel,
+          candles,
+        }),
+      );
 
-    saveClosedTrades(tradesToClose)
-    forgetOpenTrades(tradesToClose)
-    evaluateOpenTrades(true)
-  }, [settlementAutoEvaluateKey, saveClosedTrades, forgetOpenTrades, evaluateOpenTrades, liveOpenTrades, liveActivePrice, candles])
+    saveClosedTrades(tradesToClose);
+    forgetOpenTrades(tradesToClose);
+    evaluateOpenTrades(true);
+  }, [
+    settlementAutoEvaluateKey,
+    saveClosedTrades,
+    forgetOpenTrades,
+    evaluateOpenTrades,
+    liveOpenTrades,
+    liveActivePrice,
+    candles,
+  ]);
 
-  const displayOpenCount = liveOpenTrades.length
-  const displayClosedCount = closedTrades.length
-  const stableMemoryMessage = `AI memory warming up: ${formatCount(decisionStats.samples)} decision observations, ${formatCount(displayClosedCount)} closed/virtual outcomes`
+  const displayOpenCount = liveOpenTrades.length;
+  const displayClosedCount = closedTrades.length;
+  const stableMemoryMessage = `AI memory warming up: ${formatCount(decisionStats.samples)} decision observations, ${formatCount(displayClosedCount)} closed/virtual outcomes`;
+
+  const dashboardTraderDebugRows = useMemo(() => {
+    const rows: Array<{
+      time: string;
+      level: "info" | "warn" | "error" | "success";
+      message: string;
+    }> = [];
+    const nowText = new Date().toLocaleTimeString("en-US", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: true,
+    });
+
+    const pushRow = (
+      level: "info" | "warn" | "error" | "success",
+      stage: string,
+      detail: Record<string, any> = {},
+    ) => {
+      const readable = Object.entries(detail)
+        .filter(
+          ([, value]) => value !== undefined && value !== null && value !== "",
+        )
+        .map(([key, value]) => `${key}=${String(value)}`)
+        .join(" • ");
+
+      rows.push({
+        time: nowText,
+        level,
+        message: readable ? `${stage} • ${readable}` : stage,
+      });
+    };
+
+    const decisionSide = normalizeDecision(decision?.decision);
+    const rawSide = normalizeDecision(decision?.rawDecision);
+    const confidence = toFiniteNumber(decision?.confidence, 0);
+    const currentPnl = toFiniteNumber(decision?.currentPnl, 0);
+    const maxPnl = toFiniteNumber(decision?.maxPnl, 0);
+
+    pushRow(autoPaperMode ? "success" : "info", "mode", {
+      enabled: autoPaperMode,
+      symbol,
+      timeframe,
+      live: formatPrice(liveActivePrice),
+      liveSource:
+        directLivePrice > 0 ? "backend_live_price" : "chart_active_price",
+    });
+
+    pushRow(decision?.allowedToTrade ? "success" : "warn", "decision-table", {
+      decision: decision?.decision ?? "WAITING",
+      rawBias: decision?.rawDecision ?? "—",
+      confidence: `${confidence.toFixed(1)}%`,
+      grade: decision?.confidenceGrade ?? "—",
+      allowed: decision?.allowedToTrade ? "YES" : "NO",
+      loading: isLoading,
+    });
+
+    pushRow("info", "trade-plan-table", {
+      entry: formatPrice(decision?.entry),
+      target: formatPrice(decision?.target),
+      stop: formatPrice(decision?.stop),
+      rr: toFiniteNumber(decision?.riskReward, 0).toFixed(2),
+      currentPnl: formatMoney(currentPnl),
+      maxPnl: formatMoney(maxPnl),
+    });
+
+    pushRow(
+      projectionSnapshot.conflict
+        ? "warn"
+        : projectionSnapshot.available
+          ? "success"
+          : "info",
+      "projection-table",
+      {
+        mode:
+          projectionSnapshot.projectionModeLabel ||
+          projectionSnapshot.projectionMode,
+        permission: projectionSnapshot.aiPermission,
+        target: formatPrice(projectionSnapshot.targetPrice),
+        targetConfidence: `${toFiniteNumber(projectionSnapshot.targetConfidence, 0).toFixed(1)}%`,
+        ghostConfidence: `${toFiniteNumber(projectionSnapshot.ghostConfidence, 0).toFixed(1)}%`,
+        conflict: projectionSnapshot.conflict,
+      },
+    );
+
+    pushRow(displayOpenCount > 0 ? "warn" : "info", "open-trades-table", {
+      visibleOpen: displayOpenCount,
+      localOpen: getActiveOpenTrades(localOpenTrades).length,
+      backendOpen: getActiveOpenTrades(backendOpenTrades).length,
+      closedSaved: displayClosedCount,
+    });
+
+    liveOpenTrades.slice(0, 5).forEach((trade: any, index: number) => {
+      const side = normalizeTradeSide(
+        trade?.side ?? trade?.decision ?? trade?.rawDecision,
+      );
+      pushRow(
+        trade.shouldCloseNow ? "success" : "warn",
+        `open-trade-${index + 1}`,
+        {
+          side,
+          entry: formatPrice(trade?.entry ?? trade?.entryPrice),
+          target: formatPrice(trade?.target ?? trade?.targetPrice),
+          stop: formatPrice(trade?.stop ?? trade?.stopPrice),
+          live: formatPrice(trade?.liveCurrentPrice ?? trade?.currentPrice),
+          pnl: formatMoney(trade?.pnl ?? trade?.currentPnl),
+          maxPnl: formatMoney(trade?.maxPnl ?? trade?.maxPnlDollar),
+          shouldClose: trade.shouldCloseNow ? "YES" : "NO",
+          closeReason: trade.closeLabel ?? trade.closeReason ?? "",
+          key: getTradeKey(trade),
+        },
+      );
+    });
+
+    blockers.slice(0, 6).forEach((blocker, index) => {
+      pushRow(
+        blocker.severity === "high"
+          ? "error"
+          : blocker.severity === "medium"
+            ? "warn"
+            : "info",
+        `blocker-${index + 1}`,
+        {
+          label: blocker.label,
+          detail: blocker.detail,
+          severity: blocker.severity,
+        },
+      );
+    });
+
+    pushRow("info", "learning-memory-table", {
+      decisionSamples: formatCount(decisionStats.samples),
+      buyBias: formatCount(decisionStats.buyBias),
+      sellBias: formatCount(decisionStats.sellBias),
+      holdCount: formatCount(decisionStats.holdCount),
+      readyCount: formatCount(decisionStats.tradeReadyCount),
+      closed: formatCount(displayClosedCount),
+      winRate: formatPercent(stats.winRate ?? 0),
+      profitFactor: toFiniteNumber(stats.profitFactor, 0).toFixed(2),
+    });
+
+    if (actionStatus) {
+      const lower = actionStatus.toLowerCase();
+      pushRow(
+        lower.includes("failed") ||
+          lower.includes("error") ||
+          lower.includes("timed out")
+          ? "error"
+          : lower.includes("blocked") ||
+              lower.includes("waiting") ||
+              lower.includes("cooldown") ||
+              lower.includes("not opened")
+            ? "warn"
+            : lower.includes("opened") ||
+                lower.includes("started") ||
+                lower.includes("closed") ||
+                lower.includes("evaluated")
+              ? "success"
+              : "info",
+        "latest-action",
+        { message: actionStatus },
+      );
+    }
+
+    aiActivityLog.slice(0, 12).forEach((item) => {
+      pushRow(item.tone, "activity-history", {
+        at: item.time,
+        message: item.message,
+      });
+    });
+
+    return rows;
+  }, [
+    actionStatus,
+    aiActivityLog,
+    autoPaperMode,
+    backendOpenTrades,
+    blockers,
+    decision,
+    decisionStats,
+    directLivePrice,
+    displayClosedCount,
+    displayOpenCount,
+    isLoading,
+    liveActivePrice,
+    liveOpenTrades,
+    localOpenTrades,
+    projectionSnapshot,
+    stats,
+    symbol,
+    timeframe,
+  ]);
 
   return (
     <motion.div
@@ -2129,7 +2813,9 @@ export default function AiTraderPanel({
       <div className="mb-4 flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
         <div>
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-xl font-black text-white">Dashboard AI Self-Learning Trader</h2>
+            <h2 className="text-xl font-black text-white">
+              Dashboard AI Self-Learning Trader
+            </h2>
             <span className="rounded-full border border-purple-400/30 bg-purple-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-purple-200">
               Dashboard Only
             </span>
@@ -2141,7 +2827,10 @@ export default function AiTraderPanel({
             </span>
           </div>
           <p className="mt-1 text-xs text-gray-400">
-            Dashboard paper/simulated AI trades only. Broker execution is OFF. Open and closed trades are merged from backend memory and browser localStorage so active trades do not disappear during a backend memory refresh.
+            Dashboard paper/simulated AI trades only. Broker execution is OFF.
+            Open and closed trades are merged from backend memory and browser
+            localStorage so active trades do not disappear during a backend
+            memory refresh.
           </p>
         </div>
 
@@ -2150,32 +2839,40 @@ export default function AiTraderPanel({
             type="button"
             onClick={() => {
               if (autoPaperMode) {
-                setAutoPaperMode(false)
-                setActionStatus('AI Trader stopped. No new autonomous trades will open.')
-                return
+                setAutoPaperMode(false);
+                setActionStatus(
+                  "AI Trader stopped. No new autonomous trades will open.",
+                );
+                return;
               }
 
-              const visibleTrades = getActiveOpenTrades(liveOpenTrades)
+              const visibleTrades = getActiveOpenTrades(liveOpenTrades);
 
               if (visibleTrades.length > 0) {
                 const visibleDetails = visibleTrades
-                  .map((trade: any) => describeAiOpenTradeForLog(trade, liveActivePrice))
-                  .join(' || ')
-                setActionStatus(`Start blocked: ${visibleTrades.length} AI trade is already visible. ${visibleDetails}. Press Evaluate Open or let the active trade close before starting a new AI trader session.`)
-                return
+                  .map((trade: any) =>
+                    describeAiOpenTradeForLog(trade, liveActivePrice),
+                  )
+                  .join(" || ");
+                setActionStatus(
+                  `Start blocked: ${visibleTrades.length} AI trade is already visible. ${visibleDetails}. Press Evaluate Open or let the active trade close before starting a new AI trader session.`,
+                );
+                return;
               }
 
-              setLastAutoOpenKey('')
-              setAutoPaperMode(true)
-              setActionStatus('AI Trader started. Waiting for an eligible autonomous setup.')
+              setLastAutoOpenKey("");
+              setAutoPaperMode(true);
+              setActionStatus(
+                "AI Trader started. Waiting for an eligible autonomous setup.",
+              );
             }}
             className={`rounded-lg px-4 py-2 text-xs font-black transition ${
               autoPaperMode
-                ? 'border border-red-400/40 bg-red-400/10 text-red-200 hover:bg-red-400/20'
-                : 'border border-emerald-400/40 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20'
+                ? "border border-red-400/40 bg-red-400/10 text-red-200 hover:bg-red-400/20"
+                : "border border-emerald-400/40 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20"
             }`}
           >
-            {autoPaperMode ? 'Stop AI Trader' : 'Start AI Trader'}
+            {autoPaperMode ? "Stop AI Trader" : "Start AI Trader"}
           </button>
 
           <label className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-gray-400">
@@ -2186,7 +2883,11 @@ export default function AiTraderPanel({
               max={100}
               step={1}
               value={minConfidence}
-              onChange={(event) => setMinConfidence(Math.max(1, Math.min(100, Number(event.target.value) || 62)))}
+              onChange={(event) =>
+                setMinConfidence(
+                  Math.max(1, Math.min(100, Number(event.target.value) || 62)),
+                )
+              }
               className="ml-2 w-14 rounded border border-dark-600 bg-dark-800 px-2 py-1 text-xs text-white"
             />
           </label>
@@ -2199,7 +2900,14 @@ export default function AiTraderPanel({
               max={10}
               step={0.05}
               value={minRiskReward}
-              onChange={(event) => setMinRiskReward(Math.max(0.1, Math.min(10, Number(event.target.value) || 1.25)))}
+              onChange={(event) =>
+                setMinRiskReward(
+                  Math.max(
+                    0.1,
+                    Math.min(10, Number(event.target.value) || 1.25),
+                  ),
+                )
+              }
               className="ml-2 w-16 rounded border border-dark-600 bg-dark-800 px-2 py-1 text-xs text-white"
             />
           </label>
@@ -2227,92 +2935,109 @@ export default function AiTraderPanel({
         </div>
       ) : null}
 
-      {(actionStatus || aiActivityLog.length > 0) ? (
-        <div className="mb-4 rounded-xl border border-purple-400/20 bg-purple-400/10 p-3 text-xs text-purple-100">
-          <div className="mb-2 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-            <div className="font-black uppercase tracking-wide text-purple-200">AI Trader Log</div>
-            {actionStatus ? (
-              <div className="text-[10px] font-semibold text-purple-200/80">Latest: {actionStatus}</div>
-            ) : null}
-          </div>
-
-          <div className="mb-2 grid grid-cols-2 gap-2 text-[10px] sm:grid-cols-5">
-            <div className="rounded-lg border border-purple-400/15 bg-dark-900/40 px-2 py-1">
-              Mode: <span className="font-black text-white">{autoPaperMode ? 'RUNNING' : 'OFF'}</span>
+      <details
+        className="mb-4 rounded-lg border border-blue-400/20 bg-blue-400/10 px-3 py-2 text-[10px] text-blue-100"
+        open
+      >
+        <summary className="cursor-pointer select-none font-black uppercase tracking-wide text-blue-300">
+          Dashboard AI Self-Learning Trader debug log • {symbol} • {timeframe} •
+          open {displayOpenCount} • closed {displayClosedCount}
+        </summary>
+        <div className="mt-2 max-h-56 space-y-1 overflow-auto font-mono leading-4">
+          {dashboardTraderDebugRows.map((item, index) => (
+            <div
+              key={`${item.time}-${item.message}-${index}`}
+              className={
+                item.level === "error"
+                  ? "text-red-300"
+                  : item.level === "warn"
+                    ? "text-amber-300"
+                    : item.level === "success"
+                      ? "text-emerald-300"
+                      : "text-blue-100"
+              }
+            >
+              <span className="text-gray-500">{item.time}</span> {item.message}
             </div>
-            <div className="rounded-lg border border-purple-400/15 bg-dark-900/40 px-2 py-1">
-              Visible open: <span className="font-black text-white">{displayOpenCount}</span>
-            </div>
-            <div className="rounded-lg border border-purple-400/15 bg-dark-900/40 px-2 py-1">
-              Decision: <span className="font-black text-white">{decision?.decision ?? 'WAITING'}</span>
-            </div>
-            <div className="rounded-lg border border-purple-400/15 bg-dark-900/40 px-2 py-1">
-              Allowed: <span className="font-black text-white">{decision?.allowedToTrade ? 'YES' : 'NO'}</span>
-            </div>
-            <div className="rounded-lg border border-purple-400/15 bg-dark-900/40 px-2 py-1">
-              Live: <span className="font-black text-white">{formatPrice(liveActivePrice)}</span>
-            </div>
-          </div>
-
-          <div className="max-h-44 space-y-1 overflow-auto pr-1">
-            {aiActivityLog.length > 0 ? (
-              aiActivityLog.slice(0, 10).map((item, index) => {
-                const toneClass =
-                  item.tone === 'success'
-                    ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200'
-                    : item.tone === 'warn'
-                      ? 'border-amber-400/20 bg-amber-400/10 text-amber-200'
-                      : item.tone === 'error'
-                        ? 'border-red-400/20 bg-red-400/10 text-red-200'
-                        : 'border-purple-400/15 bg-dark-900/40 text-purple-100'
-
-                return (
-                  <div
-                    key={`${item.time}-${item.message}-${index}`}
-                    className={`rounded-lg border px-3 py-2 ${toneClass}`}
-                  >
-                    <span className="mr-2 font-mono text-[10px] text-gray-400">{item.time}</span>
-                    <span className="font-semibold">{item.message}</span>
-                  </div>
-                )
-              })
-            ) : (
-              <div className="rounded-lg border border-purple-400/15 bg-dark-900/40 px-3 py-2 text-purple-100">
-                Waiting for AI trader activity...
-              </div>
-            )}
-          </div>
+          ))}
         </div>
-      ) : null}
+      </details>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
         <StatBox
           label="AI Decision"
-          value={decision?.decision ?? (isLoading ? 'Loading...' : 'WAITING')}
+          value={decision?.decision ?? (isLoading ? "Loading..." : "WAITING")}
           tone={decisionTone as any}
         />
         <StatBox
           label="Raw Bias"
-          value={decision?.rawDecision ?? '—'}
-          tone={rawDecision === 'BUY' ? 'bull' : rawDecision === 'SELL' ? 'bear' : 'neutral'}
+          value={decision?.rawDecision ?? "—"}
+          tone={
+            rawDecision === "BUY"
+              ? "bull"
+              : rawDecision === "SELL"
+                ? "bear"
+                : "neutral"
+          }
         />
-        <StatBox label="Confidence" value={`${toFiniteNumber(decision?.confidence, 0).toFixed(1)}% ${decision?.confidenceGrade ?? ''}`} />
-        <StatBox label="AI Trader" value={autoPaperMode ? 'RUNNING' : 'OFF'} tone={autoPaperMode ? 'bull' : 'neutral'} />
+        <StatBox
+          label="Confidence"
+          value={`${toFiniteNumber(decision?.confidence, 0).toFixed(1)}% ${decision?.confidenceGrade ?? ""}`}
+        />
+        <StatBox
+          label="AI Trader"
+          value={autoPaperMode ? "RUNNING" : "OFF"}
+          tone={autoPaperMode ? "bull" : "neutral"}
+        />
         <StatBox label="Entry" value={formatPrice(decision?.entry)} />
         <StatBox label="Target" value={formatPrice(decision?.target)} />
         <StatBox label="Stop" value={formatPrice(decision?.stop)} tone="warn" />
-        <StatBox label="Current P&L" value={formatMoney(decision?.currentPnl)} tone={toFiniteNumber(decision?.currentPnl, 0) >= 0 ? 'bull' : 'bear'} />
-        <StatBox label="Max P&L" value={formatMoney(decision?.maxPnl)} tone={toFiniteNumber(decision?.maxPnl, 0) >= 0 ? 'bull' : 'bear'} />
-        <StatBox label="Projection" value={projectionSnapshot.projectionModeLabel || projectionSnapshot.projectionMode} tone={projectionSnapshot.conflict ? 'warn' : projectionSnapshot.available ? 'bull' : 'neutral'} />
-        <StatBox label="AI Permission" value={projectionSnapshot.aiPermission} tone={projectionSnapshot.aiPermission === 'CAN_CONSIDER' ? 'bull' : projectionSnapshot.conflict ? 'warn' : 'neutral'} />
+        <StatBox
+          label="Current P&L"
+          value={formatMoney(decision?.currentPnl)}
+          tone={toFiniteNumber(decision?.currentPnl, 0) >= 0 ? "bull" : "bear"}
+        />
+        <StatBox
+          label="Max P&L"
+          value={formatMoney(decision?.maxPnl)}
+          tone={toFiniteNumber(decision?.maxPnl, 0) >= 0 ? "bull" : "bear"}
+        />
+        <StatBox
+          label="Projection"
+          value={
+            projectionSnapshot.projectionModeLabel ||
+            projectionSnapshot.projectionMode
+          }
+          tone={
+            projectionSnapshot.conflict
+              ? "warn"
+              : projectionSnapshot.available
+                ? "bull"
+                : "neutral"
+          }
+        />
+        <StatBox
+          label="AI Permission"
+          value={projectionSnapshot.aiPermission}
+          tone={
+            projectionSnapshot.aiPermission === "CAN_CONSIDER"
+              ? "bull"
+              : projectionSnapshot.conflict
+                ? "warn"
+                : "neutral"
+          }
+        />
       </div>
 
       <div className="mt-4 rounded-xl border border-dark-700 bg-dark-900/60 p-4">
         <div className="mb-3 flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
           <div>
-            <div className="text-sm font-black text-white">ML System Status</div>
+            <div className="text-sm font-black text-white">
+              ML System Status
+            </div>
             <div className="text-xs text-gray-500">
-              Live view of Ghost ML, Target Price ML, and AI Trader learning context.
+              Live view of Ghost ML, Target Price ML, and AI Trader learning
+              context.
             </div>
           </div>
           <div className="text-[10px] font-bold uppercase tracking-wide text-gray-500">
@@ -2321,27 +3046,67 @@ export default function AiTraderPanel({
         </div>
 
         <div className="mb-3 grid grid-cols-2 gap-2 md:grid-cols-4">
-          <StatBox label="Live Price" value={formatPrice(liveActivePrice)} tone={liveActivePrice > 0 ? 'bull' : 'warn'} />
-          <StatBox label="Candles" value={formatCount(Array.isArray(candles) ? candles.length : 0)} tone={Array.isArray(candles) && candles.length > 0 ? 'bull' : 'warn'} />
-          <StatBox label="Payload" value={liveActivePrice > 0 ? 'READY' : 'WAITING'} tone={liveActivePrice > 0 ? 'bull' : 'warn'} />
-          <StatBox label="Decision Route" value={apiBaseUrl ? 'READY' : 'NO API'} tone={apiBaseUrl ? 'bull' : 'warn'} />
+          <StatBox
+            label="Live Price"
+            value={formatPrice(liveActivePrice)}
+            tone={liveActivePrice > 0 ? "bull" : "warn"}
+          />
+          <StatBox
+            label="Candles"
+            value={formatCount(Array.isArray(candles) ? candles.length : 0)}
+            tone={
+              Array.isArray(candles) && candles.length > 0 ? "bull" : "warn"
+            }
+          />
+          <StatBox
+            label="Payload"
+            value={liveActivePrice > 0 ? "READY" : "WAITING"}
+            tone={liveActivePrice > 0 ? "bull" : "warn"}
+          />
+          <StatBox
+            label="Decision Route"
+            value={apiBaseUrl ? "READY" : "NO API"}
+            tone={apiBaseUrl ? "bull" : "warn"}
+          />
           <StatBox
             label="Strategy Tester"
-            value={strategyTesterResults?.bestResult ? 'BEST FOUND' : strategyTesterResults?.currentResult ? 'LIVE' : 'WAITING'}
-            tone={strategyTesterResults?.bestResult ? 'bull' : strategyTesterResults?.currentResult ? 'warn' : 'neutral'}
+            value={
+              strategyTesterResults?.bestResult
+                ? "BEST FOUND"
+                : strategyTesterResults?.currentResult
+                  ? "LIVE"
+                  : "WAITING"
+            }
+            tone={
+              strategyTesterResults?.bestResult
+                ? "bull"
+                : strategyTesterResults?.currentResult
+                  ? "warn"
+                  : "neutral"
+            }
           />
         </div>
 
         <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
           <MlStatusCard
             title="Projection Engine"
-            status={projectionSnapshot.available ? projectionSnapshot.projectionModeLabel : 'Waiting'}
+            status={
+              projectionSnapshot.available
+                ? projectionSnapshot.projectionModeLabel
+                : "Waiting"
+            }
             confidence={toFiniteNumber(projectionSnapshot.alignmentScore, 0)}
-            tone={projectionSnapshot.conflict ? 'warn' : projectionSnapshot.available ? 'bull' : 'neutral'}
+            tone={
+              projectionSnapshot.conflict
+                ? "warn"
+                : projectionSnapshot.available
+                  ? "bull"
+                  : "neutral"
+            }
             detail={
               projectionSnapshot.available
                 ? `Target ${formatPrice(projectionSnapshot.targetPrice)} • ${projectionSnapshot.aiPermission} • ${projectionSnapshot.alignmentLabel}`
-                : 'Waiting for Unified Projection Engine target, ghost route, and alignment.'
+                : "Waiting for Unified Projection Engine target, ghost route, and alignment."
             }
           />
 
@@ -2352,20 +3117,24 @@ export default function AiTraderPanel({
             tone={getMlStrengthTone(ghostMlConfidence)}
             detail={
               ghostMlConfidence > 0
-                ? 'Ghost ML is contributing to projected candle confidence and AI decision scoring.'
-                : 'Waiting for Ghost ML confidence to flow into the AI context.'
+                ? "Ghost ML is contributing to projected candle confidence and AI decision scoring."
+                : "Waiting for Ghost ML confidence to flow into the AI context."
             }
           />
 
           <MlStatusCard
             title="Target Price ML"
-            status={(projectionSnapshot as any).targetSourceLockActive ? 'Source Locked' : getMlStrengthLabel(targetMlConfidence)}
+            status={
+              (projectionSnapshot as any).targetSourceLockActive
+                ? "Source Locked"
+                : getMlStrengthLabel(targetMlConfidence)
+            }
             confidence={targetMlConfidence}
             tone={getMlStrengthTone(targetMlConfidence)}
             detail={
               targetMlConfidence > 0
                 ? `Live ${liveTargetConfidence.toFixed(1)}% • locked ${lockedTargetConfidence.toFixed(1)}% • learned ${targetLearnedReliability.toFixed(1)}%`
-                : 'Waiting for real Target Price ML; using chart ghost overlay only if ML target is unavailable.'
+                : "Waiting for real Target Price ML; using chart ghost overlay only if ML target is unavailable."
             }
           />
 
@@ -2373,47 +3142,172 @@ export default function AiTraderPanel({
             title="AI Setup Score"
             status={formatAiStage(memoryStatus.stage)}
             confidence={aiSetupConfidence}
-            tone={decision?.allowedToTrade ? 'bull' : aiSetupConfidence >= minConfidence ? 'warn' : 'neutral'}
+            tone={
+              decision?.allowedToTrade
+                ? "bull"
+                : aiSetupConfidence >= minConfidence
+                  ? "warn"
+                  : "neutral"
+            }
             detail={
               decision?.allowedToTrade
-                ? 'Current setup is trade-ready for dashboard-only paper execution.'
+                ? "Current setup is trade-ready for dashboard-only paper execution."
                 : `Setup score changes every candle. Memory progress ${aiMemoryProgress.toFixed(1)}% from ${formatCount(aiMemorySamples)} observations.`
             }
           />
         </div>
 
         <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
-          <StatBox label="Entry ML" value={`${entryMlConfidence.toFixed(1)}%`} tone={getMlStrengthTone(entryMlConfidence)} />
+          <StatBox
+            label="Entry ML"
+            value={`${entryMlConfidence.toFixed(1)}%`}
+            tone={getMlStrengthTone(entryMlConfidence)}
+          />
           <StatBox label="Target" value={formatPrice(decision?.target)} />
-          <StatBox label="RR" value={`${toFiniteNumber(decision?.riskReward, 0).toFixed(2)}R`} tone={toFiniteNumber(decision?.riskReward, 0) >= minRiskReward ? 'bull' : 'warn'} />
-          <StatBox label="Original RR" value={`${originalRiskReward.toFixed(2)}R`} tone={originalRiskReward >= minRiskReward ? 'bull' : 'warn'} />
-          <StatBox label="RR Plan" value={rrPlanUpgraded ? 'UPGRADED' : rrPlanMethod.replace(/_/g, ' ').toUpperCase()} tone={rrPlanUpgraded ? 'bull' : toFiniteNumber(decision?.riskReward, 0) >= minRiskReward ? 'bull' : 'warn'} />
-          <StatBox label="Required Target" value={formatPrice(rrRequiredTarget)} tone={rrRequiredTarget > 0 ? 'warn' : 'neutral'} />
-          <StatBox label="Target Source" value={projectionSnapshot.source || '—'} />
-          <StatBox label="Target Live Conf" value={`${liveTargetConfidence.toFixed(1)}%`} tone={getMlStrengthTone(liveTargetConfidence)} />
-          <StatBox label="Target Locked Conf" value={`${lockedTargetConfidence.toFixed(1)}%`} tone={(projectionSnapshot as any).targetSourceLockActive ? 'bull' : getMlStrengthTone(lockedTargetConfidence)} />
-          <StatBox label="Target Learned" value={`${targetLearnedReliability.toFixed(1)}%`} tone={getMlStrengthTone(targetLearnedReliability)} />
-          <StatBox label="Source Lock" value={(projectionSnapshot as any).targetSourceLockActive ? 'ACTIVE' : 'STANDBY'} tone={(projectionSnapshot as any).targetSourceLockActive ? 'bull' : 'neutral'} />
-          <StatBox label="Tester Mode" value={strategyTesterResults?.strategyMode ?? '—'} tone={strategyTesterResults?.currentResult ? 'bull' : 'neutral'} />
-          <StatBox label="Tester WR" value={`${toFiniteNumber(strategyTesterResults?.bestResult?.winRate ?? strategyTesterResults?.currentResult?.winRate, 0).toFixed(1)}%`} tone={toFiniteNumber(strategyTesterResults?.bestResult?.winRate ?? strategyTesterResults?.currentResult?.winRate, 0) >= 50 ? 'bull' : 'warn'} />
-          <StatBox label="AI Setup Conf" value={`${aiSetupConfidence.toFixed(1)}%`} tone={decision?.allowedToTrade ? 'bull' : aiSetupConfidence >= minConfidence ? 'warn' : 'neutral'} />
-          <StatBox label="AI Memory Progress" value={`${aiMemoryProgress.toFixed(1)}%`} tone={aiMemorySamples >= 10 ? 'bull' : 'warn'} />
-          <StatBox label="AI Learned" value={`${aiLearnedReliability.toFixed(1)}%`} tone={aiMemorySamples >= 10 || displayClosedCount > 0 ? 'bull' : 'neutral'} />
-          <StatBox label="Alignment" value={`${toFiniteNumber(projectionSnapshot.alignmentScore, 0).toFixed(1)}%`} tone={projectionSnapshot.conflict ? 'warn' : toFiniteNumber(projectionSnapshot.alignmentScore, 0) >= 60 ? 'bull' : 'neutral'} />
+          <StatBox
+            label="RR"
+            value={`${toFiniteNumber(decision?.riskReward, 0).toFixed(2)}R`}
+            tone={
+              toFiniteNumber(decision?.riskReward, 0) >= minRiskReward
+                ? "bull"
+                : "warn"
+            }
+          />
+          <StatBox
+            label="Original RR"
+            value={`${originalRiskReward.toFixed(2)}R`}
+            tone={originalRiskReward >= minRiskReward ? "bull" : "warn"}
+          />
+          <StatBox
+            label="RR Plan"
+            value={
+              rrPlanUpgraded
+                ? "UPGRADED"
+                : rrPlanMethod.replace(/_/g, " ").toUpperCase()
+            }
+            tone={
+              rrPlanUpgraded
+                ? "bull"
+                : toFiniteNumber(decision?.riskReward, 0) >= minRiskReward
+                  ? "bull"
+                  : "warn"
+            }
+          />
+          <StatBox
+            label="Required Target"
+            value={formatPrice(rrRequiredTarget)}
+            tone={rrRequiredTarget > 0 ? "warn" : "neutral"}
+          />
+          <StatBox
+            label="Target Source"
+            value={projectionSnapshot.source || "—"}
+          />
+          <StatBox
+            label="Target Live Conf"
+            value={`${liveTargetConfidence.toFixed(1)}%`}
+            tone={getMlStrengthTone(liveTargetConfidence)}
+          />
+          <StatBox
+            label="Target Locked Conf"
+            value={`${lockedTargetConfidence.toFixed(1)}%`}
+            tone={
+              (projectionSnapshot as any).targetSourceLockActive
+                ? "bull"
+                : getMlStrengthTone(lockedTargetConfidence)
+            }
+          />
+          <StatBox
+            label="Target Learned"
+            value={`${targetLearnedReliability.toFixed(1)}%`}
+            tone={getMlStrengthTone(targetLearnedReliability)}
+          />
+          <StatBox
+            label="Source Lock"
+            value={
+              (projectionSnapshot as any).targetSourceLockActive
+                ? "ACTIVE"
+                : "STANDBY"
+            }
+            tone={
+              (projectionSnapshot as any).targetSourceLockActive
+                ? "bull"
+                : "neutral"
+            }
+          />
+          <StatBox
+            label="Tester Mode"
+            value={strategyTesterResults?.strategyMode ?? "—"}
+            tone={strategyTesterResults?.currentResult ? "bull" : "neutral"}
+          />
+          <StatBox
+            label="Tester WR"
+            value={`${toFiniteNumber(strategyTesterResults?.bestResult?.winRate ?? strategyTesterResults?.currentResult?.winRate, 0).toFixed(1)}%`}
+            tone={
+              toFiniteNumber(
+                strategyTesterResults?.bestResult?.winRate ??
+                  strategyTesterResults?.currentResult?.winRate,
+                0,
+              ) >= 50
+                ? "bull"
+                : "warn"
+            }
+          />
+          <StatBox
+            label="AI Setup Conf"
+            value={`${aiSetupConfidence.toFixed(1)}%`}
+            tone={
+              decision?.allowedToTrade
+                ? "bull"
+                : aiSetupConfidence >= minConfidence
+                  ? "warn"
+                  : "neutral"
+            }
+          />
+          <StatBox
+            label="AI Memory Progress"
+            value={`${aiMemoryProgress.toFixed(1)}%`}
+            tone={aiMemorySamples >= 10 ? "bull" : "warn"}
+          />
+          <StatBox
+            label="AI Learned"
+            value={`${aiLearnedReliability.toFixed(1)}%`}
+            tone={
+              aiMemorySamples >= 10 || displayClosedCount > 0
+                ? "bull"
+                : "neutral"
+            }
+          />
+          <StatBox
+            label="Alignment"
+            value={`${toFiniteNumber(projectionSnapshot.alignmentScore, 0).toFixed(1)}%`}
+            tone={
+              projectionSnapshot.conflict
+                ? "warn"
+                : toFiniteNumber(projectionSnapshot.alignmentScore, 0) >= 60
+                  ? "bull"
+                  : "neutral"
+            }
+          />
         </div>
       </div>
 
       <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-3">
         <div className="rounded-xl border border-dark-700 bg-dark-900/70 p-4 xl:col-span-2">
-          <div className="mb-2 text-xs font-black uppercase tracking-wide text-gray-400">AI Reason</div>
+          <div className="mb-2 text-xs font-black uppercase tracking-wide text-gray-400">
+            AI Reason
+          </div>
           <p className="text-sm leading-6 text-gray-200">
-            {decision?.reason ?? 'Waiting for enough dashboard data to create a decision.'}
+            {decision?.reason ??
+              "Waiting for enough dashboard data to create a decision."}
           </p>
 
           {Array.isArray(decision?.reasons) && decision.reasons.length > 0 ? (
             <div className="mt-3 space-y-1">
               {decision.reasons.slice(0, 6).map((reason, index) => (
-                <div key={`${reason}-${index}`} className="text-xs text-gray-400">
+                <div
+                  key={`${reason}-${index}`}
+                  className="text-xs text-gray-400"
+                >
                   • {reason}
                 </div>
               ))}
@@ -2421,23 +3315,38 @@ export default function AiTraderPanel({
           ) : null}
 
           {rrTargetPlan?.reason ? (
-            <div className={`mt-4 rounded-xl border px-3 py-2 text-xs ${rrPlanUpgraded ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200' : 'border-amber-400/30 bg-amber-400/10 text-amber-200'}`}>
-              <div className="font-black uppercase tracking-wide">RR Builder</div>
+            <div
+              className={`mt-4 rounded-xl border px-3 py-2 text-xs ${rrPlanUpgraded ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200" : "border-amber-400/30 bg-amber-400/10 text-amber-200"}`}
+            >
+              <div className="font-black uppercase tracking-wide">
+                RR Builder
+              </div>
               <div className="mt-1 leading-5">
                 {String(rrTargetPlan.reason)}
-                {rrRequiredTarget > 0 ? ` Required target: ${formatPrice(rrRequiredTarget)}.` : ''}
+                {rrRequiredTarget > 0
+                  ? ` Required target: ${formatPrice(rrRequiredTarget)}.`
+                  : ""}
               </div>
             </div>
           ) : null}
 
           <div className="mt-4 rounded-xl border border-dark-700 bg-dark-800/70 p-3">
-            <div className="mb-2 text-xs font-black uppercase tracking-wide text-gray-400">Blocker Analysis</div>
+            <div className="mb-2 text-xs font-black uppercase tracking-wide text-gray-400">
+              Blocker Analysis
+            </div>
             <div className="space-y-2">
               {blockers.slice(0, 6).map((blocker) => (
-                <div key={`${blocker.label}-${blocker.detail}`} className="flex flex-col gap-1 rounded-lg border border-dark-700 bg-dark-900/70 px-3 py-2 md:flex-row md:items-center md:justify-between">
+                <div
+                  key={`${blocker.label}-${blocker.detail}`}
+                  className="flex flex-col gap-1 rounded-lg border border-dark-700 bg-dark-900/70 px-3 py-2 md:flex-row md:items-center md:justify-between"
+                >
                   <div>
-                    <div className="text-xs font-black text-white">{blocker.label}</div>
-                    <div className="text-xs text-gray-500">{blocker.detail}</div>
+                    <div className="text-xs font-black text-white">
+                      {blocker.label}
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      {blocker.detail}
+                    </div>
                   </div>
                   <BlockerBadge severity={blocker.severity} />
                 </div>
@@ -2448,7 +3357,9 @@ export default function AiTraderPanel({
 
         <div className="rounded-xl border border-dark-700 bg-dark-900/70 p-4">
           <div className="mb-3 flex items-center justify-between gap-3">
-            <div className="text-xs font-black uppercase tracking-wide text-gray-400">Learning Memory</div>
+            <div className="text-xs font-black uppercase tracking-wide text-gray-400">
+              Learning Memory
+            </div>
             <span className="rounded-full border border-purple-400/30 bg-purple-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-purple-200">
               {formatAiStage(memoryStatus.stage)}
             </span>
@@ -2467,44 +3378,138 @@ export default function AiTraderPanel({
             <StatBox
               label="Live Observations"
               value={formatCount(decisionStats.samples)}
-              tone={toFiniteNumber(decisionStats.samples, 0) >= 10 ? 'bull' : 'warn'}
+              tone={
+                toFiniteNumber(decisionStats.samples, 0) >= 10 ? "bull" : "warn"
+              }
             />
             <StatBox
               label="Memory Source"
-              value={displayClosedCount > 0 ? 'CLOSED HISTORY' : toFiniteNumber(persistentLearningStats?.samples, 0) > 0 ? 'SAVED LIVE MEMORY' : summary?.memoryStatus ? 'SUMMARY' : decision?.details?.memoryStatus ? 'LIVE DECISION' : 'WAITING'}
-              tone={displayClosedCount > 0 || toFiniteNumber(activeDecisionStats?.samples, 0) > 0 ? 'bull' : 'warn'}
+              value={
+                displayClosedCount > 0
+                  ? "CLOSED HISTORY"
+                  : toFiniteNumber(persistentLearningStats?.samples, 0) > 0
+                    ? "SAVED LIVE MEMORY"
+                    : summary?.memoryStatus
+                      ? "SUMMARY"
+                      : decision?.details?.memoryStatus
+                        ? "LIVE DECISION"
+                        : "WAITING"
+              }
+              tone={
+                displayClosedCount > 0 ||
+                toFiniteNumber(activeDecisionStats?.samples, 0) > 0
+                  ? "bull"
+                  : "warn"
+              }
             />
           </div>
 
           <div className="mb-3 grid grid-cols-2 gap-2">
-            <StatBox label="Setup Confidence" value={`${aiSetupConfidence.toFixed(1)}%`} tone={decision?.allowedToTrade ? 'bull' : aiSetupConfidence >= minConfidence ? 'warn' : 'neutral'} />
-            <StatBox label="Memory Progress" value={`${aiMemoryProgress.toFixed(1)}%`} tone={aiMemorySamples >= 10 ? 'bull' : 'warn'} />
-            <StatBox label="Learned Reliability" value={`${aiLearnedReliability.toFixed(1)}%`} tone={aiMemorySamples >= 10 || displayClosedCount > 0 ? 'bull' : 'neutral'} />
-            <StatBox label="Target Lock" value={(projectionSnapshot as any).targetSourceLockActive ? 'ACTIVE' : 'STANDBY'} tone={(projectionSnapshot as any).targetSourceLockActive ? 'bull' : 'neutral'} />
+            <StatBox
+              label="Setup Confidence"
+              value={`${aiSetupConfidence.toFixed(1)}%`}
+              tone={
+                decision?.allowedToTrade
+                  ? "bull"
+                  : aiSetupConfidence >= minConfidence
+                    ? "warn"
+                    : "neutral"
+              }
+            />
+            <StatBox
+              label="Memory Progress"
+              value={`${aiMemoryProgress.toFixed(1)}%`}
+              tone={aiMemorySamples >= 10 ? "bull" : "warn"}
+            />
+            <StatBox
+              label="Learned Reliability"
+              value={`${aiLearnedReliability.toFixed(1)}%`}
+              tone={
+                aiMemorySamples >= 10 || displayClosedCount > 0
+                  ? "bull"
+                  : "neutral"
+              }
+            />
+            <StatBox
+              label="Target Lock"
+              value={
+                (projectionSnapshot as any).targetSourceLockActive
+                  ? "ACTIVE"
+                  : "STANDBY"
+              }
+              tone={
+                (projectionSnapshot as any).targetSourceLockActive
+                  ? "bull"
+                  : "neutral"
+              }
+            />
           </div>
 
           <div className="grid grid-cols-2 gap-2">
-            <StatBox label="Decisions" value={formatCount(decisionStats.samples)} />
-            <StatBox label="Trade Ready" value={formatCount(decisionStats.tradeReadyCount)} tone="bull" />
-            <StatBox label="HOLD Count" value={formatCount(decisionStats.holdCount)} tone="warn" />
-            <StatBox label="Avg AI Conf" value={`${toFiniteNumber(decisionStats.avgConfidence, 0).toFixed(1)}%`} />
-            <StatBox label="BUY Bias" value={formatCount(decisionStats.buyBias)} tone="bull" />
-            <StatBox label="SELL Bias" value={formatCount(decisionStats.sellBias)} tone="bear" />
+            <StatBox
+              label="Decisions"
+              value={formatCount(decisionStats.samples)}
+            />
+            <StatBox
+              label="Trade Ready"
+              value={formatCount(decisionStats.tradeReadyCount)}
+              tone="bull"
+            />
+            <StatBox
+              label="HOLD Count"
+              value={formatCount(decisionStats.holdCount)}
+              tone="warn"
+            />
+            <StatBox
+              label="Avg AI Conf"
+              value={`${toFiniteNumber(decisionStats.avgConfidence, 0).toFixed(1)}%`}
+            />
+            <StatBox
+              label="BUY Bias"
+              value={formatCount(decisionStats.buyBias)}
+              tone="bull"
+            />
+            <StatBox
+              label="SELL Bias"
+              value={formatCount(decisionStats.sellBias)}
+              tone="bear"
+            />
             <StatBox label="Open" value={String(displayOpenCount)} />
-            <StatBox label="Closed" value={String(displayClosedCount)} tone={displayClosedCount > 0 ? 'bull' : 'neutral'} />
-            <StatBox label="Win Rate" value={formatPercent(stats.winRate)} tone={toFiniteNumber(stats.winRate, 0) >= 0.5 ? 'bull' : 'warn'} />
-            <StatBox label="Profit Factor" value={toFiniteNumber(stats.profitFactor, 0).toFixed(2)} />
-            <StatBox label="Avg P&L" value={formatMoney(stats.avgPnl)} tone={toFiniteNumber(stats.avgPnl, 0) >= 0 ? 'bull' : 'bear'} />
-            <StatBox label="Avg R" value={toFiniteNumber(stats.avgR, 0).toFixed(2)} />
+            <StatBox
+              label="Closed"
+              value={String(displayClosedCount)}
+              tone={displayClosedCount > 0 ? "bull" : "neutral"}
+            />
+            <StatBox
+              label="Win Rate"
+              value={formatPercent(stats.winRate)}
+              tone={toFiniteNumber(stats.winRate, 0) >= 0.5 ? "bull" : "warn"}
+            />
+            <StatBox
+              label="Profit Factor"
+              value={toFiniteNumber(stats.profitFactor, 0).toFixed(2)}
+            />
+            <StatBox
+              label="Avg P&L"
+              value={formatMoney(stats.avgPnl)}
+              tone={toFiniteNumber(stats.avgPnl, 0) >= 0 ? "bull" : "bear"}
+            />
+            <StatBox
+              label="Avg R"
+              value={toFiniteNumber(stats.avgR, 0).toFixed(2)}
+            />
           </div>
         </div>
       </div>
 
       {liveOpenTrades.length > 0 ? (
         <div className="mt-4 rounded-xl border border-dark-700 bg-dark-900/70 p-4">
-          <div className="mb-1 text-xs font-black uppercase tracking-wide text-gray-400">Open Dashboard AI Trades</div>
+          <div className="mb-1 text-xs font-black uppercase tracking-wide text-gray-400">
+            Open Dashboard AI Trades
+          </div>
           <div className="mb-3 text-[11px] text-gray-500">
-            Open trade current price, P&amp;L, and target/stop/opposite-decision settlement are checked from the live chart price every refresh.
+            Open trade current price, P&amp;L, and target/stop/opposite-decision
+            settlement are checked from the live chart price every refresh.
           </div>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[1120px] text-left text-xs">
@@ -2530,39 +3535,63 @@ export default function AiTraderPanel({
                     key={getTradeKey(trade)}
                     className={`border-t text-gray-300 ${
                       trade.shouldCloseNow
-                        ? 'border-amber-400/30 bg-amber-400/5'
-                        : 'border-dark-700'
+                        ? "border-amber-400/30 bg-amber-400/5"
+                        : "border-dark-700"
                     }`}
                   >
                     <td className="py-2 font-black text-gray-300">
-                      {String(trade.symbol ?? symbol ?? '—').toUpperCase()}
+                      {String(trade.symbol ?? symbol ?? "—").toUpperCase()}
                     </td>
-                    <td className={`py-2 font-black ${normalizeDecision(trade.side) === 'BUY' ? 'text-emerald-300' : 'text-red-300'}`}>
+                    <td
+                      className={`py-2 font-black ${normalizeDecision(trade.side) === "BUY" ? "text-emerald-300" : "text-red-300"}`}
+                    >
                       {trade.side}
                     </td>
                     <td className="py-2">
-                      <div className="font-semibold text-gray-300">{formatPrice(trade.entry)}</div>
-                      <div className="mt-0.5 text-[11px] text-gray-500">{formatTradeDateTime(trade.entryTime ?? trade.createdAt)}</div>
+                      <div className="font-semibold text-gray-300">
+                        {formatPrice(trade.entry)}
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-gray-500">
+                        {formatTradeDateTime(
+                          trade.entryTime ?? trade.createdAt,
+                        )}
+                      </div>
                     </td>
                     <td className="py-2">{formatPrice(trade.target)}</td>
                     <td className="py-2">{formatPrice(trade.stop)}</td>
                     <td className="py-2">
-                      <div className="font-semibold text-gray-300">{formatPrice(trade.currentPrice)}</div>
-                      <div className="mt-0.5 text-[11px] text-gray-500">{trade.livePriceSource === 'backend_live_price' ? 'live feed' : 'chart feed'}</div>
+                      <div className="font-semibold text-gray-300">
+                        {formatPrice(trade.currentPrice)}
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-gray-500">
+                        {trade.livePriceSource === "backend_live_price"
+                          ? "live feed"
+                          : "chart feed"}
+                      </div>
                     </td>
-                    <td className={`py-2 font-bold ${toFiniteNumber(trade.currentPnl, 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                    <td
+                      className={`py-2 font-bold ${toFiniteNumber(trade.currentPnl, 0) >= 0 ? "text-emerald-300" : "text-red-300"}`}
+                    >
                       {formatMoney(trade.currentPnl)}
                     </td>
-                    <td className={`py-2 font-bold ${toFiniteNumber(trade.maxPnl ?? trade.maxPnlDollar, 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                    <td
+                      className={`py-2 font-bold ${toFiniteNumber(trade.maxPnl ?? trade.maxPnlDollar, 0) >= 0 ? "text-emerald-300" : "text-red-300"}`}
+                    >
                       {formatMoney(trade.maxPnl ?? trade.maxPnlDollar)}
                     </td>
-                    <td className={`py-2 font-bold ${toFiniteNumber(trade.pnlPercent, 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                    <td
+                      className={`py-2 font-bold ${toFiniteNumber(trade.pnlPercent, 0) >= 0 ? "text-emerald-300" : "text-red-300"}`}
+                    >
                       {formatPercent(trade.pnlPercent)}
                     </td>
-                    <td className={`py-2 font-bold ${toFiniteNumber(trade.rMultiple, 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                    <td
+                      className={`py-2 font-bold ${toFiniteNumber(trade.rMultiple, 0) >= 0 ? "text-emerald-300" : "text-red-300"}`}
+                    >
                       {toFiniteNumber(trade.rMultiple, 0).toFixed(2)}R
                     </td>
-                    <td className="py-2">{toFiniteNumber(trade.confidence, 0).toFixed(1)}%</td>
+                    <td className="py-2">
+                      {toFiniteNumber(trade.confidence, 0).toFixed(1)}%
+                    </td>
                     <td className="max-w-[280px] truncate py-2 text-gray-500">
                       {trade.shouldCloseNow
                         ? `${trade.closeLabel} at ${formatPrice(trade.closePrice)}`
@@ -2580,9 +3609,13 @@ export default function AiTraderPanel({
         <div className="mt-4 rounded-xl border border-dark-700 bg-dark-900/70 p-4">
           <div className="mb-1 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
             <div>
-              <div className="text-xs font-black uppercase tracking-wide text-gray-400">Saved Closed AI Trades</div>
+              <div className="text-xs font-black uppercase tracking-wide text-gray-400">
+                Saved Closed AI Trades
+              </div>
               <div className="mt-1 text-[11px] text-gray-500">
-                Shows backend closed trades plus locally saved frontend closures. This keeps Closed above 0 after target/stop/reversal exits.
+                Shows backend closed trades plus locally saved frontend
+                closures. This keeps Closed above 0 after target/stop/reversal
+                exits.
               </div>
             </div>
             <button
@@ -2613,35 +3646,67 @@ export default function AiTraderPanel({
               </thead>
               <tbody>
                 {closedTrades.slice(0, 50).map((trade: any) => (
-                  <tr key={getTradeKey(trade)} className="border-t border-dark-700 text-gray-300">
-                    <td className={`py-2 font-black ${String(trade.result).toUpperCase() === 'WIN' ? 'text-emerald-300' : String(trade.result).toUpperCase() === 'LOSS' ? 'text-red-300' : 'text-amber-300'}`}>
-                      {trade.result ?? 'CLOSED'}
+                  <tr
+                    key={getTradeKey(trade)}
+                    className="border-t border-dark-700 text-gray-300"
+                  >
+                    <td
+                      className={`py-2 font-black ${String(trade.result).toUpperCase() === "WIN" ? "text-emerald-300" : String(trade.result).toUpperCase() === "LOSS" ? "text-red-300" : "text-amber-300"}`}
+                    >
+                      {trade.result ?? "CLOSED"}
                     </td>
                     <td className="py-2 font-black text-gray-300">
-                      {String(trade.symbol ?? '—').toUpperCase()}
+                      {String(trade.symbol ?? "—").toUpperCase()}
                     </td>
-                    <td className={`py-2 font-black ${normalizeDecision(trade.side) === 'BUY' ? 'text-emerald-300' : 'text-red-300'}`}>
+                    <td
+                      className={`py-2 font-black ${normalizeDecision(trade.side) === "BUY" ? "text-emerald-300" : "text-red-300"}`}
+                    >
                       {trade.side}
                     </td>
                     <td className="py-2">
-                      <div className="font-semibold text-gray-300">{formatPrice(trade.entry ?? trade.entryPrice)}</div>
-                      <div className="mt-0.5 text-[11px] text-gray-500">{formatTradeDateTime(trade.entryTime)}</div>
+                      <div className="font-semibold text-gray-300">
+                        {formatPrice(trade.entry ?? trade.entryPrice)}
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-gray-500">
+                        {formatTradeDateTime(trade.entryTime)}
+                      </div>
                     </td>
                     <td className="py-2">
-                      <div className="font-semibold text-gray-300">{formatPrice(trade.exit ?? trade.exitPrice)}</div>
-                      <div className="mt-0.5 text-[11px] text-gray-500">{formatTradeDateTime(trade.exitTime ?? trade.closedAt)}</div>
+                      <div className="font-semibold text-gray-300">
+                        {formatPrice(trade.exit ?? trade.exitPrice)}
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-gray-500">
+                        {formatTradeDateTime(trade.exitTime ?? trade.closedAt)}
+                      </div>
                     </td>
-                    <td className="py-2">{formatPrice(trade.target ?? trade.targetPrice)}</td>
-                    <td className="py-2">{formatPrice(trade.stop ?? trade.stopPrice)}</td>
-                    <td className={`py-2 font-bold ${toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                    <td className="py-2">
+                      {formatPrice(trade.target ?? trade.targetPrice)}
+                    </td>
+                    <td className="py-2">
+                      {formatPrice(trade.stop ?? trade.stopPrice)}
+                    </td>
+                    <td
+                      className={`py-2 font-bold ${toFiniteNumber(trade.pnl ?? trade.pnlDollar, 0) >= 0 ? "text-emerald-300" : "text-red-300"}`}
+                    >
                       {formatMoney(trade.pnl ?? trade.pnlDollar)}
                     </td>
-                    <td className={`py-2 font-bold ${toFiniteNumber(trade.pnlPercent ?? trade.percent, 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                    <td
+                      className={`py-2 font-bold ${toFiniteNumber(trade.pnlPercent ?? trade.percent, 0) >= 0 ? "text-emerald-300" : "text-red-300"}`}
+                    >
                       {formatPercent(trade.pnlPercent ?? trade.percent)}
                     </td>
-                    <td className="py-2">{toFiniteNumber(trade.rMultiple ?? trade.r, 0).toFixed(2)}</td>
-                    <td className="py-2">{toFiniteNumber(trade.confidence, 0).toFixed(1)}%</td>
-                    <td className="max-w-[260px] truncate py-2 text-gray-500">{trade.exitReason ?? trade.closeLabel ?? trade.closeReason ?? '—'}</td>
+                    <td className="py-2">
+                      {toFiniteNumber(trade.rMultiple ?? trade.r, 0).toFixed(2)}
+                    </td>
+                    <td className="py-2">
+                      {toFiniteNumber(trade.confidence, 0).toFixed(1)}%
+                    </td>
+                    <td className="max-w-[260px] truncate py-2 text-gray-500">
+                      {trade.exitReason ??
+                        trade.closeLabel ??
+                        trade.closeReason ??
+                        "—"}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -2650,12 +3715,16 @@ export default function AiTraderPanel({
         </div>
       ) : (
         <div className="mt-4 rounded-xl border border-dark-700 bg-dark-900/70 p-4">
-          <div className="text-xs font-black uppercase tracking-wide text-gray-400">Saved Closed AI Trades</div>
+          <div className="text-xs font-black uppercase tracking-wide text-gray-400">
+            Saved Closed AI Trades
+          </div>
           <div className="mt-2 text-xs text-gray-500">
-            No closed trades saved yet. The first target, stop, or opposite-decision exit will be stored here and counted in Learning Memory.
+            No closed trades saved yet. The first target, stop, or
+            opposite-decision exit will be stored here and counted in Learning
+            Memory.
           </div>
         </div>
       )}
     </motion.div>
-  )
+  );
 }
