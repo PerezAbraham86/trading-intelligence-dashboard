@@ -6409,14 +6409,14 @@ export default function Dashboard() {
     const bootStartedAt = Date.now()
     const bootApiBaseUrl = DASHBOARD_API_BASE_URL
     const MIN_DASHBOARD_BOOT_MS = 12000
-    const CORE_MES_HISTORY_MIN_CANDLES = 120
+    const CORE_MES_HISTORY_MIN_CANDLES = 300
 
     const baseSteps: DashboardBootStep[] = [
       { key: 'backend', label: 'Waking backend', detail: `Calling ${bootApiBaseUrl}`, status: 'loading' },
       { key: 'settings', label: 'Syncing chart settings', detail: 'Loading saved chart layout and strategy controls', status: 'waiting' },
-      { key: 'hist5', label: 'Preloading MES 5m main history', detail: 'MES1! 5m • historical candles first, no live stream until chart mounts', status: 'waiting' },
-      { key: 'hist10', label: 'Preloading MES 10m history', detail: 'MES1! 10m • historical candles second, no live stream until selected', status: 'waiting' },
-      { key: 'hist1', label: 'Preloading MES 1m history', detail: 'MES1! 1m • historical candles third, no live stream until selected', status: 'waiting' },
+      { key: 'hist5', label: 'Preloading MES 5m main history', detail: 'MES1! 5m • require 300 historical candles before charts mount', status: 'waiting' },
+      { key: 'hist10', label: 'Preloading MES 10m history', detail: 'MES1! 10m • require 300 historical candles before charts mount', status: 'waiting' },
+      { key: 'hist1', label: 'Preloading MES 1m history', detail: 'MES1! 1m • require 300 historical candles before charts mount', status: 'waiting' },
       { key: 'main', label: 'Loading visible main chart history', detail: `${selectedSymbol} ${selectedTimeframe} • need 20+ candles`, status: 'waiting' },
       { key: 'mini1', label: 'Loading visible mini chart 1 history', detail: `${miniOneSymbol} ${miniOneTimeframe} • need 20+ candles`, status: 'waiting' },
       { key: 'mini2', label: 'Loading visible mini chart 2 history', detail: `${miniTwoSymbol} ${miniTwoTimeframe} • need 20+ candles`, status: 'waiting' },
@@ -6639,12 +6639,9 @@ export default function Dashboard() {
         setBootStep('settings', 'done', 'Chart settings hydrated')
 
         const requiredCoreHistory = [
-          { key: 'hist5', symbol: 'MES1!', timeframe: '5m', limit: 700, minimum: 120 },
-          // 10m has fewer bars over the same available session/history window.
-          // Earlier boot required 120 and blocked even when backend correctly returned
-          // 70 real 10-minute candles. Accept 60+ as enough history to mount.
-          { key: 'hist10', symbol: 'MES1!', timeframe: '10m', limit: 700, minimum: 60 },
-          { key: 'hist1', symbol: 'MES1!', timeframe: '1m', limit: 700, minimum: 120 },
+          { key: 'hist5', symbol: 'MES1!', timeframe: '5m', limit: 700, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+          { key: 'hist10', symbol: 'MES1!', timeframe: '10m', limit: 700, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+          { key: 'hist1', symbol: 'MES1!', timeframe: '1m', limit: 700, minimum: CORE_MES_HISTORY_MIN_CANDLES },
         ]
 
         await warmRequiredMesHistoryBundle(requiredCoreHistory)
@@ -6681,13 +6678,13 @@ export default function Dashboard() {
           'ready',
           'loading',
           remainingBootHoldMs > 0
-            ? `Holding boot screen ${Math.ceil(remainingBootHoldMs / 1000)}s so historical 5m / 10m / 1m caches finish settling`
-            : 'Historical 5m / 10m / 1m caches are ready; unlocking dashboard UI'
+            ? `Holding boot screen ${Math.ceil(remainingBootHoldMs / 1000)}s so 300+ candle history caches finish settling`
+            : '300+ MES 5m / 10m / 1m historical candles are ready; unlocking dashboard UI'
         )
         if (remainingBootHoldMs > 0) {
           await sleep(remainingBootHoldMs)
         }
-        setBootStep('ready', 'done', 'Dashboard ready with MES 5m / 10m / 1m history preloaded')
+        setBootStep('ready', 'done', 'Dashboard ready with 300+ MES 5m / 10m / 1m historical candles preloaded')
 
         if (!cancelled) {
           setDashboardBootReady(true)
