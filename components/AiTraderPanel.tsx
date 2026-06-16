@@ -850,6 +850,120 @@ function getAiTradeTickSize(symbol: any) {
   return 0.01;
 }
 
+function roundAiTradePriceToTick(price: number, symbol: any) {
+  if (!Number.isFinite(price) || price <= 0) return 0;
+
+  const tickSize = getAiTradeTickSize(symbol);
+  if (!Number.isFinite(tickSize) || tickSize <= 0) return Number(price.toFixed(5));
+
+  return Number((Math.round(price / tickSize) * tickSize).toFixed(5));
+}
+
+function getProjectionDirectivePermission(value: any) {
+  const text = String(value ?? "").toUpperCase();
+
+  if (text.includes("HOLD_CONFLICT")) return "HOLD_CONFLICT";
+  if (text.includes("WAIT")) return "WAIT";
+  if (text.includes("CAN_CONSIDER") || text.includes("CONSIDER")) return "CAN_CONSIDER";
+  if (text.includes("ALLOW") || text.includes("READY")) return "CAN_CONSIDER";
+
+  return text || "WAIT";
+}
+
+function buildUnifiedDashboardTradePlan({
+  projectionSnapshot,
+  livePrice,
+  symbol,
+  minRiskReward,
+  fallbackStop,
+  fallbackDecision,
+}: {
+  projectionSnapshot: any;
+  livePrice: number;
+  symbol: string;
+  minRiskReward: number;
+  fallbackStop?: number;
+  fallbackDecision?: any;
+}) {
+  const entry = roundAiTradePriceToTick(toFiniteNumber(livePrice, 0), symbol);
+  const projectionTarget = roundAiTradePriceToTick(
+    toFiniteNumber(projectionSnapshot?.targetPrice, 0),
+    symbol,
+  );
+  const permission = getProjectionDirectivePermission(projectionSnapshot?.aiPermission);
+  const confidence = Math.max(
+    toFiniteNumber(projectionSnapshot?.targetConfidence, 0),
+    toFiniteNumber(projectionSnapshot?.ghostConfidence, 0),
+    toFiniteNumber(projectionSnapshot?.alignmentScore, 0),
+  );
+
+  if (entry <= 0 || projectionTarget <= 0 || projectionTarget === entry) {
+    return {
+      canTrade: false,
+      reason: "Unified Intelligence has no actionable target away from live price.",
+      permission,
+      entry,
+      target: projectionTarget,
+      stop: 0,
+      side: "HOLD" as const,
+      confidence,
+    };
+  }
+
+  if (projectionSnapshot?.conflict || permission === "HOLD_CONFLICT" || permission === "WAIT") {
+    return {
+      canTrade: false,
+      reason: `Unified Intelligence permission is ${permission}; AI should wait instead of forcing a trade.`,
+      permission,
+      entry,
+      target: projectionTarget,
+      stop: 0,
+      side: "HOLD" as const,
+      confidence,
+    };
+  }
+
+  const side: "BUY" | "SELL" = projectionTarget > entry ? "BUY" : "SELL";
+  const rewardPoints = Math.abs(projectionTarget - entry);
+  const requiredRiskPoints = rewardPoints / Math.max(0.01, toFiniteNumber(minRiskReward, 1.25));
+  const fallbackStopNumber = roundAiTradePriceToTick(toFiniteNumber(fallbackStop, 0), symbol);
+  const fallbackStopIsValid =
+    fallbackStopNumber > 0 &&
+    (side === "BUY" ? fallbackStopNumber < entry : fallbackStopNumber > entry);
+
+  const fallbackRiskPoints = fallbackStopIsValid ? Math.abs(entry - fallbackStopNumber) : 0;
+
+  // The projection target is the final dashboard ML target. Stop is built around
+  // that target so the AI does not reverse the trade away from Ghost/Unified Intelligence.
+  const stop = fallbackStopIsValid && fallbackRiskPoints <= requiredRiskPoints
+    ? fallbackStopNumber
+    : roundAiTradePriceToTick(
+        side === "BUY" ? entry - requiredRiskPoints : entry + requiredRiskPoints,
+        symbol,
+      );
+
+  const riskPoints = Math.abs(entry - stop);
+  const riskReward = riskPoints > 0 ? Number((rewardPoints / riskPoints).toFixed(2)) : 0;
+
+  return {
+    canTrade: true,
+    reason: `Unified Intelligence directive: ${side} toward Ghost/Target ML target ${formatPrice(projectionTarget)} with permission ${permission}.`,
+    permission,
+    entry,
+    target: projectionTarget,
+    stop,
+    side,
+    confidence,
+    riskReward,
+    targetSource: projectionSnapshot?.source ?? "unified_projection_engine",
+    projectionMode: projectionSnapshot?.projectionMode,
+    projectionModeLabel: projectionSnapshot?.projectionModeLabel,
+    ghostConfidence: toFiniteNumber(projectionSnapshot?.ghostConfidence, 0),
+    targetConfidence: toFiniteNumber(projectionSnapshot?.targetConfidence, 0),
+    fallbackDecision: normalizeDecision(fallbackDecision),
+  };
+}
+
 function getAiTradePointValue(symbol: any, trade?: any) {
   const explicit = toFiniteNumber(
     trade?.pointValue ?? trade?.dollarPerPoint ?? trade?.multiplier,
@@ -1229,34 +1343,37 @@ function buildFrontendOpenTradeFromDecision({
   timeframe: string;
   candles?: any[];
 }) {
-  const side = normalizeDecision(
-    decision?.rawDecision ?? decision?.decision ?? payload?.side,
-  );
+  const unifiedPlan = payload?.unifiedTradePlan;
+  const side = unifiedPlan?.canTrade
+    ? normalizeDecision(unifiedPlan.side)
+    : normalizeDecision(decision?.rawDecision ?? decision?.decision ?? payload?.side);
 
   if (side === "HOLD") return null;
 
   const current = toFiniteNumber(livePrice, 0);
-  const entry = current;
-  const target = toFiniteNumber(
-    decision?.target ??
-      payload?.targetPrice ??
-      payload?.target ??
-      payload?.takeProfitPrice,
-    0,
-  );
-  const stop = toFiniteNumber(
-    decision?.stop ?? payload?.stopPrice ?? payload?.stop,
-    0,
-  );
+  const entry = unifiedPlan?.canTrade
+    ? toFiniteNumber(unifiedPlan.entry, current)
+    : current;
+  const target = unifiedPlan?.canTrade
+    ? toFiniteNumber(unifiedPlan.target, 0)
+    : toFiniteNumber(
+        decision?.target ??
+          payload?.targetPrice ??
+          payload?.target ??
+          payload?.takeProfitPrice,
+        0,
+      );
+  const stop = unifiedPlan?.canTrade
+    ? toFiniteNumber(unifiedPlan.stop, 0)
+    : toFiniteNumber(decision?.stop ?? payload?.stopPrice ?? payload?.stop, 0);
 
   if (entry <= 0 || target <= 0 || stop <= 0 || current <= 0) return null;
 
   const targetOnCorrectSide = side === "BUY" ? target > entry : target < entry;
   const stopOnCorrectSide = side === "BUY" ? stop < entry : stop > entry;
 
-  // A dashboard-only paper trade must be filled at the actual shared live
-  // price. If the saved AI setup target/stop does not make sense versus the
-  // live fill, skip the open instead of inventing a fake entry/exit.
+  // A dashboard-only paper trade must be filled from the shared live price and
+  // must agree with the Unified Intelligence / Ghost target direction.
   if (!targetOnCorrectSide || !stopOnCorrectSide) return null;
 
   const normalizedSymbol = String(
@@ -1350,10 +1467,14 @@ function buildFrontendOpenTradeFromDecision({
     confidence: toFiniteNumber(decision?.confidence ?? payload?.confidence, 0),
     confidenceGrade: decision?.confidenceGrade,
     reason:
+      unifiedPlan?.reason ??
       decision?.reason ??
       payload?.signal?.reason ??
-      "Dashboard-only paper trade opened at the shared live price. It will close only after shared live price/main chart levels hit target or stop.",
-    reasons: Array.isArray(decision?.reasons) ? decision?.reasons : [],
+      "Dashboard-only paper trade opened at the shared live price using Unified Intelligence / Ghost target logic. It will close only after shared live price/main chart levels hit target or stop.",
+    reasons: [
+      ...(unifiedPlan?.reason ? [unifiedPlan.reason] : []),
+      ...(Array.isArray(decision?.reasons) ? decision.reasons : []),
+    ],
     entryTime,
     createdAt: entryTime,
     updatedAt: entryTime,
@@ -2135,20 +2256,31 @@ export default function AiTraderPanel({
     );
     const target = projectionSnapshot.targetPrice ?? targetSnapshot.targetPrice;
     const entry = inferEntryFromSignal(signal, liveActivePrice);
-    const side = readProjectionSide(
-      activeProjectionEngine,
-      signal?.signal ?? signal?.type ?? signal?.direction,
-    );
+    const unifiedTradePlan = buildUnifiedDashboardTradePlan({
+      projectionSnapshot,
+      livePrice: liveActivePrice,
+      symbol,
+      minRiskReward,
+      fallbackStop: signal?.stop ?? signal?.stopPrice ?? signal?.nrtrStopPrice ?? undefined,
+      fallbackDecision: signal?.signal ?? signal?.type ?? signal?.direction,
+    });
+    const side = unifiedTradePlan.canTrade
+      ? unifiedTradePlan.side
+      : readProjectionSide(
+          activeProjectionEngine,
+          signal?.signal ?? signal?.type ?? signal?.direction,
+        );
     const entryTime = getLatestCandleTime(candles);
     const setupKey = buildAiTradeSetupKey({
       symbol,
       timeframe,
       candles,
       side,
-      entry,
-      target,
-      stop:
-        signal?.stop ?? signal?.stopPrice ?? signal?.nrtrStopPrice ?? undefined,
+      entry: unifiedTradePlan.canTrade ? unifiedTradePlan.entry : entry,
+      target: unifiedTradePlan.canTrade ? unifiedTradePlan.target : target,
+      stop: unifiedTradePlan.canTrade
+        ? unifiedTradePlan.stop
+        : signal?.stop ?? signal?.stopPrice ?? signal?.nrtrStopPrice ?? undefined,
     });
 
     return {
@@ -2157,8 +2289,12 @@ export default function AiTraderPanel({
       setupKey,
       entryTime,
       currentPrice: liveActivePrice,
-      entryPrice: entry,
-      targetPrice: target,
+      entryPrice: unifiedTradePlan.canTrade ? unifiedTradePlan.entry : entry,
+      targetPrice: unifiedTradePlan.canTrade ? unifiedTradePlan.target : target,
+      stopPrice: unifiedTradePlan.canTrade
+        ? unifiedTradePlan.stop
+        : signal?.stop ?? signal?.stopPrice ?? signal?.nrtrStopPrice ?? undefined,
+      unifiedTradePlan,
       side,
       signal: {
         ...(signal ?? {}),
@@ -2206,6 +2342,8 @@ export default function AiTraderPanel({
         projectionEngineLabel: projectionSnapshot.projectionModeLabel,
         aiPermission: projectionSnapshot.aiPermission,
         targetGhostConflict: projectionSnapshot.conflict,
+        unifiedTradePlanStatus: unifiedTradePlan.canTrade ? "READY" : "WAIT",
+        unifiedTradePlanReason: unifiedTradePlan.reason,
         strategyTesterScope: strategyTesterResults?.scope ?? "MAIN_CHART_ONLY",
         strategyTesterMode: strategyTesterResults?.strategyMode,
         strategyTesterBestSettings: strategyTesterResults?.bestSettings,
@@ -2761,9 +2899,19 @@ export default function AiTraderPanel({
 
   useEffect(() => {
     if (!autoPaperMode) return;
-    if (!decision?.allowedToTrade) return;
 
-    const side = normalizeDecision(decision.rawDecision ?? decision.decision);
+    const unifiedPlan = (safePayload as any)?.unifiedTradePlan;
+    const unifiedReady = Boolean(unifiedPlan?.canTrade);
+    const backendAllowed = Boolean(decision?.allowedToTrade);
+
+    // Unified Intelligence / Ghost projection is the primary gate. Backend
+    // decision is now only a supporting label; it must not reverse or override
+    // the dashboard ML target direction.
+    if (!unifiedReady && !backendAllowed) return;
+
+    const side = unifiedReady
+      ? normalizeDecision(unifiedPlan.side)
+      : normalizeDecision(decision?.rawDecision ?? decision?.decision);
     if (side === "HOLD") return;
 
     const key = buildAiTradeSetupKey({
@@ -2771,9 +2919,9 @@ export default function AiTraderPanel({
       timeframe,
       candles,
       side,
-      entry: decision.entry,
-      target: decision.target,
-      stop: decision.stop,
+      entry: unifiedReady ? unifiedPlan.entry : decision?.entry,
+      target: unifiedReady ? unifiedPlan.target : decision?.target,
+      stop: unifiedReady ? unifiedPlan.stop : decision?.stop,
     });
 
     if (key === lastAutoOpenKey) return;
@@ -2786,6 +2934,7 @@ export default function AiTraderPanel({
     decision,
     lastAutoOpenKey,
     openDashboardTrade,
+    safePayload,
     symbol,
     timeframe,
   ]);
