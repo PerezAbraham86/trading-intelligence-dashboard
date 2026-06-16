@@ -88,6 +88,7 @@ type AiTradeCloseReason =
   | "AI_REVERSAL_EXIT"
   | "AI_CONFIDENCE_EXIT"
   | "MAX_RISK_R_HIT"
+  | "TRAILING_STOP_HIT"
   | "MANUAL_CLOSE";
 
 function toFiniteNumber(value: any, fallback = 0) {
@@ -1109,6 +1110,145 @@ function calculateLiveTradePnl(trade: any, livePrice: number) {
   };
 }
 
+
+function calculateBestFavorableTradeR(
+  trade: any,
+  livePrice: number,
+  candles?: any[],
+) {
+  const side = normalizeTradeSide(
+    trade?.side ?? trade?.decision ?? trade?.rawDecision,
+  );
+  const entry = toFiniteNumber(trade?.entry ?? trade?.entryPrice, 0);
+  const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0);
+  const current = getTradeLiveCurrentPrice(trade, livePrice);
+
+  if (entry <= 0 || stop <= 0 || current <= 0 || side === "HOLD") {
+    return {
+      bestPrice: current,
+      bestR: 0,
+      trailingStopPrice: 0,
+    };
+  }
+
+  const riskPoints = Math.abs(entry - stop);
+  if (!Number.isFinite(riskPoints) || riskPoints <= 0) {
+    return {
+      bestPrice: current,
+      bestR: 0,
+      trailingStopPrice: 0,
+    };
+  }
+
+  const afterEntryCandles = getCandlesAfterTradeEntry(candles, trade);
+  const favorablePrices = afterEntryCandles
+    .map((candle) =>
+      side === "BUY"
+        ? toFiniteNumber(candle?.high ?? candle?.h, NaN)
+        : toFiniteNumber(candle?.low ?? candle?.l, NaN),
+    )
+    .filter((price) => Number.isFinite(price) && price > 0);
+
+  favorablePrices.push(current);
+
+  const bestPrice =
+    side === "BUY"
+      ? Math.max(entry, ...favorablePrices)
+      : Math.min(entry, ...favorablePrices);
+
+  const bestR =
+    side === "BUY"
+      ? (bestPrice - entry) / riskPoints
+      : (entry - bestPrice) / riskPoints;
+
+  return {
+    bestPrice,
+    bestR: Number.isFinite(bestR) ? bestR : 0,
+    trailingStopPrice: 0,
+  };
+}
+
+function getAiTrailingStopSettlement({
+  trade,
+  livePrice,
+  candles,
+  trailingStopR,
+}: {
+  trade: any;
+  livePrice: number;
+  candles?: any[];
+  trailingStopR: number;
+}) {
+  const side = normalizeTradeSide(
+    trade?.side ?? trade?.decision ?? trade?.rawDecision,
+  );
+  const entry = toFiniteNumber(trade?.entry ?? trade?.entryPrice, 0);
+  const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0);
+  const current = getTradeLiveCurrentPrice(trade, livePrice);
+  const activeTrailR = Math.max(0.05, Math.abs(toFiniteNumber(trailingStopR, 0.5)));
+
+  if (entry <= 0 || stop <= 0 || current <= 0 || side === "HOLD") {
+    return {
+      active: false,
+      shouldClose: false,
+      closePrice: current,
+      bestR: 0,
+      trailStopR: 0,
+      trailStopPrice: 0,
+    };
+  }
+
+  const riskPoints = Math.abs(entry - stop);
+  if (!Number.isFinite(riskPoints) || riskPoints <= 0) {
+    return {
+      active: false,
+      shouldClose: false,
+      closePrice: current,
+      bestR: 0,
+      trailStopR: 0,
+      trailStopPrice: 0,
+    };
+  }
+
+  const best = calculateBestFavorableTradeR(trade, livePrice, candles);
+
+  // Trailing stop activates only after the trade has reached at least +1.00R.
+  // Then it locks profit activeTrailR behind the best favorable R.
+  // Example with Trail Stop R = 0.50:
+  // best +1.00R -> trail at +0.50R
+  // best +1.50R -> trail at +1.00R
+  if (best.bestR < 1) {
+    return {
+      active: false,
+      shouldClose: false,
+      closePrice: current,
+      bestR: best.bestR,
+      trailStopR: 0,
+      trailStopPrice: 0,
+    };
+  }
+
+  const trailStopR = Math.max(0, best.bestR - activeTrailR);
+  const trailStopPrice =
+    side === "BUY"
+      ? entry + riskPoints * trailStopR
+      : entry - riskPoints * trailStopR;
+
+  const shouldClose =
+    side === "BUY"
+      ? current <= trailStopPrice
+      : current >= trailStopPrice;
+
+  return {
+    active: true,
+    shouldClose,
+    closePrice: trailStopPrice,
+    bestR: best.bestR,
+    trailStopR,
+    trailStopPrice,
+  };
+}
+
 function calculateAiTradeMaxTargetPnl(trade: any) {
   const existingMaxPnl = toFiniteNumber(
     trade?.maxPnl ??
@@ -1280,6 +1420,8 @@ function getAiTradeSettlement(
   decision: AiTraderDecision | null,
   minConfidence: number,
   maxRiskR: number,
+  useAiTrailingStop: boolean,
+  trailingStopR: number,
   candles?: any[],
 ): {
   shouldClose: boolean;
@@ -1327,6 +1469,24 @@ function getAiTradeSettlement(
       closeReason: "STOP_HIT",
       closeLabel: "Stop hit from shared live price / main chart level",
     };
+  }
+
+  if (useAiTrailingStop) {
+    const trailingSettlement = getAiTrailingStopSettlement({
+      trade,
+      livePrice: hit.current,
+      candles,
+      trailingStopR,
+    });
+
+    if (trailingSettlement.shouldClose) {
+      return {
+        shouldClose: true,
+        closePrice: trailingSettlement.closePrice,
+        closeReason: "TRAILING_STOP_HIT",
+        closeLabel: `AI trailing stop hit at +${trailingSettlement.trailStopR.toFixed(2)}R after reaching +${trailingSettlement.bestR.toFixed(2)}R`,
+      };
+    }
   }
 
   // No AI reversal auto-close here. Dashboard paper trades now close only when
@@ -2057,6 +2217,8 @@ export default function AiTraderPanel({
   const [minConfidence, setMinConfidence] = useState(62);
   const [minRiskReward, setMinRiskReward] = useState(1.25);
   const [maxRiskR, setMaxRiskR] = useState(1);
+  const [useAiTrailingStop, setUseAiTrailingStop] = useState(false);
+  const [trailingStopR, setTrailingStopR] = useState(0.5);
   const [lastAutoOpenKey, setLastAutoOpenKey] = useState("");
   const [localOpenTrades, setLocalOpenTrades] = useState<any[]>([]);
   const [hydratedLocalOpenTrades, setHydratedLocalOpenTrades] = useState(false);
@@ -2420,6 +2582,8 @@ export default function AiTraderPanel({
       minConfidence,
       minRiskReward,
       maxRiskR,
+      useAiTrailingStop,
+      trailingStopR,
     };
   }, [
     liveActivePrice,
@@ -2432,6 +2596,8 @@ export default function AiTraderPanel({
     minConfidence,
     minRiskReward,
     maxRiskR,
+    useAiTrailingStop,
+    trailingStopR,
     activeProjectionEngine,
     projectionSnapshot,
     candles,
@@ -2723,6 +2889,8 @@ export default function AiTraderPanel({
               decision,
               minConfidence,
               maxRiskR,
+              useAiTrailingStop,
+              trailingStopR,
               candles,
             );
 
@@ -2773,6 +2941,8 @@ export default function AiTraderPanel({
       localOpenTrades,
       minConfidence,
       maxRiskR,
+      useAiTrailingStop,
+      trailingStopR,
       summary,
     ],
   );
@@ -3208,6 +3378,8 @@ export default function AiTraderPanel({
         decision,
         minConfidence,
         maxRiskR,
+        useAiTrailingStop,
+        trailingStopR,
         candles,
       );
       const live = calculateLiveTradePnl(
@@ -3243,6 +3415,16 @@ export default function AiTraderPanel({
         liveUpdatedFromChart: live.current > 0,
         livePriceSource: livePriceSourceLabel,
         livePriceUpdatedAt: directLivePriceUpdatedAt,
+        trailingStopEnabled: useAiTrailingStop,
+        trailingStopR,
+        trailingSettlement: useAiTrailingStop
+          ? getAiTrailingStopSettlement({
+              trade,
+              livePrice: settlement.shouldClose ? settlement.closePrice : liveActivePrice,
+              candles,
+              trailingStopR,
+            })
+          : null,
 
         shouldCloseNow: settlement.shouldClose,
         closePrice: settlement.shouldClose
@@ -3534,7 +3716,7 @@ export default function AiTraderPanel({
     pushRow("warn", "risk-control-table", {
       maxRiskR: `-${maxRiskR.toFixed(2)}R`,
       action: "Close open AI trade when Live R is less than or equal to max risk",
-      trailingStop: "OFF",
+      trailingStop: useAiTrailingStop ? `ON • ${trailingStopR.toFixed(2)}R` : "OFF",
     });
 
     liveOpenTrades.slice(0, 5).forEach((trade: any, index: number) => {
@@ -3689,6 +3871,8 @@ export default function AiTraderPanel({
     localOpenTrades,
     projectionSnapshot,
     maxRiskR,
+    useAiTrailingStop,
+    trailingStopR,
     staleOpenTradeCount,
     stats,
     symbol,
@@ -3836,6 +4020,47 @@ export default function AiTraderPanel({
                 )
               }
               className="ml-2 w-16 rounded border border-red-400/30 bg-dark-800 px-2 py-1 text-xs text-white"
+            />
+          </label>
+
+
+          <button
+            type="button"
+            onClick={() => setUseAiTrailingStop((current) => !current)}
+            title="Trailing stop activates after the AI trade reaches +1.00R. It trails behind the best favorable R by the Trailing Stop R amount."
+            className={`rounded-lg border px-3 py-2 text-[10px] font-black uppercase tracking-wide transition ${
+              useAiTrailingStop
+                ? "border-emerald-400/40 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20"
+                : "border-dark-600 bg-dark-900 text-gray-400 hover:border-emerald-400/30 hover:text-emerald-200"
+            }`}
+          >
+            AI Trail {useAiTrailingStop ? "On" : "Off"}
+          </button>
+
+          <label
+            className={`rounded-lg border px-3 py-2 text-[10px] font-bold uppercase tracking-wide ${
+              useAiTrailingStop
+                ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
+                : "border-dark-600 bg-dark-900 text-gray-400"
+            }`}
+            title="Trailing Stop R. Example: 0.50 means after best profit reaches +1.50R, AI closes if price falls back to +1.00R."
+          >
+            Trailing Stop
+            <input
+              type="number"
+              min={0.05}
+              max={5}
+              step={0.05}
+              value={trailingStopR}
+              onChange={(event) =>
+                setTrailingStopR(
+                  Math.max(
+                    0.05,
+                    Math.min(5, Math.abs(Number(event.target.value) || 0.5)),
+                  ),
+                )
+              }
+              className="ml-2 w-16 rounded border border-emerald-400/30 bg-dark-800 px-2 py-1 text-xs text-white"
             />
           </label>
 
@@ -4485,7 +4710,7 @@ export default function AiTraderPanel({
             backend/Supabase.
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1180px] text-left text-xs">
+            <table className="w-full min-w-[1260px] text-left text-xs">
               <thead className="text-gray-500">
                 <tr>
                   <th className="pb-2">Symbol</th>
@@ -4498,6 +4723,7 @@ export default function AiTraderPanel({
                   <th className="pb-2">Max P&L</th>
                   <th className="pb-2">P&L %</th>
                   <th className="pb-2">Live R</th>
+                  <th className="pb-2">Trail</th>
                   <th className="pb-2">Confidence</th>
                   <th className="pb-2">Reason</th>
                   <th className="pb-2 text-right">Close</th>
@@ -4562,6 +4788,22 @@ export default function AiTraderPanel({
                       className={`py-2 font-bold ${toFiniteNumber(trade.rMultiple, 0) >= 0 ? "text-emerald-300" : "text-red-300"}`}
                     >
                       {toFiniteNumber(trade.rMultiple, 0).toFixed(2)}R
+                    </td>
+                    <td className="py-2 text-[11px]">
+                      {trade.trailingStopEnabled ? (
+                        trade.trailingSettlement?.active ? (
+                          <div className="font-semibold text-emerald-300">
+                            +{toFiniteNumber(trade.trailingSettlement?.trailStopR, 0).toFixed(2)}R
+                            <div className="mt-0.5 font-normal text-gray-500">
+                              best +{toFiniteNumber(trade.trailingSettlement?.bestR, 0).toFixed(2)}R
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="text-gray-500">Waiting +1R</span>
+                        )
+                      ) : (
+                        <span className="text-gray-600">Off</span>
+                      )}
                     </td>
                     <td className="py-2">
                       {toFiniteNumber(trade.confidence, 0).toFixed(1)}%
