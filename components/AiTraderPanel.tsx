@@ -1260,6 +1260,11 @@ export default function AiTraderPanel({
   const [hydratedLearningStats, setHydratedLearningStats] = useState(false)
   const [directLivePrice, setDirectLivePrice] = useState(0)
   const [directLivePriceUpdatedAt, setDirectLivePriceUpdatedAt] = useState('')
+  const [aiActivityLog, setAiActivityLog] = useState<Array<{
+    time: string
+    message: string
+    tone: 'info' | 'success' | 'warn' | 'error'
+  }>>([])
 
   const decisionRequestInFlightRef = useRef(false)
   const summaryRequestInFlightRef = useRef(false)
@@ -1272,6 +1277,53 @@ export default function AiTraderPanel({
   const lastSummaryRequestAtRef = useRef(0)
   const lastEvaluateRequestAtRef = useRef(0)
   const lastOpenRequestAtRef = useRef(0)
+  const lastLoggedActionStatusRef = useRef('')
+
+  const pushAiActivityLog = useCallback((message: string, tone: 'info' | 'success' | 'warn' | 'error' = 'info') => {
+    const cleanMessage = String(message ?? '').trim()
+    if (!cleanMessage) return
+
+    setAiActivityLog((current) => [
+      {
+        time: new Date().toLocaleTimeString('en-US', {
+          hour: 'numeric',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: true,
+        }),
+        message: cleanMessage,
+        tone,
+      },
+      ...current,
+    ].slice(0, 30))
+  }, [])
+
+  useEffect(() => {
+    if (!actionStatus) return
+    if (lastLoggedActionStatusRef.current === actionStatus) return
+
+    lastLoggedActionStatusRef.current = actionStatus
+
+    const normalized = actionStatus.toLowerCase()
+    const tone =
+      normalized.includes('failed') ||
+      normalized.includes('error') ||
+      normalized.includes('timed out')
+        ? 'error'
+        : normalized.includes('blocked') ||
+            normalized.includes('waiting') ||
+            normalized.includes('cooldown') ||
+            normalized.includes('not opened')
+          ? 'warn'
+          : normalized.includes('opened') ||
+              normalized.includes('started') ||
+              normalized.includes('closed') ||
+              normalized.includes('evaluated')
+            ? 'success'
+            : 'info'
+
+    pushAiActivityLog(actionStatus, tone)
+  }, [actionStatus, pushAiActivityLog])
 
   const openStorageKey = useMemo(() => {
     return `marketbos:ai-trader:open:${String(symbol ?? 'ALL').toUpperCase()}:${String(timeframe ?? 'ALL')}`
@@ -2130,9 +2182,43 @@ export default function AiTraderPanel({
         </div>
       ) : null}
 
-      {actionStatus ? (
-        <div className="mb-4 rounded-lg border border-purple-400/20 bg-purple-400/10 px-3 py-2 text-xs text-purple-200">
-          {actionStatus}
+      {(actionStatus || aiActivityLog.length > 0) ? (
+        <div className="mb-4 rounded-xl border border-purple-400/20 bg-purple-400/10 p-3 text-xs text-purple-100">
+          <div className="mb-2 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+            <div className="font-black uppercase tracking-wide text-purple-200">AI Trader Log</div>
+            {actionStatus ? (
+              <div className="text-[10px] font-semibold text-purple-200/80">Latest: {actionStatus}</div>
+            ) : null}
+          </div>
+
+          <div className="max-h-40 space-y-1 overflow-auto pr-1">
+            {aiActivityLog.length > 0 ? (
+              aiActivityLog.slice(0, 10).map((item, index) => {
+                const toneClass =
+                  item.tone === 'success'
+                    ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200'
+                    : item.tone === 'warn'
+                      ? 'border-amber-400/20 bg-amber-400/10 text-amber-200'
+                      : item.tone === 'error'
+                        ? 'border-red-400/20 bg-red-400/10 text-red-200'
+                        : 'border-purple-400/15 bg-dark-900/40 text-purple-100'
+
+                return (
+                  <div
+                    key={`${item.time}-${item.message}-${index}`}
+                    className={`rounded-lg border px-3 py-2 ${toneClass}`}
+                  >
+                    <span className="mr-2 font-mono text-[10px] text-gray-400">{item.time}</span>
+                    <span className="font-semibold">{item.message}</span>
+                  </div>
+                )
+              })
+            ) : (
+              <div className="rounded-lg border border-purple-400/15 bg-dark-900/40 px-3 py-2 text-purple-100">
+                Waiting for AI trader activity...
+              </div>
+            )}
+          </div>
         </div>
       ) : null}
 
