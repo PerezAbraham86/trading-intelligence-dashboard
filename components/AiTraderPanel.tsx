@@ -82,6 +82,37 @@ type AiTraderSummary = {
   };
 };
 
+type AiTraderValidation = {
+  eventType?: string;
+  status?: string;
+  valid?: boolean;
+  errorCode?: string | null;
+  message?: string;
+  plan?: any;
+  blockers?: Array<{ code?: string; field?: string; message?: string }>;
+  warnings?: Array<{ code?: string; field?: string; message?: string }>;
+  createdAt?: string;
+};
+
+type AiTraderDiagnostics = {
+  eventType?: string;
+  status?: string;
+  counts?: {
+    open?: number;
+    matchingOpen?: number;
+    closed?: number;
+    virtualOpen?: number;
+    virtualClosed?: number;
+    decisionLog?: number;
+  };
+  validation?: AiTraderValidation | null;
+  phase1BackendAuthority?: any;
+  activeOpenTrades?: any[];
+  evaluatedOpenTrades?: any[];
+  memoryStatus?: any;
+  createdAt?: string;
+};
+
 type AiTradeCloseReason =
   | "TARGET_HIT"
   | "STOP_HIT"
@@ -1123,7 +1154,7 @@ function calculateBestFavorableTradeR(
   const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0);
   const current = getTradeLiveCurrentPrice(trade, livePrice);
 
-  if (entry <= 0 || stop <= 0 || current <= 0) {
+  if (entry <= 0 || stop <= 0 || current <= 0 || side === "HOLD") {
     return {
       bestPrice: current,
       bestR: 0,
@@ -1187,7 +1218,7 @@ function getAiTrailingStopSettlement({
   const current = getTradeLiveCurrentPrice(trade, livePrice);
   const activeTrailR = Math.max(0.05, Math.abs(toFiniteNumber(trailingStopR, 0.5)));
 
-  if (entry <= 0 || stop <= 0 || current <= 0) {
+  if (entry <= 0 || stop <= 0 || current <= 0 || side === "HOLD") {
     return {
       active: false,
       shouldClose: false,
@@ -1212,15 +1243,12 @@ function getAiTrailingStopSettlement({
 
   const best = calculateBestFavorableTradeR(trade, livePrice, candles);
 
-  // Trailing stop activates automatically as soon as the trade has ever
-  // moved into positive R. It no longer waits for +0.50R or +1.00R.
-  //
-  // Trail Stop R is only the trailing distance behind the best favorable move.
+  // Trailing stop activates only after the trade has reached at least +1.00R.
+  // Then it locks profit activeTrailR behind the best favorable R.
   // Example with Trail Stop R = 0.50:
-  // best +0.16R -> trail at breakeven 0.00R
-  // best +0.75R -> trail at +0.25R
+  // best +1.00R -> trail at +0.50R
   // best +1.50R -> trail at +1.00R
-  if (best.bestR <= 0) {
+  if (best.bestR < 1) {
     return {
       active: false,
       shouldClose: false,
@@ -2213,6 +2241,8 @@ export default function AiTraderPanel({
 }: AiTraderPanelProps) {
   const [decision, setDecision] = useState<AiTraderDecision | null>(null);
   const [summary, setSummary] = useState<AiTraderSummary | null>(null);
+  const [validation, setValidation] = useState<AiTraderValidation | null>(null);
+  const [diagnostics, setDiagnostics] = useState<AiTraderDiagnostics | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [actionStatus, setActionStatus] = useState("");
   const [errorText, setErrorText] = useState("");
@@ -2244,6 +2274,8 @@ export default function AiTraderPanel({
 
   const decisionRequestInFlightRef = useRef(false);
   const summaryRequestInFlightRef = useRef(false);
+  const validateRequestInFlightRef = useRef(false);
+  const diagnosticsRequestInFlightRef = useRef(false);
   const evaluateRequestInFlightRef = useRef(false);
   const openRequestInFlightRef = useRef(false);
   const activePaperTradeLockRef = useRef(false);
@@ -2601,6 +2633,7 @@ export default function AiTraderPanel({
     maxRiskR,
     useAiTrailingStop,
     trailingStopR,
+    validation,
     activeProjectionEngine,
     projectionSnapshot,
     candles,
@@ -2725,6 +2758,96 @@ export default function AiTraderPanel({
     ],
   );
 
+  const validateBackendPlan = useCallback(
+    async (inputPayload: any = safePayload, force = false) => {
+      if (!apiBaseUrl) return null;
+
+      if (validateRequestInFlightRef.current && !force) {
+        return validation;
+      }
+
+      validateRequestInFlightRef.current = true;
+      const timeout = createRequestTimeout(12000);
+
+      try {
+        const response = await fetch(`${apiBaseUrl}/api/ai-trader/validate-plan`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(inputPayload),
+          signal: timeout.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(`AI trader validate-plan failed: ${await readApiError(response)}`);
+        }
+
+        const json = await response.json();
+        setValidation(json);
+        return json as AiTraderValidation;
+      } catch (error) {
+        const message = formatRequestError(error, "AI trader validate-plan failed");
+        const failed: AiTraderValidation = {
+          eventType: "AI_TRADER_VALIDATE_PLAN",
+          status: "Error",
+          valid: false,
+          errorCode: "VALIDATE_PLAN_REQUEST_FAILED",
+          message,
+          blockers: [{ code: "VALIDATE_PLAN_REQUEST_FAILED", message }],
+          createdAt: new Date().toISOString(),
+        };
+        setValidation(failed);
+        return failed;
+      } finally {
+        timeout.clear();
+        validateRequestInFlightRef.current = false;
+      }
+    },
+    [apiBaseUrl, safePayload, validation],
+  );
+
+  const fetchDiagnostics = useCallback(
+    async (force = false) => {
+      if (!apiBaseUrl) return;
+      if (diagnosticsRequestInFlightRef.current && !force) return;
+
+      diagnosticsRequestInFlightRef.current = true;
+      const timeout = createRequestTimeout(12000);
+
+      try {
+        const response = await fetch(`${apiBaseUrl}/api/ai-trader/diagnostics`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            ...(safePayload as any),
+            symbol,
+            timeframe,
+            currentPrice: liveActivePrice,
+            candles: Array.isArray(candles) ? candles.slice(-80) : [],
+            includeMemory: false,
+          }),
+          cache: "no-store",
+          signal: timeout.signal,
+        });
+
+        if (!response.ok) return;
+
+        const json = await response.json();
+        setDiagnostics(json);
+        if (json?.validation) setValidation(json.validation);
+      } catch {
+        // Diagnostics are informational only. Do not block trading panel refresh.
+      } finally {
+        timeout.clear();
+        diagnosticsRequestInFlightRef.current = false;
+      }
+    },
+    [apiBaseUrl, candles, liveActivePrice, safePayload, symbol, timeframe],
+  );
+
   const fetchDecision = useCallback(
     async (force = false) => {
       if (!apiBaseUrl) {
@@ -2775,6 +2898,7 @@ export default function AiTraderPanel({
 
         const json = await response.json();
         setDecision(json);
+        await validateBackendPlan({ ...(safePayload as any), decision: json }, true);
         setPersistentLearningStats((current: any) => {
           const withBackendStats = mergeAiDecisionStats(
             current,
@@ -2796,7 +2920,7 @@ export default function AiTraderPanel({
         setIsLoading(false);
       }
     },
-    [apiBaseUrl, liveActivePrice, safePayload, symbol, timeframe, candles],
+    [apiBaseUrl, liveActivePrice, safePayload, symbol, timeframe, candles, validateBackendPlan],
   );
 
   const fetchSummary = useCallback(
@@ -2872,81 +2996,93 @@ export default function AiTraderPanel({
 
       evaluateRequestInFlightRef.current = true;
       lastEvaluateRequestAtRef.current = now;
+      const timeout = createRequestTimeout(16000);
 
       try {
-        const activeTrades = getActiveOpenTrades([
-          ...localOpenTrades,
-          ...(Array.isArray((summary as any)?.globalOpenTrades)
-            ? (summary as any).globalOpenTrades
-            : []),
-          ...(Array.isArray(summary?.openTrades) ? summary.openTrades : []),
-        ]).filter(
-          (trade: any) => !closedTradeKeysRef.current.has(getTradeKey(trade)),
-        );
-
-        const tradesToClose = activeTrades
-          .map((trade: any) => {
-            const settlement = getAiTradeSettlement(
-              trade,
-              liveActivePrice,
-              decision,
-              minConfidence,
-              maxRiskR,
-              useAiTrailingStop,
-              trailingStopR,
-              candles,
-            );
-
-            if (!settlement.shouldClose) return null;
-
-            return {
-              trade,
-              closePrice: settlement.closePrice,
-              closeReason: settlement.closeReason,
-              closeLabel: settlement.closeLabel,
-            };
-          })
-          .filter(Boolean) as Array<{
-            trade: any;
-            closePrice: number;
-            closeReason?: AiTradeCloseReason;
-            closeLabel?: string;
-          }>;
-
-        let closedCount = 0;
-
-        for (const item of tradesToClose) {
-          await closeTradeOnBackend(item);
-          closedCount += 1;
+        if (!apiBaseUrl) {
+          throw new Error("Evaluate failed: apiBaseUrl is missing.");
         }
+
+        const response = await fetch(`${apiBaseUrl}/api/ai-trader/evaluate-open`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            symbol,
+            timeframe,
+            currentPrice: liveActivePrice,
+            livePrice: liveActivePrice,
+            candles: Array.isArray(candles) ? candles.slice(-120) : [],
+            maxRiskR,
+            useAiTrailingStop,
+            trailingStopR,
+          }),
+          cache: "no-store",
+          signal: timeout.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(`AI trader evaluate-open failed: ${await readApiError(response)}`);
+        }
+
+        const json = await response.json();
+        const backendClosedTrades = [
+          ...(Array.isArray(json?.closedTrades) ? json.closedTrades : []),
+          ...(Array.isArray(json?.virtualClosedTrades) ? json.virtualClosedTrades : []),
+        ];
+        const backendOpenTrades = [
+          ...(Array.isArray(json?.openTrades) ? json.openTrades : []),
+          ...(Array.isArray(json?.virtualOpenTrades) ? json.virtualOpenTrades : []),
+        ];
+
+        if (backendClosedTrades.length > 0) {
+          saveClosedTrades(backendClosedTrades);
+          forgetOpenTrades(backendClosedTrades);
+          activePaperTradeLockRef.current = false;
+          openRequestInFlightRef.current = false;
+        }
+
+        if (backendOpenTrades.length > 0) {
+          saveOpenTrades(backendOpenTrades);
+        } else if (toFiniteNumber(json?.openCount, 0) === 0) {
+          setLocalOpenTrades([]);
+          activePaperTradeLockRef.current = false;
+        }
+
+        if (json?.summary) setSummary(json.summary);
+
+        const closedCount =
+          toFiniteNumber(json?.closedCount, backendClosedTrades.length) +
+          toFiniteNumber(json?.virtualClosedCount, 0);
 
         if (force || closedCount > 0) {
           setActionStatus(
-            `Evaluated shared live price/main chart levels • Closed ${closedCount} trade(s) through backend/Supabase`,
+            `Backend evaluated open AI trades • Closed ${closedCount} trade(s) through Supabase authority`,
           );
         }
 
-        if (closedCount > 0) {
-          fetchSummary(true);
-        }
+        fetchDiagnostics(false);
       } catch (error) {
         setActionStatus(formatRequestError(error, "Evaluate failed"));
       } finally {
+        timeout.clear();
         evaluateRequestInFlightRef.current = false;
       }
     },
     [
+      apiBaseUrl,
       candles,
-      closeTradeOnBackend,
-      decision,
-      fetchSummary,
+      fetchDiagnostics,
+      forgetOpenTrades,
       liveActivePrice,
-      localOpenTrades,
-      minConfidence,
       maxRiskR,
-      useAiTrailingStop,
+      saveClosedTrades,
+      saveOpenTrades,
+      symbol,
+      timeframe,
       trailingStopR,
-      summary,
+      useAiTrailingStop,
     ],
   );
 
@@ -3038,6 +3174,28 @@ export default function AiTraderPanel({
         setActionStatus(
           `Open blocked: ${visibleLocalOpenTrades.length} dashboard AI trade is already visible. ${visibleDetails}. Learning mode is one trade at a time.`,
         );
+        return;
+      }
+
+      const backendValidation = await validateBackendPlan(
+        {
+          ...(safePayload as any),
+          decision,
+          currentPrice: liveActivePrice,
+          entryPrice: (safePayload as any)?.entryPrice ?? liveActivePrice,
+        },
+        true,
+      );
+
+      if (backendValidation && backendValidation.valid === false) {
+        const firstBlocker = Array.isArray(backendValidation.blockers)
+          ? backendValidation.blockers[0]
+          : null;
+        setActionStatus(
+          `Open blocked by backend validate-plan: ${firstBlocker?.message ?? backendValidation.message ?? backendValidation.errorCode ?? "invalid trade plan"}`,
+        );
+        activePaperTradeLockRef.current = false;
+        openRequestInFlightRef.current = false;
         return;
       }
 
@@ -3171,13 +3329,15 @@ export default function AiTraderPanel({
       localOpenTrades,
       liveActivePrice,
       saveOpenTrades,
+      validateBackendPlan,
     ],
   );
 
   useEffect(() => {
     fetchDecision(true);
     fetchSummary(true);
-  }, [apiBaseUrl, symbol, timeframe]);
+    fetchDiagnostics(true);
+  }, [apiBaseUrl, symbol, timeframe, fetchDecision, fetchSummary, fetchDiagnostics]);
 
   useEffect(() => {
     if (!autoPaperMode) return;
@@ -3226,10 +3386,11 @@ export default function AiTraderPanel({
       fetchDecision(false);
       fetchSummary(false);
       evaluateOpenTrades(false);
+      fetchDiagnostics(false);
     }, 20000);
 
     return () => window.clearInterval(id);
-  }, [fetchDecision, fetchSummary, evaluateOpenTrades]);
+  }, [fetchDecision, fetchSummary, evaluateOpenTrades, fetchDiagnostics]);
 
   const aiDecision = normalizeDecision(decision?.decision);
   const rawDecision = normalizeDecision(decision?.rawDecision);
@@ -3662,6 +3823,23 @@ export default function AiTraderPanel({
       loading: isLoading,
     });
 
+    pushRow(validation?.valid ? "success" : validation ? "warn" : "info", "backend-validate-plan", {
+      status: validation?.status ?? "WAITING",
+      valid: validation?.valid === true ? "YES" : validation?.valid === false ? "NO" : "—",
+      code: validation?.errorCode ?? "—",
+      blockers: Array.isArray(validation?.blockers) ? validation.blockers.length : 0,
+      message: validation?.message ?? "Backend validate-plan waiting.",
+    });
+
+    pushRow(diagnostics?.status === "Ready" ? "success" : "info", "backend-diagnostics", {
+      status: diagnostics?.status ?? "WAITING",
+      open: diagnostics?.counts?.open ?? "—",
+      matchingOpen: diagnostics?.counts?.matchingOpen ?? "—",
+      closed: diagnostics?.counts?.closed ?? "—",
+      decisions: diagnostics?.counts?.decisionLog ?? "—",
+      backendAuthority: diagnostics?.phase1BackendAuthority ? "ON" : "WAITING",
+    });
+
     pushRow(
       "info",
       hasVisibleOpenTrade ? "open-trade-plan-table" : "latest-setup-plan-table",
@@ -3719,7 +3897,7 @@ export default function AiTraderPanel({
     pushRow("warn", "risk-control-table", {
       maxRiskR: `-${maxRiskR.toFixed(2)}R`,
       action: "Close open AI trade when Live R is less than or equal to max risk",
-      trailingStop: useAiTrailingStop ? `ON • active when profit > 0 • ${trailingStopR.toFixed(2)}R distance` : "OFF",
+      trailingStop: useAiTrailingStop ? `ON • ${trailingStopR.toFixed(2)}R` : "OFF",
     });
 
     liveOpenTrades.slice(0, 5).forEach((trade: any, index: number) => {
@@ -3859,6 +4037,7 @@ export default function AiTraderPanel({
     blockers,
     decision,
     decisionStats,
+    diagnostics,
     directLivePrice,
     livePriceSourceLabel,
     sharedLivePriceFromDashboard,
@@ -4030,7 +4209,7 @@ export default function AiTraderPanel({
           <button
             type="button"
             onClick={() => setUseAiTrailingStop((current) => !current)}
-            title="Trailing stop activates automatically as soon as the AI trade is positive. The Trailing Stop R value is only the distance behind the best favorable R."
+            title="Trailing stop activates after the AI trade reaches +1.00R. It trails behind the best favorable R by the Trailing Stop R amount."
             className={`rounded-lg border px-3 py-2 text-[10px] font-black uppercase tracking-wide transition ${
               useAiTrailingStop
                 ? "border-emerald-400/40 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20"
@@ -4046,7 +4225,7 @@ export default function AiTraderPanel({
                 ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
                 : "border-dark-600 bg-dark-900 text-gray-400"
             }`}
-            title="Trailing Stop R distance. Example: 0.50 means best +0.75R trails at +0.25R; best +1.50R trails at +1.00R. Activation begins automatically once profit is positive."
+            title="Trailing Stop R. Example: 0.50 means after best profit reaches +1.50R, AI closes if price falls back to +1.00R."
           >
             Trailing Stop
             <input
@@ -4073,6 +4252,22 @@ export default function AiTraderPanel({
             className="rounded-lg border border-dark-600 bg-dark-900 px-3 py-2 text-xs font-bold text-gray-200 hover:border-purple-300"
           >
             Refresh AI
+          </button>
+
+          <button
+            type="button"
+            onClick={() => validateBackendPlan({ ...(safePayload as any), decision }, true)}
+            className="rounded-lg border border-purple-400/30 bg-purple-400/10 px-3 py-2 text-xs font-bold text-purple-200 hover:bg-purple-400/20"
+          >
+            Validate Plan
+          </button>
+
+          <button
+            type="button"
+            onClick={() => fetchDiagnostics(true)}
+            className="rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-2 text-xs font-bold text-cyan-200 hover:bg-cyan-400/20"
+          >
+            Diagnostics
           </button>
           {staleOpenTradeCount > 0 && (
             <button
@@ -4267,6 +4462,16 @@ export default function AiTraderPanel({
             label="Decision Route"
             value={apiBaseUrl ? "READY" : "NO API"}
             tone={apiBaseUrl ? "bull" : "warn"}
+          />
+          <StatBox
+            label="Validate Plan"
+            value={validation?.valid ? "VALID" : validation ? "BLOCKED" : "WAITING"}
+            tone={validation?.valid ? "bull" : validation ? "warn" : "neutral"}
+          />
+          <StatBox
+            label="Diagnostics"
+            value={diagnostics?.status === "Ready" ? "READY" : "WAITING"}
+            tone={diagnostics?.status === "Ready" ? "bull" : "neutral"}
           />
           <StatBox
             label="Strategy Tester"
@@ -4802,7 +5007,7 @@ export default function AiTraderPanel({
                             </div>
                           </div>
                         ) : (
-                          <span className="text-gray-500">Waiting profit</span>
+                          <span className="text-gray-500">Waiting +1R</span>
                         )
                       ) : (
                         <span className="text-gray-600">Off</span>
