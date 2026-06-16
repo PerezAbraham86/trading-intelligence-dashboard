@@ -958,6 +958,59 @@ function candleDebugMessage(stage: string, detail: Record<string, any> = {}) {
   return readable ? `${stage} • ${readable}` : stage
 }
 
+function copyTextToClipboard(value: string) {
+  if (typeof window === 'undefined') return
+
+  if (navigator?.clipboard?.writeText) {
+    navigator.clipboard.writeText(value).catch(() => {
+      const textarea = document.createElement('textarea')
+      textarea.value = value
+      textarea.style.position = 'fixed'
+      textarea.style.left = '-9999px'
+      textarea.style.top = '0'
+      textarea.setAttribute('readonly', 'true')
+      document.body.appendChild(textarea)
+      textarea.focus()
+      textarea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textarea)
+    })
+    return
+  }
+
+  const textarea = document.createElement('textarea')
+  textarea.value = value
+  textarea.style.position = 'fixed'
+  textarea.style.left = '-9999px'
+  textarea.style.top = '0'
+  textarea.setAttribute('readonly', 'true')
+  document.body.appendChild(textarea)
+  textarea.focus()
+  textarea.select()
+  document.execCommand('copy')
+  document.body.removeChild(textarea)
+}
+
+function buildCandleDebugCopyText({
+  title,
+  symbol,
+  timeframe,
+  plotted,
+  rows,
+}: {
+  title: string
+  symbol: string
+  timeframe: string
+  plotted: number
+  rows: ChartCandleDebugLogEntry[]
+}) {
+  return [
+    `${title} • ${symbol} • ${timeframe} • ${plotted} plotted`,
+    ...rows.map((item) => `${item.time} ${item.level.toUpperCase()} ${item.message}`),
+  ].join('
+')
+}
+
 function candleIdentityKey(candle: DashboardCandle) {
   const epoch = liveCandleEpoch(candle)
   if (epoch > 0) return String(epoch)
@@ -5414,8 +5467,31 @@ function LightweightChartPanel({
           className="mb-3 rounded-lg border border-blue-400/20 bg-blue-400/10 px-3 py-2 text-[10px] text-blue-100"
           open={!compact}
         >
-          <summary className="cursor-pointer select-none font-black uppercase tracking-wide text-blue-300">
-            Chart candle load log • {normalizedSymbol} • {normalizedTimeframe} • {candles.length} plotted
+          <summary className="flex cursor-pointer select-none items-center justify-between gap-3 font-black uppercase tracking-wide text-blue-300">
+            <span>
+              Chart candle load log • {normalizedSymbol} • {normalizedTimeframe} • {candles.length} plotted
+            </span>
+            <button
+              type="button"
+              onClick={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                copyTextToClipboard(
+                  buildCandleDebugCopyText({
+                    title: 'Chart candle load log',
+                    symbol: normalizedSymbol,
+                    timeframe: normalizedTimeframe,
+                    plotted: candles.length,
+                    rows: debugLog,
+                  })
+                )
+              }}
+              title="Copy chart candle load log"
+              aria-label="Copy chart candle load log"
+              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-blue-300/30 bg-blue-400/10 text-sm font-black text-blue-200 transition hover:bg-blue-400/20 hover:text-white"
+            >
+              ⧉
+            </button>
           </summary>
           <div className="mt-2 max-h-40 space-y-1 overflow-auto font-mono leading-4">
             {debugLog.map((item, index) => (
