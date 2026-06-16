@@ -6453,9 +6453,10 @@ export default function Dashboard() {
       const normalizedTimeframe = normalizeTimeframe(timeframe)
       const cacheKey = sharedCandleKey(normalizedSymbol, normalizedTimeframe)
       const existing = SHARED_CANDLE_CACHE.get(cacheKey)
+      const existingCandleCount = Array.isArray(existing?.candles) ? existing.candles.length : 0
 
-      if (existing?.candles?.length >= minimum) {
-        setBootStep(key, 'done', `${normalizedSymbol} ${normalizedTimeframe} • ${existing.candles.length} cached candles ready`)
+      if (existing && existingCandleCount >= minimum) {
+        setBootStep(key, 'done', `${normalizedSymbol} ${normalizedTimeframe} • ${existingCandleCount} cached candles ready`)
         return existing
       }
 
