@@ -87,6 +87,7 @@ except Exception:
 
 try:
     from api.ai_trader import (
+        ai_trader_diagnostics,
         ai_trader_export,
         ai_trader_summary,
         close_ai_trade,
@@ -94,10 +95,12 @@ try:
         get_ai_trader_decision,
         open_ai_trade,
         reset_ai_trader_memory,
+        validate_ai_trade_plan,
     )
 except Exception:
     try:
         from ai_trader import (
+            ai_trader_diagnostics,
             ai_trader_export,
             ai_trader_summary,
             close_ai_trade,
@@ -105,8 +108,10 @@ except Exception:
             get_ai_trader_decision,
             open_ai_trade,
             reset_ai_trader_memory,
+            validate_ai_trade_plan,
         )
     except Exception:
+        ai_trader_diagnostics = None
         ai_trader_export = None
         ai_trader_summary = None
         close_ai_trade = None
@@ -114,6 +119,7 @@ except Exception:
         get_ai_trader_decision = None
         open_ai_trade = None
         reset_ai_trader_memory = None
+        validate_ai_trade_plan = None
 
 
 try:
@@ -491,10 +497,20 @@ class AiTraderDecisionPayload(BaseModel):
 
     minConfidence: Optional[Any] = None
     minRiskReward: Optional[Any] = None
+    maxRiskR: Optional[Any] = None
+    useAiTrailingStop: Optional[Any] = None
+    trailingStopR: Optional[Any] = None
+    setupKey: Optional[Any] = None
+
+
+class AiTraderValidatePlanPayload(AiTraderDecisionPayload):
+    pass
 
 
 class AiTraderOpenPayload(AiTraderDecisionPayload):
     entryTime: Optional[Any] = None
+    openedAt: Optional[Any] = None
+    clientOpenedAt: Optional[Any] = None
 
 
 class AiTraderClosePayload(BaseModel):
@@ -512,7 +528,19 @@ class AiTraderEvaluatePayload(BaseModel):
     symbol: Optional[Any] = "MES1!"
     timeframe: Optional[Any] = "1m"
     currentPrice: Optional[Any] = None
+    livePrice: Optional[Any] = None
     candles: Optional[Any] = None
+    maxRiskR: Optional[Any] = None
+    useAiTrailingStop: Optional[Any] = None
+    trailingStopR: Optional[Any] = None
+
+
+class AiTraderDiagnosticsPayload(BaseModel):
+    symbol: Optional[Any] = "MES1!"
+    timeframe: Optional[Any] = "1m"
+    currentPrice: Optional[Any] = None
+    candles: Optional[Any] = None
+    includeMemory: Optional[Any] = True
 
 class ProjectionEnginePayload(BaseModel):
     # Loose payload on purpose. The dashboard sends mixed frontend context objects,
@@ -6755,6 +6783,24 @@ def ai_trader_decision_route(payload: AiTraderDecisionPayload) -> Dict[str, Any]
     return get_ai_trader_decision(**model_to_dict(payload))
 
 
+@app.post("/api/ai-trader/validate-plan")
+@app.post("/api/ai-trader-validate-plan")
+def ai_trader_validate_plan_route(payload: AiTraderValidatePlanPayload) -> Dict[str, Any]:
+    if validate_ai_trade_plan is None:
+        return {
+            "eventType": "AI_TRADER_VALIDATE_PLAN",
+            "status": "Unavailable",
+            "valid": False,
+            "dashboardOnly": True,
+            "brokerConnected": False,
+            "errorCode": "AI_TRADER_VALIDATE_PLAN_UNAVAILABLE",
+            "error": "api.ai_trader.validate_ai_trade_plan is unavailable. Update api/ai_trader.py first.",
+            "createdAt": now_iso(),
+        }
+
+    return validate_ai_trade_plan(**model_to_dict(payload))
+
+
 @app.post("/api/ai-trader/open")
 @app.post("/api/ai-trader-open")
 def ai_trader_open_route(payload: AiTraderOpenPayload) -> Dict[str, Any]:
@@ -6803,6 +6849,34 @@ def ai_trader_evaluate_route(payload: AiTraderEvaluatePayload) -> Dict[str, Any]
         }
 
     return evaluate_ai_trades(**model_to_dict(payload))
+
+
+@app.post("/api/ai-trader/evaluate-open")
+@app.post("/api/ai-trader-evaluate-open")
+def ai_trader_evaluate_open_route(payload: AiTraderEvaluatePayload) -> Dict[str, Any]:
+    # Preferred Phase 1 route name. Uses the same backend evaluator so older
+    # frontend calls to /evaluate remain compatible.
+    return ai_trader_evaluate_route(payload)
+
+
+@app.post("/api/ai-trader/diagnostics")
+@app.get("/api/ai-trader/diagnostics")
+def ai_trader_diagnostics_route(payload: Optional[AiTraderDiagnosticsPayload] = None, symbol: str = "", timeframe: str = "") -> Dict[str, Any]:
+    if ai_trader_diagnostics is None:
+        return {
+            "eventType": "AI_TRADER_DIAGNOSTICS",
+            "status": "Unavailable",
+            "dashboardOnly": True,
+            "brokerConnected": False,
+            "errorCode": "AI_TRADER_DIAGNOSTICS_UNAVAILABLE",
+            "error": "api.ai_trader.ai_trader_diagnostics is unavailable. Update api/ai_trader.py first.",
+            "createdAt": now_iso(),
+        }
+
+    data = model_to_dict(payload) if payload is not None else {}
+    data.setdefault("symbol", symbol)
+    data.setdefault("timeframe", timeframe)
+    return ai_trader_diagnostics(**data)
 
 
 @app.get("/api/ai-trader/summary")
