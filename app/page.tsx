@@ -6635,7 +6635,7 @@ export default function Dashboard() {
     })
 
     let cancelled = false
-    const timers: ReturnType<typeof window.setTimeout>[] = []
+    const timers: number[] = []
 
     backgroundWarmItems.forEach((item, index) => {
       const timer = window.setTimeout(async () => {
