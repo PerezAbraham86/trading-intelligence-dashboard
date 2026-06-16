@@ -2241,6 +2241,501 @@ def get_ai_trader_decision(
     return decision_result
 
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 1 AI TRADER BACKEND AUTHORITY HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+AI_TRADER_APPROVED_CLOSE_REASONS = {
+    "TARGET_HIT",
+    "STOP_HIT",
+    "MAX_RISK_R_HIT",
+    "TRAILING_STOP_HIT",
+    "MANUAL_CLOSE",
+    "AI_REVERSAL_EXIT",
+    "AI_CONFIDENCE_EXIT",
+    "VIRTUAL_TIMEOUT",
+}
+
+
+def normalize_close_reason(value: Any, fallback: str = "MANUAL_CLOSE") -> str:
+    raw = str(value or "").upper().strip().replace(" ", "_").replace("-", "_")
+
+    if not raw:
+        return fallback
+    if raw in AI_TRADER_APPROVED_CLOSE_REASONS:
+        return raw
+    if "TARGET" in raw or "TAKE_PROFIT" in raw or raw in {"TP", "TP1"}:
+        return "TARGET_HIT"
+    if "STOP" in raw or raw in {"SL", "STOPLOSS", "STOP_LOSS"}:
+        return "STOP_HIT"
+    if "TRAIL" in raw:
+        return "TRAILING_STOP_HIT"
+    if "MAX" in raw and "RISK" in raw:
+        return "MAX_RISK_R_HIT"
+    if "REVERS" in raw:
+        return "AI_REVERSAL_EXIT"
+    if "CONF" in raw:
+        return "AI_CONFIDENCE_EXIT"
+    if "VIRTUAL" in raw and "TIME" in raw:
+        return "VIRTUAL_TIMEOUT"
+    if "MANUAL" in raw or raw in {"X", "CLOSE", "CLOSED"}:
+        return "MANUAL_CLOSE"
+
+    return fallback
+
+
+def ai_structured_error(
+    *,
+    event_type: str,
+    error_code: str,
+    message: str,
+    status: str = "Rejected",
+    recoverable: bool = True,
+    details: Optional[Dict[str, Any]] = None,
+    **extra: Any,
+) -> Dict[str, Any]:
+    payload = {
+        "eventType": event_type,
+        "status": status,
+        "dashboardOnly": True,
+        "brokerConnected": False,
+        "errorCode": error_code,
+        "message": message,
+        "error": message,
+        "recoverable": bool(recoverable),
+        "details": details or {},
+        "createdAt": now_iso(),
+    }
+    payload.update(extra)
+    return payload
+
+
+def ai_price_tick_size(symbol: Any) -> float:
+    normalized = normalize_symbol(symbol)
+    if normalized.startswith("MES") or normalized.startswith("ES"):
+        return 0.25
+    if normalized.startswith("BTC"):
+        return 0.5
+    if normalized.startswith("ETH"):
+        return 0.05
+    return 0.01
+
+
+def round_ai_price(symbol: Any, price: Any) -> float:
+    value = to_float(price, 0.0)
+    if value <= 0:
+        return 0.0
+    tick = ai_price_tick_size(symbol)
+    if tick <= 0:
+        return round(value, 8)
+    return round(round(value / tick) * tick, 8)
+
+
+def ai_trade_plan_values_from_payload(payload: Dict[str, Any], decision: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = safe_dict(payload)
+    decision = safe_dict(decision)
+    unified_plan = safe_dict(payload.get("unifiedTradePlan"))
+    source_snapshot = safe_dict(payload.get("sourceSnapshot"))
+    source_decision = safe_dict(source_snapshot.get("decision"))
+
+    symbol = normalize_symbol(
+        payload.get("symbol")
+        or decision.get("symbol")
+        or source_decision.get("symbol")
+        or "MES1!"
+    )
+    timeframe = normalize_timeframe(
+        payload.get("timeframe")
+        or decision.get("timeframe")
+        or source_decision.get("timeframe")
+        or "1m"
+    )
+    side = normalize_side(
+        unified_plan.get("side")
+        or payload.get("side")
+        or decision.get("rawDecision")
+        or decision.get("decision")
+        or source_decision.get("rawDecision")
+        or source_decision.get("decision")
+    )
+
+    entry = to_float(
+        unified_plan.get("entry")
+        or payload.get("entryPrice")
+        or payload.get("entry")
+        or decision.get("entry")
+        or source_decision.get("entry"),
+        0.0,
+    )
+    target = to_float(
+        unified_plan.get("target")
+        or payload.get("targetPrice")
+        or payload.get("target")
+        or payload.get("takeProfitPrice")
+        or decision.get("target")
+        or source_decision.get("target"),
+        0.0,
+    )
+    stop = to_float(
+        unified_plan.get("stop")
+        or payload.get("stopPrice")
+        or payload.get("stop")
+        or decision.get("stop")
+        or source_decision.get("stop"),
+        0.0,
+    )
+    current = to_float(
+        payload.get("currentPrice")
+        or payload.get("livePrice")
+        or decision.get("currentPrice")
+        or source_decision.get("currentPrice")
+        or entry,
+        0.0,
+    )
+    min_rr = to_float(payload.get("minRiskReward"), DEFAULT_MIN_RR)
+
+    if side == "HOLD" and entry > 0 and target > 0:
+        side = infer_side_from_target(entry, target)
+
+    rr = calculate_rr(side, entry, target, stop)
+    if rr <= 0:
+        rr = to_float(payload.get("riskReward") or decision.get("riskReward"), 0.0)
+
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "side": side,
+        "entry": round_ai_price(symbol, entry),
+        "target": round_ai_price(symbol, target),
+        "stop": round_ai_price(symbol, stop),
+        "currentPrice": round_ai_price(symbol, current),
+        "riskReward": round(rr, 6) if math.isfinite(rr) else 0.0,
+        "minRiskReward": min_rr,
+        "setupKey": str(payload.get("setupKey") or decision.get("setupKey") or "").strip(),
+    }
+
+
+def validate_ai_trade_plan(**payload: Any) -> Dict[str, Any]:
+    """Strict backend validator for AI Trader open plans.
+
+    This is the safety gate. It rejects impossible trade geometry before a row
+    can be saved to JSON/Supabase. Frontend may still display setup ideas, but
+    backend open trades must pass this validator.
+    """
+    data = safe_dict(payload)
+    decision = safe_dict(data.get("decision"))
+    plan = ai_trade_plan_values_from_payload(data, decision)
+
+    side = plan["side"]
+    entry = to_float(plan["entry"], 0.0)
+    target = to_float(plan["target"], 0.0)
+    stop = to_float(plan["stop"], 0.0)
+    min_rr = max(0.01, to_float(plan.get("minRiskReward"), DEFAULT_MIN_RR))
+    rr = calculate_rr(side, entry, target, stop)
+
+    blockers: List[Dict[str, Any]] = []
+    warnings: List[Dict[str, Any]] = []
+
+    def block(code: str, message: str, field: str = "tradePlan") -> None:
+        blockers.append({"code": code, "field": field, "message": message})
+
+    if side not in {"BUY", "SELL"}:
+        block("INVALID_SIDE", "AI trade side must be BUY or SELL.", "side")
+    if entry <= 0:
+        block("INVALID_ENTRY", "Entry price must be greater than zero.", "entry")
+    if target <= 0:
+        block("INVALID_TARGET", "Target price must be greater than zero.", "target")
+    if stop <= 0:
+        block("INVALID_STOP", "Stop price must be greater than zero.", "stop")
+
+    if side == "BUY" and entry > 0:
+        if target > 0 and target <= entry:
+            block("INVALID_BUY_TARGET", "BUY target must be above entry.", "target")
+        if stop > 0 and stop >= entry:
+            block("INVALID_BUY_STOP", "BUY stop must be below entry.", "stop")
+
+    if side == "SELL" and entry > 0:
+        if target > 0 and target >= entry:
+            block("INVALID_SELL_TARGET", "SELL target must be below entry.", "target")
+        if stop > 0 and stop <= entry:
+            block("INVALID_SELL_STOP", "SELL stop must be above entry.", "stop")
+
+    if not blockers:
+        reward_points = signed_move(side, entry, target)
+        risk_points = -signed_move(side, entry, stop)
+        if reward_points <= 0:
+            block("INVALID_REWARD", "Reward must be positive in the trade direction.", "target")
+        if risk_points <= 0:
+            block("INVALID_RISK", "Risk must be positive between entry and stop.", "stop")
+        if rr < min_rr:
+            block("MIN_RR_NOT_MET", f"Risk/reward {rr:.2f}R is below required {min_rr:.2f}R.", "riskReward")
+    else:
+        reward_points = signed_move(side, entry, target)
+        risk_points = -signed_move(side, entry, stop)
+
+    confidence = to_float(data.get("confidence") or decision.get("confidence"), 0.0)
+    min_confidence = to_float(data.get("minConfidence"), DEFAULT_MIN_CONFIDENCE)
+    if confidence > 0 and confidence < min_confidence:
+        warnings.append({
+            "code": "CONFIDENCE_BELOW_LABEL",
+            "field": "confidence",
+            "message": f"Confidence {confidence:.1f}% is below label {min_confidence:.1f}%. Learning mode may still allow observation, but trade validation remains strict.",
+        })
+
+    valid = len(blockers) == 0
+    error_code = blockers[0]["code"] if blockers else None
+    message = "AI trade plan is valid." if valid else blockers[0]["message"]
+
+    return {
+        "eventType": "AI_TRADER_VALIDATE_PLAN",
+        "status": "Valid" if valid else "Rejected",
+        "valid": valid,
+        "dashboardOnly": True,
+        "brokerConnected": False,
+        "errorCode": error_code,
+        "message": message,
+        "plan": {
+            **plan,
+            "riskReward": round(rr, 4) if rr > 0 else to_float(plan.get("riskReward"), 0.0),
+            "riskPoints": round(risk_points, 8) if math.isfinite(risk_points) else 0.0,
+            "rewardPoints": round(reward_points, 8) if math.isfinite(reward_points) else 0.0,
+            "pointValue": point_value(plan["symbol"]),
+        },
+        "blockers": blockers,
+        "warnings": warnings,
+        "createdAt": now_iso(),
+    }
+
+
+def get_epoch_ms(value: Any) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        return numeric if numeric > 10_000_000_000 else numeric * 1000.0
+    text = str(value).strip()
+    if not text:
+        return 0.0
+    try:
+        numeric = float(text)
+        return numeric if numeric > 10_000_000_000 else numeric * 1000.0
+    except Exception:
+        pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp() * 1000.0
+    except Exception:
+        return 0.0
+
+
+def trade_entry_epoch_ms(trade: Dict[str, Any]) -> float:
+    return get_epoch_ms(trade.get("entryTime") or trade.get("openedAt") or trade.get("createdAt") or trade.get("time"))
+
+
+def candles_after_trade_entry(candles: List[Any], trade: Dict[str, Any]) -> List[Dict[str, Any]]:
+    entry_ms = trade_entry_epoch_ms(trade)
+    rows: List[Dict[str, Any]] = []
+    for candle in safe_list(candles):
+        if not isinstance(candle, dict):
+            continue
+        candle_ms = get_epoch_ms(candle.get("time") or candle.get("timestamp") or candle.get("t") or candle.get("date"))
+        if entry_ms <= 0 or candle_ms > entry_ms:
+            rows.append(candle)
+    return rows
+
+
+def calculate_trade_r_multiple(trade: Dict[str, Any], price: Any) -> float:
+    side = normalize_side(trade.get("side") or trade.get("decision") or trade.get("rawDecision"))
+    entry = to_float(trade.get("entry") or trade.get("entryPrice"), 0.0)
+    stop = to_float(trade.get("stop") or trade.get("stopPrice"), 0.0)
+    current = to_float(price, 0.0)
+    risk_points = abs(entry - stop) if entry > 0 and stop > 0 else 0.0
+    if side not in {"BUY", "SELL"} or entry <= 0 or current <= 0 or risk_points <= 0:
+        return 0.0
+    return signed_move(side, entry, current) / risk_points
+
+
+def best_favorable_r_for_trade(trade: Dict[str, Any], current_price: Any, candles: Optional[List[Any]] = None) -> Dict[str, Any]:
+    side = normalize_side(trade.get("side") or trade.get("decision") or trade.get("rawDecision"))
+    entry = to_float(trade.get("entry") or trade.get("entryPrice"), 0.0)
+    stop = to_float(trade.get("stop") or trade.get("stopPrice"), 0.0)
+    current = to_float(current_price, 0.0)
+    risk_points = abs(entry - stop) if entry > 0 and stop > 0 else 0.0
+
+    if side not in {"BUY", "SELL"} or entry <= 0 or risk_points <= 0:
+        return {"bestPrice": current, "bestR": 0.0}
+
+    favorable: List[float] = []
+    for candle in candles_after_trade_entry(safe_list(candles), trade):
+        high, low, _close = candle_high_low_close(candle)
+        if side == "BUY" and high > 0:
+            favorable.append(high)
+        if side == "SELL" and low > 0:
+            favorable.append(low)
+
+    if current > 0:
+        favorable.append(current)
+
+    if not favorable:
+        return {"bestPrice": current, "bestR": 0.0}
+
+    best_price = max([entry, *favorable]) if side == "BUY" else min([entry, *favorable])
+    best_r = signed_move(side, entry, best_price) / risk_points if risk_points > 0 else 0.0
+    return {"bestPrice": round(best_price, 8), "bestR": round(best_r, 6)}
+
+
+def trade_settlement_from_live_context(
+    trade: Dict[str, Any],
+    *,
+    current_price: Any = None,
+    candles: Optional[List[Any]] = None,
+    max_risk_r: Any = None,
+    use_ai_trailing_stop: Any = None,
+    trailing_stop_r: Any = None,
+    virtual: bool = False,
+) -> Dict[str, Any]:
+    side = normalize_side(trade.get("side") or trade.get("decision") or trade.get("rawDecision"))
+    entry = to_float(trade.get("entry") or trade.get("entryPrice"), 0.0)
+    target = to_float(trade.get("target") or trade.get("targetPrice") or trade.get("takeProfitPrice"), 0.0)
+    stop = to_float(trade.get("stop") or trade.get("stopPrice"), 0.0)
+    current = to_float(current_price, 0.0)
+
+    latest_high = latest_low = latest_close = current
+    filtered_candles = candles_after_trade_entry(safe_list(candles), trade)
+    if filtered_candles:
+        high, low, close = candle_high_low_close(filtered_candles[-1])
+        latest_high = high or current
+        latest_low = low or current
+        latest_close = close or current
+
+    if current <= 0:
+        current = latest_close
+
+    if current > 0:
+        latest_high = max(latest_high, current)
+        latest_low = min(latest_low, current)
+        latest_close = current
+
+    should_close = False
+    close_price = current
+    close_reason = ""
+    close_label = ""
+
+    # Approved target/stop validation prevents a reversed target from closing instantly.
+    target_valid = entry > 0 and target > 0 and (target > entry if side == "BUY" else target < entry if side == "SELL" else False)
+    stop_valid = entry > 0 and stop > 0 and (stop < entry if side == "BUY" else stop > entry if side == "SELL" else False)
+
+    if side == "BUY":
+        if target_valid and latest_high >= target:
+            should_close = True
+            close_price = target
+            close_reason = "TARGET_HIT"
+            close_label = "Target hit from shared live price/main chart level"
+        elif stop_valid and latest_low <= stop:
+            should_close = True
+            close_price = stop
+            close_reason = "STOP_HIT"
+            close_label = "Stop hit from shared live price/main chart level"
+    elif side == "SELL":
+        if target_valid and latest_low <= target:
+            should_close = True
+            close_price = target
+            close_reason = "TARGET_HIT"
+            close_label = "Target hit from shared live price/main chart level"
+        elif stop_valid and latest_high >= stop:
+            should_close = True
+            close_price = stop
+            close_reason = "STOP_HIT"
+            close_label = "Stop hit from shared live price/main chart level"
+
+    live_r = calculate_trade_r_multiple(trade, current)
+    active_max_risk_r = max(0.1, abs(to_float(max_risk_r, 1.0)))
+
+    if not should_close and live_r <= -active_max_risk_r:
+        should_close = True
+        close_price = current
+        close_reason = "MAX_RISK_R_HIT"
+        close_label = f"Max risk {active_max_risk_r:.2f}R hit from shared live price"
+
+    trailing_enabled = str(use_ai_trailing_stop).lower().strip() in {"1", "true", "yes", "on"}
+    active_trailing_r = max(0.05, abs(to_float(trailing_stop_r, 0.5)))
+    favorable = best_favorable_r_for_trade(trade, current, filtered_candles)
+    trail_stop_r = 0.0
+    trail_stop_price = 0.0
+    trail_active = False
+
+    if trailing_enabled and not should_close and entry > 0 and stop > 0:
+        best_r = to_float(favorable.get("bestR"), 0.0)
+        risk_points = abs(entry - stop)
+        if best_r >= 1.0 and risk_points > 0:
+            trail_active = True
+            trail_stop_r = max(0.0, best_r - active_trailing_r)
+            trail_stop_price = entry + risk_points * trail_stop_r if side == "BUY" else entry - risk_points * trail_stop_r
+            if (side == "BUY" and current <= trail_stop_price) or (side == "SELL" and current >= trail_stop_price):
+                should_close = True
+                close_price = round_ai_price(trade.get("symbol"), trail_stop_price)
+                close_reason = "TRAILING_STOP_HIT"
+                close_label = f"AI trailing stop hit at +{trail_stop_r:.2f}R after reaching +{best_r:.2f}R"
+
+    bars_open = to_int(trade.get("barsOpen"), 0) + 1
+    if virtual and not should_close and bars_open >= VIRTUAL_TRADE_MAX_BARS and current > 0:
+        should_close = True
+        close_price = current
+        close_reason = "VIRTUAL_TIMEOUT"
+        close_label = "Virtual learning trade timed out"
+
+    return {
+        "shouldClose": bool(should_close),
+        "closePrice": round_ai_price(trade.get("symbol"), close_price),
+        "closeReason": close_reason,
+        "closeLabel": close_label,
+        "currentPrice": round_ai_price(trade.get("symbol"), current),
+        "latestHigh": round_ai_price(trade.get("symbol"), latest_high),
+        "latestLow": round_ai_price(trade.get("symbol"), latest_low),
+        "liveR": round(live_r, 6),
+        "bestR": to_float(favorable.get("bestR"), 0.0),
+        "bestPrice": favorable.get("bestPrice"),
+        "trailingActive": trail_active,
+        "trailStopR": round(trail_stop_r, 6),
+        "trailStopPrice": round_ai_price(trade.get("symbol"), trail_stop_price),
+        "barsOpen": bars_open,
+    }
+
+
+def close_trade_record_from_settlement(trade: Dict[str, Any], settlement: Dict[str, Any], *, virtual: bool = False) -> Dict[str, Any]:
+    closed = dict(trade)
+    symbol = normalize_symbol(closed.get("symbol"))
+    side = normalize_side(closed.get("side"))
+    entry = to_float(closed.get("entry") or closed.get("entryPrice"), 0.0)
+    stop = to_float(closed.get("stop") or closed.get("stopPrice"), 0.0)
+    exit_price = to_float(settlement.get("closePrice"), 0.0)
+    pnl = signed_move(side, entry, exit_price) * point_value(symbol) if entry > 0 and exit_price > 0 else 0.0
+    risk_points = abs(entry - stop) if entry > 0 and stop > 0 else 0.0
+    r_multiple = signed_move(side, entry, exit_price) / risk_points if risk_points > 0 else 0.0
+    close_reason = normalize_close_reason(settlement.get("closeReason"), "VIRTUAL_TIMEOUT" if virtual else "MANUAL_CLOSE")
+
+    closed.update({
+        "status": "VIRTUAL_CLOSED" if virtual else "CLOSED",
+        "exit": exit_price,
+        "exitPrice": exit_price,
+        "exitReason": settlement.get("closeLabel") or close_reason,
+        "closeReason": close_reason,
+        "closeLabel": settlement.get("closeLabel") or close_reason,
+        "exitTime": now_iso(),
+        "pnl": round(pnl, 4),
+        "pnlDollar": round(pnl, 4),
+        "currentPnl": round(pnl, 4),
+        "rMultiple": round(r_multiple, 4),
+        "r": round(r_multiple, 4),
+        "result": "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN"),
+        "currentPrice": exit_price,
+        "barsOpen": to_int(settlement.get("barsOpen"), to_int(closed.get("barsOpen"), 0)),
+        "updatedAt": now_iso(),
+        "virtualLearningOnly": bool(virtual),
+    })
+    return closed
+
 def open_ai_trade(**payload: Any) -> Dict[str, Any]:
     with MEMORY_LOCK:
         decision = get_ai_trader_decision(**payload)
@@ -2251,24 +2746,42 @@ def open_ai_trade(**payload: Any) -> Dict[str, Any]:
                 "eventType": "AI_TRADER_OPEN",
                 "status": "Rejected",
                 "opened": False,
+                "errorCode": "AI_DECISION_NOT_ALLOWED",
                 "message": "AI trade was not opened because allowedToTrade is false.",
+            }
+
+        validation_payload = {**payload, "decision": decision}
+        validation = validate_ai_trade_plan(**validation_payload)
+        if not validation.get("valid"):
+            return {
+                "eventType": "AI_TRADER_OPEN",
+                "status": "Rejected",
+                "opened": False,
+                "dashboardOnly": True,
+                "brokerConnected": False,
+                "errorCode": validation.get("errorCode") or "INVALID_TRADE_PLAN",
+                "message": validation.get("message") or "AI trade plan failed backend validation.",
+                "validation": validation,
+                "decision": decision,
+                "createdAt": now_iso(),
             }
 
         memory = load_memory()
         open_trades = safe_list(memory.get("openTrades"))
-        symbol = normalize_symbol(decision.get("symbol"))
-        timeframe = normalize_timeframe(decision.get("timeframe"))
-        side = normalize_side(decision.get("rawDecision") or decision.get("decision"))
-        entry_time = payload.get("entryTime") or decision.get("createdAt") or now_iso()
-        setup_key = str(payload.get("setupKey") or decision.get("setupKey") or "").strip()
+        plan = safe_dict(validation.get("plan"))
+        symbol = normalize_symbol(plan.get("symbol") or decision.get("symbol"))
+        timeframe = normalize_timeframe(plan.get("timeframe") or decision.get("timeframe"))
+        side = normalize_side(plan.get("side") or decision.get("rawDecision") or decision.get("decision"))
+        entry_time = payload.get("entryTime") or payload.get("openedAt") or payload.get("clientOpenedAt") or decision.get("createdAt") or now_iso()
+        setup_key = str(payload.get("setupKey") or decision.get("setupKey") or plan.get("setupKey") or "").strip()
         trade_id = build_trade_setup_id(
             symbol,
             timeframe,
             side,
             setup_key=setup_key,
-            entry=decision.get("entry"),
-            target=decision.get("target"),
-            stop=decision.get("stop"),
+            entry=plan.get("entry"),
+            target=plan.get("target"),
+            stop=plan.get("stop"),
             entry_time=entry_time,
         )
 
@@ -2281,8 +2794,11 @@ def open_ai_trade(**payload: Any) -> Dict[str, Any]:
                 "opened": False,
                 "dashboardOnly": True,
                 "brokerConnected": False,
+                "errorCode": "ACTIVE_TRADE_EXISTS",
                 "trade": active_open_trades[-1],
                 "decision": decision,
+                "validation": validation,
+                "summary": ai_trader_summary(symbol=symbol, timeframe=timeframe),
                 "message": "Open blocked: one AI paper trade is already active. Learning mode is set to one trade at a time.",
                 "createdAt": now_iso(),
             }
@@ -2290,12 +2806,9 @@ def open_ai_trade(**payload: Any) -> Dict[str, Any]:
         existing = [
             trade for trade in active_open_trades
             if isinstance(trade, dict)
-            and normalize_symbol(trade.get("symbol")) == symbol
-            and normalize_timeframe(trade.get("timeframe")) == timeframe
             and (
                 str(trade.get("id") or "") == trade_id
-                or (setup_key and str(trade.get("setupKey") or trade.get("sourceSnapshot", {}).get("setupKey") or "") == setup_key)
-                or (not AI_TRADER_ALLOW_MULTIPLE_OPEN_TRADES or normalize_side(trade.get("side")) == side)
+                or (setup_key and str(trade.get("setupKey") or safe_dict(trade.get("sourceSnapshot")).get("setupKey") or "") == setup_key)
             )
         ]
 
@@ -2306,45 +2819,73 @@ def open_ai_trade(**payload: Any) -> Dict[str, Any]:
                 "opened": False,
                 "dashboardOnly": True,
                 "brokerConnected": False,
+                "errorCode": "DUPLICATE_SETUP_KEY",
                 "trade": existing[-1],
                 "decision": decision,
+                "validation": validation,
+                "summary": ai_trader_summary(symbol=symbol, timeframe=timeframe),
                 "message": "Open blocked: matching AI paper trade is already active.",
                 "createdAt": now_iso(),
             }
 
+        entry = to_float(plan.get("entry"), 0.0)
+        target = to_float(plan.get("target"), 0.0)
+        stop = to_float(plan.get("stop"), 0.0)
+        current_price = to_float(plan.get("currentPrice"), 0.0) or entry
+        current_pnl = signed_move(side, entry, current_price) * point_value(symbol) if current_price > 0 and entry > 0 else 0.0
+        max_pnl = signed_move(side, entry, target) * point_value(symbol) if target > 0 and entry > 0 else 0.0
+        risk_pnl = -abs(signed_move(side, entry, stop) * point_value(symbol)) if stop > 0 and entry > 0 else 0.0
+
         trade = {
             "id": trade_id,
+            "tradeId": trade_id,
             "setupKey": setup_key,
             "symbol": symbol,
             "timeframe": timeframe,
             "side": side,
+            "decision": side,
+            "rawDecision": side,
             "entryTime": entry_time,
-            "entry": decision.get("entry"),
-            "target": decision.get("target"),
-            "stop": decision.get("stop"),
-            "riskReward": decision.get("riskReward"),
+            "entry": entry,
+            "entryPrice": entry,
+            "target": target,
+            "targetPrice": target,
+            "takeProfitPrice": target,
+            "stop": stop,
+            "stopPrice": stop,
+            "riskReward": round(to_float(plan.get("riskReward"), calculate_rr(side, entry, target, stop)), 4),
             "confidence": decision.get("confidence"),
             "confidenceGrade": decision.get("confidenceGrade"),
-            "currentPrice": decision.get("currentPrice"),
-            "currentPnl": decision.get("currentPnl"),
-            "maxPnl": decision.get("maxPnl"),
-            "riskPnl": decision.get("riskPnl"),
+            "currentPrice": current_price,
+            "currentPnl": round(current_pnl, 4),
+            "pnl": round(current_pnl, 4),
+            "maxPnl": round(max_pnl, 4),
+            "maxPnlDollar": round(max_pnl, 4),
+            "targetPnl": round(max_pnl, 4),
+            "targetPnlDollar": round(max_pnl, 4),
+            "riskPnl": round(risk_pnl, 4),
+            "pointValue": point_value(symbol),
+            "tickSize": ai_price_tick_size(symbol),
             "bucket": read_path(decision, "details.bucket", fallback=""),
             "reason": decision.get("reason"),
             "dashboardOnly": True,
             "brokerConnected": False,
+            "frontendOnly": False,
+            "openedBy": "backend_ai_trader_validated_plan",
             "status": "OPEN",
             "createdAt": now_iso(),
             "updatedAt": now_iso(),
             "sourceSnapshot": {
                 "decision": decision,
+                "validation": validation,
                 "payloadContext": safe_dict(payload.get("context")),
+                "setupKey": setup_key,
             },
         }
 
         open_trades.append(trade)
         memory["openTrades"] = dedupe_open_trades(open_trades)
-        save_memory(memory)
+        saved = save_memory(memory)
 
         return {
             "eventType": "AI_TRADER_OPEN",
@@ -2354,7 +2895,9 @@ def open_ai_trade(**payload: Any) -> Dict[str, Any]:
             "brokerConnected": False,
             "trade": trade,
             "decision": decision,
+            "validation": validation,
             "summary": ai_trader_summary(symbol=symbol, timeframe=timeframe),
+            "storage": saved.get("storage"),
             "createdAt": now_iso(),
         }
 
@@ -2369,6 +2912,8 @@ def close_ai_trade(
     exitTime: Any = None,
     exitReason: Optional[str] = None,
     currentPrice: Any = None,
+    closeReason: Optional[str] = None,
+    closeLabel: Optional[str] = None,
     **_: Any,
 ) -> Dict[str, Any]:
     with MEMORY_LOCK:
@@ -2377,24 +2922,24 @@ def close_ai_trade(
         timeframe = normalize_timeframe(timeframe)
         close_side = normalize_side(side)
         price = to_float(exitPrice, 0.0) or to_float(currentPrice, 0.0)
+        approved_reason = normalize_close_reason(closeReason or exitReason, "MANUAL_CLOSE")
 
         if price <= 0:
-            return {
-                "eventType": "AI_TRADER_CLOSE",
-                "status": "Rejected",
-                "closed": False,
-                "message": "exitPrice/currentPrice is required to close an AI dashboard trade.",
-                "createdAt": now_iso(),
-            }
+            return ai_structured_error(
+                event_type="AI_TRADER_CLOSE",
+                error_code="MISSING_EXIT_PRICE",
+                message="exitPrice/currentPrice is required to close an AI dashboard trade.",
+                closed=False,
+            )
 
         open_trades = safe_list(memory.get("openTrades"))
         match_index = -1
 
         for index, trade in enumerate(open_trades):
-            if not isinstance(trade, dict):
+            if not isinstance(trade, dict) or not is_open_trade_status(trade):
                 continue
 
-            if tradeId and trade.get("id") == tradeId:
+            if tradeId and str(trade.get("id") or trade.get("tradeId") or "") == str(tradeId):
                 match_index = index
                 break
 
@@ -2409,40 +2954,49 @@ def close_ai_trade(
                 continue
 
             match_index = index
+            break
 
         if match_index < 0:
-            return {
-                "eventType": "AI_TRADER_CLOSE",
-                "status": "NotFound",
-                "closed": False,
-                "message": "No matching open AI dashboard trade found.",
-                "createdAt": now_iso(),
-            }
+            return ai_structured_error(
+                event_type="AI_TRADER_CLOSE",
+                status="NotFound",
+                error_code="OPEN_TRADE_NOT_FOUND",
+                message="No matching open AI dashboard trade found.",
+                closed=False,
+                recoverable=True,
+                summary=ai_trader_summary(symbol=symbol, timeframe=timeframe),
+            )
 
         trade = dict(open_trades.pop(match_index))
         trade_side = normalize_side(trade.get("side"))
         entry = to_float(trade.get("entry"), 0.0)
-        target = to_float(trade.get("target"), 0.0)
         stop = to_float(trade.get("stop"), 0.0)
         pnl = signed_move(trade_side, entry, price) * point_value(symbol) if entry > 0 else 0.0
-        risk_points = abs(signed_move(trade_side, entry, stop))
+        risk_points = abs(entry - stop) if entry > 0 and stop > 0 else 0.0
         r_multiple = signed_move(trade_side, entry, price) / risk_points if risk_points > 0 else 0.0
 
         trade.update({
             "status": "CLOSED",
             "exitTime": exitTime or now_iso(),
+            "closedAt": exitTime or now_iso(),
             "exit": price,
             "exitPrice": price,
-            "exitReason": exitReason or "manual_close",
+            "exitReason": closeLabel or exitReason or approved_reason,
+            "closeReason": approved_reason,
+            "closeLabel": closeLabel or exitReason or approved_reason,
             "pnl": round(pnl, 4),
+            "pnlDollar": round(pnl, 4),
+            "currentPnl": round(pnl, 4),
             "rMultiple": round(r_multiple, 4),
+            "r": round(r_multiple, 4),
             "result": "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN"),
+            "currentPrice": price,
             "updatedAt": now_iso(),
         })
 
         memory["openTrades"] = open_trades
         memory["closedTrades"] = safe_list(memory.get("closedTrades")) + [trade]
-        save_memory(memory)
+        saved = save_memory(memory)
 
         return {
             "eventType": "AI_TRADER_CLOSE",
@@ -2452,6 +3006,7 @@ def close_ai_trade(
             "brokerConnected": False,
             "trade": trade,
             "summary": ai_trader_summary(symbol=symbol, timeframe=timeframe),
+            "storage": saved.get("storage"),
             "createdAt": now_iso(),
         }
 
@@ -2572,108 +3127,74 @@ def evaluate_ai_trades(
     symbol: Any = "MES1!",
     timeframe: Any = "1m",
     currentPrice: Any = None,
+    livePrice: Any = None,
     candles: Optional[List[Any]] = None,
+    maxRiskR: Any = None,
+    useAiTrailingStop: Any = None,
+    trailingStopR: Any = None,
     **_: Any,
 ) -> Dict[str, Any]:
     with MEMORY_LOCK:
         memory = load_memory()
         symbol = normalize_symbol(symbol)
         timeframe = normalize_timeframe(timeframe)
-        current = to_float(currentPrice, 0.0)
+        current = to_float(currentPrice, 0.0) or to_float(livePrice, 0.0)
         candles = safe_list(candles)
 
-        latest_high = latest_low = latest_close = current
+        if current <= 0 and candles:
+            _high, _low, close = candle_high_low_close(candles[-1])
+            current = close
 
-        if candles:
-            high, low, close = candle_high_low_close(candles[-1])
-            latest_high = high or current
-            latest_low = low or current
-            latest_close = close or current
-
-        if current <= 0:
-            current = latest_close
-
-        # Settlement must respect the live chart/quote price, even when the last
-        # candle high/low is stale or has not merged the newest tick yet.
-        if current > 0:
-            latest_high = max(latest_high, current)
-            latest_low = min(latest_low, current)
-            latest_close = current
-
-        def evaluate_trade_list(trades: List[Any], virtual: bool = False) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        def evaluate_trade_list(trades: List[Any], virtual: bool = False) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
             closed_rows: List[Dict[str, Any]] = []
             still_rows: List[Dict[str, Any]] = []
+            evaluated_rows: List[Dict[str, Any]] = []
 
-            for trade in trades:
+            for trade in safe_list(trades):
                 if not isinstance(trade, dict):
+                    continue
+
+                if not is_open_trade_status(trade):
+                    still_rows.append(trade)
                     continue
 
                 if normalize_symbol(trade.get("symbol")) != symbol or normalize_timeframe(trade.get("timeframe")) != timeframe:
                     still_rows.append(trade)
                     continue
 
-                side = normalize_side(trade.get("side"))
-                target = to_float(trade.get("target"), 0.0)
-                stop = to_float(trade.get("stop"), 0.0)
-                entry = to_float(trade.get("entry"), 0.0)
-                exit_price = 0.0
-                exit_reason = ""
-                bars_open = to_int(trade.get("barsOpen"), 0) + 1
+                settlement = trade_settlement_from_live_context(
+                    trade,
+                    current_price=current,
+                    candles=candles,
+                    max_risk_r=maxRiskR,
+                    use_ai_trailing_stop=useAiTrailingStop,
+                    trailing_stop_r=trailingStopR,
+                    virtual=virtual,
+                )
 
-                if side == "BUY":
-                    if target > 0 and latest_high >= target:
-                        exit_price = target
-                        exit_reason = "target_hit"
-                    elif stop > 0 and latest_low <= stop:
-                        exit_price = stop
-                        exit_reason = "stop_hit"
-                elif side == "SELL":
-                    if target > 0 and latest_low <= target:
-                        exit_price = target
-                        exit_reason = "target_hit"
-                    elif stop > 0 and latest_high >= stop:
-                        exit_price = stop
-                        exit_reason = "stop_hit"
+                live_refreshed = calculate_open_trade_live_pnl(trade, settlement.get("currentPrice") or current)
+                live_refreshed["barsOpen"] = settlement.get("barsOpen")
+                live_refreshed["settlement"] = settlement
+                evaluated_rows.append(live_refreshed)
 
-                if virtual and exit_price <= 0 and bars_open >= VIRTUAL_TRADE_MAX_BARS and current > 0:
-                    exit_price = current
-                    exit_reason = "virtual_timeout"
-
-                if exit_price > 0:
-                    pnl = signed_move(side, entry, exit_price) * point_value(symbol) if entry > 0 else 0.0
-                    risk_points = abs(signed_move(side, entry, stop))
-                    r_multiple = signed_move(side, entry, exit_price) / risk_points if risk_points > 0 else 0.0
-                    trade.update({
-                        "status": "VIRTUAL_CLOSED" if virtual else "CLOSED",
-                        "exit": exit_price,
-                        "exitPrice": exit_price,
-                        "exitReason": exit_reason,
-                        "exitTime": now_iso(),
-                        "pnl": round(pnl, 4),
-                        "rMultiple": round(r_multiple, 4),
-                        "result": "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN"),
-                        "barsOpen": bars_open,
-                        "updatedAt": now_iso(),
-                        "virtualLearningOnly": bool(virtual),
-                    })
-                    closed_rows.append(trade)
+                if settlement.get("shouldClose"):
+                    closed_rows.append(close_trade_record_from_settlement(live_refreshed, settlement, virtual=virtual))
                 else:
-                    trade["barsOpen"] = bars_open
-                    trade["currentPrice"] = current
-                    trade["currentPnl"] = round(signed_move(side, entry, current) * point_value(symbol), 4) if entry > 0 and current > 0 else 0.0
-                    trade["updatedAt"] = now_iso()
-                    still_rows.append(trade)
+                    live_refreshed["updatedAt"] = now_iso()
+                    still_rows.append(live_refreshed)
 
-            return closed_rows, still_rows
+            return closed_rows, still_rows, evaluated_rows
 
-        closed, still_open = evaluate_trade_list(safe_list(memory.get("openTrades")), virtual=False)
-        virtual_closed, virtual_still_open = evaluate_trade_list(safe_list(memory.get("virtualOpenTrades")), virtual=True)
+        closed, still_open, evaluated_open = evaluate_trade_list(memory.get("openTrades"), virtual=False)
+        virtual_closed, virtual_still_open, evaluated_virtual_open = evaluate_trade_list(memory.get("virtualOpenTrades"), virtual=True)
 
         memory["openTrades"] = still_open
         memory["closedTrades"] = safe_list(memory.get("closedTrades")) + closed
         memory["virtualOpenTrades"] = virtual_still_open
         memory["virtualClosedTrades"] = safe_list(memory.get("virtualClosedTrades")) + virtual_closed
-        save_memory(memory)
+        saved = save_memory(memory)
+
+        summary = ai_trader_summary(symbol=symbol, timeframe=timeframe)
 
         return {
             "eventType": "AI_TRADER_EVALUATE",
@@ -2682,10 +3203,11 @@ def evaluate_ai_trades(
             "brokerConnected": False,
             "symbol": symbol,
             "timeframe": timeframe,
+            "currentPrice": current,
             "closedCount": len(closed),
             "virtualClosedCount": len(virtual_closed),
-            "openCount": len(still_open),
-            "virtualOpenCount": len(virtual_still_open),
+            "openCount": len([trade for trade in still_open if isinstance(trade, dict) and normalize_symbol(trade.get("symbol")) == symbol and normalize_timeframe(trade.get("timeframe")) == timeframe]),
+            "virtualOpenCount": len([trade for trade in virtual_still_open if isinstance(trade, dict) and normalize_symbol(trade.get("symbol")) == symbol and normalize_timeframe(trade.get("timeframe")) == timeframe]),
             "closedTrades": closed,
             "virtualClosedTrades": virtual_closed,
             "openTrades": [
@@ -2700,106 +3222,15 @@ def evaluate_ai_trades(
                 and normalize_symbol(trade.get("symbol")) == symbol
                 and normalize_timeframe(trade.get("timeframe")) == timeframe
             ],
-            "summary": ai_trader_summary(symbol=symbol, timeframe=timeframe),
-            "createdAt": now_iso(),
-        }
-
-
-        latest_high = latest_low = latest_close = current
-
-        if candles:
-            high, low, close = candle_high_low_close(candles[-1])
-            latest_high = high or current
-            latest_low = low or current
-            latest_close = close or current
-
-        if current <= 0:
-            current = latest_close
-
-        # Settlement must respect the live chart/quote price, even when the last
-        # candle high/low is stale or has not merged the newest tick yet.
-        if current > 0:
-            latest_high = max(latest_high, current)
-            latest_low = min(latest_low, current)
-            latest_close = current
-
-        closed: List[Dict[str, Any]] = []
-        still_open: List[Dict[str, Any]] = []
-
-        for trade in safe_list(memory.get("openTrades")):
-            if not isinstance(trade, dict):
-                continue
-
-            if normalize_symbol(trade.get("symbol")) != symbol or normalize_timeframe(trade.get("timeframe")) != timeframe:
-                still_open.append(trade)
-                continue
-
-            side = normalize_side(trade.get("side"))
-            target = to_float(trade.get("target"), 0.0)
-            stop = to_float(trade.get("stop"), 0.0)
-            exit_price = 0.0
-            exit_reason = ""
-
-            if side == "BUY":
-                if target > 0 and latest_high >= target:
-                    exit_price = target
-                    exit_reason = "target_hit"
-                elif stop > 0 and latest_low <= stop:
-                    exit_price = stop
-                    exit_reason = "stop_hit"
-            elif side == "SELL":
-                if target > 0 and latest_low <= target:
-                    exit_price = target
-                    exit_reason = "target_hit"
-                elif stop > 0 and latest_high >= stop:
-                    exit_price = stop
-                    exit_reason = "stop_hit"
-
-            if exit_price > 0:
-                entry = to_float(trade.get("entry"), 0.0)
-                pnl = signed_move(side, entry, exit_price) * point_value(symbol) if entry > 0 else 0.0
-                risk_points = abs(signed_move(side, entry, stop))
-                r_multiple = signed_move(side, entry, exit_price) / risk_points if risk_points > 0 else 0.0
-                trade.update({
-                    "status": "CLOSED",
-                    "exit": exit_price,
-                    "exitPrice": exit_price,
-                    "exitReason": exit_reason,
-                    "exitTime": now_iso(),
-                    "pnl": round(pnl, 4),
-                    "rMultiple": round(r_multiple, 4),
-                    "result": "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN"),
-                    "updatedAt": now_iso(),
-                })
-                closed.append(trade)
-            else:
-                entry = to_float(trade.get("entry"), 0.0)
-                trade["currentPrice"] = current
-                trade["currentPnl"] = round(signed_move(side, entry, current) * point_value(symbol), 4) if entry > 0 and current > 0 else 0.0
-                trade["updatedAt"] = now_iso()
-                still_open.append(trade)
-
-        memory["openTrades"] = still_open
-        memory["closedTrades"] = safe_list(memory.get("closedTrades")) + closed
-        save_memory(memory)
-
-        return {
-            "eventType": "AI_TRADER_EVALUATE",
-            "status": "Evaluated",
-            "dashboardOnly": True,
-            "brokerConnected": False,
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "closedCount": len(closed),
-            "openCount": len(still_open),
-            "closedTrades": closed,
-            "openTrades": [
-                trade for trade in still_open
-                if isinstance(trade, dict)
-                and normalize_symbol(trade.get("symbol")) == symbol
-                and normalize_timeframe(trade.get("timeframe")) == timeframe
-            ],
-            "summary": ai_trader_summary(symbol=symbol, timeframe=timeframe),
+            "evaluatedOpenTrades": evaluated_open,
+            "evaluatedVirtualOpenTrades": evaluated_virtual_open,
+            "riskControls": {
+                "maxRiskR": max(0.1, abs(to_float(maxRiskR, 1.0))),
+                "useAiTrailingStop": str(useAiTrailingStop).lower().strip() in {"1", "true", "yes", "on"},
+                "trailingStopR": max(0.05, abs(to_float(trailingStopR, 0.5))),
+            },
+            "summary": summary,
+            "storage": saved.get("storage"),
             "createdAt": now_iso(),
         }
 
@@ -2954,6 +3385,94 @@ def clear_ai_trader_open_trades(symbol: Optional[Any] = None, timeframe: Optiona
         }
 
 
+
+
+
+def ai_trader_diagnostics(
+    *,
+    symbol: Any = "MES1!",
+    timeframe: Any = "1m",
+    currentPrice: Any = None,
+    candles: Optional[List[Any]] = None,
+    includeMemory: Any = True,
+    **payload: Any,
+) -> Dict[str, Any]:
+    memory = load_memory()
+    normalized_symbol = normalize_symbol(symbol) if symbol else ""
+    normalized_timeframe = normalize_timeframe(timeframe) if timeframe else ""
+    current = to_float(currentPrice, 0.0)
+    candles = safe_list(candles)
+
+    open_trades = [trade for trade in safe_list(memory.get("openTrades")) if isinstance(trade, dict) and is_open_trade_status(trade)]
+    closed_trades = [trade for trade in safe_list(memory.get("closedTrades")) if isinstance(trade, dict)]
+    virtual_open = [trade for trade in safe_list(memory.get("virtualOpenTrades")) if isinstance(trade, dict) and is_open_trade_status(trade)]
+    virtual_closed = [trade for trade in safe_list(memory.get("virtualClosedTrades")) if isinstance(trade, dict)]
+
+    matching_open = [
+        trade for trade in open_trades
+        if (not normalized_symbol or normalize_symbol(trade.get("symbol")) == normalized_symbol)
+        and (not normalized_timeframe or normalize_timeframe(trade.get("timeframe")) == normalized_timeframe)
+    ]
+
+    validation = validate_ai_trade_plan(
+        symbol=normalized_symbol or symbol,
+        timeframe=normalized_timeframe or timeframe,
+        currentPrice=current,
+        **payload,
+    ) if payload or current > 0 else None
+
+    evaluated = []
+    for trade in matching_open[:10]:
+        evaluated.append({
+            "tradeId": trade.get("id") or trade.get("tradeId"),
+            "symbol": trade.get("symbol"),
+            "timeframe": trade.get("timeframe"),
+            "side": trade.get("side"),
+            "entry": trade.get("entry"),
+            "target": trade.get("target"),
+            "stop": trade.get("stop"),
+            "live": calculate_open_trade_live_pnl(trade, current) if current > 0 else trade,
+            "settlement": trade_settlement_from_live_context(trade, current_price=current, candles=candles) if current > 0 else None,
+        })
+
+    diagnostics = {
+        "eventType": "AI_TRADER_DIAGNOSTICS",
+        "status": "Ready",
+        "dashboardOnly": True,
+        "brokerConnected": False,
+        "symbol": normalized_symbol or "ALL",
+        "timeframe": normalized_timeframe or "ALL",
+        "storage": "supabase" if supabase_enabled() else "json",
+        "supabaseEnabled": supabase_enabled(),
+        "userKey": AI_TRADER_USER_KEY,
+        "memoryPath": str(MEMORY_PATH),
+        "counts": {
+            "open": len(open_trades),
+            "matchingOpen": len(matching_open),
+            "closed": len(closed_trades),
+            "virtualOpen": len(virtual_open),
+            "virtualClosed": len(virtual_closed),
+            "decisionLog": len(safe_list(memory.get("decisionLog"))),
+        },
+        "activeOpenTrades": matching_open[-10:],
+        "evaluatedOpenTrades": evaluated,
+        "validation": validation,
+        "memoryStatus": ai_memory_status(memory),
+        "phase1BackendAuthority": {
+            "validatePlan": True,
+            "structuredErrors": True,
+            "strictTargetStopGeometry": True,
+            "maxRiskR": True,
+            "aiTrailingStop": True,
+            "approvedCloseReasons": sorted(AI_TRADER_APPROVED_CLOSE_REASONS),
+        },
+        "createdAt": now_iso(),
+    }
+
+    if str(includeMemory).lower().strip() in {"1", "true", "yes", "on"}:
+        diagnostics["memory"] = memory
+
+    return diagnostics
 
 def ai_trader_export() -> Dict[str, Any]:
     memory = load_memory()
