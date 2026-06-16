@@ -1007,8 +1007,7 @@ function buildCandleDebugCopyText({
   return [
     `${title} • ${symbol} • ${timeframe} • ${plotted} plotted`,
     ...rows.map((item) => `${item.time} ${item.level.toUpperCase()} ${item.message}`),
-  ].join('
-')
+  ].join('\n')
 }
 
 function candleIdentityKey(candle: DashboardCandle) {
