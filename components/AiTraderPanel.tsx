@@ -2909,6 +2909,7 @@ export default function AiTraderPanel({
       level: "info" | "warn" | "error" | "success",
       stage: string,
       detail: Record<string, any> = {},
+      rowTime = nowText,
     ) => {
       const readable = Object.entries(detail)
         .filter(
@@ -2918,7 +2919,7 @@ export default function AiTraderPanel({
         .join(" • ");
 
       rows.push({
-        time: nowText,
+        time: rowTime,
         level,
         message: readable ? `${stage} • ${readable}` : stage,
       });
@@ -3090,6 +3091,9 @@ export default function AiTraderPanel({
 
     if (actionStatus) {
       const lower = actionStatus.toLowerCase();
+      const latestActionLogItem = aiActivityLog.find(
+        (item) => item.message === actionStatus,
+      );
       pushRow(
         lower.includes("failed") ||
           lower.includes("error") ||
@@ -3108,14 +3112,21 @@ export default function AiTraderPanel({
               : "info",
         "latest-action",
         { message: actionStatus },
+        latestActionLogItem?.time ?? nowText,
       );
     }
 
     aiActivityLog.slice(0, 12).forEach((item) => {
-      pushRow(item.tone, "activity-history", {
-        at: item.time,
-        message: item.message,
-      });
+      // Activity rows are historical events, so their left timestamp must be
+      // the original event time, not the current render/snapshot time.
+      pushRow(
+        item.tone,
+        "activity-history",
+        {
+          message: item.message,
+        },
+        item.time,
+      );
     });
 
     return rows;
