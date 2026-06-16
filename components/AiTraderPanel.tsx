@@ -1096,6 +1096,8 @@ function getBlockerAnalysis(
   summary: AiTraderSummary | null,
   minConfidence: number,
   minRiskReward: number,
+  projectionTargetConfidence = 0,
+  projectionGhostConfidence = 0,
 ) {
   const blockers: Array<{
     label: string;
@@ -1107,8 +1109,25 @@ function getBlockerAnalysis(
   const directional = decision?.details?.directionalContext ?? {};
   const memoryStatus =
     summary?.memoryStatus ?? decision?.details?.memoryStatus ?? {};
-  const targetConfidence = toFiniteNumber(directional?.targetConfidence, 0);
-  const ghostConfidence = toFiniteNumber(directional?.ghostConfidence, 0);
+  const targetConfidence = Math.max(
+    toFiniteNumber(directional?.targetConfidence, 0),
+    toFiniteNumber(projectionTargetConfidence, 0),
+    toFiniteNumber(decision?.details?.projectionEngine?.targetConfidence, 0),
+    toFiniteNumber(
+      decision?.details?.projectionEngineContext?.targetConfidence,
+      0,
+    ),
+    toFiniteNumber(decision?.details?.targetMl?.targetConfidence, 0),
+  );
+  const ghostConfidence = Math.max(
+    toFiniteNumber(directional?.ghostConfidence, 0),
+    toFiniteNumber(projectionGhostConfidence, 0),
+    toFiniteNumber(decision?.details?.projectionEngine?.ghostConfidence, 0),
+    toFiniteNumber(
+      decision?.details?.projectionEngineContext?.ghostConfidence,
+      0,
+    ),
+  );
   const entryConfidence = toFiniteNumber(directional?.entryConfidence, 0);
   const nrtrConflicts = toFiniteNumber(directional?.nrtrConflictCount, 0);
   const nrtrAgreements = toFiniteNumber(directional?.nrtrAgreementCount, 0);
@@ -2429,6 +2448,8 @@ export default function AiTraderPanel({
     mergedSummaryForStats,
     minConfidence,
     minRiskReward,
+    toFiniteNumber(projectionSnapshot.targetConfidence, 0),
+    toFiniteNumber(projectionSnapshot.ghostConfidence, 0),
   );
 
   const directionalContext = decision?.details?.directionalContext ?? {};
@@ -2608,8 +2629,49 @@ export default function AiTraderPanel({
   ]);
 
   const displayOpenCount = liveOpenTrades.length;
+  const liveOpenTradeKeys = useMemo(
+    () => new Set(liveOpenTrades.map(getTradeKey)),
+    [liveOpenTrades],
+  );
+  const hiddenLocalOpenTrades = useMemo(() => {
+    return getActiveOpenTrades(localOpenTrades)
+      .filter((trade: any) => !locallyClosedKeys.has(getTradeKey(trade)))
+      .filter((trade: any) => !liveOpenTradeKeys.has(getTradeKey(trade)));
+  }, [liveOpenTradeKeys, localOpenTrades, locallyClosedKeys]);
+  const hiddenBackendOpenTrades = useMemo(() => {
+    return getActiveOpenTrades(backendOpenTrades)
+      .filter((trade: any) => !locallyClosedKeys.has(getTradeKey(trade)))
+      .filter((trade: any) => !liveOpenTradeKeys.has(getTradeKey(trade)));
+  }, [backendOpenTrades, liveOpenTradeKeys, locallyClosedKeys]);
+  const staleOpenTradeCount =
+    hiddenLocalOpenTrades.length + hiddenBackendOpenTrades.length;
   const displayClosedCount = closedTrades.length;
   const stableMemoryMessage = `AI memory warming up: ${formatCount(decisionStats.samples)} decision observations, ${formatCount(displayClosedCount)} closed/virtual outcomes`;
+
+  const clearStaleOpenAiTrades = useCallback(() => {
+    const hiddenCount = staleOpenTradeCount;
+
+    setLocalOpenTrades([]);
+    setSummary((current: any) => {
+      if (!current || typeof current !== "object") return current;
+
+      return {
+        ...current,
+        openTrades: [],
+        globalOpenTrades: [],
+        openCount: 0,
+      };
+    });
+    activePaperTradeLockRef.current = false;
+    openRequestInFlightRef.current = false;
+    recentOpenSetupKeysRef.current.clear();
+    setLastAutoOpenKey("");
+    setActionStatus(
+      hiddenCount > 0
+        ? `Cleared ${hiddenCount} stale frontend open AI trade reference(s). Closed history was not deleted.`
+        : "Open AI trade references were reset. Closed history was not deleted.",
+    );
+  }, [staleOpenTradeCount]);
 
   const dashboardTraderDebugRows = useMemo(() => {
     const rows: Array<{
@@ -2699,6 +2761,9 @@ export default function AiTraderPanel({
       visibleOpen: displayOpenCount,
       localOpen: getActiveOpenTrades(localOpenTrades).length,
       backendOpen: getActiveOpenTrades(backendOpenTrades).length,
+      hiddenLocal: hiddenLocalOpenTrades.length,
+      hiddenBackend: hiddenBackendOpenTrades.length,
+      staleOpenRefs: staleOpenTradeCount,
       closedSaved: displayClosedCount,
     });
 
@@ -2723,6 +2788,27 @@ export default function AiTraderPanel({
         },
       );
     });
+
+    hiddenLocalOpenTrades.slice(0, 5).forEach((trade: any, index: number) => {
+      pushRow("warn", `hidden-local-open-${index + 1}`, {
+        source: "browser localStorage",
+        detail: describeAiOpenTradeForLog(trade, liveActivePrice),
+      });
+    });
+
+    hiddenBackendOpenTrades.slice(0, 5).forEach((trade: any, index: number) => {
+      pushRow("warn", `hidden-backend-open-${index + 1}`, {
+        source: "backend summary",
+        detail: describeAiOpenTradeForLog(trade, liveActivePrice),
+      });
+    });
+
+    if (staleOpenTradeCount > 0 && displayOpenCount === 0) {
+      pushRow("warn", "stale-open-cleanup-needed", {
+        reason:
+          "Open trade references exist, but no active trade is visible in the table. Use Clear Stale Open Trades if these are old ghost references.",
+      });
+    }
 
     blockers.slice(0, 6).forEach((blocker, index) => {
       pushRow(
@@ -2793,11 +2879,14 @@ export default function AiTraderPanel({
     directLivePrice,
     displayClosedCount,
     displayOpenCount,
+    hiddenBackendOpenTrades,
+    hiddenLocalOpenTrades,
     isLoading,
     liveActivePrice,
     liveOpenTrades,
     localOpenTrades,
     projectionSnapshot,
+    staleOpenTradeCount,
     stats,
     symbol,
     timeframe,
@@ -2847,6 +2936,10 @@ export default function AiTraderPanel({
               }
 
               const visibleTrades = getActiveOpenTrades(liveOpenTrades);
+              const hiddenTrades = [
+                ...hiddenLocalOpenTrades,
+                ...hiddenBackendOpenTrades,
+              ];
 
               if (visibleTrades.length > 0) {
                 const visibleDetails = visibleTrades
@@ -2856,6 +2949,15 @@ export default function AiTraderPanel({
                   .join(" || ");
                 setActionStatus(
                   `Start blocked: ${visibleTrades.length} AI trade is already visible. ${visibleDetails}. Press Evaluate Open or let the active trade close before starting a new AI trader session.`,
+                );
+                return;
+              }
+
+              if (hiddenTrades.length > 0) {
+                setAutoPaperMode(false);
+                activePaperTradeLockRef.current = false;
+                setActionStatus(
+                  `Start blocked: ${hiddenTrades.length} stale hidden open AI trade reference(s) still exist. Review the debug log and press Clear Stale Open Trades if they are old ghost references.`,
                 );
                 return;
               }
@@ -2919,6 +3021,16 @@ export default function AiTraderPanel({
           >
             Refresh AI
           </button>
+          {staleOpenTradeCount > 0 && (
+            <button
+              type="button"
+              onClick={clearStaleOpenAiTrades}
+              className="rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs font-bold text-amber-200 hover:bg-amber-400/20"
+            >
+              Clear Stale Open Trades
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => evaluateOpenTrades(true)}
