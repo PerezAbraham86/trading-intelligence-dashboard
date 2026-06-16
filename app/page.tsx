@@ -5965,6 +5965,129 @@ function buildScorecardSignalPatch(scorecards: any, mlFeatures: any) {
 }
 
 
+type DashboardBootStep = {
+  key: string
+  label: string
+  detail: string
+  status: 'waiting' | 'loading' | 'done' | 'warning' | 'error'
+}
+
+function DashboardBootScreen({
+  steps,
+  errorText,
+  onForceContinue,
+}: {
+  steps: DashboardBootStep[]
+  errorText?: string
+  onForceContinue?: () => void
+}) {
+  const completedCount = steps.filter((step) => step.status === 'done' || step.status === 'warning').length
+  const progress = steps.length > 0 ? Math.round((completedCount / steps.length) * 100) : 0
+  const activeStep = steps.find((step) => step.status === 'loading') ?? steps.find((step) => step.status === 'warning') ?? steps[steps.length - 1]
+
+  return (
+    <div className="flex min-h-screen items-center justify-center overflow-hidden bg-[#101010] px-6 py-10 text-gray-100">
+      <div className="absolute inset-0 opacity-30">
+        <div className="absolute -right-24 top-16 grid grid-cols-5 gap-2">
+          {Array.from({ length: 40 }).map((_, index) => (
+            <div
+              key={index}
+              className={`h-14 w-14 border border-white/10 ${index % 3 === 0 ? 'bg-purple-500/80' : index % 5 === 0 ? 'bg-emerald-400/70' : 'bg-white/5'}`}
+            />
+          ))}
+        </div>
+        <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.05)_1px,transparent_1px)] bg-[size:70px_70px]" />
+      </div>
+
+      <motion.div
+        initial={{ opacity: 0, y: 18 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.45 }}
+        className="relative z-10 w-full max-w-5xl rounded-3xl border border-white/10 bg-black/45 p-8 shadow-2xl backdrop-blur"
+      >
+        <div className="mb-8 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+          <div>
+            <div className="mb-3 text-xs font-black uppercase tracking-[0.35em] text-purple-300">
+              Render backend boot
+            </div>
+            <h1 className="font-mono text-3xl font-black uppercase tracking-[0.18em] text-white md:text-5xl">
+              Welcome to MarketBOS
+            </h1>
+            <p className="mt-3 max-w-2xl text-sm text-gray-400">
+              Waking the backend, building dashboard snapshots, warming visible chart history, and syncing AI Trader state before the dashboard mounts.
+            </p>
+          </div>
+
+          <div className="rounded-2xl border border-purple-300/25 bg-purple-500/10 px-5 py-4 text-right">
+            <div className="text-xs font-black uppercase tracking-wide text-purple-200">Application loading</div>
+            <div className="mt-1 text-3xl font-black text-white">{progress}%</div>
+          </div>
+        </div>
+
+        <div className="mb-6 h-2 overflow-hidden rounded-full bg-white/10">
+          <div
+            className="h-full rounded-full bg-purple-400 transition-all duration-500"
+            style={{ width: `${Math.max(5, progress)}%` }}
+          />
+        </div>
+
+        <div className="space-y-3 font-mono text-xs">
+          {steps.map((step, index) => (
+            <div
+              key={step.key}
+              className={`flex items-start gap-3 rounded-xl border px-4 py-3 ${
+                step.status === 'done'
+                  ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200'
+                  : step.status === 'loading'
+                    ? 'border-purple-300/30 bg-purple-500/15 text-purple-100'
+                    : step.status === 'warning'
+                      ? 'border-amber-300/30 bg-amber-400/10 text-amber-100'
+                      : step.status === 'error'
+                        ? 'border-red-300/30 bg-red-500/10 text-red-100'
+                        : 'border-white/10 bg-white/[0.03] text-gray-400'
+              }`}
+            >
+              <span className="mt-0.5 w-10 shrink-0 text-gray-500">{String(index + 1).padStart(2, '0')}:</span>
+              <div className="min-w-0 flex-1">
+                <div className="font-black uppercase tracking-wide">{step.label}</div>
+                <div className="mt-1 break-words text-[11px] opacity-80">{step.detail}</div>
+              </div>
+              <span className="shrink-0 text-[10px] font-black uppercase tracking-wide">
+                {step.status === 'loading' ? '...' : step.status}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {activeStep ? (
+          <div className="mt-6 rounded-2xl border border-white/10 bg-white/[0.03] p-4 font-mono text-xs text-gray-300">
+            <span className="text-purple-300">Current:</span> {activeStep.label} — {activeStep.detail}
+          </div>
+        ) : null}
+
+        {errorText ? (
+          <div className="mt-4 rounded-2xl border border-amber-300/30 bg-amber-400/10 p-4 text-xs text-amber-100">
+            {errorText}
+          </div>
+        ) : null}
+
+        {onForceContinue ? (
+          <div className="mt-5 flex justify-end">
+            <button
+              type="button"
+              onClick={onForceContinue}
+              className="rounded-xl border border-white/15 bg-white/10 px-4 py-2 text-xs font-black uppercase tracking-wide text-white hover:bg-white/20"
+            >
+              Open dashboard anyway
+            </button>
+          </div>
+        ) : null}
+      </motion.div>
+    </div>
+  )
+}
+
+
 export default function Dashboard() {
   const [isClient, setIsClient] = useState(false)
   const [pythonEngineState, setPythonEngineState] =
@@ -6002,6 +6125,17 @@ export default function Dashboard() {
   const [miniChartTwoIndicatorSettings, setMiniChartTwoIndicatorSettings] = useState<ChartStrategySettings>(defaultChartSettings)
   const [lastSavedChartKey, setLastSavedChartKey] = useState<ChartConfigKey | null>(null)
   const [chartConfigsHydrated, setChartConfigsHydrated] = useState(false)
+  const [dashboardBootReady, setDashboardBootReady] = useState(false)
+  const [dashboardBootError, setDashboardBootError] = useState('')
+  const [dashboardBootSteps, setDashboardBootSteps] = useState<DashboardBootStep[]>([
+    { key: 'backend', label: 'Waking backend', detail: 'Waiting for Render service to answer', status: 'waiting' },
+    { key: 'settings', label: 'Syncing chart settings', detail: 'Loading saved chart layout and strategy controls', status: 'waiting' },
+    { key: 'main', label: 'Loading main chart history', detail: 'Waiting for main chart snapshot', status: 'waiting' },
+    { key: 'mini1', label: 'Loading mini chart 1 history', detail: 'Waiting for mini chart 1 snapshot', status: 'waiting' },
+    { key: 'mini2', label: 'Loading mini chart 2 history', detail: 'Waiting for mini chart 2 snapshot', status: 'waiting' },
+    { key: 'ai', label: 'Syncing AI Trader', detail: 'Loading backend AI Trader control state', status: 'waiting' },
+    { key: 'ready', label: 'Finalizing dashboard', detail: 'Preparing chart cache and live price state', status: 'waiting' },
+  ])
 
   const [mainChartSelection, setMainChartSelection] = useState<ChartSelection>({
     symbol: 'MES1!',
@@ -6186,7 +6320,7 @@ export default function Dashboard() {
   } = useApiPolling({
     symbol: selectedSymbol,
     timeframe: selectedTimeframe,
-    enabled: chartConfigsHydrated,
+    enabled: chartConfigsHydrated && dashboardBootReady,
     pollMs: 10000,
   })
 
@@ -6264,6 +6398,277 @@ export default function Dashboard() {
     () => Array.from(new Set([selectedTimeframe, miniOneTimeframe, miniTwoTimeframe])),
     [selectedTimeframe, miniOneTimeframe, miniTwoTimeframe]
   )
+
+  useEffect(() => {
+    if (!isClient || !chartConfigsHydrated || dashboardBootReady) return
+
+    let cancelled = false
+    const bootApiBaseUrl = DASHBOARD_API_BASE_URL
+
+    const baseSteps: DashboardBootStep[] = [
+      { key: 'backend', label: 'Waking backend', detail: `Calling ${bootApiBaseUrl}`, status: 'loading' },
+      { key: 'settings', label: 'Syncing chart settings', detail: 'Loading saved chart layout and strategy controls', status: 'waiting' },
+      { key: 'main', label: 'Loading main chart history', detail: `${selectedSymbol} ${selectedTimeframe} • need 20+ candles`, status: 'waiting' },
+      { key: 'mini1', label: 'Loading mini chart 1 history', detail: `${miniOneSymbol} ${miniOneTimeframe} • need 20+ candles`, status: 'waiting' },
+      { key: 'mini2', label: 'Loading mini chart 2 history', detail: `${miniTwoSymbol} ${miniTwoTimeframe} • need 20+ candles`, status: 'waiting' },
+      { key: 'ai', label: 'Syncing AI Trader', detail: 'Loading backend control state and trade summary', status: 'waiting' },
+      { key: 'ready', label: 'Finalizing dashboard', detail: 'Preparing shared candle cache and live price state', status: 'waiting' },
+    ]
+
+    const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms))
+
+    const setBootStep = (
+      key: string,
+      status: DashboardBootStep['status'],
+      detail?: string
+    ) => {
+      if (cancelled) return
+      setDashboardBootSteps((current) =>
+        current.map((step) =>
+          step.key === key
+            ? {
+                ...step,
+                status,
+                detail: detail ?? step.detail,
+              }
+            : step
+        )
+      )
+    }
+
+    const warmSnapshot = async ({
+      key,
+      symbol,
+      timeframe,
+      limit,
+      minimum,
+    }: {
+      key: string
+      symbol: string
+      timeframe: string
+      limit: number
+      minimum: number
+    }) => {
+      const normalizedSymbol = normalizeSymbol(symbol)
+      const normalizedTimeframe = normalizeTimeframe(timeframe)
+      const cacheKey = sharedCandleKey(normalizedSymbol, normalizedTimeframe)
+      const existing = SHARED_CANDLE_CACHE.get(cacheKey)
+
+      if (existing?.candles?.length >= minimum) {
+        setBootStep(key, 'done', `${normalizedSymbol} ${normalizedTimeframe} • ${existing.candles.length} cached candles ready`)
+        return existing
+      }
+
+      for (let attempt = 1; attempt <= 4; attempt += 1) {
+        if (cancelled) return null
+        setBootStep(key, 'loading', `${normalizedSymbol} ${normalizedTimeframe} • requesting snapshot attempt ${attempt}/4`)
+
+        try {
+          const snapshot = await fetchDashboardSnapshotPayload(
+            bootApiBaseUrl,
+            normalizedSymbol,
+            normalizedTimeframe,
+            limit
+          )
+          const candles = normalizeCandlePayload(snapshot)
+
+          const liveSnapshot = extractBackendLivePriceSnapshot(
+            getDashboardSnapshotLivePricePayload(snapshot),
+            normalizedSymbol,
+            normalizedTimeframe
+          )
+
+          if (liveSnapshot) {
+            const normalizedLive = writeSharedLivePriceCache(liveSnapshot, { force: true })
+            if (normalizedLive) {
+              setSharedLivePrices((current) => ({
+                ...current,
+                [sharedLivePriceKey(normalizedLive.symbol)]: normalizedLive,
+              }))
+            }
+          }
+
+          if (candles.length >= minimum) {
+            const previous = SHARED_CANDLE_CACHE.get(cacheKey)
+            const engineState = getDashboardSnapshotEngineState(snapshot)
+            const projection = getDashboardSnapshotProjectionEngine(snapshot)
+            const overlayPayload = getUnifiedOverlayPayload(snapshot, engineState, projection)
+            const unifiedIntelligence = mergeProjectionEngineIntoUnifiedIntelligence(
+              getUnifiedIntelligencePayload(snapshot, engineState, projection),
+              projection
+            )
+            const mergedCandles = mergeHistoricalCandles(previous?.candles, candles)
+            const entry: SharedCandleCacheEntry = {
+              candles: mergedCandles,
+              overlayPayload: overlayPayload ?? previous?.overlayPayload ?? null,
+              unifiedIntelligence: unifiedIntelligence ?? previous?.unifiedIntelligence ?? null,
+              updatedAt: Date.now(),
+              limit: Math.max(limit, previous?.limit ?? 0, mergedCandles.length),
+              provider:
+                typeof snapshot?.candles?.provider === 'string'
+                  ? snapshot.candles.provider
+                  : typeof snapshot?.provider === 'string'
+                    ? snapshot.provider
+                    : 'dashboard_snapshot_boot',
+              source:
+                typeof snapshot?.candles?.source === 'string'
+                  ? snapshot.candles.source
+                  : typeof snapshot?.source === 'string'
+                    ? snapshot.source
+                    : 'dashboard_boot_snapshot',
+            }
+
+            SHARED_CANDLE_CACHE.set(cacheKey, entry)
+
+            if (key === 'main') {
+              setPythonEngineState(engineState)
+              if (projection) setProjectionEngine(projection)
+            }
+
+            setBootStep(key, 'done', `${normalizedSymbol} ${normalizedTimeframe} • ${candles.length} candles ready`)
+            return entry
+          }
+
+          setBootStep(key, 'warning', `${normalizedSymbol} ${normalizedTimeframe} • backend returned ${candles.length} candles; retrying`)
+        } catch (error) {
+          setBootStep(
+            key,
+            'warning',
+            `${normalizedSymbol} ${normalizedTimeframe} • ${error instanceof Error ? error.message : 'snapshot unavailable'}; retrying`
+          )
+        }
+
+        await sleep(1200 + attempt * 800)
+      }
+
+      const fallback = SHARED_CANDLE_CACHE.get(cacheKey)
+      if (fallback?.candles?.length) {
+        setBootStep(key, 'warning', `${normalizedSymbol} ${normalizedTimeframe} • using ${fallback.candles.length} cached candles`)
+        return fallback
+      }
+
+      setBootStep(key, 'warning', `${normalizedSymbol} ${normalizedTimeframe} • history still warming in background`)
+      return null
+    }
+
+    async function runDashboardBoot() {
+      setDashboardBootError('')
+      setDashboardBootReady(false)
+      setDashboardBootSteps(baseSteps)
+
+      try {
+        try {
+          await fetch(`${bootApiBaseUrl}/`, { cache: 'no-store' })
+          setBootStep('backend', 'done', 'Render backend answered')
+        } catch (error) {
+          setBootStep('backend', 'warning', 'Backend wake request did not answer immediately; continuing with snapshots')
+        }
+
+        setBootStep('settings', 'done', 'Chart settings hydrated')
+
+        const visibleCharts = [
+          { key: 'main', symbol: selectedSymbol, timeframe: selectedTimeframe, limit: 700, minimum: 20 },
+          { key: 'mini1', symbol: miniOneSymbol, timeframe: miniOneTimeframe, limit: 300, minimum: 20 },
+          { key: 'mini2', symbol: miniTwoSymbol, timeframe: miniTwoTimeframe, limit: 300, minimum: 20 },
+        ]
+
+        for (const chart of visibleCharts) {
+          await warmSnapshot(chart)
+        }
+
+        setBootStep('ai', 'loading', 'Requesting AI Trader control, summary, and diagnostics')
+        const aiRequests = await Promise.allSettled([
+          fetch(`${bootApiBaseUrl}/api/ai-trader/control`, { cache: 'no-store' }),
+          fetch(`${bootApiBaseUrl}/api/ai-trader/summary?symbol=${encodeURIComponent(selectedSymbol)}&timeframe=${encodeURIComponent(selectedTimeframe)}`, { cache: 'no-store' }),
+          fetch(`${bootApiBaseUrl}/api/ai-trader/diagnostics?symbol=${encodeURIComponent(selectedSymbol)}&timeframe=${encodeURIComponent(selectedTimeframe)}`, { cache: 'no-store' }),
+        ])
+        const aiOkCount = aiRequests.filter((result) => result.status === 'fulfilled' && result.value.ok).length
+        setBootStep('ai', aiOkCount > 0 ? 'done' : 'warning', `AI Trader backend checks ready: ${aiOkCount}/3`)
+
+        setBootStep('ready', 'loading', 'Unlocking dashboard UI')
+        await sleep(350)
+        setBootStep('ready', 'done', 'Dashboard ready')
+
+        if (!cancelled) {
+          setDashboardBootReady(true)
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Dashboard boot failed'
+        setDashboardBootError(message)
+        setBootStep('ready', 'error', message)
+      }
+    }
+
+    runDashboardBoot()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    chartConfigsHydrated,
+    dashboardBootReady,
+    isClient,
+    miniOneSymbol,
+    miniOneTimeframe,
+    miniTwoSymbol,
+    miniTwoTimeframe,
+    selectedSymbol,
+    selectedTimeframe,
+  ])
+
+  useEffect(() => {
+    if (!isClient || !dashboardBootReady) return
+
+    const backgroundWarmItems = [
+      { symbol: 'MES1!', timeframe: '15m', limit: 300 },
+      { symbol: 'MES1!', timeframe: '30m', limit: 300 },
+      { symbol: 'BTCUSD', timeframe: '1m', limit: 300 },
+      { symbol: 'BTCUSD', timeframe: '5m', limit: 300 },
+      { symbol: 'ETHUSD', timeframe: '1m', limit: 300 },
+      { symbol: 'ETHUSD', timeframe: '5m', limit: 300 },
+      { symbol: 'SPY', timeframe: '1m', limit: 300 },
+      { symbol: 'SPY', timeframe: '5m', limit: 300 },
+    ].filter((item) => {
+      const key = sharedCandleKey(item.symbol, item.timeframe)
+      return !SHARED_CANDLE_CACHE.get(key)?.candles?.length
+    })
+
+    let cancelled = false
+    const timers: ReturnType<typeof window.setTimeout>[] = []
+
+    backgroundWarmItems.forEach((item, index) => {
+      const timer = window.setTimeout(async () => {
+        if (cancelled) return
+
+        try {
+          const snapshot = await fetchDashboardSnapshotPayload(DASHBOARD_API_BASE_URL, item.symbol, item.timeframe, item.limit)
+          const candles = normalizeCandlePayload(snapshot)
+          if (candles.length === 0) return
+
+          const cacheKey = sharedCandleKey(item.symbol, item.timeframe)
+          const previous = SHARED_CANDLE_CACHE.get(cacheKey)
+          SHARED_CANDLE_CACHE.set(cacheKey, {
+            candles: mergeHistoricalCandles(previous?.candles, candles),
+            overlayPayload: getUnifiedOverlayPayload(snapshot) ?? previous?.overlayPayload ?? null,
+            unifiedIntelligence: getUnifiedIntelligencePayload(snapshot) ?? previous?.unifiedIntelligence ?? null,
+            updatedAt: Date.now(),
+            limit: Math.max(item.limit, previous?.limit ?? 0, candles.length),
+            provider: typeof snapshot?.provider === 'string' ? snapshot.provider : 'dashboard_snapshot_background_boot',
+            source: typeof snapshot?.source === 'string' ? snapshot.source : 'dashboard_background_warm',
+          })
+        } catch {
+          // Background warming is best effort only.
+        }
+      }, 4000 + index * 3500)
+
+      timers.push(timer)
+    })
+
+    return () => {
+      cancelled = true
+      timers.forEach((timer) => window.clearTimeout(timer))
+    }
+  }, [dashboardBootReady, isClient])
 
   const overallTimeframeLabel = dashboardTimeframes.join(' / ')
   const FactorConfirmationTableLoose = FactorConfirmationTable as any
@@ -6622,6 +7027,19 @@ export default function Dashboard() {
     return null
   }
 
+  if (!dashboardBootReady) {
+    return (
+      <DashboardBootScreen
+        steps={dashboardBootSteps}
+        errorText={dashboardBootError}
+        onForceContinue={() => {
+          setDashboardBootError('Dashboard opened manually before every warmup task completed.')
+          setDashboardBootReady(true)
+        }}
+      />
+    )
+  }
+
   const maxSignalsToShow = 25
   const visibleRecentSignals = recentSignals
     .filter((signal: any) => {
@@ -6736,7 +7154,7 @@ export default function Dashboard() {
             saveStatus={lastSavedChartKey === 'main' ? 'Saved' : ''}
             apiBaseUrl={apiBaseUrl}
             isClient={isClient}
-            enabled={chartConfigsHydrated}
+            enabled={chartConfigsHydrated && dashboardBootReady}
             priority="main"
             livePrice={selectedLivePrice}
             onLivePriceUpdate={handleLivePriceUpdate}
@@ -6780,7 +7198,7 @@ export default function Dashboard() {
               saveStatus={lastSavedChartKey === 'mini1' ? 'Saved' : ''}
               apiBaseUrl={apiBaseUrl}
               isClient={isClient}
-              enabled={chartConfigsHydrated && mainCandlesReady}
+              enabled={chartConfigsHydrated && dashboardBootReady && mainCandlesReady}
               priority="mini"
               livePrice={miniOneLivePrice}
               onLivePriceUpdate={handleLivePriceUpdate}
@@ -6813,7 +7231,7 @@ export default function Dashboard() {
               saveStatus={lastSavedChartKey === 'mini2' ? 'Saved' : ''}
               apiBaseUrl={apiBaseUrl}
               isClient={isClient}
-              enabled={chartConfigsHydrated && mainCandlesReady}
+              enabled={chartConfigsHydrated && dashboardBootReady && mainCandlesReady}
               priority="mini"
               livePrice={miniTwoLivePrice}
               onLivePriceUpdate={handleLivePriceUpdate}
