@@ -291,7 +291,7 @@ function setSharedLivePriceForSymbol(symbol: string, live: LivePricePayload | nu
       detail: record,
     })
   )
-
+}
 
 function normalizeTimeframe(value: any): string {
   const tf = String(value ?? '').trim().toLowerCase()
