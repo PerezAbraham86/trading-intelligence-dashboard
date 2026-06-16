@@ -1035,6 +1035,114 @@ function buildClosedTradeFromOpenTrade({
   };
 }
 
+function buildFrontendOpenTradeFromDecision({
+  decision,
+  payload,
+  livePrice,
+  symbol,
+  timeframe,
+  candles,
+}: {
+  decision: AiTraderDecision | null;
+  payload: any;
+  livePrice: number;
+  symbol: string;
+  timeframe: string;
+  candles?: any[];
+}) {
+  const side = normalizeDecision(
+    decision?.rawDecision ?? decision?.decision ?? payload?.side,
+  );
+
+  if (side === "HOLD") return null;
+
+  const entry = toFiniteNumber(
+    decision?.entry ?? payload?.entryPrice ?? payload?.entry ?? livePrice,
+    0,
+  );
+  const target = toFiniteNumber(
+    decision?.target ?? payload?.targetPrice ?? payload?.target ?? payload?.takeProfitPrice,
+    0,
+  );
+  const stop = toFiniteNumber(
+    decision?.stop ?? payload?.stopPrice ?? payload?.stop,
+    0,
+  );
+  const current = toFiniteNumber(livePrice, entry);
+
+  if (entry <= 0 || target <= 0 || stop <= 0 || current <= 0) return null;
+
+  const normalizedSymbol = String(symbol ?? payload?.symbol ?? "MES1!").toUpperCase();
+  const normalizedTimeframe = String(timeframe ?? payload?.timeframe ?? "1m");
+  const entryTime = String(payload?.entryTime ?? getLatestCandleTime(candles));
+  const setupKey = String(
+    payload?.setupKey ??
+      buildAiTradeSetupKey({
+        symbol: normalizedSymbol,
+        timeframe: normalizedTimeframe,
+        candles,
+        side,
+        entry,
+        target,
+        stop,
+      }),
+  );
+  const quantity = Math.max(1, toFiniteNumber(payload?.quantity ?? payload?.qty ?? 1, 1));
+  const pointValue = Math.max(
+    1,
+    toFiniteNumber(
+      payload?.pointValue ?? payload?.dollarPerPoint ?? payload?.multiplier,
+      normalizedSymbol.includes("MES") ? 5 : 1,
+    ),
+  );
+  const riskPoints = Math.abs(entry - stop);
+  const rewardPoints = Math.abs(target - entry);
+  const riskReward =
+    riskPoints > 0
+      ? Number((rewardPoints / riskPoints).toFixed(2))
+      : toFiniteNumber(decision?.riskReward ?? payload?.riskReward, 0);
+
+  return {
+    id: `AI-${normalizedSymbol}-${normalizedTimeframe}-${side}-${Math.abs(
+      setupKey.split("").reduce((hash, char) => ((hash << 5) - hash + char.charCodeAt(0)) | 0, 0),
+    ).toString(16)}`,
+    tradeId: setupKey,
+    setupKey,
+    symbol: normalizedSymbol,
+    timeframe: normalizedTimeframe,
+    side,
+    decision: side,
+    rawDecision: side,
+    status: "OPEN",
+    entry,
+    entryPrice: entry,
+    target,
+    targetPrice: target,
+    takeProfitPrice: target,
+    stop,
+    stopPrice: stop,
+    currentPrice: current,
+    quantity,
+    pointValue,
+    dollarPerPoint: pointValue,
+    riskReward,
+    confidence: toFiniteNumber(decision?.confidence ?? payload?.confidence, 0),
+    confidenceGrade: decision?.confidenceGrade,
+    reason:
+      decision?.reason ??
+      payload?.signal?.reason ??
+      "Frontend dashboard fallback open because backend had stale closed open references.",
+    reasons: Array.isArray(decision?.reasons) ? decision?.reasons : [],
+    entryTime,
+    createdAt: entryTime,
+    updatedAt: entryTime,
+    frontendOnly: true,
+    dashboardOnly: true,
+    brokerConnected: false,
+    openedBy: "dashboard_frontend_fallback_after_stale_backend_block",
+  };
+}
+
 function calculateClosedTradeStats(closedTrades: any[]) {
   const closed = closedTrades.filter(
     (trade) => trade && typeof trade === "object",
@@ -2169,14 +2277,18 @@ export default function AiTraderPanel({
         return;
       }
 
-      if (now - lastOpenRequestAtRef.current < 20000) {
+      const openSetupKey = String((safePayload as any)?.setupKey ?? "");
+      const cooldownMs = 20000;
+      const setupAlreadySentRecently =
+        openSetupKey && recentOpenSetupKeysRef.current.has(openSetupKey);
+
+      if (now - lastOpenRequestAtRef.current < cooldownMs && setupAlreadySentRecently) {
         setActionStatus(
-          "Open trade cooldown active. Waiting before another open attempt.",
+          "Open trade cooldown active for this exact setup. Waiting for a fresh candle/setup before another open attempt.",
         );
         return;
       }
 
-      const openSetupKey = String((safePayload as any)?.setupKey ?? "");
       pruneRecentSetupKeys(recentOpenSetupKeysRef.current, now);
 
       if (activePaperTradeLockRef.current) {
@@ -2274,7 +2386,6 @@ export default function AiTraderPanel({
 
       activePaperTradeLockRef.current = true;
       openRequestInFlightRef.current = true;
-      lastOpenRequestAtRef.current = now;
       const timeout = createRequestTimeout(16000);
 
       try {
@@ -2326,9 +2437,49 @@ export default function AiTraderPanel({
             candles,
           );
         });
+        const backendMessage = String(json?.message ?? json?.error ?? "");
+        const backendBlockedByOpenTrade =
+          /already active|already visible|one .*trade|open trade/i.test(backendMessage);
+        const canUseFrontendFallback =
+          !json?.opened &&
+          !json?.trade &&
+          backendBlockedByOpenTrade &&
+          getActiveOpenTrades(localOpenTrades).filter(
+            (trade: any) => !closedTradeKeysRef.current.has(getTradeKey(trade)),
+          ).length === 0 &&
+          trustedBackendOpenTrades.length === 0 &&
+          normalizeDecision(nextDecision?.rawDecision ?? nextDecision?.decision) !== "HOLD" &&
+          Boolean(nextDecision?.allowedToTrade);
+
+        if (canUseFrontendFallback) {
+          const fallbackTrade = buildFrontendOpenTradeFromDecision({
+            decision: nextDecision,
+            payload: safePayload,
+            livePrice: liveActivePrice,
+            symbol,
+            timeframe,
+            candles,
+          });
+
+          if (fallbackTrade) {
+            saveOpenTrades([fallbackTrade]);
+            lastOpenRequestAtRef.current = now;
+            setActionStatus(
+              `Dashboard AI trade opened locally. Backend still has stale closed open references, so frontend opened the dashboard-only paper trade: ${describeAiOpenTradeForLog(fallbackTrade, liveActivePrice)}.`,
+            );
+            return;
+          }
+        }
+
         if (!json?.opened && !json?.trade) {
           activePaperTradeLockRef.current = false;
+          if (openSetupKey) {
+            recentOpenSetupKeysRef.current.delete(openSetupKey);
+          }
+        } else {
+          lastOpenRequestAtRef.current = now;
         }
+
         setActionStatus(
           json?.opened
             ? "Dashboard AI trade opened"
@@ -2336,6 +2487,9 @@ export default function AiTraderPanel({
         );
       } catch (error) {
         activePaperTradeLockRef.current = false;
+        if (openSetupKey) {
+          recentOpenSetupKeysRef.current.delete(openSetupKey);
+        }
         setActionStatus(formatRequestError(error, "Open failed"));
       } finally {
         timeout.clear();
