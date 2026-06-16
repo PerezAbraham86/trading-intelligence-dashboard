@@ -1061,7 +1061,10 @@ function buildFrontendOpenTradeFromDecision({
     0,
   );
   const target = toFiniteNumber(
-    decision?.target ?? payload?.targetPrice ?? payload?.target ?? payload?.takeProfitPrice,
+    decision?.target ??
+      payload?.targetPrice ??
+      payload?.target ??
+      payload?.takeProfitPrice,
     0,
   );
   const stop = toFiniteNumber(
@@ -1072,7 +1075,9 @@ function buildFrontendOpenTradeFromDecision({
 
   if (entry <= 0 || target <= 0 || stop <= 0 || current <= 0) return null;
 
-  const normalizedSymbol = String(symbol ?? payload?.symbol ?? "MES1!").toUpperCase();
+  const normalizedSymbol = String(
+    symbol ?? payload?.symbol ?? "MES1!",
+  ).toUpperCase();
   const normalizedTimeframe = String(timeframe ?? payload?.timeframe ?? "1m");
   const entryTime = String(payload?.entryTime ?? getLatestCandleTime(candles));
   const setupKey = String(
@@ -1087,7 +1092,10 @@ function buildFrontendOpenTradeFromDecision({
         stop,
       }),
   );
-  const quantity = Math.max(1, toFiniteNumber(payload?.quantity ?? payload?.qty ?? 1, 1));
+  const quantity = Math.max(
+    1,
+    toFiniteNumber(payload?.quantity ?? payload?.qty ?? 1, 1),
+  );
   const pointValue = Math.max(
     1,
     toFiniteNumber(
@@ -1104,7 +1112,12 @@ function buildFrontendOpenTradeFromDecision({
 
   return {
     id: `AI-${normalizedSymbol}-${normalizedTimeframe}-${side}-${Math.abs(
-      setupKey.split("").reduce((hash, char) => ((hash << 5) - hash + char.charCodeAt(0)) | 0, 0),
+      setupKey
+        .split("")
+        .reduce(
+          (hash, char) => ((hash << 5) - hash + char.charCodeAt(0)) | 0,
+          0,
+        ),
     ).toString(16)}`,
     tradeId: setupKey,
     setupKey,
@@ -2278,18 +2291,12 @@ export default function AiTraderPanel({
       }
 
       const openSetupKey = String((safePayload as any)?.setupKey ?? "");
-      const cooldownMs = 20000;
-      const setupAlreadySentRecently =
-        openSetupKey && recentOpenSetupKeysRef.current.has(openSetupKey);
 
-      if (now - lastOpenRequestAtRef.current < cooldownMs && setupAlreadySentRecently) {
-        setActionStatus(
-          "Open trade cooldown active for this exact setup. Waiting for a fresh candle/setup before another open attempt.",
-        );
-        return;
-      }
-
-      pruneRecentSetupKeys(recentOpenSetupKeysRef.current, now);
+      // Autonomous paper trading should not stay locked out by an old setup key
+      // or an old timestamp. The only valid entry blockers are an actual open
+      // trade or an in-flight open request. Stale backend/local ghost references
+      // are filtered below and should never create an hours-long cooldown.
+      pruneRecentSetupKeys(recentOpenSetupKeysRef.current, now, 15_000);
 
       if (activePaperTradeLockRef.current) {
         const localActiveUnlocked = getActiveOpenTrades(localOpenTrades).filter(
@@ -2318,13 +2325,6 @@ export default function AiTraderPanel({
         setActionStatus(
           "Internal AI trade lock was stale and has been reset. Checking the current setup again...",
         );
-      }
-
-      if (openSetupKey && recentOpenSetupKeysRef.current.has(openSetupKey)) {
-        setActionStatus(
-          "Open blocked: this exact AI setup was already sent recently. Waiting for a fresh candle/setup.",
-        );
-        return;
       }
 
       const trustedBackendOpenTrades = getActiveOpenTrades([
@@ -2370,19 +2370,9 @@ export default function AiTraderPanel({
         return;
       }
 
-      if (
-        decisionRequestInFlightRef.current ||
-        evaluateRequestInFlightRef.current
-      ) {
-        setActionStatus(
-          "Waiting for current AI refresh/evaluation to finish before opening trade.",
-        );
-        return;
-      }
-
-      if (openSetupKey) {
-        recentOpenSetupKeysRef.current.set(openSetupKey, now);
-      }
+      // Do not block a valid autonomous entry just because a decision/evaluate
+      // refresh is running. Use the latest already-rendered decision/setup.
+      // The openRequestInFlightRef above still prevents duplicate submit clicks.
 
       activePaperTradeLockRef.current = true;
       openRequestInFlightRef.current = true;
@@ -2439,7 +2429,9 @@ export default function AiTraderPanel({
         });
         const backendMessage = String(json?.message ?? json?.error ?? "");
         const backendBlockedByOpenTrade =
-          /already active|already visible|one .*trade|open trade/i.test(backendMessage);
+          /already active|already visible|one .*trade|open trade/i.test(
+            backendMessage,
+          );
         const canUseFrontendFallback =
           !json?.opened &&
           !json?.trade &&
@@ -2448,7 +2440,9 @@ export default function AiTraderPanel({
             (trade: any) => !closedTradeKeysRef.current.has(getTradeKey(trade)),
           ).length === 0 &&
           trustedBackendOpenTrades.length === 0 &&
-          normalizeDecision(nextDecision?.rawDecision ?? nextDecision?.decision) !== "HOLD" &&
+          normalizeDecision(
+            nextDecision?.rawDecision ?? nextDecision?.decision,
+          ) !== "HOLD" &&
           Boolean(nextDecision?.allowedToTrade);
 
         if (canUseFrontendFallback) {
@@ -2463,6 +2457,8 @@ export default function AiTraderPanel({
 
           if (fallbackTrade) {
             saveOpenTrades([fallbackTrade]);
+            if (openSetupKey)
+              recentOpenSetupKeysRef.current.set(openSetupKey, now);
             lastOpenRequestAtRef.current = now;
             setActionStatus(
               `Dashboard AI trade opened locally. Backend still has stale closed open references, so frontend opened the dashboard-only paper trade: ${describeAiOpenTradeForLog(fallbackTrade, liveActivePrice)}.`,
@@ -2477,6 +2473,8 @@ export default function AiTraderPanel({
             recentOpenSetupKeysRef.current.delete(openSetupKey);
           }
         } else {
+          if (openSetupKey)
+            recentOpenSetupKeysRef.current.set(openSetupKey, now);
           lastOpenRequestAtRef.current = now;
         }
 
@@ -2840,19 +2838,19 @@ export default function AiTraderPanel({
   const activeVisibleOpenTrade = liveOpenTrades[0] ?? null;
   const hasVisibleOpenTrade = Boolean(activeVisibleOpenTrade);
   const headerEntryValue = hasVisibleOpenTrade
-    ? activeVisibleOpenTrade?.entry ?? activeVisibleOpenTrade?.entryPrice
+    ? (activeVisibleOpenTrade?.entry ?? activeVisibleOpenTrade?.entryPrice)
     : decision?.entry;
   const headerTargetValue = hasVisibleOpenTrade
-    ? activeVisibleOpenTrade?.target ?? activeVisibleOpenTrade?.targetPrice
+    ? (activeVisibleOpenTrade?.target ?? activeVisibleOpenTrade?.targetPrice)
     : decision?.target;
   const headerStopValue = hasVisibleOpenTrade
-    ? activeVisibleOpenTrade?.stop ?? activeVisibleOpenTrade?.stopPrice
+    ? (activeVisibleOpenTrade?.stop ?? activeVisibleOpenTrade?.stopPrice)
     : decision?.stop;
   const headerCurrentPnlValue = hasVisibleOpenTrade
-    ? activeVisibleOpenTrade?.currentPnl ?? activeVisibleOpenTrade?.pnl
+    ? (activeVisibleOpenTrade?.currentPnl ?? activeVisibleOpenTrade?.pnl)
     : null;
   const headerMaxPnlValue = hasVisibleOpenTrade
-    ? activeVisibleOpenTrade?.maxPnl ?? activeVisibleOpenTrade?.maxPnlDollar
+    ? (activeVisibleOpenTrade?.maxPnl ?? activeVisibleOpenTrade?.maxPnlDollar)
     : null;
 
   useEffect(() => {
@@ -2948,16 +2946,20 @@ export default function AiTraderPanel({
       loading: isLoading,
     });
 
-    pushRow("info", hasVisibleOpenTrade ? "open-trade-plan-table" : "latest-setup-plan-table", {
-      status: hasVisibleOpenTrade ? "OPEN_TRADE" : "LATEST_AI_SETUP_ONLY",
-      entry: formatPrice(headerEntryValue),
-      target: formatPrice(headerTargetValue),
-      stop: formatPrice(headerStopValue),
-      rr: toFiniteNumber(decision?.riskReward, 0).toFixed(2),
-      note: hasVisibleOpenTrade
-        ? "P&L is shown on the open-trade row and header cards."
-        : "No open trade exists; these are only the latest AI setup prices.",
-    });
+    pushRow(
+      "info",
+      hasVisibleOpenTrade ? "open-trade-plan-table" : "latest-setup-plan-table",
+      {
+        status: hasVisibleOpenTrade ? "OPEN_TRADE" : "LATEST_AI_SETUP_ONLY",
+        entry: formatPrice(headerEntryValue),
+        target: formatPrice(headerTargetValue),
+        stop: formatPrice(headerStopValue),
+        rr: toFiniteNumber(decision?.riskReward, 0).toFixed(2),
+        note: hasVisibleOpenTrade
+          ? "P&L is shown on the open-trade row and header cards."
+          : "No open trade exists; these are only the latest AI setup prices.",
+      },
+    );
 
     if (!hasVisibleOpenTrade) {
       pushRow("info", "no-open-trade-table", {
@@ -3352,18 +3354,48 @@ export default function AiTraderPanel({
           value={autoPaperMode ? "RUNNING" : "OFF"}
           tone={autoPaperMode ? "bull" : "neutral"}
         />
-        <StatBox label={hasVisibleOpenTrade ? "Open Entry" : "Setup Entry"} value={formatPrice(headerEntryValue)} />
-        <StatBox label={hasVisibleOpenTrade ? "Open Target" : "Setup Target"} value={formatPrice(headerTargetValue)} />
-        <StatBox label={hasVisibleOpenTrade ? "Open Stop" : "Setup Stop"} value={formatPrice(headerStopValue)} tone="warn" />
+        <StatBox
+          label={hasVisibleOpenTrade ? "Open Entry" : "Setup Entry"}
+          value={formatPrice(headerEntryValue)}
+        />
+        <StatBox
+          label={hasVisibleOpenTrade ? "Open Target" : "Setup Target"}
+          value={formatPrice(headerTargetValue)}
+        />
+        <StatBox
+          label={hasVisibleOpenTrade ? "Open Stop" : "Setup Stop"}
+          value={formatPrice(headerStopValue)}
+          tone="warn"
+        />
         <StatBox
           label="Current P&L"
-          value={hasVisibleOpenTrade ? formatMoney(headerCurrentPnlValue) : "No Open Trade"}
-          tone={hasVisibleOpenTrade ? (toFiniteNumber(headerCurrentPnlValue, 0) >= 0 ? "bull" : "bear") : "neutral"}
+          value={
+            hasVisibleOpenTrade
+              ? formatMoney(headerCurrentPnlValue)
+              : "No Open Trade"
+          }
+          tone={
+            hasVisibleOpenTrade
+              ? toFiniteNumber(headerCurrentPnlValue, 0) >= 0
+                ? "bull"
+                : "bear"
+              : "neutral"
+          }
         />
         <StatBox
           label="Max P&L"
-          value={hasVisibleOpenTrade ? formatMoney(headerMaxPnlValue) : "No Open Trade"}
-          tone={hasVisibleOpenTrade ? (toFiniteNumber(headerMaxPnlValue, 0) >= 0 ? "bull" : "bear") : "neutral"}
+          value={
+            hasVisibleOpenTrade
+              ? formatMoney(headerMaxPnlValue)
+              : "No Open Trade"
+          }
+          tone={
+            hasVisibleOpenTrade
+              ? toFiniteNumber(headerMaxPnlValue, 0) >= 0
+                ? "bull"
+                : "bear"
+              : "neutral"
+          }
         />
         <StatBox
           label="Projection"
