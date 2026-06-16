@@ -673,9 +673,14 @@ function getCandlesAfterTradeEntry(candles: any[] | undefined, trade: any) {
   if (!Array.isArray(candles) || candles.length === 0) return [] as any[];
 
   const entryMs = getTradeEntryEpochMs(trade);
-  if (entryMs <= 0) return candles.slice(-2);
+  if (entryMs <= 0) return [];
 
-  return candles.filter((candle) => getCandleEpochMs(candle) >= entryMs);
+  // Important: do NOT include the entry candle. Its high/low can contain
+  // price action that happened before the AI trade actually opened, which can
+  // create false instant target/stop hits seconds after entry. Only candles
+  // that start after the trade entry timestamp are allowed for candle-level
+  // settlement. Live shared price still settles immediately when it truly hits.
+  return candles.filter((candle) => getCandleEpochMs(candle) > entryMs);
 }
 
 function getTradeLevelHitPrice({
@@ -689,34 +694,34 @@ function getTradeLevelHitPrice({
 }) {
   const current = getTradeLiveCurrentPrice(trade, livePrice);
   const side = normalizeTradeSide(trade?.side ?? trade?.decision ?? trade?.rawDecision);
-  const target = toFiniteNumber(trade?.target ?? trade?.targetPrice ?? trade?.takeProfitPrice ?? trade?.tp1, 0);
-  const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0);
+  const entry = toFiniteNumber(trade?.entry ?? trade?.entryPrice, 0);
+  const rawTarget = toFiniteNumber(trade?.target ?? trade?.targetPrice ?? trade?.takeProfitPrice ?? trade?.tp1, 0);
+  const rawStop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0);
   const entryMs = getTradeEntryEpochMs(trade);
   const nowMs = Date.now();
+
+  // Direction sanity check. A SELL target must be below entry and a SELL stop
+  // must be above entry. A BUY target must be above entry and a BUY stop must
+  // be below entry. If backend/old local history sends reversed levels, never
+  // call that a target hit just because current price is already on the wrong
+  // side of the invalid level.
+  const targetIsValid =
+    entry > 0 &&
+    rawTarget > 0 &&
+    (side === "BUY" ? rawTarget > entry : rawTarget < entry);
+  const stopIsValid =
+    entry > 0 &&
+    rawStop > 0 &&
+    (side === "BUY" ? rawStop < entry : rawStop > entry);
+  const target = targetIsValid ? rawTarget : 0;
+  const stop = stopIsValid ? rawStop : 0;
 
   // Safety guard: never close a just-created paper trade on the same render tick.
   // The trade must exist long enough for at least one real live-price/chart update
   // to evaluate it. This prevents fabricated instant open/close rows.
-  if (entryMs > 0 && nowMs - entryMs < 1500) {
+  if (entryMs > 0 && nowMs - entryMs < 3000) {
     return { current, targetHit: false, stopHit: false, price: current };
   }
-
-  const afterEntryCandles = getCandlesAfterTradeEntry(candles, trade);
-  const hitFromCandle = afterEntryCandles.some((candle) => {
-    const high = toFiniteNumber(candle?.high ?? candle?.h, NaN);
-    const low = toFiniteNumber(candle?.low ?? candle?.l, NaN);
-    if (!Number.isFinite(high) || !Number.isFinite(low)) return false;
-
-    if (side === "BUY") {
-      if (target > 0 && high >= target) return true;
-      if (stop > 0 && low <= stop) return true;
-    } else {
-      if (target > 0 && low <= target) return true;
-      if (stop > 0 && high >= stop) return true;
-    }
-
-    return false;
-  });
 
   const buyTargetHit = target > 0 && side === "BUY" && current >= target;
   const buyStopHit = stop > 0 && side === "BUY" && current <= stop;
@@ -726,22 +731,22 @@ function getTradeLevelHitPrice({
   if (buyTargetHit || sellTargetHit) return { current, targetHit: true, stopHit: false, price: target };
   if (buyStopHit || sellStopHit) return { current, targetHit: false, stopHit: true, price: stop };
 
-  // Candle high/low confirmation is allowed only after the trade exists. This
-  // ties closed rows to the main chart timeframe and prevents backend/random
-  // fills from creating fake outcomes.
-  if (hitFromCandle) {
-    for (const candle of afterEntryCandles) {
-      const high = toFiniteNumber(candle?.high ?? candle?.h, NaN);
-      const low = toFiniteNumber(candle?.low ?? candle?.l, NaN);
-      if (!Number.isFinite(high) || !Number.isFinite(low)) continue;
+  // Candle high/low confirmation can only use candles that START AFTER the
+  // trade's real entry timestamp. Never use the entry candle high/low because
+  // the high/low may have happened before the trade opened.
+  const afterEntryCandles = getCandlesAfterTradeEntry(candles, trade);
 
-      if (side === "BUY") {
-        if (target > 0 && high >= target) return { current, targetHit: true, stopHit: false, price: target };
-        if (stop > 0 && low <= stop) return { current, targetHit: false, stopHit: true, price: stop };
-      } else {
-        if (target > 0 && low <= target) return { current, targetHit: true, stopHit: false, price: target };
-        if (stop > 0 && high >= stop) return { current, targetHit: false, stopHit: true, price: stop };
-      }
+  for (const candle of afterEntryCandles) {
+    const high = toFiniteNumber(candle?.high ?? candle?.h, NaN);
+    const low = toFiniteNumber(candle?.low ?? candle?.l, NaN);
+    if (!Number.isFinite(high) || !Number.isFinite(low)) continue;
+
+    if (side === "BUY") {
+      if (target > 0 && high >= target) return { current, targetHit: true, stopHit: false, price: target };
+      if (stop > 0 && low <= stop) return { current, targetHit: false, stopHit: true, price: stop };
+    } else {
+      if (target > 0 && low <= target) return { current, targetHit: true, stopHit: false, price: target };
+      if (stop > 0 && high >= stop) return { current, targetHit: false, stopHit: true, price: stop };
     }
   }
 
@@ -1425,7 +1430,7 @@ function buildFrontendOpenTradeFromDecision({
     symbol ?? payload?.symbol ?? "MES1!",
   ).toUpperCase();
   const normalizedTimeframe = String(timeframe ?? payload?.timeframe ?? "1m");
-  const entryTime = String(payload?.entryTime ?? getLatestCandleTime(candles));
+  const entryTime = String(payload?.entryTime ?? new Date().toISOString());
   const setupKey = String(
     payload?.setupKey ??
       buildAiTradeSetupKey({
@@ -2315,7 +2320,7 @@ export default function AiTraderPanel({
           activeProjectionEngine,
           signal?.signal ?? signal?.type ?? signal?.direction,
         );
-    const entryTime = getLatestCandleTime(candles);
+    const entryTime = new Date().toISOString();
     const setupKey = buildAiTradeSetupKey({
       symbol,
       timeframe,
@@ -2856,12 +2861,20 @@ export default function AiTraderPanel({
       try {
         setActionStatus("AI Trader opening dashboard-only trade...");
 
+        const openTimestamp = new Date().toISOString();
         const response = await fetch(`${apiBaseUrl}/api/ai-trader/open`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
           },
-          body: JSON.stringify(safePayload),
+          body: JSON.stringify({
+            ...(safePayload as any),
+            entryTime: openTimestamp,
+            openedAt: openTimestamp,
+            clientOpenedAt: openTimestamp,
+            currentPrice: liveActivePrice,
+            entryPrice: (safePayload as any)?.entryPrice ?? liveActivePrice,
+          }),
           signal: timeout.signal,
         });
 
