@@ -726,6 +726,29 @@ function getActiveOpenTrades(trades: any[]) {
   return (Array.isArray(trades) ? trades : []).filter(isActiveAiOpenTrade)
 }
 
+function describeAiOpenTradeForLog(trade: any, livePrice = 0) {
+  if (!trade || typeof trade !== 'object') return 'unknown open trade'
+
+  const live = calculateLiveTradePnl(trade, livePrice)
+  const symbolLabel = String(trade?.symbol ?? 'UNKNOWN').toUpperCase()
+  const timeframeLabel = String(trade?.timeframe ?? '')
+  const side = normalizeTradeSide(trade?.side ?? trade?.decision ?? trade?.rawDecision)
+  const entry = toFiniteNumber(trade?.entry ?? trade?.entryPrice, 0)
+  const target = toFiniteNumber(trade?.target ?? trade?.targetPrice ?? trade?.takeProfitPrice ?? trade?.tp1, 0)
+  const stop = toFiniteNumber(trade?.stop ?? trade?.stopPrice, 0)
+  const key = getTradeKey(trade).slice(0, 72)
+
+  return [
+    `${symbolLabel}${timeframeLabel ? ` ${timeframeLabel}` : ''} ${side}`,
+    `entry ${formatPrice(entry)}`,
+    `target ${formatPrice(target)}`,
+    `stop ${formatPrice(stop)}`,
+    `live ${formatPrice(live.current)}`,
+    `P&L ${formatMoney(live.pnl)}`,
+    `key ${key}`,
+  ].join(' • ')
+}
+
 function keepNewestActiveOpenTrade(trades: any[]) {
   const active = getActiveOpenTrades(trades)
 
@@ -1765,7 +1788,12 @@ export default function AiTraderPanel({
     pruneRecentSetupKeys(recentOpenSetupKeysRef.current, now)
 
     if (activePaperTradeLockRef.current) {
-      setActionStatus('Open blocked: one AI Auto Trade is already active. Learning mode is one trade at a time.')
+      const localCount = getActiveOpenTrades(localOpenTrades).length
+      const backendCount = getActiveOpenTrades([
+        ...(Array.isArray((summary as any)?.globalOpenTrades) ? (summary as any).globalOpenTrades : []),
+        ...(Array.isArray(summary?.openTrades) ? summary.openTrades : []),
+      ]).length
+      setActionStatus(`Open blocked: internal AI trade lock is active. Debug: visibleLocal=${localCount}, backendOpen=${backendCount}. Run Evaluate Open or wait for the active trade to close.`)
       return
     }
 
@@ -1793,7 +1821,10 @@ export default function AiTraderPanel({
 
     if (visibleLocalOpenTrades.length > 0) {
       activePaperTradeLockRef.current = true
-      setActionStatus('Open blocked: one dashboard AI Auto Trade is already visible. Learning mode is one trade at a time.')
+      const visibleDetails = visibleLocalOpenTrades
+        .map((trade: any) => describeAiOpenTradeForLog(trade, liveActivePrice))
+        .join(' || ')
+      setActionStatus(`Open blocked: ${visibleLocalOpenTrades.length} dashboard AI trade is already visible. ${visibleDetails}. Learning mode is one trade at a time.`)
       return
     }
 
@@ -1854,7 +1885,7 @@ export default function AiTraderPanel({
       timeout.clear()
       openRequestInFlightRef.current = false
     }
-  }, [apiBaseUrl, safePayload, decision, summary, symbol, timeframe, candles, localOpenTrades, saveOpenTrades])
+  }, [apiBaseUrl, safePayload, decision, summary, symbol, timeframe, candles, localOpenTrades, liveActivePrice, saveOpenTrades])
 
   useEffect(() => {
     fetchDecision(true)
@@ -2118,11 +2149,25 @@ export default function AiTraderPanel({
           <button
             type="button"
             onClick={() => {
-              setAutoPaperMode((current) => {
-                const next = !current
-                setActionStatus(next ? 'AI Trader started. It will open and manage trades autonomously.' : 'AI Trader stopped. No new autonomous trades will open.')
-                return next
-              })
+              if (autoPaperMode) {
+                setAutoPaperMode(false)
+                setActionStatus('AI Trader stopped. No new autonomous trades will open.')
+                return
+              }
+
+              const visibleTrades = getActiveOpenTrades(liveOpenTrades)
+
+              if (visibleTrades.length > 0) {
+                const visibleDetails = visibleTrades
+                  .map((trade: any) => describeAiOpenTradeForLog(trade, liveActivePrice))
+                  .join(' || ')
+                setActionStatus(`Start blocked: ${visibleTrades.length} AI trade is already visible. ${visibleDetails}. Press Evaluate Open or let the active trade close before starting a new AI trader session.`)
+                return
+              }
+
+              setLastAutoOpenKey('')
+              setAutoPaperMode(true)
+              setActionStatus('AI Trader started. Waiting for an eligible autonomous setup.')
             }}
             className={`rounded-lg px-4 py-2 text-xs font-black transition ${
               autoPaperMode
@@ -2191,7 +2236,25 @@ export default function AiTraderPanel({
             ) : null}
           </div>
 
-          <div className="max-h-40 space-y-1 overflow-auto pr-1">
+          <div className="mb-2 grid grid-cols-2 gap-2 text-[10px] sm:grid-cols-5">
+            <div className="rounded-lg border border-purple-400/15 bg-dark-900/40 px-2 py-1">
+              Mode: <span className="font-black text-white">{autoPaperMode ? 'RUNNING' : 'OFF'}</span>
+            </div>
+            <div className="rounded-lg border border-purple-400/15 bg-dark-900/40 px-2 py-1">
+              Visible open: <span className="font-black text-white">{displayOpenCount}</span>
+            </div>
+            <div className="rounded-lg border border-purple-400/15 bg-dark-900/40 px-2 py-1">
+              Decision: <span className="font-black text-white">{decision?.decision ?? 'WAITING'}</span>
+            </div>
+            <div className="rounded-lg border border-purple-400/15 bg-dark-900/40 px-2 py-1">
+              Allowed: <span className="font-black text-white">{decision?.allowedToTrade ? 'YES' : 'NO'}</span>
+            </div>
+            <div className="rounded-lg border border-purple-400/15 bg-dark-900/40 px-2 py-1">
+              Live: <span className="font-black text-white">{formatPrice(liveActivePrice)}</span>
+            </div>
+          </div>
+
+          <div className="max-h-44 space-y-1 overflow-auto pr-1">
             {aiActivityLog.length > 0 ? (
               aiActivityLog.slice(0, 10).map((item, index) => {
                 const toneClass =
