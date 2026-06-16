@@ -167,6 +167,39 @@ function formatCount(value: any) {
   return Math.max(0, Math.round(parsed)).toLocaleString();
 }
 
+function copyTextToClipboard(value: string) {
+  if (typeof window === "undefined") return;
+
+  if (navigator?.clipboard?.writeText) {
+    navigator.clipboard.writeText(value).catch(() => {
+      const textarea = document.createElement("textarea");
+      textarea.value = value;
+      textarea.style.position = "fixed";
+      textarea.style.left = "-9999px";
+      textarea.style.top = "0";
+      textarea.setAttribute("readonly", "true");
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+    });
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+  textarea.setAttribute("readonly", "true");
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
+}
+
 function formatTradeDateTime(value: any) {
   if (!value) return "—";
 
@@ -4061,6 +4094,21 @@ export default function AiTraderPanel({
     timeframe,
   ]);
 
+  const dashboardTraderDebugCopyText = useMemo(() => {
+    return [
+      `Dashboard AI Self-Learning Trader debug log • ${symbol} • ${timeframe} • open ${displayOpenCount} • closed ${displayClosedCount}`,
+      ...dashboardTraderDebugRows.map((item) =>
+        `${item.time} ${item.level.toUpperCase()} ${item.message}`,
+      ),
+    ].join("\n");
+  }, [
+    dashboardTraderDebugRows,
+    displayClosedCount,
+    displayOpenCount,
+    symbol,
+    timeframe,
+  ]);
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 14 }}
@@ -4299,9 +4347,24 @@ export default function AiTraderPanel({
         className="mb-4 rounded-lg border border-blue-400/20 bg-blue-400/10 px-3 py-2 text-[10px] text-blue-100"
         open
       >
-        <summary className="cursor-pointer select-none font-black uppercase tracking-wide text-blue-300">
-          Dashboard AI Self-Learning Trader debug log • {symbol} • {timeframe} •
-          open {displayOpenCount} • closed {displayClosedCount}
+        <summary className="flex cursor-pointer select-none items-center justify-between gap-3 font-black uppercase tracking-wide text-blue-300">
+          <span>
+            Dashboard AI Self-Learning Trader debug log • {symbol} • {timeframe} •
+            open {displayOpenCount} • closed {displayClosedCount}
+          </span>
+          <button
+            type="button"
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              copyTextToClipboard(dashboardTraderDebugCopyText);
+            }}
+            title="Copy AI Trader debug log"
+            aria-label="Copy AI Trader debug log"
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-blue-300/30 bg-blue-400/10 text-sm font-black text-blue-200 transition hover:bg-blue-400/20 hover:text-white"
+          >
+            ⧉
+          </button>
         </summary>
         <div className="mt-2 max-h-56 space-y-1 overflow-auto font-mono leading-4">
           {dashboardTraderDebugRows.map((item, index) => (
