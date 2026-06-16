@@ -86,7 +86,8 @@ type AiTradeCloseReason =
   | "TARGET_HIT"
   | "STOP_HIT"
   | "AI_REVERSAL_EXIT"
-  | "AI_CONFIDENCE_EXIT";
+  | "AI_CONFIDENCE_EXIT"
+  | "MANUAL_CLOSE";
 
 function toFiniteNumber(value: any, fallback = 0) {
   const parsed = Number(value);
@@ -2997,6 +2998,43 @@ export default function AiTraderPanel({
       };
     });
 
+  const closeDashboardTradeNow = useCallback(
+    (trade: any) => {
+      if (!trade) return;
+
+      const closePrice =
+        toFiniteNumber(trade.currentPrice, NaN) > 0
+          ? toFiniteNumber(trade.currentPrice, liveActivePrice)
+          : toFiniteNumber(liveActivePrice, NaN) > 0
+            ? liveActivePrice
+            : toFiniteNumber(trade.entry, 0);
+
+      if (!Number.isFinite(closePrice) || closePrice <= 0) {
+        setActionStatus("Manual close failed: no valid shared live price is available.");
+        return;
+      }
+
+      const closedTrade = buildClosedTradeFromOpenTrade({
+        trade,
+        livePrice: closePrice,
+        closePrice,
+        closeReason: "MANUAL_CLOSE",
+        closeLabel: "Manually closed with X at shared live price",
+        candles,
+      });
+
+      saveClosedTrades([closedTrade]);
+      forgetOpenTrades([trade]);
+      activePaperTradeLockRef.current = false;
+      openRequestInFlightRef.current = false;
+
+      setActionStatus(
+        `Manually closed dashboard AI trade at ${formatPrice(closePrice)} from shared live price.`,
+      );
+    },
+    [candles, forgetOpenTrades, liveActivePrice, saveClosedTrades],
+  );
+
   useEffect(() => {
     const hasActiveOpenTrade = getActiveOpenTrades(liveOpenTrades).length > 0;
 
@@ -4173,7 +4211,7 @@ export default function AiTraderPanel({
             settlement are checked from the live chart price every refresh.
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1120px] text-left text-xs">
+            <table className="w-full min-w-[1180px] text-left text-xs">
               <thead className="text-gray-500">
                 <tr>
                   <th className="pb-2">Symbol</th>
@@ -4188,6 +4226,7 @@ export default function AiTraderPanel({
                   <th className="pb-2">Live R</th>
                   <th className="pb-2">Confidence</th>
                   <th className="pb-2">Reason</th>
+                  <th className="pb-2 text-right">Close</th>
                 </tr>
               </thead>
               <tbody>
@@ -4257,6 +4296,17 @@ export default function AiTraderPanel({
                       {trade.shouldCloseNow
                         ? `${trade.closeLabel} at ${formatPrice(trade.closePrice)}`
                         : trade.reason}
+                    </td>
+                    <td className="py-2 text-right">
+                      <button
+                        type="button"
+                        onClick={() => closeDashboardTradeNow(trade)}
+                        title="Close this dashboard AI trade at the current shared live price"
+                        aria-label="Close dashboard AI trade"
+                        className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-red-400/40 bg-red-500/10 text-sm font-black text-red-200 hover:bg-red-500 hover:text-white"
+                      >
+                        ×
+                      </button>
                     </td>
                   </tr>
                 ))}
