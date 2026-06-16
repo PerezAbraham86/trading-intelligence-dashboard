@@ -2359,6 +2359,8 @@ def get_live_price_payload(symbol: str, timeframe: str = "1m") -> Dict[str, Any]
 
 PERSISTENT_LIVE_CANDLE_CACHE_LIMIT = int(os.getenv("PERSISTENT_LIVE_CANDLE_CACHE_LIMIT", "5000"))
 PERSISTENT_LIVE_CANDLE_MAX_CACHE_AGE_SECONDS = int(os.getenv("PERSISTENT_LIVE_CANDLE_MAX_CACHE_AGE_SECONDS", str(7 * 24 * 60 * 60)))
+PERSISTENT_LIVE_BACKFILL_MAX_BARS = int(os.getenv("PERSISTENT_LIVE_BACKFILL_MAX_BARS", "300"))
+PERSISTENT_LIVE_BACKFILL_ENABLED = os.getenv("PERSISTENT_LIVE_BACKFILL_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def live_price_payload_to_candle(live_payload: Any, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
@@ -2496,6 +2498,143 @@ def find_cached_candle_for_epoch(symbol: str, timeframe: str, epoch: int) -> Opt
     return None
 
 
+
+def find_latest_cached_candle_before_epoch(symbol: str, timeframe: str, epoch: int) -> Optional[Dict[str, Any]]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    target_epoch = int(epoch or 0)
+
+    if target_epoch <= 0:
+        return None
+
+    candidate_payloads: List[Any] = []
+
+    for route_name in ["dashboard", "historical"]:
+        for getter in [candle_cache_best, candle_cache_stale]:
+            try:
+                cached = getter(
+                    route_name,
+                    normalized_symbol,
+                    normalized_timeframe,
+                    PERSISTENT_LIVE_CANDLE_CACHE_LIMIT,
+                    PERSISTENT_LIVE_CANDLE_MAX_CACHE_AGE_SECONDS,
+                ) if getter is candle_cache_best else getter(route_name, normalized_symbol, normalized_timeframe, PERSISTENT_LIVE_CANDLE_CACHE_LIMIT)
+                if cached:
+                    candidate_payloads.append(cached)
+            except Exception:
+                pass
+
+    candidate_payloads.append({"candles": RECENT_CANDLES})
+
+    latest: Optional[Dict[str, Any]] = None
+    latest_epoch = 0
+
+    for payload in candidate_payloads:
+        candles = payload.get("candles") if isinstance(payload, dict) else None
+        if not isinstance(candles, list):
+            continue
+
+        for candle in candles:
+            if not isinstance(candle, dict):
+                continue
+            if normalize_symbol(str(candle.get("symbol") or normalized_symbol)) != normalized_symbol:
+                continue
+            if normalize_timeframe(str(candle.get("timeframe") or normalized_timeframe)) != normalized_timeframe:
+                continue
+
+            candle_epoch = int(to_epoch_seconds(candle.get("epoch") or candle.get("time") or candle.get("timestamp")))
+            if 0 < candle_epoch < target_epoch and candle_epoch > latest_epoch:
+                latest = candle
+                latest_epoch = candle_epoch
+
+    return latest
+
+
+def build_persistent_live_backfill_candles(
+    symbol: str,
+    timeframe: str,
+    previous_candle: Optional[Dict[str, Any]],
+    current_tick: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Build missing timeframe buckets between provider history and the newest live tick.
+
+    If the dashboard was not open, no vendor sent us true OHLC for the missing
+    minutes. These candles are explicitly marked as live bridge candles. Their
+    purpose is continuity: the next historical load includes the live tail that
+    accumulated after the first history load, instead of leaving a blank gap.
+    """
+    if not PERSISTENT_LIVE_BACKFILL_ENABLED or not isinstance(current_tick, dict):
+        return [current_tick]
+
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    seconds = max(timeframe_seconds(normalized_timeframe), 60)
+    tick_epoch = int(to_epoch_seconds(current_tick.get("epoch") or current_tick.get("time") or current_tick.get("timestamp")))
+    tick_close = to_float(current_tick.get("close"), 0.0)
+
+    if tick_epoch <= 0 or tick_close <= 0:
+        return [current_tick]
+
+    if not isinstance(previous_candle, dict):
+        return [current_tick]
+
+    previous_epoch = int(to_epoch_seconds(previous_candle.get("epoch") or previous_candle.get("time") or previous_candle.get("timestamp")))
+    previous_close = to_float(previous_candle.get("close"), 0.0)
+
+    if previous_epoch <= 0 or previous_close <= 0 or previous_epoch >= tick_epoch:
+        return [current_tick]
+
+    gap_bars = int((tick_epoch - previous_epoch) // seconds) - 1
+    if gap_bars <= 0:
+        return [current_tick]
+
+    # Do not create an enormous overnight/weekend synthetic tail. If the gap is
+    # larger than the safety cap, keep only the actual live tick and let the
+    # provider refill true history later.
+    if gap_bars > max(1, PERSISTENT_LIVE_BACKFILL_MAX_BARS):
+        return [current_tick]
+
+    rows: List[Dict[str, Any]] = []
+    last_close = previous_close
+    total_steps = gap_bars + 1
+
+    for step in range(1, gap_bars + 1):
+        epoch = previous_epoch + seconds * step
+        progress = step / max(total_steps, 1)
+        close = previous_close + (tick_close - previous_close) * progress
+        open_price = last_close
+        high = max(open_price, close)
+        low = min(open_price, close)
+        formatted_time = format_bar_time(epoch)
+
+        bridge = {
+            "time": formatted_time,
+            "timestamp": formatted_time,
+            "epoch": epoch,
+            "open": round(open_price, 8),
+            "high": round(high, 8),
+            "low": round(low, 8),
+            "close": round(close, 8),
+            "volume": 0.0,
+            "symbol": normalized_symbol,
+            "timeframe": normalized_timeframe,
+            "createdAt": now_iso(),
+            "provider": str(current_tick.get("provider") or "live_price"),
+            "source": "persistent_live_gap_backfill_bridge",
+            "persistentLiveCandle": True,
+            "persistentLiveBackfill": True,
+            "backfillFromEpoch": previous_epoch,
+            "backfillToEpoch": tick_epoch,
+        }
+
+        if is_candle_valid_for_symbol(bridge, normalized_symbol):
+            rows.append(bridge)
+            last_close = close
+
+    rows.append(current_tick)
+    return rows
+
+
 def upsert_recent_live_candle(candle: Dict[str, Any]) -> None:
     global RECENT_CANDLES
 
@@ -2540,9 +2679,26 @@ def persist_live_candle_to_history_cache(symbol: str, timeframe: str, live_paylo
     if not is_candle_valid_for_symbol(merged_tick, normalized_symbol):
         return None
 
-    upsert_recent_live_candle(merged_tick)
+    previous_candle = find_latest_cached_candle_before_epoch(normalized_symbol, normalized_timeframe, tick_epoch)
+    candles_to_store = build_persistent_live_backfill_candles(
+        normalized_symbol,
+        normalized_timeframe,
+        previous_candle,
+        merged_tick,
+    )
 
-    # Store the same live candle into both dashboard and historical cache families.
+    valid_store_rows = filter_valid_candles_for_symbol(
+        merge_candles_by_time(candles_to_store),
+        normalized_symbol,
+    )
+
+    if not valid_store_rows:
+        valid_store_rows = [merged_tick]
+
+    for row in valid_store_rows:
+        upsert_recent_live_candle(row)
+
+    # Store the same live tail into both dashboard and historical cache families.
     # Later historical requests return provider candles merged with these saved live
     # candles, so the chart does not reload an old history tail and then jump to live.
     for route_name in ["dashboard", "historical"]:
@@ -2555,19 +2711,26 @@ def persist_live_candle_to_history_cache(symbol: str, timeframe: str, live_paylo
                 {
                     "symbol": normalized_symbol,
                     "timeframe": normalized_timeframe,
-                    "count": 1,
-                    "candles": [merged_tick],
+                    "count": len(valid_store_rows),
+                    "candles": valid_store_rows,
                     "provider": merged_tick.get("provider"),
-                    "source": "persistent_live_candle_cache",
+                    "source": "persistent_live_candle_cache_with_gap_backfill",
                     "cache": "persistent_live_candle",
                     "persistentLiveCandles": True,
+                    "persistentLiveBackfillCount": max(0, len(valid_store_rows) - 1),
                     "createdAt": now_iso(),
                 },
             )
         except Exception as error:
             print(f"[Persistent live candles] cache set failed for {route_name}: {error}")
 
-    return merged_tick
+    if len(valid_store_rows) > 1:
+        print(
+            f"[Persistent live candles] saved live tail for {normalized_symbol} {normalized_timeframe}: "
+            f"rows={len(valid_store_rows)} backfill={len(valid_store_rows) - 1}"
+        )
+
+    return valid_store_rows[-1]
 
 
 def merge_saved_live_candles_with_history(symbol: str, timeframe: str, candles: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
@@ -2580,11 +2743,27 @@ def merge_saved_live_candles_with_history(symbol: str, timeframe: str, candles: 
         normalized_symbol,
     )
 
+    historical_rows = filter_valid_candles_for_symbol(merge_candles_by_time(candles or []), normalized_symbol)
+
     if not live_rows:
-        return filter_valid_candles_for_symbol(merge_candles_by_time(candles), normalized_symbol)[-safe_limit:]
+        return historical_rows[-safe_limit:]
+
+    bridge_rows: List[Dict[str, Any]] = []
+    if historical_rows and live_rows:
+        first_live = live_rows[0]
+        last_history = historical_rows[-1]
+        first_live_epoch = int(to_epoch_seconds(first_live.get("epoch") or first_live.get("time") or first_live.get("timestamp")))
+        last_history_epoch = int(to_epoch_seconds(last_history.get("epoch") or last_history.get("time") or last_history.get("timestamp")))
+        if first_live_epoch > last_history_epoch + timeframe_seconds(normalized_timeframe):
+            bridge_rows = build_persistent_live_backfill_candles(
+                normalized_symbol,
+                normalized_timeframe,
+                last_history,
+                first_live,
+            )[:-1]
 
     return filter_valid_candles_for_symbol(
-        merge_candles_by_time([*(candles or []), *live_rows]),
+        merge_candles_by_time([*historical_rows, *bridge_rows, *live_rows]),
         normalized_symbol,
     )[-safe_limit:]
 
