@@ -1318,7 +1318,118 @@ function extractBackendLivePriceSnapshot(payload: any, symbol: string, timeframe
   }
 }
 
+async function fetchDashboardSnapshotPayload(
+  apiBaseUrl: string,
+  symbol: string,
+  timeframe: string,
+  limit = 700
+): Promise<any> {
+  const params = new URLSearchParams({
+    symbol: normalizeSymbol(symbol),
+    timeframe: normalizeTimeframe(timeframe),
+    limit: String(Math.max(1, Math.min(Number(limit) || 700, SHARED_CANDLE_CACHE_MAX_BARS))),
+  })
+
+  const response = await fetch(`${apiBaseUrl}/api/dashboard/snapshot?${params.toString()}`, {
+    cache: 'no-store',
+  })
+
+  if (!response.ok) {
+    throw new Error(`Dashboard snapshot request failed: ${response.status}`)
+  }
+
+  return response.json()
+}
+
+function getDashboardSnapshotLivePricePayload(snapshot: any) {
+  if (!snapshot || typeof snapshot !== 'object') return null
+
+  const candidates = [
+    snapshot.livePrice,
+    snapshot.live,
+    snapshot.price,
+    snapshot.currentPrice,
+    snapshot.market?.livePrice,
+    snapshot.marketState?.livePrice,
+    snapshot.marketState?.currentPrice,
+    snapshot.data?.livePrice,
+    snapshot.data?.price,
+  ]
+
+  for (const candidate of candidates) {
+    if (!candidate && candidate !== 0) continue
+
+    if (typeof candidate === 'number' || typeof candidate === 'string') {
+      const price = toFiniteNumber(candidate, NaN)
+      if (Number.isFinite(price) && price > 0) {
+        return {
+          symbol: snapshot.symbol,
+          timeframe: snapshot.timeframe,
+          price,
+          source: 'dashboard_snapshot_live_price',
+          updatedAt: snapshot.updatedAt ?? snapshot.createdAt,
+        }
+      }
+    }
+
+    if (candidate && typeof candidate === 'object') return candidate
+  }
+
+  return null
+}
+
+function getDashboardSnapshotEngineState(snapshot: any): PythonEngineState | null {
+  if (!snapshot || typeof snapshot !== 'object') return null
+
+  const candidate =
+    snapshot.engineState ??
+    snapshot.pythonEngineState ??
+    snapshot.engine ??
+    snapshot.overlayEngine ??
+    snapshot.data?.engineState ??
+    null
+
+  return candidate && typeof candidate === 'object' ? candidate as PythonEngineState : null
+}
+
+function getDashboardSnapshotProjectionEngine(snapshot: any): ProjectionEngineState | null {
+  if (!snapshot || typeof snapshot !== 'object') return null
+
+  const candidate =
+    snapshot.projectionEngine ??
+    snapshot.unifiedProjectionEngine ??
+    snapshot.projection ??
+    snapshot.aiTrader?.projectionEngine ??
+    snapshot.data?.projectionEngine ??
+    null
+
+  return candidate && typeof candidate === 'object' ? candidate as ProjectionEngineState : null
+}
+
+function getDashboardSnapshotTechnicalSentiment(snapshot: any): TechnicalSentiment | null {
+  return normalizeSharedTechnicalSentimentPayload(
+    snapshot?.technicalSentiment ??
+      snapshot?.sentiment ??
+      snapshot?.engineState?.technicalSentiment ??
+      snapshot?.engineState?.sentiment ??
+      snapshot
+  )
+}
+
 async function fetchBackendSharedLivePrice(apiBaseUrl: string, symbol: string, timeframe: string): Promise<LiveFeedSnapshot | null> {
+  try {
+    const snapshot = await fetchDashboardSnapshotPayload(apiBaseUrl, symbol, timeframe, 120)
+    const liveSnapshot = extractBackendLivePriceSnapshot(
+      getDashboardSnapshotLivePricePayload(snapshot),
+      symbol,
+      timeframe
+    )
+
+    if (liveSnapshot) return liveSnapshot
+  } catch (error) {
+    console.warn('Dashboard snapshot live price unavailable, falling back to /api/live-price:', error)
+  }
+
   const params = new URLSearchParams({
     symbol: normalizeSymbol(symbol),
     timeframe: normalizeTimeframe(timeframe),
@@ -1552,6 +1663,47 @@ async function fetchSharedCandlePayload(
         previousCount > 0 ? previousCount + requestedLimit : requestedLimit
       )
     )
+
+    try {
+      const snapshot = await fetchDashboardSnapshotPayload(apiBaseUrl, normalizedSymbol, normalizedTimeframe, apiLimit)
+      const snapshotCandles = normalizeCandlePayload(snapshot)
+
+      if (snapshotCandles.length > 0) {
+        const snapshotLive = extractBackendLivePriceSnapshot(
+          getDashboardSnapshotLivePricePayload(snapshot),
+          normalizedSymbol,
+          normalizedTimeframe
+        )
+
+        if (snapshotLive) {
+          writeSharedLivePriceCache(snapshotLive, { force: true })
+        }
+
+        const snapshotEngineState = getDashboardSnapshotEngineState(snapshot)
+        const snapshotProjectionEngine = getDashboardSnapshotProjectionEngine(snapshot)
+        const snapshotOverlayPayload = getUnifiedOverlayPayload(snapshot, snapshotEngineState, snapshotProjectionEngine)
+        const snapshotUnifiedIntelligence = mergeProjectionEngineIntoUnifiedIntelligence(
+          getUnifiedIntelligencePayload(snapshot, snapshotEngineState, snapshotProjectionEngine),
+          snapshotProjectionEngine
+        )
+
+        const mergedCandles = mergeHistoricalCandles(previous?.candles, snapshotCandles)
+        const entry: SharedCandleCacheEntry = {
+          candles: mergedCandles,
+          overlayPayload: snapshotOverlayPayload ?? previous?.overlayPayload ?? null,
+          unifiedIntelligence: snapshotUnifiedIntelligence ?? previous?.unifiedIntelligence ?? null,
+          updatedAt: Date.now(),
+          limit: Math.max(apiLimit, previous?.limit ?? 0, mergedCandles.length),
+          provider: typeof snapshot?.provider === 'string' ? snapshot.provider : 'dashboard_snapshot',
+          source: typeof snapshot?.source === 'string' ? snapshot.source : 'dashboard_snapshot_candles_live_engine',
+        }
+
+        SHARED_CANDLE_CACHE.set(key, entry)
+        return entry
+      }
+    } catch (error) {
+      console.warn('Dashboard snapshot candle payload unavailable, falling back to legacy candle route:', error)
+    }
 
     let routeConfig = getHistoricalCandleRouteForSymbol(apiBaseUrl, normalizedSymbol)
 
@@ -6086,114 +6238,76 @@ export default function Dashboard() {
     let cancelled = false
     let intervalId: ReturnType<typeof setInterval> | null = null
 
-    async function fetchPythonEngineStates() {
+    async function fetchDashboardSnapshots() {
       try {
         const entries = await Promise.all(
           dashboardTimeframes.map(async (timeframe) => {
-            const params = new URLSearchParams({
-              symbol: selectedSymbol,
-              timeframe,
-              limit: '500',
-            })
+            try {
+              const snapshot = await fetchDashboardSnapshotPayload(
+                apiBaseUrl,
+                selectedSymbol,
+                timeframe,
+                timeframe === selectedTimeframe ? 700 : 500
+              )
+              const engineState = getDashboardSnapshotEngineState(snapshot)
+              const technicalSentiment = getDashboardSnapshotTechnicalSentiment(snapshot)
+              const projection = timeframe === selectedTimeframe ? getDashboardSnapshotProjectionEngine(snapshot) : null
+              const liveSnapshot = extractBackendLivePriceSnapshot(
+                getDashboardSnapshotLivePricePayload(snapshot),
+                selectedSymbol,
+                timeframe
+              )
 
-            const response = await fetch(`${apiBaseUrl}/api/engine-state?${params.toString()}`, {
-              cache: 'no-store',
-            })
-
-            if (!response.ok) return [timeframe, null] as const
-
-            const json = await response.json()
-            return [timeframe, json && typeof json === 'object' ? json as PythonEngineState : null] as const
+              return [timeframe, { snapshot, engineState, technicalSentiment, projection, liveSnapshot }] as const
+            } catch (error) {
+              console.warn('Dashboard snapshot sync failed for timeframe:', timeframe, error)
+              return [timeframe, null] as const
+            }
           })
         )
 
-        if (!cancelled) {
-          const nextStates = Object.fromEntries(entries) as Record<string, PythonEngineState | null>
-          setTimeframeEngineStates(nextStates)
-          setPythonEngineState(nextStates[selectedTimeframe] ?? entries[0]?.[1] ?? null)
+        if (cancelled) return
+
+        const nextEngineStates: Record<string, PythonEngineState | null> = {}
+        const nextTechnicalSentiments: Record<string, TechnicalSentiment | null> = {}
+        const nextLiveSnapshots: Record<string, LiveFeedSnapshot> = {}
+
+        for (const [timeframe, value] of entries) {
+          nextEngineStates[timeframe] = value?.engineState ?? null
+          nextTechnicalSentiments[timeframe] = value?.technicalSentiment ?? null
+
+          if (value?.projection) {
+            setProjectionEngine(value.projection)
+          }
+
+          if (value?.liveSnapshot) {
+            const normalizedLive = writeSharedLivePriceCache(value.liveSnapshot, { force: true })
+            if (normalizedLive) {
+              nextLiveSnapshots[sharedLivePriceKey(normalizedLive.symbol)] = normalizedLive
+            }
+          }
+        }
+
+        setTimeframeEngineStates(nextEngineStates)
+        setPythonEngineState(nextEngineStates[selectedTimeframe] ?? entries[0]?.[1]?.engineState ?? null)
+        setTimeframeTechnicalSentiments(nextTechnicalSentiments)
+        setSharedTechnicalSentiment(nextTechnicalSentiments[selectedTimeframe] ?? null)
+
+        if (Object.keys(nextLiveSnapshots).length > 0) {
+          setSharedLivePrices((current) => ({
+            ...current,
+            ...nextLiveSnapshots,
+          }))
         }
       } catch (error) {
-        console.error('Dashboard Python multi-timeframe engine sync error:', error)
-      }
-    }
-
-    fetchPythonEngineStates()
-    intervalId = setInterval(fetchPythonEngineStates, 15000)
-
-    return () => {
-      cancelled = true
-      if (intervalId) clearInterval(intervalId)
-    }
-  }, [apiBaseUrl, isClient, selectedSymbol, selectedTimeframe, dashboardTimeframes, mainCandlesReady])
-
-  useEffect(() => {
-    if (!isClient || !apiBaseUrl || !mainCandlesReady) return
-
-    let cancelled = false
-    let intervalId: ReturnType<typeof setInterval> | null = null
-
-    async function fetchSharedTechnicalSentiments() {
-      try {
-        const entries = await Promise.all(
-          dashboardTimeframes.map(async (timeframe) => {
-            const params = new URLSearchParams({
-              symbol: selectedSymbol,
-              timeframe,
-              limit: '500',
-            })
-
-            const [latestResponse, engineResponse] = await Promise.allSettled([
-              fetch(`${apiBaseUrl}/api/latest-sentiment?${params.toString()}`, {
-                cache: 'no-store',
-              }),
-              fetch(`${apiBaseUrl}/api/engine-state?${params.toString()}`, {
-                cache: 'no-store',
-              }),
-            ])
-
-            const payloads: unknown[] = []
-
-            if (latestResponse.status === 'fulfilled' && latestResponse.value.ok) {
-              payloads.push(await latestResponse.value.json())
-            }
-
-            if (engineResponse.status === 'fulfilled' && engineResponse.value.ok) {
-              payloads.push(await engineResponse.value.json())
-            }
-
-            const candidates = payloads
-              .map(normalizeSharedTechnicalSentimentPayload)
-              .filter((item): item is TechnicalSentiment => Boolean(item))
-
-            const best =
-              candidates.length > 0
-                ? candidates.reduce((currentBest, current) =>
-                    countTechnicalIndicatorsPayload(current) > countTechnicalIndicatorsPayload(currentBest)
-                      ? current
-                      : currentBest
-                  )
-                : null
-
-            return [timeframe, best] as const
-          })
-        )
-
-        if (!cancelled) {
-          const nextSentiments = Object.fromEntries(entries) as Record<string, TechnicalSentiment | null>
-          const mainOnlySentiment = nextSentiments[selectedTimeframe] ?? null
-
-          setTimeframeTechnicalSentiments(nextSentiments)
-          setSharedTechnicalSentiment(mainOnlySentiment)
-        }
-      } catch (error) {
-        console.error('Dashboard shared multi-timeframe sentiment sync error:', error)
+        console.error('Dashboard snapshot sync error:', error)
       }
     }
 
     setSharedTechnicalSentiment(null)
     setTimeframeTechnicalSentiments({})
-    fetchSharedTechnicalSentiments()
-    intervalId = setInterval(fetchSharedTechnicalSentiments, 10000)
+    fetchDashboardSnapshots()
+    intervalId = setInterval(fetchDashboardSnapshots, 7000)
 
     return () => {
       cancelled = true
@@ -6412,86 +6526,8 @@ export default function Dashboard() {
     }
   }, [chartMlFeatures, matrixScorecards])
 
-  useEffect(() => {
-    if (!isClient || !apiBaseUrl || !mainCandlesReady || mainChartCandles.length === 0) return
-
-    let cancelled = false
-    let intervalId: ReturnType<typeof setInterval> | null = null
-
-    async function buildProjectionEngine() {
-      try {
-        const response = await fetch(`${apiBaseUrl}/api/projection-engine/build`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          cache: 'no-store',
-          body: JSON.stringify({
-            symbol: selectedSymbol,
-            timeframe: selectedTimeframe,
-            candles: dashboardCandlesToOverlayCandles(mainChartCandles).slice(-700),
-            scorecards: matrixScorecards,
-            mlFeatures: matrixMlFeatures,
-            overlayPayload: mainChartOverlayPayload,
-            unifiedIntelligence: mergedUnifiedIntelligence,
-            externalTables: {
-              technicalSentiment: sharedTechnicalSentiment,
-              timeframeTechnicalSentiments,
-            },
-            signal: {
-              ...(latestSignal ?? {}),
-              symbol: selectedSymbol,
-              timeframe: selectedTimeframe,
-              price: selectedLivePrice ?? activeChartPrice ?? latestSignal?.price ?? latestSignal?.current,
-              current: selectedLivePrice ?? activeChartPrice ?? latestSignal?.current ?? latestSignal?.price,
-            },
-            ghostCount: 3,
-            autoRegister: true,
-          }),
-        })
-
-        if (!response.ok) {
-          throw new Error(`Projection engine request failed: ${response.status}`)
-        }
-
-        const json = await response.json()
-
-        if (!cancelled && json && typeof json === 'object') {
-          setProjectionEngine(json as ProjectionEngineState)
-        }
-      } catch (error) {
-        console.error('Unified projection engine sync error:', error)
-
-        if (!cancelled) {
-          setProjectionEngine(null)
-        }
-      }
-    }
-
-    buildProjectionEngine()
-    intervalId = setInterval(buildProjectionEngine, 7000)
-
-    return () => {
-      cancelled = true
-      if (intervalId) clearInterval(intervalId)
-    }
-  }, [
-    activeChartPrice,
-    selectedLivePrice,
-    apiBaseUrl,
-    isClient,
-    latestSignal,
-    mainCandlesReady,
-    mainChartCandles,
-    mainChartOverlayPayload,
-    mainUnifiedIntelligence,
-    matrixMlFeatures,
-    matrixScorecards,
-    selectedSymbol,
-    selectedTimeframe,
-    sharedTechnicalSentiment,
-    timeframeTechnicalSentiments,
-  ])
+  // Projection engine state now comes from /api/dashboard/snapshot.
+  // This avoids the frontend calling /api/projection-engine/build on its own every few seconds.
 
   const safeDashboardStatus = getSafeDashboardStatus({
     error: null,
