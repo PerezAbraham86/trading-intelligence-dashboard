@@ -2680,6 +2680,27 @@ export default function AiTraderPanel({
   const displayClosedCount = closedTrades.length;
   const stableMemoryMessage = `AI memory warming up: ${formatCount(decisionStats.samples)} decision observations, ${formatCount(displayClosedCount)} closed/virtual outcomes`;
 
+  // Header cards must not display simulated P&L when there is no real visible open trade.
+  // The decision object can contain a latest setup plan and theoretical P&L fields,
+  // but those are not an active trade. Keep setup values separate from open-trade values.
+  const activeVisibleOpenTrade = liveOpenTrades[0] ?? null;
+  const hasVisibleOpenTrade = Boolean(activeVisibleOpenTrade);
+  const headerEntryValue = hasVisibleOpenTrade
+    ? activeVisibleOpenTrade?.entry ?? activeVisibleOpenTrade?.entryPrice
+    : decision?.entry;
+  const headerTargetValue = hasVisibleOpenTrade
+    ? activeVisibleOpenTrade?.target ?? activeVisibleOpenTrade?.targetPrice
+    : decision?.target;
+  const headerStopValue = hasVisibleOpenTrade
+    ? activeVisibleOpenTrade?.stop ?? activeVisibleOpenTrade?.stopPrice
+    : decision?.stop;
+  const headerCurrentPnlValue = hasVisibleOpenTrade
+    ? activeVisibleOpenTrade?.currentPnl ?? activeVisibleOpenTrade?.pnl
+    : null;
+  const headerMaxPnlValue = hasVisibleOpenTrade
+    ? activeVisibleOpenTrade?.maxPnl ?? activeVisibleOpenTrade?.maxPnlDollar
+    : null;
+
   useEffect(() => {
     if (closedLocalOpenRefs.length === 0) return;
 
@@ -2754,8 +2775,6 @@ export default function AiTraderPanel({
     const decisionSide = normalizeDecision(decision?.decision);
     const rawSide = normalizeDecision(decision?.rawDecision);
     const confidence = toFiniteNumber(decision?.confidence, 0);
-    const currentPnl = toFiniteNumber(decision?.currentPnl, 0);
-    const maxPnl = toFiniteNumber(decision?.maxPnl, 0);
 
     pushRow(autoPaperMode ? "success" : "info", "mode", {
       enabled: autoPaperMode,
@@ -2775,14 +2794,24 @@ export default function AiTraderPanel({
       loading: isLoading,
     });
 
-    pushRow("info", "trade-plan-table", {
-      entry: formatPrice(decision?.entry),
-      target: formatPrice(decision?.target),
-      stop: formatPrice(decision?.stop),
+    pushRow("info", hasVisibleOpenTrade ? "open-trade-plan-table" : "latest-setup-plan-table", {
+      status: hasVisibleOpenTrade ? "OPEN_TRADE" : "LATEST_AI_SETUP_ONLY",
+      entry: formatPrice(headerEntryValue),
+      target: formatPrice(headerTargetValue),
+      stop: formatPrice(headerStopValue),
       rr: toFiniteNumber(decision?.riskReward, 0).toFixed(2),
-      currentPnl: formatMoney(currentPnl),
-      maxPnl: formatMoney(maxPnl),
+      note: hasVisibleOpenTrade
+        ? "P&L is shown on the open-trade row and header cards."
+        : "No open trade exists; these are only the latest AI setup prices.",
     });
+
+    if (!hasVisibleOpenTrade) {
+      pushRow("info", "no-open-trade-table", {
+        currentPnl: "—",
+        maxPnl: "—",
+        reason: "P&L is hidden because visibleOpen=0.",
+      });
+    }
 
     pushRow(
       projectionSnapshot.conflict
@@ -3169,18 +3198,18 @@ export default function AiTraderPanel({
           value={autoPaperMode ? "RUNNING" : "OFF"}
           tone={autoPaperMode ? "bull" : "neutral"}
         />
-        <StatBox label="Entry" value={formatPrice(decision?.entry)} />
-        <StatBox label="Target" value={formatPrice(decision?.target)} />
-        <StatBox label="Stop" value={formatPrice(decision?.stop)} tone="warn" />
+        <StatBox label={hasVisibleOpenTrade ? "Open Entry" : "Setup Entry"} value={formatPrice(headerEntryValue)} />
+        <StatBox label={hasVisibleOpenTrade ? "Open Target" : "Setup Target"} value={formatPrice(headerTargetValue)} />
+        <StatBox label={hasVisibleOpenTrade ? "Open Stop" : "Setup Stop"} value={formatPrice(headerStopValue)} tone="warn" />
         <StatBox
           label="Current P&L"
-          value={formatMoney(decision?.currentPnl)}
-          tone={toFiniteNumber(decision?.currentPnl, 0) >= 0 ? "bull" : "bear"}
+          value={hasVisibleOpenTrade ? formatMoney(headerCurrentPnlValue) : "No Open Trade"}
+          tone={hasVisibleOpenTrade ? (toFiniteNumber(headerCurrentPnlValue, 0) >= 0 ? "bull" : "bear") : "neutral"}
         />
         <StatBox
           label="Max P&L"
-          value={formatMoney(decision?.maxPnl)}
-          tone={toFiniteNumber(decision?.maxPnl, 0) >= 0 ? "bull" : "bear"}
+          value={hasVisibleOpenTrade ? formatMoney(headerMaxPnlValue) : "No Open Trade"}
+          tone={hasVisibleOpenTrade ? (toFiniteNumber(headerMaxPnlValue, 0) >= 0 ? "bull" : "bear") : "neutral"}
         />
         <StatBox
           label="Projection"
