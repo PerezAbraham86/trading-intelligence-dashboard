@@ -326,7 +326,7 @@ function isFuturesCandleSymbol(symbol: string) {
 }
 
 function isInsightSentryDirectHistoricalTimeframe(timeframe: string) {
-  return ['1m', '5m', '10m', '15m', '30m'].includes(normalizeTimeframe(timeframe))
+  return ['1m', '3m', '5m', '10m', '15m', '30m'].includes(normalizeTimeframe(timeframe))
 }
 
 function getHistoricalCandleRouteForSymbol(apiBaseUrl: string, symbol: string) {
@@ -341,7 +341,7 @@ function getHistoricalCandleRouteForSymbol(apiBaseUrl: string, symbol: string) {
     return {
       route: `${apiBaseUrl}/api/candles`,
       provider: 'dashboard_candles',
-      source: 'dashboard_candle_router_futures_snapshot_cache_first',
+      source: 'clean_backend_candles_futures',
     }
   }
 
@@ -374,11 +374,9 @@ function extractCandleArray(payload: any): any[] {
   if (Array.isArray(payload?.results)) return payload.results
   if (Array.isArray(payload?.series)) return payload.series
 
-  // Dashboard snapshot payloads return candle history as:
-  // { candles: { candles: [...] } }
-  // The previous frontend only checked payload.candles when it was already an
-  // array, so snapshot candles looked empty and mini charts fell through to
-  // legacy routes. This keeps /api/dashboard/snapshot as the first candle source.
+  // Backward compatible nested payload support. The clean candle path uses
+  // /api/candles directly, but older dashboard/snapshot payloads may still be
+  // parsed by non-chart panels.
   if (Array.isArray(payload?.candles?.candles)) return payload.candles.candles
   if (Array.isArray(payload?.candles?.data)) return payload.candles.data
   if (Array.isArray(payload?.candles?.results)) return payload.candles.results
@@ -1372,7 +1370,8 @@ async function fetchBackendHistoricalRefreshPayload(
   apiBaseUrl: string,
   symbol: string,
   timeframe: string,
-  limit = 0
+  limit = 0,
+  force = false
 ): Promise<any> {
   const normalizedSymbol = normalizeSymbol(symbol)
   const normalizedTimeframe = normalizeTimeframe(timeframe)
@@ -1381,49 +1380,35 @@ async function fetchBackendHistoricalRefreshPayload(
     ? '0'
     : String(Math.max(1, Math.min(Number(limit) || 700, SHARED_CANDLE_CACHE_MAX_BARS || 5000)))
 
-  const routes = ['/api/candles', '/api/historical-candles']
-  let lastError = ''
+  const params = new URLSearchParams({
+    symbol: normalizedSymbol,
+    timeframe: normalizedTimeframe,
+    limit: safeLimit,
+    force: force ? 'true' : 'false',
+  })
 
-  for (const route of routes) {
-    const params = new URLSearchParams({
-      symbol: normalizedSymbol,
-      timeframe: normalizedTimeframe,
-      limit: safeLimit,
-      force: 'true',
-      repair: 'true',
-      historicalOnly: 'true',
-    })
+  const response = await fetch(`${apiBaseUrl}/api/candles?${params.toString()}`, {
+    cache: 'no-store',
+  })
 
-    try {
-      const response = await fetch(`${apiBaseUrl}${route}?${params.toString()}`, {
-        cache: 'no-store',
-      })
-
-      if (!response.ok) {
-        lastError = `${route} returned ${response.status}`
-        continue
-      }
-
-      const payload = await response.json()
-      const candles = normalizeCandlePayload(payload)
-
-      if (candles.length > 0) {
-        return {
-          ...payload,
-          candles,
-          source: typeof payload?.source === 'string'
-            ? `${payload.source}+frontend_forced_history_refresh`
-            : `${route}_frontend_forced_history_refresh`,
-        }
-      }
-
-      lastError = `${route} returned 0 candles`
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : `${route} failed`
-    }
+  if (!response.ok) {
+    throw new Error(`/api/candles returned ${response.status}`)
   }
 
-  throw new Error(lastError || 'Backend historical refresh returned no candles')
+  const payload = await response.json()
+  const candles = normalizeCandlePayload(payload)
+
+  if (candles.length === 0) {
+    throw new Error(`/api/candles returned 0 candles for ${normalizedSymbol} ${normalizedTimeframe}`)
+  }
+
+  return {
+    ...payload,
+    candles,
+    source: typeof payload?.source === 'string'
+      ? `${payload.source}+frontend_clean_candle_route`
+      : 'frontend_clean_candle_route',
+  }
 }
 
 function getDashboardSnapshotLivePricePayload(snapshot: any) {
@@ -1502,19 +1487,6 @@ function getDashboardSnapshotTechnicalSentiment(snapshot: any): TechnicalSentime
 }
 
 async function fetchBackendSharedLivePrice(apiBaseUrl: string, symbol: string, timeframe: string): Promise<LiveFeedSnapshot | null> {
-  try {
-    const snapshot = await fetchDashboardSnapshotPayload(apiBaseUrl, symbol, timeframe, 120)
-    const liveSnapshot = extractBackendLivePriceSnapshot(
-      getDashboardSnapshotLivePricePayload(snapshot),
-      symbol,
-      timeframe
-    )
-
-    if (liveSnapshot) return liveSnapshot
-  } catch (error) {
-    console.warn('Dashboard snapshot live price unavailable, falling back to /api/live-price:', error)
-  }
-
   const params = new URLSearchParams({
     symbol: normalizeSymbol(symbol),
     timeframe: normalizeTimeframe(timeframe),
@@ -1722,11 +1694,6 @@ async function fetchSharedCandlePayload(
   const key = sharedCandleKey(normalizedSymbol, normalizedTimeframe)
   const noFrontendLimit = isFuturesCandleSymbol(normalizedSymbol) || !limit || limit <= 0
   const requestedLimit = noFrontendLimit ? 0 : Math.max(1, limit)
-
-  // Force must still reach the backend for MES/futures. The frontend is not
-  // calling InsightSentry directly; it is asking our backend to repair/refetch
-  // the same timeframe. Blocking force for futures caused the chart to keep
-  // retrying stale/empty snapshots instead of requesting fresh history.
   const providerForce = Boolean(force)
 
   const activeRequest = SHARED_CANDLE_IN_FLIGHT.get(key)
@@ -1740,329 +1707,67 @@ async function fetchSharedCandlePayload(
 
   const request = (async () => {
     const previous = SHARED_CANDLE_CACHE.get(key)
-    const previousCount = previous?.candles?.length ?? 0
-
-    // Backfill/grow rule:
-    // Display can still request 300/700 candles, but the stored shared cache
-    // should grow after history has loaded once. Increasing the provider limit
-    // on occasional historical refreshes lets the cache expand toward 5,000
-    // bars instead of permanently staying at the visible chart limit.
     const apiLimit = noFrontendLimit
       ? 0
       : Math.min(
           SHARED_CANDLE_CACHE_MAX_BARS || 5000,
-          Math.max(
-            requestedLimit,
-            previous?.limit ?? 0,
-            previousCount > 0 ? previousCount + requestedLimit : requestedLimit
-          )
+          Math.max(requestedLimit, previous?.limit ?? 0)
         )
 
-    if (isFuturesCandleSymbol(normalizedSymbol) && (providerForce || previousCount === 0)) {
-      try {
-        const forcedHistory = await fetchBackendHistoricalRefreshPayload(
-          apiBaseUrl,
-          normalizedSymbol,
-          normalizedTimeframe,
-          apiLimit
-        )
-        const forcedCandles = normalizeCandlePayload(forcedHistory)
-
-        if (forcedCandles.length > 0) {
-          const overlayPayload = getUnifiedOverlayPayload(forcedHistory)
-          const unifiedIntelligence = getUnifiedIntelligencePayload(forcedHistory)
-          const mergedCandles = mergeHistoricalCandles(
-            previous?.candles,
-            forcedCandles,
-            noFrontendLimit ? 0 : SHARED_CANDLE_CACHE_MAX_BARS
-          )
-          const entry: SharedCandleCacheEntry = {
-            candles: mergedCandles,
-            overlayPayload: overlayPayload ?? previous?.overlayPayload ?? null,
-            unifiedIntelligence: unifiedIntelligence ?? previous?.unifiedIntelligence ?? null,
-            updatedAt: Date.now(),
-            limit: Math.max(apiLimit, previous?.limit ?? 0, mergedCandles.length),
-            provider: typeof forcedHistory?.provider === 'string' ? forcedHistory.provider : 'dashboard_candles',
-            source: typeof forcedHistory?.source === 'string'
-              ? `${forcedHistory.source}+futures_direct_forced_history_first`
-              : 'futures_direct_forced_history_first',
-          }
-          SHARED_CANDLE_CACHE.set(key, entry)
-          return entry
-        }
-      } catch (error) {
-        console.warn('Direct futures historical refresh failed, trying snapshot next:', error)
-      }
-    }
+    let json: any
+    let candles: DashboardCandle[] = []
 
     try {
-      const snapshot = await fetchDashboardSnapshotPayload(apiBaseUrl, normalizedSymbol, normalizedTimeframe, apiLimit)
-      const snapshotCandles = normalizeCandlePayload(snapshot)
-
-      if (snapshotCandles.length > 0) {
-        const snapshotLive = extractBackendLivePriceSnapshot(
-          getDashboardSnapshotLivePricePayload(snapshot),
-          normalizedSymbol,
-          normalizedTimeframe
-        )
-
-        if (snapshotLive) {
-          writeSharedLivePriceCache(snapshotLive, { force: true })
-        }
-
-        const snapshotEngineState = getDashboardSnapshotEngineState(snapshot)
-        const snapshotProjectionEngine = getDashboardSnapshotProjectionEngine(snapshot)
-        const snapshotOverlayPayload = getUnifiedOverlayPayload(snapshot, snapshotEngineState, snapshotProjectionEngine)
-        const snapshotUnifiedIntelligence = mergeProjectionEngineIntoUnifiedIntelligence(
-          getUnifiedIntelligencePayload(snapshot, snapshotEngineState, snapshotProjectionEngine),
-          snapshotProjectionEngine
-        )
-
-        const mergedCandles = mergeHistoricalCandles(previous?.candles, snapshotCandles, noFrontendLimit ? 0 : SHARED_CANDLE_CACHE_MAX_BARS)
-        const entry: SharedCandleCacheEntry = {
-          candles: mergedCandles,
-          overlayPayload: snapshotOverlayPayload ?? previous?.overlayPayload ?? null,
-          unifiedIntelligence: snapshotUnifiedIntelligence ?? previous?.unifiedIntelligence ?? null,
-          updatedAt: Date.now(),
-          limit: Math.max(apiLimit, previous?.limit ?? 0, mergedCandles.length),
-          provider:
-            typeof snapshot?.candles?.provider === 'string'
-              ? snapshot.candles.provider
-              : typeof snapshot?.provider === 'string'
-                ? snapshot.provider
-                : 'dashboard_snapshot',
-          source:
-            typeof snapshot?.candles?.source === 'string'
-              ? snapshot.candles.source
-              : typeof snapshot?.source === 'string'
-                ? snapshot.source
-                : 'dashboard_snapshot_candles_live_engine',
-        }
-
-        SHARED_CANDLE_CACHE.set(key, entry)
-        return entry
-      }
-    } catch (error) {
-      console.warn('Dashboard snapshot candle payload unavailable, forcing backend historical refresh:', error)
-    }
-
-    // Snapshot is only a convenience wrapper. If it fails, returns zero candles,
-    // or the browser has no warm cache yet, immediately ask the backend candle
-    // warehouse to fetch/repair real same-timeframe history up to now.
-    try {
-      const forcedHistory = await fetchBackendHistoricalRefreshPayload(
+      json = await fetchBackendHistoricalRefreshPayload(
         apiBaseUrl,
         normalizedSymbol,
         normalizedTimeframe,
-        apiLimit
+        apiLimit,
+        providerForce
       )
-      const forcedCandles = normalizeCandlePayload(forcedHistory)
-
-      if (forcedCandles.length > 0) {
-        const overlayPayload = getUnifiedOverlayPayload(forcedHistory)
-        const unifiedIntelligence = getUnifiedIntelligencePayload(forcedHistory)
-        const mergedCandles = mergeHistoricalCandles(
-          previous?.candles,
-          forcedCandles,
-          noFrontendLimit ? 0 : SHARED_CANDLE_CACHE_MAX_BARS
-        )
-        const entry: SharedCandleCacheEntry = {
-          candles: mergedCandles,
-          overlayPayload: overlayPayload ?? previous?.overlayPayload ?? null,
-          unifiedIntelligence: unifiedIntelligence ?? previous?.unifiedIntelligence ?? null,
+      candles = normalizeCandlePayload(json)
+    } catch (error) {
+      if (previous?.candles?.length) {
+        return {
+          ...previous,
+          candles: noFrontendLimit ? previous.candles : previous.candles.slice(-requestedLimit),
           updatedAt: Date.now(),
-          limit: Math.max(apiLimit, previous?.limit ?? 0, mergedCandles.length),
-          provider: typeof forcedHistory?.provider === 'string' ? forcedHistory.provider : 'dashboard_candles',
-          source: typeof forcedHistory?.source === 'string'
-            ? `${forcedHistory.source}+snapshot_failover_forced_history`
-            : 'snapshot_failover_forced_history',
-        }
-        SHARED_CANDLE_CACHE.set(key, entry)
-        return entry
-      }
-    } catch (error) {
-      console.warn('Forced backend historical refresh failed, trying normal candle route:', error)
-    }
-
-    let routeConfig = getHistoricalCandleRouteForSymbol(apiBaseUrl, normalizedSymbol)
-
-    // InsightSentry direct history does not return reliable full series for every
-    // custom timeframe. For MES 3m/2h/4h/etc., use the backend candle router so
-    // api/main.py can fetch 1m/valid source candles and resample them correctly.
-    if (isFuturesCandleSymbol(normalizedSymbol) && !isInsightSentryDirectHistoricalTimeframe(normalizedTimeframe)) {
-      routeConfig = {
-        route: `${apiBaseUrl}/api/candles`,
-        provider: 'dashboard_candles',
-        source: 'dashboard_candle_router_resampled_futures_history',
-      }
-    }
-
-    const useBackendFallbackFirst =
-      routeConfig.provider === 'insightsentry' &&
-      (!providerForce || shouldUseInsightSentryBackoff(key)) &&
-      shouldUseInsightSentryBackoff(key)
-
-    const activeRouteConfig = useBackendFallbackFirst
-      ? {
-          route: `${apiBaseUrl}/api/candles`,
-          provider: 'dashboard_candles',
-          source: 'dashboard_candle_router_rate_limit_backoff',
-        }
-      : routeConfig
-
-    const params = new URLSearchParams({
-      symbol: normalizedSymbol,
-      timeframe: normalizedTimeframe,
-      limit: String(apiLimit),
-      force: providerForce ? 'true' : 'false',
-    })
-
-    if (activeRouteConfig.provider === 'insightsentry') {
-      params.set('start_ym', new Date().toISOString().slice(0, 7))
-      params.set('extended', 'true')
-      params.set('badj', 'true')
-      params.set('dadj', 'false')
-    }
-
-    let json: any = null
-    let providerLabel = activeRouteConfig.provider
-    let sourceLabel = activeRouteConfig.source
-
-    let response: Response | null = null
-
-    try {
-      response = await fetch(`${activeRouteConfig.route}?${params.toString()}`, {
-        cache: 'no-store',
-      })
-    } catch (error) {
-      // A browser TypeError("Failed to fetch") usually means the backend was
-      // waking/restarting or the network request was interrupted. Do not stop
-      // the chart here; immediately retry through the forced historical repair
-      // path before surfacing the error to the chart log.
-      try {
-        const forcedHistory = await fetchBackendHistoricalRefreshPayload(
-          apiBaseUrl,
-          normalizedSymbol,
-          normalizedTimeframe,
-          apiLimit
-        )
-        const forcedCandles = normalizeCandlePayload(forcedHistory)
-        if (forcedCandles.length > 0) {
-          json = forcedHistory
-          providerLabel = typeof forcedHistory?.provider === 'string' ? forcedHistory.provider : providerLabel
-          sourceLabel = typeof forcedHistory?.source === 'string'
-            ? `${forcedHistory.source}+network_error_forced_history`
-            : 'network_error_forced_history'
-        }
-      } catch (repairError) {
-        throw error
-      }
-    }
-
-    if (response && !response.ok) {
-      if (routeConfig.provider === 'insightsentry') {
-        if (response.status === 429) {
-          rememberInsightSentryBackoff(key)
-        }
-
-        const fallbackParams = new URLSearchParams({
-          symbol: normalizedSymbol,
-          timeframe: normalizedTimeframe,
-          limit: String(apiLimit),
-          force: 'false',
-        })
-
-        const fallbackResponse = await fetch(`${apiBaseUrl}/api/candles?${fallbackParams.toString()}`, {
-          cache: 'no-store',
-        }).catch(() => null)
-
-        if (fallbackResponse?.ok) {
-          const fallbackJson = await fallbackResponse.json()
-          const fallbackCandles = normalizeCandlePayload(fallbackJson)
-
-          if (fallbackCandles.length > 0) {
-            json = {
-              ...fallbackJson,
-              warning: `InsightSentry history returned ${response.status}; using backend cached MES candles.`,
-            }
-            providerLabel = typeof fallbackJson?.provider === 'string' ? fallbackJson.provider : 'dashboard_candles'
-            sourceLabel = typeof fallbackJson?.source === 'string' ? fallbackJson.source : 'dashboard_candle_router_rate_limit_fallback'
-          }
-        }
-
-        if (!json && previous?.candles?.length) {
-          return {
-            ...previous,
-            candles: noFrontendLimit ? previous.candles : previous.candles.slice(-requestedLimit),
-            updatedAt: Date.now(),
-            source: 'frontend_cached_history_after_insightsentry_error',
-          }
+          source: `${previous.source ?? 'frontend_cached_history'}_after_clean_candle_error`,
         }
       }
 
-      if (!json) {
-        throw new Error(`${activeRouteConfig.provider} candle history error ${response.status}`)
-      }
+      throw error
     }
 
-    if (!json && response) {
-      json = await response.json()
-    }
-
-    const candles = normalizeCandlePayload(json)
-
-    // A backend 200 response with zero candles is not a usable history payload.
-    // Do not cache it and do not log it as a successful candle load; otherwise
-    // mini charts can get stuck showing "0 plotted" until another retry wins.
     if (candles.length === 0) {
-      try {
-        const forcedHistory = await fetchBackendHistoricalRefreshPayload(
-          apiBaseUrl,
-          normalizedSymbol,
-          normalizedTimeframe,
-          apiLimit
-        )
-        const forcedCandles = normalizeCandlePayload(forcedHistory)
-        if (forcedCandles.length > 0) {
-          json = forcedHistory
-          candles.splice(0, candles.length, ...forcedCandles)
-          providerLabel = typeof forcedHistory?.provider === 'string' ? forcedHistory.provider : providerLabel
-          sourceLabel = typeof forcedHistory?.source === 'string'
-            ? `${forcedHistory.source}+zero_candle_forced_history`
-            : 'zero_candle_forced_history'
+      if (previous?.candles?.length) {
+        return {
+          ...previous,
+          candles: noFrontendLimit ? previous.candles : previous.candles.slice(-requestedLimit),
+          updatedAt: Date.now(),
+          source: `${previous.source ?? 'frontend_cached_history'}_after_zero_clean_candles`,
         }
-      } catch (error) {
-        // Fall through to previous cache or error below.
       }
 
-      if (candles.length === 0) {
-        if (previous?.candles?.length) {
-          return {
-            ...previous,
-            candles: noFrontendLimit ? previous.candles : previous.candles.slice(-requestedLimit),
-            updatedAt: Date.now(),
-            source: `${previous.source ?? 'frontend_cached_history'}_after_zero_candle_response`,
-          }
-        }
-
-        throw new Error(`${providerLabel} returned zero candles for ${normalizedSymbol} ${normalizedTimeframe}`)
-      }
+      throw new Error(`/api/candles returned zero candles for ${normalizedSymbol} ${normalizedTimeframe}`)
     }
 
     const overlayPayload = getUnifiedOverlayPayload(json)
     const unifiedIntelligence = getUnifiedIntelligencePayload(json)
-    const mergedCandles = mergeHistoricalCandles(previous?.candles, candles, isFuturesCandleSymbol(normalizedSymbol) ? 0 : SHARED_CANDLE_CACHE_MAX_BARS)
+    const mergedCandles = mergeHistoricalCandles(
+      previous?.candles,
+      candles,
+      noFrontendLimit ? 0 : SHARED_CANDLE_CACHE_MAX_BARS
+    )
 
     const entry: SharedCandleCacheEntry = {
       candles: mergedCandles,
-      // Candle history is the candle source. Preserve any previous
-      // overlay/intelligence payload so live refreshes do not blank the canvas.
       overlayPayload: overlayPayload ?? previous?.overlayPayload ?? null,
       unifiedIntelligence: unifiedIntelligence ?? previous?.unifiedIntelligence ?? null,
       updatedAt: Date.now(),
       limit: Math.max(apiLimit, previous?.limit ?? 0, mergedCandles.length),
-      provider: typeof json?.provider === 'string' ? json.provider : providerLabel,
-      source: typeof json?.source === 'string' ? json.source : sourceLabel,
+      provider: typeof json?.provider === 'string' ? json.provider : 'clean_backend_candles',
+      source: typeof json?.source === 'string' ? json.source : 'clean_backend_candles',
     }
 
     SHARED_CANDLE_CACHE.set(key, entry)
@@ -4466,8 +4171,7 @@ function useChartCandles(
     function startPolling() {
       if (intervalId || liveSourceConnected) return
       intervalId = setInterval(() => {
-        const forceHistory = isFuturesCandleSymbol(symbol) && !fullSharedCacheHasHistorical()
-        fetchCandles(forceHistory, forceHistory ? 'poll-force-history-empty-cache' : 'poll')
+        fetchCandles(false, 'poll')
       }, pollMs)
     }
 
@@ -4512,7 +4216,7 @@ function useChartCandles(
       // are loaded, then live candles can safely merge into that history.
       if (now - lastInitialHistoryRetryAt >= 5000) {
         lastInitialHistoryRetryAt = now
-        fetchCandles(isFuturesCandleSymbol(symbol) && !fullSharedCacheHasHistorical(), 'initial-history-after-live')
+        fetchCandles(false, 'initial-history-after-live')
       }
     }
 
@@ -4735,20 +4439,7 @@ function useChartCandles(
         }
 
         const cachedWasApplied = applyCachedPayload('after-fetch-error')
-        retryForcedHistoryAfterError = Boolean(
-          !force &&
-          !cachedWasApplied &&
-          isFuturesCandleSymbol(symbol) &&
-          !fullSharedCacheHasHistorical()
-        )
-
-        if (retryForcedHistoryAfterError) {
-          addCandleDebugLog('force-history-retry-scheduled', {
-            reason,
-            error: message,
-            priority,
-          }, 'warn')
-        }
+        retryForcedHistoryAfterError = false
 
         if (!cachedWasApplied) {
           setErrorText(isZeroCandlePending ? '' : message)
@@ -4830,7 +4521,7 @@ function useChartCandles(
     setCandles([])
     setOverlayPayload(null)
     setUnifiedIntelligence(null)
-    fetchCandles(isFuturesCandleSymbol(symbol), isFuturesCandleSymbol(symbol) ? 'initial-force-history' : 'initial')
+    fetchCandles(false, 'initial')
     startPolling()
 
     if (typeof window !== 'undefined' && typeof EventSource !== 'undefined') {
@@ -5551,12 +5242,14 @@ function LightweightChartPanel({
 }: LightweightChartPanelProps) {
   const normalizedSymbol = normalizeSymbol(symbol)
   const normalizedTimeframe = normalizeTimeframe(timeframe)
+  const candleFetchLimit = isFuturesCandleSymbol(normalizedSymbol) ? 0 : compact ? 300 : 700
+
   const { candles, overlayPayload: unifiedOverlayPayload, unifiedIntelligence, isLoading, errorText, debugLog } = useChartCandles(
     apiBaseUrl,
     isClient,
     normalizedSymbol,
     normalizedTimeframe,
-    compact ? 300 : 700,
+    candleFetchLimit,
     compact ? 10000 : 5000,
     enabled,
     priority,
@@ -6639,6 +6332,7 @@ export default function Dashboard() {
       { key: 'settings', label: 'Syncing chart settings', detail: 'Loading saved chart layout and strategy controls', status: 'waiting' },
       { key: 'hist5', label: 'Preloading MES 5m main history', detail: 'MES1! 5m • warming backend/browser candle cache', status: 'waiting' },
       { key: 'hist10', label: 'Preloading MES 10m history', detail: 'MES1! 10m • warming backend/browser candle cache', status: 'waiting' },
+      { key: 'hist3', label: 'Preloading MES 3m history', detail: 'MES1! 3m • warming backend/browser candle cache', status: 'waiting' },
       { key: 'hist1', label: 'Preloading MES 1m history', detail: 'MES1! 1m • warming backend/browser candle cache', status: 'waiting' },
       { key: 'ready', label: 'Finalizing dashboard', detail: 'Preparing shared candle cache, live price state, charts, and AI Trader background sync', status: 'waiting' },
     ]
@@ -6734,93 +6428,50 @@ export default function Dashboard() {
         return entry
       }
 
-      for (let attempt = 1; attempt <= 4; attempt += 1) {
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
         if (cancelled) return null
-        setBootStep(key, 'loading', `${normalizedSymbol} ${normalizedTimeframe} • requesting snapshot attempt ${attempt}/4`)
-
-        try {
-          const snapshot = await fetchDashboardSnapshotPayload(
-            bootApiBaseUrl,
-            normalizedSymbol,
-            normalizedTimeframe,
-            limit
-          )
-          const candles = normalizeCandlePayload(snapshot)
-
-          const liveSnapshot = extractBackendLivePriceSnapshot(
-            getDashboardSnapshotLivePricePayload(snapshot),
-            normalizedSymbol,
-            normalizedTimeframe
-          )
-
-          if (liveSnapshot) {
-            const normalizedLive = writeSharedLivePriceCache(liveSnapshot, { force: true })
-            if (normalizedLive) {
-              setSharedLivePrices((current) => ({
-                ...current,
-                [sharedLivePriceKey(normalizedLive.symbol)]: normalizedLive,
-              }))
-            }
-          }
-
-          if (candles.length >= minimum) {
-            const entry = storeBootPayload(snapshot, candles, 'dashboard_boot_snapshot')
-            setBootStep(key, 'done', `${normalizedSymbol} ${normalizedTimeframe} • ${candles.length} snapshot candles ready`)
-            return entry
-          }
-
-          setBootStep(
-            key,
-            'warning',
-            `${normalizedSymbol} ${normalizedTimeframe} • snapshot returned ${candles.length}/${minimum}; forcing direct historical refresh`
-          )
-        } catch (error) {
-          setBootStep(
-            key,
-            'warning',
-            `${normalizedSymbol} ${normalizedTimeframe} • snapshot unavailable; forcing direct historical refresh`
-          )
-        }
+        setBootStep(key, 'loading', `${normalizedSymbol} ${normalizedTimeframe} • requesting /api/candles attempt ${attempt}/3`)
 
         try {
           const historical = await fetchBackendHistoricalRefreshPayload(
             bootApiBaseUrl,
             normalizedSymbol,
             normalizedTimeframe,
-            limit
+            limit,
+            false
           )
           const historicalCandles = normalizeCandlePayload(historical)
 
           if (historicalCandles.length >= minimum) {
-            const entry = storeBootPayload(historical, historicalCandles, 'frontend_forced_same_timeframe_historical_refresh')
+            const entry = storeBootPayload(historical, historicalCandles, 'dashboard_boot_clean_candle_route')
             setBootStep(
               key,
               'done',
-              `${normalizedSymbol} ${normalizedTimeframe} • ${historicalCandles.length} direct historical candles ready`
+              `${normalizedSymbol} ${normalizedTimeframe} • ${historicalCandles.length} clean backend candles ready`
             )
             return entry
           }
 
           if (historicalCandles.length > 0) {
-            const entry = storeBootPayload(historical, historicalCandles, 'frontend_partial_same_timeframe_historical_refresh')
+            const entry = storeBootPayload(historical, historicalCandles, 'dashboard_boot_partial_clean_candle_route')
             setBootStep(
               key,
               'warning',
-              `${normalizedSymbol} ${normalizedTimeframe} • direct history returned ${historicalCandles.length}/${minimum}; retrying`
+              `${normalizedSymbol} ${normalizedTimeframe} • /api/candles returned ${historicalCandles.length}/${minimum}; retrying`
             )
-            if (attempt === 4) return entry
+            if (attempt === 3) return entry
           } else {
-            setBootStep(key, 'warning', `${normalizedSymbol} ${normalizedTimeframe} • direct history returned 0 candles; retrying`)
+            setBootStep(key, 'warning', `${normalizedSymbol} ${normalizedTimeframe} • /api/candles returned 0 candles; retrying`)
           }
         } catch (error) {
           setBootStep(
             key,
             'warning',
-            `${normalizedSymbol} ${normalizedTimeframe} • ${error instanceof Error ? error.message : 'direct history unavailable'}; retrying`
+            `${normalizedSymbol} ${normalizedTimeframe} • ${error instanceof Error ? error.message : '/api/candles unavailable'}; retrying`
           )
         }
 
-        await sleep(1200 + attempt * 800)
+        await sleep(800 + attempt * 500)
       }
 
       const fallback = SHARED_CANDLE_CACHE.get(cacheKey)
@@ -6841,16 +6492,16 @@ export default function Dashboard() {
       const preloadParams = new URLSearchParams({
         symbols: 'MES1!',
         timeframes: requiredCoreHistory.map((chart) => normalizeTimeframe(chart.timeframe)).join(','),
-        limit: String(Math.max(...requiredCoreHistory.map((chart) => chart.limit), 700)),
-        historicalOnly: 'true',
+        limit: '0',
+        force: 'false',
       })
 
-      const response = await fetch(`${bootApiBaseUrl}/api/preload-candles?${preloadParams.toString()}`, {
+      const response = await fetch(`${bootApiBaseUrl}/api/candles/warm?${preloadParams.toString()}`, {
         cache: 'no-store',
       })
 
       if (!response.ok) {
-        throw new Error(`MES multi-timeframe preload failed: ${response.status}`)
+        throw new Error(`MES clean candle warm failed: ${response.status}`)
       }
 
       const payload = await response.json()
@@ -6883,8 +6534,8 @@ export default function Dashboard() {
       }
 
       // Pull the freshly warmed backend cache into the browser shared candle cache
-      // before charts mount. These snapshot calls should now read backend cache,
-      // not hit InsightSentry directly.
+      // before charts mount. These /api/candles calls now read backend cache,
+      // not snapshot/heavy dashboard routes.
       for (const chart of requiredCoreHistory) {
         const entry = await warmSnapshot(chart)
         const candleCount = Array.isArray(entry?.candles) ? entry.candles.length : 0
@@ -6909,15 +6560,16 @@ export default function Dashboard() {
           await fetch(`${bootApiBaseUrl}/`, { cache: 'no-store' })
           setBootStep('backend', 'done', 'Render backend answered')
         } catch (error) {
-          setBootStep('backend', 'warning', 'Backend wake request did not answer immediately; continuing with snapshots')
+          setBootStep('backend', 'warning', 'Backend wake request did not answer immediately; continuing with clean candle routes')
         }
 
         setBootStep('settings', 'done', 'Chart settings hydrated')
 
         const requiredCoreHistory = [
-          { key: 'hist5', symbol: 'MES1!', timeframe: '5m', limit: 700, minimum: CORE_MES_HISTORY_MIN_CANDLES },
-          { key: 'hist10', symbol: 'MES1!', timeframe: '10m', limit: 700, minimum: CORE_MES_HISTORY_MIN_CANDLES },
-          { key: 'hist1', symbol: 'MES1!', timeframe: '1m', limit: 700, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+          { key: 'hist5', symbol: 'MES1!', timeframe: '5m', limit: 0, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+          { key: 'hist10', symbol: 'MES1!', timeframe: '10m', limit: 0, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+          { key: 'hist3', symbol: 'MES1!', timeframe: '3m', limit: 0, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+          { key: 'hist1', symbol: 'MES1!', timeframe: '1m', limit: 0, minimum: CORE_MES_HISTORY_MIN_CANDLES },
         ]
 
         await warmRequiredMesHistoryBundle(requiredCoreHistory)
@@ -6994,20 +6646,30 @@ export default function Dashboard() {
         if (cancelled) return
 
         try {
-          const snapshot = await fetchDashboardSnapshotPayload(DASHBOARD_API_BASE_URL, item.symbol, item.timeframe, item.limit)
-          const candles = normalizeCandlePayload(snapshot)
+          const payload = await fetchBackendHistoricalRefreshPayload(
+            DASHBOARD_API_BASE_URL,
+            item.symbol,
+            item.timeframe,
+            isFuturesCandleSymbol(item.symbol) ? 0 : item.limit,
+            false
+          )
+          const candles = normalizeCandlePayload(payload)
           if (candles.length === 0) return
 
           const cacheKey = sharedCandleKey(item.symbol, item.timeframe)
           const previous = SHARED_CANDLE_CACHE.get(cacheKey)
           SHARED_CANDLE_CACHE.set(cacheKey, {
-            candles: mergeHistoricalCandles(previous?.candles, candles),
-            overlayPayload: getUnifiedOverlayPayload(snapshot) ?? previous?.overlayPayload ?? null,
-            unifiedIntelligence: getUnifiedIntelligencePayload(snapshot) ?? previous?.unifiedIntelligence ?? null,
+            candles: mergeHistoricalCandles(
+              previous?.candles,
+              candles,
+              isFuturesCandleSymbol(item.symbol) ? 0 : SHARED_CANDLE_CACHE_MAX_BARS
+            ),
+            overlayPayload: getUnifiedOverlayPayload(payload) ?? previous?.overlayPayload ?? null,
+            unifiedIntelligence: getUnifiedIntelligencePayload(payload) ?? previous?.unifiedIntelligence ?? null,
             updatedAt: Date.now(),
             limit: Math.max(item.limit, previous?.limit ?? 0, candles.length),
-            provider: typeof snapshot?.provider === 'string' ? snapshot.provider : 'dashboard_snapshot_background_boot',
-            source: typeof snapshot?.source === 'string' ? snapshot.source : 'dashboard_background_warm',
+            provider: typeof payload?.provider === 'string' ? payload.provider : 'clean_backend_candles_background_boot',
+            source: typeof payload?.source === 'string' ? payload.source : 'clean_backend_candles_background_warm',
           })
         } catch {
           // Background warming is best effort only.
