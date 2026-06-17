@@ -5,6 +5,8 @@ import io
 import json
 import math
 import os
+import threading
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -340,6 +342,7 @@ app.add_middleware(
 @app.on_event("startup")
 def load_site_candle_cache_on_startup() -> None:
     load_persistent_candle_cache()
+    start_backend_candle_warehouse()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -387,7 +390,7 @@ CANDLE_CACHE_FILE = Path(os.getenv("CANDLE_CACHE_FILE", "/tmp/trading_dashboard_
 CANDLE_SITE_CACHE_MAX_AGE_SECONDS = int(os.getenv("CANDLE_SITE_CACHE_MAX_AGE_SECONDS", "21600"))
 
 MAX_RECENT_SIGNALS = 50
-MAX_RECENT_CANDLES = 5000
+MAX_RECENT_CANDLES = int(os.getenv("MAX_RECENT_CANDLES", "50000"))
 OVERLAY_PAYLOAD_VERSION = "unified_v1"
 
 
@@ -1305,7 +1308,7 @@ def insightsentry_history_start_ym(symbol: str, timeframe: str) -> str:
 def build_insightsentry_urls(api_symbol: str, api_interval: str, limit: int) -> List[str]:
     encoded_path_symbol = quote(api_symbol, safe="")
     bar_type, bar_interval = insightsentry_bar_type_interval(api_interval)
-    safe_limit = max(1, min(int(limit or 500), 5000))
+    safe_limit = max(1, min(candle_cache_limit_value(limit) or 5000, 5000))
 
     # InsightSentry Historical Time Series OHLCV uses /history with start_ym.
     # We intentionally do not rely on /series dp for MES preload because it was
@@ -1337,10 +1340,10 @@ def build_insightsentry_urls(api_symbol: str, api_interval: str, limit: int) -> 
         f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_path_symbol}/series?{urlencode(series_params)}",
     ]
 
-def fetch_insightsentry_direct_candles(symbol: str, timeframe: str = "1m", limit: int = 500) -> List[Dict[str, Any]]:
+def fetch_insightsentry_direct_candles(symbol: str, timeframe: str = "1m", limit: int = 0) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(1, min(int(limit or 500), 5000))
+    safe_limit = max(1, min(candle_cache_limit_value(limit) or 5000, 5000))
     headers = insightsentry_headers()
 
     last_error: Optional[str] = None
@@ -1379,7 +1382,7 @@ def fetch_insightsentry_direct_candles(symbol: str, timeframe: str = "1m", limit
                         f"api_symbol={api_symbol} timeframe={normalized_timeframe} api_interval={api_interval} "
                         f"count={len(candles)}"
                     )
-                    return candles[-safe_limit:]
+                    return candles
 
                 last_error = f"No bars parsed from {url}"
 
@@ -1389,7 +1392,7 @@ def fetch_insightsentry_direct_candles(symbol: str, timeframe: str = "1m", limit
     return []
 
 
-def fetch_insightsentry_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 500) -> List[Dict[str, Any]]:
+def fetch_insightsentry_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 0) -> List[Dict[str, Any]]:
     """
     MES/ES futures candles use the verified InsightSentry Time Series OHLCV route.
 
@@ -1400,10 +1403,10 @@ def fetch_insightsentry_historical_candles(symbol: str, timeframe: str = "1m", l
     """
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(1, min(int(limit or 500), 5000))
+    safe_limit = max(1, min(candle_cache_limit_value(limit) or 5000, 5000))
 
     direct = fetch_insightsentry_direct_candles(normalized_symbol, normalized_timeframe, safe_limit)
-    return direct[-safe_limit:] if direct else []
+    return direct if direct else []
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CANDLE PROVIDERS
@@ -1616,8 +1619,31 @@ def candle_cache_payload(cached: Dict[str, Any], cache_label: str) -> Dict[str, 
     return payload
 
 
+def candle_cache_limit_value(limit: Any) -> int:
+    try:
+        parsed = int(limit)
+    except Exception:
+        parsed = 0
+    return max(0, parsed)
+
+
+def should_limit_candles(symbol: str, limit: Any) -> bool:
+    # Futures history must plot whatever the provider/cache has saved.
+    # For MES, limit=0 and any frontend limit are treated as unlimited.
+    if is_futures_symbol(symbol):
+        return False
+    return candle_cache_limit_value(limit) > 0
+
+
+def maybe_limit_candles(candles: List[Dict[str, Any]], symbol: str, limit: Any) -> List[Dict[str, Any]]:
+    rows = merge_candles_by_time(candles or [])
+    if not should_limit_candles(symbol, limit):
+        return rows
+    return rows[-candle_cache_limit_value(limit):]
+
+
 def candle_cache_key(route: str, symbol: str, timeframe: str, limit: int) -> str:
-    return f"{route}::{normalize_symbol(symbol)}::{normalize_timeframe(timeframe)}::{int(limit or 500)}"
+    return f"{route}::{normalize_symbol(symbol)}::{normalize_timeframe(timeframe)}::{candle_cache_limit_value(limit)}"
 
 
 def candle_cache_get(route: str, symbol: str, timeframe: str, limit: int, max_age_seconds: int = CANDLE_SITE_CACHE_MAX_AGE_SECONDS) -> Optional[Dict[str, Any]]:
@@ -1645,7 +1671,7 @@ def candle_cache_get(route: str, symbol: str, timeframe: str, limit: int, max_ag
     return None
 
 
-MAX_STORED_CANDLES_PER_CACHE_ENTRY = int(os.getenv("MAX_STORED_CANDLES_PER_CACHE_ENTRY", "5000"))
+MAX_STORED_CANDLES_PER_CACHE_ENTRY = int(os.getenv("MAX_STORED_CANDLES_PER_CACHE_ENTRY", "0"))  # 0 = keep every candle returned/saved
 
 
 def find_existing_candle_cache_payload_for_merge(route: str, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
@@ -1690,7 +1716,9 @@ def merge_candle_cache_payload(route: str, symbol: str, timeframe: str, limit: i
     existing_candles = existing_payload.get("candles") if isinstance(existing_payload, dict) and isinstance(existing_payload.get("candles"), list) else []
 
     if existing_candles or incoming_candles:
-        merged = merge_candles_by_time([*existing_candles, *incoming_candles])[-MAX_STORED_CANDLES_PER_CACHE_ENTRY:]
+        merged = merge_candles_by_time([*existing_candles, *incoming_candles])
+        if MAX_STORED_CANDLES_PER_CACHE_ENTRY > 0:
+            merged = merged[-MAX_STORED_CANDLES_PER_CACHE_ENTRY:]
         stored["candles"] = merged
         stored["count"] = len(merged)
         stored["candleCount"] = len(merged)
@@ -1705,7 +1733,7 @@ def merge_candle_cache_payload(route: str, symbol: str, timeframe: str, limit: i
             "maxStoredCandles": MAX_STORED_CANDLES_PER_CACHE_ENTRY,
         }
 
-    stored["requestedLimit"] = int(limit or 500)
+    stored["requestedLimit"] = candle_cache_limit_value(limit)
     return stored
 
 
@@ -1723,7 +1751,7 @@ def candle_cache_set(route: str, symbol: str, timeframe: str, limit: int, payloa
                 route=route,
                 symbol=normalize_symbol(symbol),
                 timeframe=normalize_timeframe(timeframe),
-                limit_value=max(int(limit or 500), len(stored.get("candles", [])) if isinstance(stored.get("candles"), list) else int(limit or 500)),
+                limit_value=max(candle_cache_limit_value(limit), len(stored.get("candles", [])) if isinstance(stored.get("candles"), list) else candle_cache_limit_value(limit)),
                 payload=stored,
             )
         except Exception as error:
@@ -1912,7 +1940,7 @@ def timeframe_to_1m_fetch_limit(timeframe: str, limit: int) -> int:
 
 
 
-def fetch_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 500) -> List[Dict[str, Any]]:
+def fetch_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 0) -> List[Dict[str, Any]]:
     """
     Clean provider router.
 
@@ -1920,23 +1948,18 @@ def fetch_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 50
     - BTCUSD -> Alpaca crypto
     - MES1!  -> InsightSentry Time Series OHLCV
 
-    Removed unnecessary fallback patches that were only masking the old MES endpoint issue.
+    MES rule:
+    - Every timeframe is fetched directly from InsightSentry.
+    - No 1m resampling/building for 3m/5m/10m.
+    - No artificial 300/700/5000 chart limit; whatever InsightSentry returns is saved and plotted.
     """
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(1, min(int(limit or 500), 5000))
+    safe_limit = max(1, min(candle_cache_limit_value(limit) or 500, 5000))
 
     if is_futures_symbol(normalized_symbol):
-        candles = fetch_insightsentry_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
-
-        # Important speed/reliability fallback:
-        # if a higher timeframe returns empty, fetch 1m once and resample locally.
-        if not candles and normalized_timeframe != "1m":
-            one_min_limit = timeframe_to_1m_fetch_limit(normalized_timeframe, safe_limit)
-            one_min = fetch_insightsentry_historical_candles(normalized_symbol, "1m", one_min_limit)
-            candles = resample_candles_to_timeframe(one_min, normalized_timeframe, safe_limit)
-
-        return candles[-safe_limit:]
+        candles = fetch_insightsentry_historical_candles(normalized_symbol, normalized_timeframe, 0)
+        return filter_valid_candles_for_symbol(merge_candles_by_time(candles), normalized_symbol)
 
     if is_crypto_symbol(normalized_symbol):
         try:
@@ -1977,10 +2000,10 @@ def get_live_recent_candles(symbol: str, timeframe: str) -> List[Dict[str, Any]]
     return filter_valid_candles_for_symbol(candles, normalized_symbol)
 
 
-def get_dashboard_candles(symbol: str, timeframe: str = "1m", limit: int = 500, use_cache: bool = True) -> List[Dict[str, Any]]:
+def get_dashboard_candles(symbol: str, timeframe: str = "1m", limit: int = 0, use_cache: bool = True) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(1, min(int(limit or 500), 5000))
+    safe_limit = 0 if is_futures_symbol(normalized_symbol) else max(1, min(candle_cache_limit_value(limit) or 500, 5000))
 
     if use_cache:
         # Critical rate-limit protection:
@@ -2006,7 +2029,7 @@ def get_dashboard_candles(symbol: str, timeframe: str = "1m", limit: int = 500, 
                     # The route should refresh history instead of drawing a fake vertical candle.
                     continue
 
-                merged = merge_candles_by_time([*cached_candles, *live])[-safe_limit:]
+                merged = maybe_limit_candles([*cached_candles, *live], normalized_symbol, safe_limit)
                 return filter_valid_candles_for_symbol(merged, normalized_symbol)
 
     historical = filter_valid_candles_for_symbol(
@@ -2024,9 +2047,9 @@ def get_dashboard_candles(symbol: str, timeframe: str = "1m", limit: int = 500, 
             f"[MES merge guard] skipped live merge for {normalized_symbol} {normalized_timeframe}; "
             f"history_close={latest_candle_close(historical)} live_close={latest_candle_close(live)}"
         )
-        return historical[-safe_limit:]
+        return maybe_limit_candles(historical, normalized_symbol, safe_limit)
 
-    merged = merge_candles_by_time([*historical, *live])[-safe_limit:]
+    merged = maybe_limit_candles([*historical, *live], normalized_symbol, safe_limit)
     return filter_valid_candles_for_symbol(merged, normalized_symbol)
 
 
@@ -2396,7 +2419,7 @@ def get_live_price_payload(symbol: str, timeframe: str = "1m") -> Dict[str, Any]
 # PERSISTENT LIVE CANDLE BRIDGE
 # ─────────────────────────────────────────────────────────────────────────────
 
-PERSISTENT_LIVE_CANDLE_CACHE_LIMIT = int(os.getenv("PERSISTENT_LIVE_CANDLE_CACHE_LIMIT", "5000"))
+PERSISTENT_LIVE_CANDLE_CACHE_LIMIT = int(os.getenv("PERSISTENT_LIVE_CANDLE_CACHE_LIMIT", "0"))  # 0 = keep all saved live candles
 PERSISTENT_LIVE_CANDLE_MAX_CACHE_AGE_SECONDS = int(os.getenv("PERSISTENT_LIVE_CANDLE_MAX_CACHE_AGE_SECONDS", str(7 * 24 * 60 * 60)))
 PERSISTENT_LIVE_BACKFILL_MAX_BARS = int(os.getenv("PERSISTENT_LIVE_BACKFILL_MAX_BARS", "300"))
 # Important: do not fabricate missing historical OHLC candles by default.
@@ -2784,7 +2807,7 @@ def persist_live_candle_to_history_cache(symbol: str, timeframe: str, live_paylo
 def merge_saved_live_candles_with_history(symbol: str, timeframe: str, candles: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(1, min(int(limit or 500), 5000))
+    safe_limit = 0 if is_futures_symbol(normalized_symbol) else max(1, min(candle_cache_limit_value(limit) or 500, 5000))
 
     def is_real_ohlcv_row(row: Dict[str, Any]) -> bool:
         if not isinstance(row, dict):
@@ -2806,7 +2829,7 @@ def merge_saved_live_candles_with_history(symbol: str, timeframe: str, candles: 
     )
 
     if not live_rows:
-        return historical_rows[-safe_limit:]
+        return maybe_limit_candles(historical_rows, normalized_symbol, safe_limit)
 
     bridge_rows: List[Dict[str, Any]] = []
 
@@ -2835,9 +2858,9 @@ def merge_saved_live_candles_with_history(symbol: str, timeframe: str, candles: 
         )
 
     return filter_valid_candles_for_symbol(
-        merged_rows,
+        maybe_limit_candles(merged_rows, normalized_symbol, safe_limit),
         normalized_symbol,
-    )[-safe_limit:]
+    )
 
 
 def rebuild_history_payload_with_saved_live_candles(
@@ -2850,7 +2873,7 @@ def rebuild_history_payload_with_saved_live_candles(
 ) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(1, min(int(limit or 500), 5000))
+    safe_limit = 0 if is_futures_symbol(normalized_symbol) else max(1, min(candle_cache_limit_value(limit) or 500, 5000))
     raw_candles = payload.get("candles") if isinstance(payload, dict) else []
     candles = raw_candles if isinstance(raw_candles, list) else []
     merged = merge_saved_live_candles_with_history(normalized_symbol, normalized_timeframe, candles, safe_limit)
@@ -7875,6 +7898,264 @@ def build_candle_route_payload(
     return payload
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# BACKEND CANDLE WAREHOUSE: STARTUP WARMUP + LIVE UPDATER
+# ─────────────────────────────────────────────────────────────────────────────
+
+CANDLE_WAREHOUSE_SYMBOLS = os.getenv("CANDLE_WAREHOUSE_SYMBOLS", "MES1!")
+CANDLE_WAREHOUSE_TIMEFRAMES = os.getenv("CANDLE_WAREHOUSE_TIMEFRAMES", "1m,3m,5m,10m")
+CANDLE_WAREHOUSE_STARTUP_WARM_ENABLED = os.getenv("CANDLE_WAREHOUSE_STARTUP_WARM_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+CANDLE_WAREHOUSE_LIVE_ENABLED = os.getenv("CANDLE_WAREHOUSE_LIVE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+CANDLE_WAREHOUSE_LIVE_INTERVAL_SECONDS = max(5, int(os.getenv("CANDLE_WAREHOUSE_LIVE_INTERVAL_SECONDS", "15")))
+CANDLE_WAREHOUSE_RECENT_DP = max(2, min(int(os.getenv("CANDLE_WAREHOUSE_RECENT_DP", "25")), 100))
+
+_CANDLE_WAREHOUSE_THREAD: Optional[threading.Thread] = None
+_CANDLE_WAREHOUSE_LOCK = threading.RLock()
+_CANDLE_WAREHOUSE_STATUS: Dict[str, Any] = {
+    "started": False,
+    "running": False,
+    "lastWarmup": None,
+    "lastLiveUpdate": None,
+    "lastError": None,
+    "createdAt": now_iso(),
+}
+
+
+def _warehouse_symbols() -> List[str]:
+    rows = [normalize_symbol(item) for item in str(CANDLE_WAREHOUSE_SYMBOLS or "MES1!").split(",") if item.strip()]
+    return rows or ["MES1!"]
+
+
+def _warehouse_timeframes() -> List[str]:
+    return _preload_unique_timeframes(CANDLE_WAREHOUSE_TIMEFRAMES or "1m,3m,5m,10m")
+
+
+def _store_backend_warehouse_candles(symbol: str, timeframe: str, candles_list: List[Dict[str, Any]], source: str) -> Dict[str, Any]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    clean = filter_valid_candles_for_symbol(merge_candles_by_time(candles_list or []), normalized_symbol)
+    payload = build_candle_route_payload(
+        route_source=source,
+        symbol=normalized_symbol,
+        timeframe=normalized_timeframe,
+        candles=clean,
+        provider="insightsentry" if is_futures_symbol(normalized_symbol) else (clean[-1].get("provider") if clean else None),
+        cache_label="warehouse_saved",
+    )
+    payload["backendWarehouse"] = True
+    payload["noArtificialCandleLimit"] = is_futures_symbol(normalized_symbol)
+    payload["savedAllReturnedCandles"] = True
+
+    if clean:
+        stored_dashboard = candle_cache_set("dashboard", normalized_symbol, normalized_timeframe, 0 if is_futures_symbol(normalized_symbol) else len(clean), payload)
+        candle_cache_set("historical", normalized_symbol, normalized_timeframe, 0 if is_futures_symbol(normalized_symbol) else len(clean), payload)
+        return stored_dashboard
+
+    return payload
+
+
+def fetch_insightsentry_recent_series_candles(symbol: str, timeframe: str, dp: int = CANDLE_WAREHOUSE_RECENT_DP) -> List[Dict[str, Any]]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    if not is_futures_symbol(normalized_symbol):
+        return []
+
+    headers = insightsentry_headers()
+    bar_type, bar_interval = insightsentry_bar_type_interval(normalized_timeframe)
+    safe_dp = max(2, min(int(dp or CANDLE_WAREHOUSE_RECENT_DP), 100))
+
+    for api_symbol in insightsentry_symbol_candidates(normalized_symbol):
+        encoded_path_symbol = quote(api_symbol, safe="")
+        params = urlencode({
+            "bar_type": bar_type,
+            "bar_interval": bar_interval,
+            "extended": "true",
+            "badj": "true",
+            "dadj": "false",
+            "dp": safe_dp,
+            "long_poll": "false",
+        })
+        url = f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_path_symbol}/series?{params}"
+        data = http_get_json_or_none(url, headers=headers, provider="InsightSentry live candle series")
+        if data is None:
+            continue
+
+        bars = extract_insightsentry_bars(data)
+        candles_list = [
+            candle
+            for candle in (normalize_insightsentry_bar(bar, normalized_symbol, normalized_timeframe) for bar in bars)
+            if candle is not None
+        ]
+        candles_list = filter_valid_candles_for_symbol(merge_candles_by_time(candles_list), normalized_symbol)
+        if candles_list and candles_match_requested_timeframe(candles_list, normalized_timeframe):
+            return candles_list
+
+    return []
+
+
+def warm_backend_candle_warehouse(symbols: Optional[List[str]] = None, timeframes: Optional[List[str]] = None) -> Dict[str, Any]:
+    symbol_list = symbols or _warehouse_symbols()
+    timeframe_list = timeframes or _warehouse_timeframes()
+    results: List[Dict[str, Any]] = []
+
+    for item_symbol in symbol_list:
+        normalized_symbol = normalize_symbol(item_symbol)
+        for item_timeframe in timeframe_list:
+            tf = normalize_timeframe(item_timeframe)
+            try:
+                if is_futures_symbol(normalized_symbol):
+                    # Direct historical pull per timeframe. No 1m building. No candle cap.
+                    fetched = fetch_insightsentry_historical_candles(normalized_symbol, tf, 0)
+                else:
+                    fetched = fetch_historical_candles(normalized_symbol, tf, 0)
+
+                fetched = filter_valid_candles_for_symbol(merge_candles_by_time(fetched), normalized_symbol)
+                stored = _store_backend_warehouse_candles(
+                    normalized_symbol,
+                    tf,
+                    fetched,
+                    f"backend_startup_direct_{tf}_history",
+                )
+                stored_candles = stored.get("candles") if isinstance(stored, dict) else []
+                stored_count = len(stored_candles) if isinstance(stored_candles, list) else 0
+                results.append({
+                    "symbol": normalized_symbol,
+                    "timeframe": tf,
+                    "count": stored_count,
+                    "provider": stored.get("provider") if isinstance(stored, dict) else None,
+                    "source": stored.get("source") if isinstance(stored, dict) else None,
+                    "firstCandleTime": stored.get("firstCandleTime") if isinstance(stored, dict) else None,
+                    "lastCandleTime": stored.get("lastCandleTime") if isinstance(stored, dict) else None,
+                    "savedAllReturnedCandles": True,
+                    "directTimeframeFetch": True,
+                })
+            except Exception as error:
+                message = str(error)[:500]
+                print(f"[Candle Warehouse] warmup failed for {normalized_symbol} {tf}: {message}")
+                results.append({
+                    "symbol": normalized_symbol,
+                    "timeframe": tf,
+                    "count": 0,
+                    "error": message,
+                    "directTimeframeFetch": True,
+                })
+
+    summary = {
+        "eventType": "BACKEND_CANDLE_WAREHOUSE_WARMUP",
+        "status": "Ready" if any(int(row.get("count", 0) or 0) > 0 for row in results) else "Waiting",
+        "results": results,
+        "count": len(results),
+        "createdAt": now_iso(),
+    }
+    with _CANDLE_WAREHOUSE_LOCK:
+        _CANDLE_WAREHOUSE_STATUS["lastWarmup"] = summary
+    return summary
+
+
+def _update_backend_live_candles_once() -> Dict[str, Any]:
+    results: List[Dict[str, Any]] = []
+    for item_symbol in _warehouse_symbols():
+        normalized_symbol = normalize_symbol(item_symbol)
+        for tf in _warehouse_timeframes():
+            normalized_timeframe = normalize_timeframe(tf)
+            try:
+                saved_count = 0
+                if is_futures_symbol(normalized_symbol):
+                    recent = fetch_insightsentry_recent_series_candles(normalized_symbol, normalized_timeframe)
+                    if recent:
+                        stored = _store_backend_warehouse_candles(
+                            normalized_symbol,
+                            normalized_timeframe,
+                            recent,
+                            f"backend_live_direct_{normalized_timeframe}_series",
+                        )
+                        stored_candles = stored.get("candles") if isinstance(stored, dict) else []
+                        saved_count = len(stored_candles) if isinstance(stored_candles, list) else 0
+
+                    # Quote-to-current-candle bridge keeps the active candle moving between series updates.
+                    live_payload = get_live_price_payload(normalized_symbol, normalized_timeframe)
+                    persist_live_candle_to_history_cache(normalized_symbol, normalized_timeframe, live_payload)
+
+                results.append({
+                    "symbol": normalized_symbol,
+                    "timeframe": normalized_timeframe,
+                    "savedCount": saved_count,
+                    "updatedAt": now_iso(),
+                })
+            except Exception as error:
+                message = str(error)[:500]
+                print(f"[Candle Warehouse] live update failed for {normalized_symbol} {normalized_timeframe}: {message}")
+                results.append({
+                    "symbol": normalized_symbol,
+                    "timeframe": normalized_timeframe,
+                    "savedCount": 0,
+                    "error": message,
+                    "updatedAt": now_iso(),
+                })
+
+    payload = {
+        "eventType": "BACKEND_CANDLE_WAREHOUSE_LIVE_UPDATE",
+        "status": "Live",
+        "results": results,
+        "count": len(results),
+        "createdAt": now_iso(),
+    }
+    with _CANDLE_WAREHOUSE_LOCK:
+        _CANDLE_WAREHOUSE_STATUS["lastLiveUpdate"] = payload
+    return payload
+
+
+def _backend_candle_warehouse_loop() -> None:
+    with _CANDLE_WAREHOUSE_LOCK:
+        _CANDLE_WAREHOUSE_STATUS["running"] = True
+        _CANDLE_WAREHOUSE_STATUS["startedAt"] = now_iso()
+
+    if CANDLE_WAREHOUSE_STARTUP_WARM_ENABLED:
+        warm_backend_candle_warehouse()
+
+    while CANDLE_WAREHOUSE_LIVE_ENABLED:
+        try:
+            _update_backend_live_candles_once()
+        except Exception as error:
+            with _CANDLE_WAREHOUSE_LOCK:
+                _CANDLE_WAREHOUSE_STATUS["lastError"] = str(error)[:500]
+        time.sleep(CANDLE_WAREHOUSE_LIVE_INTERVAL_SECONDS)
+
+
+def start_backend_candle_warehouse() -> Dict[str, Any]:
+    global _CANDLE_WAREHOUSE_THREAD
+    with _CANDLE_WAREHOUSE_LOCK:
+        if _CANDLE_WAREHOUSE_THREAD is not None and _CANDLE_WAREHOUSE_THREAD.is_alive():
+            return dict(_CANDLE_WAREHOUSE_STATUS)
+        _CANDLE_WAREHOUSE_STATUS["started"] = True
+        _CANDLE_WAREHOUSE_STATUS["symbols"] = _warehouse_symbols()
+        _CANDLE_WAREHOUSE_STATUS["timeframes"] = _warehouse_timeframes()
+        _CANDLE_WAREHOUSE_STATUS["liveIntervalSeconds"] = CANDLE_WAREHOUSE_LIVE_INTERVAL_SECONDS
+        _CANDLE_WAREHOUSE_THREAD = threading.Thread(
+            target=_backend_candle_warehouse_loop,
+            name="backend-candle-warehouse",
+            daemon=True,
+        )
+        _CANDLE_WAREHOUSE_THREAD.start()
+        return dict(_CANDLE_WAREHOUSE_STATUS)
+
+
+@app.get("/api/candle-warehouse/status")
+def candle_warehouse_status() -> Dict[str, Any]:
+    with _CANDLE_WAREHOUSE_LOCK:
+        return {
+            "eventType": "BACKEND_CANDLE_WAREHOUSE_STATUS",
+            "status": "Live" if _CANDLE_WAREHOUSE_STATUS.get("started") else "Waiting",
+            **dict(_CANDLE_WAREHOUSE_STATUS),
+            "createdAt": now_iso(),
+        }
+
+
+@app.get("/api/candle-warehouse/update-now")
+def candle_warehouse_update_now() -> Dict[str, Any]:
+    return _update_backend_live_candles_once()
+
+
 @app.get("/api/ml-feature-store/status")
 def ml_feature_store_status(symbol: Optional[str] = None, timeframe: Optional[str] = None) -> Dict[str, Any]:
     if not get_ml_feature_store_summary:
@@ -7968,40 +8249,46 @@ def recent_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 3
 
 
 @app.get("/api/historical-candles")
-def historical_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500, force: bool = False) -> Dict[str, Any]:
+def historical_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 0, force: bool = False) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(1, min(int(limit or 500), 5000))
+    safe_limit = 0 if is_futures_symbol(normalized_symbol) else max(1, min(candle_cache_limit_value(limit) or 500, 5000))
 
     if not force:
-        cached = candle_cache_get("historical", normalized_symbol, normalized_timeframe, safe_limit, CANDLE_SITE_CACHE_MAX_AGE_SECONDS)
+        cached = candle_cache_best("historical", normalized_symbol, normalized_timeframe, 1, max(CANDLE_SITE_CACHE_MAX_AGE_SECONDS, 7 * 24 * 60 * 60))
         if cached:
             cached_candles = cached.get("candles")
             if isinstance(cached_candles, list):
+                returned = maybe_limit_candles(cached_candles, normalized_symbol, safe_limit)
                 rebuilt = build_candle_route_payload(
-                    route_source="historical_candle_route",
+                    route_source="historical_candle_route_saved_backend",
                     symbol=normalized_symbol,
                     timeframe=normalized_timeframe,
-                    candles=cached_candles,
+                    candles=returned,
                     provider=cached.get("provider"),
                     cache_label=str(cached.get("cache") or "site_cached"),
                 )
                 rebuilt["siteCache"] = cached.get("siteCache", True)
                 rebuilt["siteCacheAgeSeconds"] = cached.get("siteCacheAgeSeconds")
+                rebuilt["backendWarehouse"] = True
+                rebuilt["noArtificialCandleLimit"] = is_futures_symbol(normalized_symbol)
                 return rebuilt
             return cached
 
     candles = fetch_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
+    candles = maybe_limit_candles(candles, normalized_symbol, safe_limit)
     provider = candles[-1].get("provider") if candles else None
 
     payload = build_candle_route_payload(
-        route_source="historical_candle_route",
+        route_source="historical_candle_route_provider_refresh",
         symbol=normalized_symbol,
         timeframe=normalized_timeframe,
         candles=candles,
         provider=provider,
         cache_label="refreshed",
     )
+    payload["backendWarehouse"] = True
+    payload["noArtificialCandleLimit"] = is_futures_symbol(normalized_symbol)
 
     if candles:
         return candle_cache_set("historical", normalized_symbol, normalized_timeframe, safe_limit, payload)
@@ -8011,45 +8298,51 @@ def historical_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int
 
 
 @app.get("/api/candles")
-def candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500, force: bool = False) -> Dict[str, Any]:
+def candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 0, force: bool = False) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(1, min(int(limit or 500), 5000))
+    safe_limit = 0 if is_futures_symbol(normalized_symbol) else max(1, min(candle_cache_limit_value(limit) or 500, 5000))
     use_backend_cache = not force
 
     if not force:
-        cached = candle_cache_get("dashboard", normalized_symbol, normalized_timeframe, safe_limit, CANDLE_SITE_CACHE_MAX_AGE_SECONDS)
+        cached = candle_cache_best("dashboard", normalized_symbol, normalized_timeframe, 1, max(CANDLE_SITE_CACHE_MAX_AGE_SECONDS, 7 * 24 * 60 * 60))
         if cached:
             cached_candles = cached.get("candles")
             if isinstance(cached_candles, list):
                 if futures_cached_payload_is_stale_against_live(cached, normalized_symbol, normalized_timeframe):
                     use_backend_cache = False
                 else:
+                    returned = maybe_limit_candles(cached_candles, normalized_symbol, safe_limit)
                     rebuilt = build_candle_route_payload(
-                        route_source="dashboard_merged_candles",
+                        route_source="dashboard_saved_backend_candles",
                         symbol=normalized_symbol,
                         timeframe=normalized_timeframe,
-                        candles=cached_candles,
+                        candles=returned,
                         provider=cached.get("provider"),
                         cache_label=str(cached.get("cache") or "site_cached"),
                     )
                     rebuilt["siteCache"] = cached.get("siteCache", True)
                     rebuilt["siteCacheAgeSeconds"] = cached.get("siteCacheAgeSeconds")
+                    rebuilt["backendWarehouse"] = True
+                    rebuilt["noArtificialCandleLimit"] = is_futures_symbol(normalized_symbol)
                     return rebuilt
             elif not futures_cached_payload_is_stale_against_live(cached, normalized_symbol, normalized_timeframe):
                 return cached
 
     merged = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit, use_cache=use_backend_cache)
+    merged = maybe_limit_candles(merged, normalized_symbol, safe_limit)
     provider = merged[-1].get("provider") if merged else None
 
     payload = build_candle_route_payload(
-        route_source="dashboard_merged_candles",
+        route_source="dashboard_provider_refresh_candles",
         symbol=normalized_symbol,
         timeframe=normalized_timeframe,
         candles=merged,
         provider=provider,
         cache_label="refreshed",
     )
+    payload["backendWarehouse"] = True
+    payload["noArtificialCandleLimit"] = is_futures_symbol(normalized_symbol)
 
     if merged:
         return candle_cache_set("dashboard", normalized_symbol, normalized_timeframe, safe_limit, payload)
@@ -8075,7 +8368,7 @@ def _preload_unique_timeframes(timeframes: str) -> List[str]:
 def _best_cached_candles_for_preload(symbol: str, timeframe: str, limit: int) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(1, min(int(limit or 500), 5000))
+    safe_limit = 0 if is_futures_symbol(normalized_symbol) else max(1, min(candle_cache_limit_value(limit) or 500, 5000))
 
     for route_name in ["dashboard", "historical"]:
         try:
@@ -8097,7 +8390,7 @@ def _best_cached_candles_for_preload(symbol: str, timeframe: str, limit: int) ->
                 normalized_symbol,
             )
             if candles_list:
-                return candles_list[-safe_limit:]
+                return maybe_limit_candles(candles_list, normalized_symbol, safe_limit)
 
     return []
 
@@ -8113,8 +8406,8 @@ def _store_preload_candle_payload(
 ) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(1, min(int(limit or 500), 5000))
-    clean_candles = filter_valid_candles_for_symbol(candles_list, normalized_symbol)[-safe_limit:]
+    safe_limit = 0 if is_futures_symbol(normalized_symbol) else max(1, min(candle_cache_limit_value(limit) or 500, 5000))
+    clean_candles = filter_valid_candles_for_symbol(maybe_limit_candles(candles_list, normalized_symbol, safe_limit), normalized_symbol)
 
     payload = build_candle_route_payload(
         route_source=source,
@@ -8146,8 +8439,8 @@ def _preload_mes_direct_history(timeframe_list: List[str], limit: int) -> List[D
     - start_ym=2026-06 is used for MES because RapidAPI verified it returns real bars
     """
     normalized_symbol = "MES1!"
-    safe_limit = max(1, min(int(limit or 500), 5000))
-    required_count = min(safe_limit, 300)
+    safe_limit = 0
+    required_count = 1
 
     unique_timeframes: List[str] = []
     seen: set[str] = set()
@@ -8170,7 +8463,7 @@ def _preload_mes_direct_history(timeframe_list: List[str], limit: int) -> List[D
                 fetched = fetch_insightsentry_historical_candles(normalized_symbol, tf, safe_limit)
                 fetched = filter_valid_candles_for_symbol(fetched, normalized_symbol)
                 if len(fetched) >= len(tf_candles):
-                    tf_candles = fetched[-safe_limit:]
+                    tf_candles = fetched
                     source = f"mes_preload_direct_{tf}_history_start_ym_{insightsentry_history_start_ym(normalized_symbol, tf)}"
             except Exception as error:
                 print(f"[Preload candles] MES direct {tf} fetch failed: {error}")
@@ -8183,7 +8476,7 @@ def _preload_mes_direct_history(timeframe_list: List[str], limit: int) -> List[D
                 one_min = fetch_insightsentry_historical_candles(normalized_symbol, "1m", min(one_min_limit, 5000))
                 resampled = resample_candles_to_timeframe(one_min, tf, safe_limit)
                 if len(resampled) > len(tf_candles):
-                    tf_candles = resampled[-safe_limit:]
+                    tf_candles = resampled
                     source = "mes_preload_resampled_from_direct_1m_history"
             except Exception as error:
                 print(f"[Preload candles] MES resample fallback failed for {tf}: {error}")
@@ -8221,13 +8514,13 @@ def _preload_mes_direct_history(timeframe_list: List[str], limit: int) -> List[D
 @app.get("/api/preload-candles")
 def preload_candles(
     symbols: str = "BTCUSD,MES1!,SPY",
-    timeframes: str = "1m,5m,10m,15m",
-    limit: int = 500,
+    timeframes: str = "1m,3m,5m,10m",
+    limit: int = 0,
     historicalOnly: bool = True,
 ) -> Dict[str, Any]:
     symbol_list = [normalize_symbol(item) for item in symbols.split(",") if item.strip()]
     timeframe_list = _preload_unique_timeframes(timeframes)
-    safe_limit = max(1, min(int(limit or 500), 5000))
+    safe_limit = 0
 
     results: List[Dict[str, Any]] = []
 
@@ -8262,17 +8555,37 @@ def preload_candles(
     }
 
 @app.get("/api/candle-cache-status")
-def candle_cache_status() -> Dict[str, Any]:
+def candle_cache_status(symbol: str = "", timeframes: str = "") -> Dict[str, Any]:
+    requested_symbol = normalize_symbol(symbol) if symbol else ""
+    requested_timeframes = {normalize_timeframe(item.strip()) for item in str(timeframes or "").split(",") if item.strip()}
     entries: List[Dict[str, Any]] = []
+
+    if db_list_candle_cache_entries:
+        try:
+            for row in db_list_candle_cache_entries(1000):
+                if requested_symbol and normalize_symbol(str(row.get("symbol") or "")) != requested_symbol:
+                    continue
+                if requested_timeframes and normalize_timeframe(str(row.get("timeframe") or "")) not in requested_timeframes:
+                    continue
+                entries.append(row)
+        except Exception as error:
+            print(f"[Candle Cache Status] DB list failed: {error}")
 
     for key, value in CANDLE_RESPONSE_CACHE.items():
         if not isinstance(value, dict):
             continue
+        row_symbol = normalize_symbol(str(value.get("symbol") or ""))
+        row_timeframe = normalize_timeframe(str(value.get("timeframe") or ""))
+        if requested_symbol and row_symbol != requested_symbol:
+            continue
+        if requested_timeframes and row_timeframe not in requested_timeframes:
+            continue
 
         entries.append({
             "key": key,
-            "symbol": value.get("symbol"),
-            "timeframe": value.get("timeframe"),
+            "route": "memory_json_fallback",
+            "symbol": row_symbol,
+            "timeframe": row_timeframe,
             "count": value.get("count", len(value.get("candles", []) if isinstance(value.get("candles"), list) else [])),
             "provider": value.get("provider"),
             "createdAt": value.get("createdAt"),
@@ -8283,7 +8596,10 @@ def candle_cache_status() -> Dict[str, Any]:
         "eventType": "CANDLE_CACHE_STATUS",
         "status": "Live",
         "siteCache": True,
+        "siteCacheDb": bool(db_list_candle_cache_entries),
         "cacheFile": str(CANDLE_CACHE_FILE),
+        "symbol": requested_symbol or None,
+        "timeframes": sorted(requested_timeframes) if requested_timeframes else None,
         "count": len(entries),
         "entries": entries,
         "createdAt": now_iso(),
@@ -8355,16 +8671,17 @@ async def save_chart_settings(request: FastAPIRequest) -> Dict[str, Any]:
     }
 
 
+@app.get("/api/warm-candles")
 @app.get("/api/warm-candle-cache")
 def warm_candle_cache(
-    symbols: str = "BTCUSD,MES1!",
-    timeframes: str = "1m,5m,10m,15m,30m",
-    limit: int = 500,
+    symbols: str = "MES1!",
+    timeframes: str = "1m,3m,5m,10m",
+    limit: int = 0,
     force: bool = False,
 ) -> Dict[str, Any]:
     symbol_list = [normalize_symbol(item) for item in symbols.split(",") if item.strip()]
     timeframe_list = [normalize_timeframe(item) for item in timeframes.split(",") if item.strip()]
-    safe_limit = max(1, min(int(limit or 500), 1000))
+    safe_limit = 0
 
     results: List[Dict[str, Any]] = []
 
