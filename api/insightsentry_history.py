@@ -102,6 +102,48 @@ def to_int(value: Any, fallback: int = 0) -> int:
         return fallback
 
 
+def to_epoch_seconds(value: Any, fallback: int = 0) -> int:
+    """Normalize provider candle time to Unix epoch seconds.
+
+    InsightSentry may return numeric epoch seconds, millisecond epochs, or ISO
+    datetime strings like 2026-06-01T00:00:00+00:00. The clean candle
+    service stores ISO strings for chart compatibility, but every internal sort
+    and cache key should use the numeric epoch field.
+    """
+    if value is None:
+        return fallback
+
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if numeric <= 0:
+            return fallback
+        if numeric > 10_000_000_000:
+            numeric = numeric / 1000.0
+        return int(numeric)
+
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+
+    try:
+        numeric = float(text)
+        if numeric <= 0:
+            return fallback
+        if numeric > 10_000_000_000:
+            numeric = numeric / 1000.0
+        return int(numeric)
+    except Exception:
+        pass
+
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return int(parsed.timestamp())
+    except Exception:
+        return fallback
+
+
 def normalize_symbol(value: Any = "MES1!") -> str:
     raw = str(value or "MES1!").strip().upper()
     raw = (
@@ -248,7 +290,7 @@ def normalize_history_candle(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not isinstance(raw, dict):
         return None
 
-    timestamp = to_int(raw.get("time") or raw.get("timestamp") or raw.get("t"), 0)
+    timestamp = to_epoch_seconds(raw.get("time") or raw.get("timestamp") or raw.get("t"), 0)
     open_price = to_float(raw.get("open") or raw.get("o"), 0.0)
     high_price = to_float(raw.get("high") or raw.get("h"), 0.0)
     low_price = to_float(raw.get("low") or raw.get("l"), 0.0)
@@ -310,7 +352,7 @@ def normalize_history_response(
         if candle:
             candles.append(candle)
 
-    candles.sort(key=lambda item: int(item.get("time", 0)))
+    candles.sort(key=lambda item: to_epoch_seconds(item.get("epoch") or item.get("time") or item.get("timestamp"), 0))
 
     if limit and limit > 0:
         candles = candles[-int(limit):]
