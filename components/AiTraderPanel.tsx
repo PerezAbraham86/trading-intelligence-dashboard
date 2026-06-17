@@ -330,6 +330,153 @@ function normalizeTradeSide(value: any): "BUY" | "SELL" {
   return side === "SELL" ? "SELL" : "BUY";
 }
 
+
+function normalizeOptionalTradeSide(value: any): "BUY" | "SELL" | "HOLD" {
+  return normalizeDecision(value);
+}
+
+function readTradePlanNumber(...values: any[]) {
+  for (const value of values) {
+    const parsed = toFiniteNumber(value, NaN);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+
+  return 0;
+}
+
+function buildAiTraderExecutionPayload({
+  inputPayload,
+  latestDecision,
+  livePrice,
+  symbol,
+  timeframe,
+  candles,
+}: {
+  inputPayload: any;
+  latestDecision?: any;
+  livePrice: number;
+  symbol: string;
+  timeframe: string;
+  candles?: any[];
+}) {
+  const payload = inputPayload && typeof inputPayload === "object" ? inputPayload : {};
+  const decisionObject = latestDecision && typeof latestDecision === "object" ? latestDecision : payload?.decision;
+  const unifiedPlan = payload?.unifiedTradePlan && typeof payload.unifiedTradePlan === "object"
+    ? payload.unifiedTradePlan
+    : null;
+
+  const unifiedSide = unifiedPlan?.canTrade
+    ? normalizeOptionalTradeSide(unifiedPlan?.side)
+    : "HOLD";
+  const decisionSide = normalizeOptionalTradeSide(
+    decisionObject?.rawDecision ??
+      decisionObject?.decision ??
+      payload?.rawDecision ??
+      payload?.decision ??
+      payload?.side ??
+      payload?.signal?.signal ??
+      payload?.signal?.side ??
+      payload?.signal?.direction,
+  );
+  const targetSide = readTradePlanNumber(
+    unifiedPlan?.target,
+    decisionObject?.target,
+    payload?.targetPrice,
+    payload?.target,
+  ) > readTradePlanNumber(
+    unifiedPlan?.entry,
+    decisionObject?.entry,
+    payload?.entryPrice,
+    payload?.entry,
+    livePrice,
+  )
+    ? "BUY"
+    : readTradePlanNumber(
+        unifiedPlan?.target,
+        decisionObject?.target,
+        payload?.targetPrice,
+        payload?.target,
+      ) > 0
+      ? "SELL"
+      : "HOLD";
+
+  const side = unifiedSide !== "HOLD" ? unifiedSide : decisionSide !== "HOLD" ? decisionSide : targetSide;
+  const normalizedSymbol = String(payload?.symbol ?? symbol ?? "MES1!").toUpperCase();
+  const normalizedTimeframe = String(payload?.timeframe ?? timeframe ?? "1m");
+  const current = readTradePlanNumber(livePrice, payload?.currentPrice, payload?.price);
+  const entry = unifiedPlan?.canTrade
+    ? readTradePlanNumber(unifiedPlan?.entry, current)
+    : readTradePlanNumber(decisionObject?.entry, payload?.entryPrice, payload?.entry, current);
+  const target = unifiedPlan?.canTrade
+    ? readTradePlanNumber(unifiedPlan?.target)
+    : readTradePlanNumber(
+        decisionObject?.target,
+        payload?.targetPrice,
+        payload?.target,
+        payload?.takeProfitPrice,
+        payload?.signal?.targetPrice,
+        payload?.signal?.target,
+      );
+  const stop = unifiedPlan?.canTrade
+    ? readTradePlanNumber(unifiedPlan?.stop)
+    : readTradePlanNumber(
+        decisionObject?.stop,
+        payload?.stopPrice,
+        payload?.stop,
+        payload?.signal?.stopPrice,
+        payload?.signal?.stop,
+      );
+  const setupKey = String(
+    payload?.setupKey ??
+      buildAiTradeSetupKey({
+        symbol: normalizedSymbol,
+        timeframe: normalizedTimeframe,
+        candles,
+        side,
+        entry,
+        target,
+        stop,
+      }),
+  );
+
+  return sanitizeAiTraderPayload({
+    ...payload,
+    symbol: normalizedSymbol,
+    timeframe: normalizedTimeframe,
+    setupKey,
+    side,
+    decision: side,
+    rawDecision: side,
+    currentPrice: current,
+    livePrice: current,
+    entry,
+    target,
+    stop,
+    entryPrice: entry,
+    targetPrice: target,
+    stopPrice: stop,
+    unifiedTradePlan: unifiedPlan
+      ? {
+          ...unifiedPlan,
+          side,
+        }
+      : payload?.unifiedTradePlan,
+    signal: {
+      ...(payload?.signal ?? {}),
+      signal: side,
+      side,
+      direction: side,
+      entry,
+      target,
+      stop,
+      entryPrice: entry,
+      targetPrice: target,
+      stopPrice: stop,
+    },
+    decisionSnapshot: decisionObject,
+  });
+}
+
 function sanitizeAiTraderPayload(value: any, depth = 0): any {
   if (depth > 6) return null;
   if (value === undefined || value === null) return null;
@@ -376,7 +523,7 @@ async function readApiError(response: Response) {
   }
 }
 
-function createRequestTimeout(timeoutMs = 12000) {
+function createRequestTimeout(timeoutMs = 25000) {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
 
@@ -1365,12 +1512,12 @@ function getAiTrailingStopSettlement({
 
   const best = calculateBestFavorableTradeR(trade, livePrice, candles);
 
-  // Trailing stop activates only after the trade has reached at least +1.00R.
-  // Then it locks profit activeTrailR behind the best favorable R.
+  // Trailing stop activates automatically once the trade is profitable.
+  // Then it trails activeTrailR behind the best favorable R.
   // Example with Trail Stop R = 0.50:
-  // best +1.00R -> trail at +0.50R
+  // best +0.60R -> trail at +0.10R
   // best +1.50R -> trail at +1.00R
-  if (best.bestR < 1) {
+  if (best.bestR <= 0) {
     return {
       active: false,
       shouldClose: false,
@@ -2829,7 +2976,7 @@ export default function AiTraderPanel({
         candles,
       });
 
-      const timeout = createRequestTimeout(16000);
+      const timeout = createRequestTimeout(26000);
 
       try {
         const response = await fetch(`${apiBaseUrl}/api/ai-trader/close`, {
@@ -2894,8 +3041,42 @@ export default function AiTraderPanel({
         return validation;
       }
 
+      const outboundPayload = buildAiTraderExecutionPayload({
+        inputPayload,
+        latestDecision: inputPayload?.decision ?? decision,
+        livePrice: liveActivePrice,
+        symbol,
+        timeframe,
+        candles,
+      });
+      const outboundSide = normalizeOptionalTradeSide(
+        (outboundPayload as any)?.side ??
+          (outboundPayload as any)?.rawDecision ??
+          (outboundPayload as any)?.decision,
+      );
+
+      if (outboundSide === "HOLD") {
+        const waiting: AiTraderValidation = {
+          eventType: "AI_TRADER_VALIDATE_PLAN",
+          status: "Waiting",
+          valid: false,
+          errorCode: "WAITING_FOR_BUY_SELL_SIDE",
+          message: "AI Trader is waiting for a real BUY or SELL setup before validating a trade plan.",
+          blockers: [
+            {
+              code: "WAITING_FOR_BUY_SELL_SIDE",
+              field: "side",
+              message: "No executable BUY or SELL side is available yet.",
+            },
+          ],
+          createdAt: new Date().toISOString(),
+        };
+        setValidation(waiting);
+        return waiting;
+      }
+
       validateRequestInFlightRef.current = true;
-      const timeout = createRequestTimeout(12000);
+      const timeout = createRequestTimeout(22000);
 
       try {
         const response = await fetch(`${apiBaseUrl}/api/ai-trader/validate-plan`, {
@@ -2903,7 +3084,7 @@ export default function AiTraderPanel({
           headers: {
             "Content-Type": "application/json",
           },
-          body: JSON.stringify(inputPayload),
+          body: JSON.stringify(outboundPayload),
           signal: timeout.signal,
         });
 
@@ -2932,7 +3113,7 @@ export default function AiTraderPanel({
         validateRequestInFlightRef.current = false;
       }
     },
-    [apiBaseUrl, safePayload, validation],
+    [apiBaseUrl, candles, decision, liveActivePrice, safePayload, symbol, timeframe, validation],
   );
 
   const fetchDiagnostics = useCallback(
@@ -3121,7 +3302,7 @@ export default function AiTraderPanel({
 
       decisionRequestInFlightRef.current = true;
       lastDecisionRequestAtRef.current = now;
-      const timeout = createRequestTimeout(14000);
+      const timeout = createRequestTimeout(24000);
 
       try {
         setIsLoading(true);
@@ -3132,7 +3313,16 @@ export default function AiTraderPanel({
           headers: {
             "Content-Type": "application/json",
           },
-          body: JSON.stringify(safePayload),
+          body: JSON.stringify(
+            buildAiTraderExecutionPayload({
+              inputPayload: safePayload,
+              latestDecision: decision,
+              livePrice: liveActivePrice,
+              symbol,
+              timeframe,
+              candles,
+            }),
+          ),
           signal: timeout.signal,
         });
 
@@ -3144,7 +3334,17 @@ export default function AiTraderPanel({
 
         const json = await response.json();
         setDecision(json);
-        await validateBackendPlan({ ...(safePayload as any), decision: json }, true);
+        await validateBackendPlan(
+          buildAiTraderExecutionPayload({
+            inputPayload: safePayload,
+            latestDecision: json,
+            livePrice: liveActivePrice,
+            symbol,
+            timeframe,
+            candles,
+          }),
+          true,
+        );
         setPersistentLearningStats((current: any) => {
           const withBackendStats = mergeAiDecisionStats(
             current,
@@ -3166,7 +3366,7 @@ export default function AiTraderPanel({
         setIsLoading(false);
       }
     },
-    [apiBaseUrl, liveActivePrice, safePayload, symbol, timeframe, candles, validateBackendPlan],
+    [apiBaseUrl, candles, decision, liveActivePrice, safePayload, symbol, timeframe, validateBackendPlan],
   );
 
   const fetchSummary = useCallback(
@@ -3243,7 +3443,7 @@ export default function AiTraderPanel({
 
       evaluateRequestInFlightRef.current = true;
       lastEvaluateRequestAtRef.current = now;
-      const timeout = createRequestTimeout(16000);
+      const timeout = createRequestTimeout(26000);
 
       try {
         if (!apiBaseUrl) {
@@ -3338,13 +3538,31 @@ export default function AiTraderPanel({
       if (!apiBaseUrl) return;
 
       const now = Date.now();
+      const executionPayload = buildAiTraderExecutionPayload({
+        inputPayload: safePayload,
+        latestDecision: decision,
+        livePrice: liveActivePrice,
+        symbol,
+        timeframe,
+        candles,
+      });
+      const executionSide = normalizeOptionalTradeSide(
+        (executionPayload as any)?.side ??
+          (executionPayload as any)?.rawDecision ??
+          (executionPayload as any)?.decision,
+      );
+
+      if (executionSide === "HOLD") {
+        setActionStatus("Open blocked: AI Trader has no executable BUY or SELL side yet.");
+        return;
+      }
 
       if (openRequestInFlightRef.current) {
         setActionStatus("Open trade request already running...");
         return;
       }
 
-      const openSetupKey = String((safePayload as any)?.setupKey ?? "");
+      const openSetupKey = String((executionPayload as any)?.setupKey ?? "");
 
       // Autonomous paper trading should not stay locked out by an old setup key
       // or an old timestamp. The only valid entry blockers are an actual open
@@ -3426,10 +3644,11 @@ export default function AiTraderPanel({
 
       const backendValidation = await validateBackendPlan(
         {
-          ...(safePayload as any),
+          ...(executionPayload as any),
           decision,
           currentPrice: liveActivePrice,
-          entryPrice: (safePayload as any)?.entryPrice ?? liveActivePrice,
+          livePrice: liveActivePrice,
+          entryPrice: (executionPayload as any)?.entryPrice ?? liveActivePrice,
         },
         true,
       );
@@ -3456,7 +3675,7 @@ export default function AiTraderPanel({
       // computer will not see it in ai_trader_open_trades.
       activePaperTradeLockRef.current = true;
       openRequestInFlightRef.current = true;
-      const timeout = createRequestTimeout(16000);
+      const timeout = createRequestTimeout(26000);
 
       try {
         setActionStatus("AI Trader opening dashboard-only trade...");
@@ -3468,12 +3687,13 @@ export default function AiTraderPanel({
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            ...(safePayload as any),
+            ...(executionPayload as any),
             entryTime: openTimestamp,
             openedAt: openTimestamp,
             clientOpenedAt: openTimestamp,
             currentPrice: liveActivePrice,
-            entryPrice: (safePayload as any)?.entryPrice ?? liveActivePrice,
+            livePrice: liveActivePrice,
+            entryPrice: (executionPayload as any)?.entryPrice ?? liveActivePrice,
           }),
           signal: timeout.signal,
         });
@@ -4172,8 +4392,9 @@ export default function AiTraderPanel({
     });
 
     pushRow("warn", "risk-control-table", {
-      maxRiskR: `-${maxRiskR.toFixed(2)}R`,
-      action: "Close open AI trade when Live R is less than or equal to max risk",
+      maxRiskR: `${maxRiskR.toFixed(2)}R`,
+      stopThreshold: `Live R <= -${maxRiskR.toFixed(2)}R`,
+      action: "Close open AI trade when Live R reaches the negative max-risk threshold",
       trailingStop: useAiTrailingStop ? `ON • ${trailingStopR.toFixed(2)}R` : "OFF",
     });
 
@@ -4503,7 +4724,7 @@ export default function AiTraderPanel({
           <button
             type="button"
             onClick={() => setUseAiTrailingStop((current) => !current)}
-            title="Trailing stop activates after the AI trade reaches +1.00R. It trails behind the best favorable R by the Trailing Stop R amount."
+            title="Trailing stop activates automatically whenever AI Trail is ON and the trade has positive favorable R. It trails behind the best favorable R by the Trailing Stop R amount."
             className={`rounded-lg border px-3 py-2 text-[10px] font-black uppercase tracking-wide transition ${
               useAiTrailingStop
                 ? "border-emerald-400/40 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20"
@@ -4519,7 +4740,7 @@ export default function AiTraderPanel({
                 ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
                 : "border-dark-600 bg-dark-900 text-gray-400"
             }`}
-            title="Trailing Stop R. Example: 0.50 means after best profit reaches +1.50R, AI closes if price falls back to +1.00R."
+            title="Trailing Stop R. Example: 0.50 means the AI trails 0.50R behind the best favorable move once the trade is profitable."
           >
             Trailing Stop
             <input
@@ -4550,7 +4771,19 @@ export default function AiTraderPanel({
 
           <button
             type="button"
-            onClick={() => validateBackendPlan({ ...(safePayload as any), decision }, true)}
+            onClick={() =>
+              validateBackendPlan(
+                buildAiTraderExecutionPayload({
+                  inputPayload: safePayload,
+                  latestDecision: decision,
+                  livePrice: liveActivePrice,
+                  symbol,
+                  timeframe,
+                  candles,
+                }),
+                true,
+              )
+            }
             className="rounded-lg border border-purple-400/30 bg-purple-400/10 px-3 py-2 text-xs font-bold text-purple-200 hover:bg-purple-400/20"
           >
             Validate Plan
