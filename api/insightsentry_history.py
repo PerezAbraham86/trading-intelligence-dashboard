@@ -268,9 +268,12 @@ def normalize_history_candle(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     high_price = max(high_price, open_price, close_price)
     low_price = min(low_price, open_price, close_price)
 
+    iso_time = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+
     return {
-        "time": timestamp,
-        "timestamp": timestamp,
+        "time": iso_time,
+        "timestamp": iso_time,
+        "epoch": timestamp,
         "t": timestamp,
         "open": round(open_price, 8),
         "high": round(high_price, 8),
@@ -361,7 +364,7 @@ def get_historical_ohlcv(
     symbol: str = "MES1!",
     timeframe: str = "1m",
     start_ym: Optional[str] = None,
-    limit: int = 700,
+    limit: int = 0,
     extended: bool = True,
     badj: bool = True,
     dadj: bool = False,
@@ -378,7 +381,13 @@ def get_historical_ohlcv(
     bar_type, bar_interval = timeframe_to_history_params(tf)
     start_ym_value = str(start_ym or current_start_ym()).strip()
 
-    safe_limit = max(1, min(int(limit or 700), 5000))
+    # Dashboard rule: limit=0 means do not artificially cap MES/provider history.
+    # Positive limit still slices the returned series when explicitly requested.
+    try:
+        requested_limit = int(limit or 0)
+    except Exception:
+        requested_limit = 0
+    safe_limit = max(0, min(requested_limit, 100000))
     key = cache_key(
         symbol=normalized_symbol,
         timeframe=tf,
