@@ -1367,6 +1367,65 @@ async function fetchDashboardSnapshotPayload(
   return response.json()
 }
 
+
+async function fetchBackendHistoricalRefreshPayload(
+  apiBaseUrl: string,
+  symbol: string,
+  timeframe: string,
+  limit = 0
+): Promise<any> {
+  const normalizedSymbol = normalizeSymbol(symbol)
+  const normalizedTimeframe = normalizeTimeframe(timeframe)
+  const futuresHistory = isFuturesCandleSymbol(normalizedSymbol)
+  const safeLimit = futuresHistory
+    ? '0'
+    : String(Math.max(1, Math.min(Number(limit) || 700, SHARED_CANDLE_CACHE_MAX_BARS || 5000)))
+
+  const routes = ['/api/candles', '/api/historical-candles']
+  let lastError = ''
+
+  for (const route of routes) {
+    const params = new URLSearchParams({
+      symbol: normalizedSymbol,
+      timeframe: normalizedTimeframe,
+      limit: safeLimit,
+      force: 'true',
+      repair: 'true',
+      historicalOnly: 'true',
+    })
+
+    try {
+      const response = await fetch(`${apiBaseUrl}${route}?${params.toString()}`, {
+        cache: 'no-store',
+      })
+
+      if (!response.ok) {
+        lastError = `${route} returned ${response.status}`
+        continue
+      }
+
+      const payload = await response.json()
+      const candles = normalizeCandlePayload(payload)
+
+      if (candles.length > 0) {
+        return {
+          ...payload,
+          candles,
+          source: typeof payload?.source === 'string'
+            ? `${payload.source}+frontend_forced_history_refresh`
+            : `${route}_frontend_forced_history_refresh`,
+        }
+      }
+
+      lastError = `${route} returned 0 candles`
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : `${route} failed`
+    }
+  }
+
+  throw new Error(lastError || 'Backend historical refresh returned no candles')
+}
+
 function getDashboardSnapshotLivePricePayload(snapshot: any) {
   if (!snapshot || typeof snapshot !== 'object') return null
 
@@ -6475,6 +6534,52 @@ export default function Dashboard() {
         return existing
       }
 
+      const storeBootPayload = (payload: any, candles: DashboardCandle[], sourceFallback: string) => {
+        if (!Array.isArray(candles) || candles.length === 0) return null
+
+        const previous = SHARED_CANDLE_CACHE.get(cacheKey)
+        const engineState = getDashboardSnapshotEngineState(payload)
+        const projection = getDashboardSnapshotProjectionEngine(payload)
+        const overlayPayload = getUnifiedOverlayPayload(payload, engineState, projection)
+        const unifiedIntelligence = mergeProjectionEngineIntoUnifiedIntelligence(
+          getUnifiedIntelligencePayload(payload, engineState, projection),
+          projection
+        )
+        const mergedCandles = mergeHistoricalCandles(
+          previous?.candles,
+          candles,
+          isFuturesCandleSymbol(normalizedSymbol) ? 0 : SHARED_CANDLE_CACHE_MAX_BARS
+        )
+        const entry: SharedCandleCacheEntry = {
+          candles: mergedCandles,
+          overlayPayload: overlayPayload ?? previous?.overlayPayload ?? null,
+          unifiedIntelligence: unifiedIntelligence ?? previous?.unifiedIntelligence ?? null,
+          updatedAt: Date.now(),
+          limit: Math.max(limit, previous?.limit ?? 0, mergedCandles.length),
+          provider:
+            typeof payload?.candles?.provider === 'string'
+              ? payload.candles.provider
+              : typeof payload?.provider === 'string'
+                ? payload.provider
+                : 'backend_history',
+          source:
+            typeof payload?.candles?.source === 'string'
+              ? payload.candles.source
+              : typeof payload?.source === 'string'
+                ? payload.source
+                : sourceFallback,
+        }
+
+        SHARED_CANDLE_CACHE.set(cacheKey, entry)
+
+        if (key === 'main') {
+          setPythonEngineState(engineState)
+          if (projection) setProjectionEngine(projection)
+        }
+
+        return entry
+      }
+
       for (let attempt = 1; attempt <= 4; attempt += 1) {
         if (cancelled) return null
         setBootStep(key, 'loading', `${normalizedSymbol} ${normalizedTimeframe} • requesting snapshot attempt ${attempt}/4`)
@@ -6505,52 +6610,59 @@ export default function Dashboard() {
           }
 
           if (candles.length >= minimum) {
-            const previous = SHARED_CANDLE_CACHE.get(cacheKey)
-            const engineState = getDashboardSnapshotEngineState(snapshot)
-            const projection = getDashboardSnapshotProjectionEngine(snapshot)
-            const overlayPayload = getUnifiedOverlayPayload(snapshot, engineState, projection)
-            const unifiedIntelligence = mergeProjectionEngineIntoUnifiedIntelligence(
-              getUnifiedIntelligencePayload(snapshot, engineState, projection),
-              projection
-            )
-            const mergedCandles = mergeHistoricalCandles(previous?.candles, candles, isFuturesCandleSymbol(normalizedSymbol) ? 0 : SHARED_CANDLE_CACHE_MAX_BARS)
-            const entry: SharedCandleCacheEntry = {
-              candles: mergedCandles,
-              overlayPayload: overlayPayload ?? previous?.overlayPayload ?? null,
-              unifiedIntelligence: unifiedIntelligence ?? previous?.unifiedIntelligence ?? null,
-              updatedAt: Date.now(),
-              limit: Math.max(limit, previous?.limit ?? 0, mergedCandles.length),
-              provider:
-                typeof snapshot?.candles?.provider === 'string'
-                  ? snapshot.candles.provider
-                  : typeof snapshot?.provider === 'string'
-                    ? snapshot.provider
-                    : 'dashboard_snapshot_boot',
-              source:
-                typeof snapshot?.candles?.source === 'string'
-                  ? snapshot.candles.source
-                  : typeof snapshot?.source === 'string'
-                    ? snapshot.source
-                    : 'dashboard_boot_snapshot',
-            }
-
-            SHARED_CANDLE_CACHE.set(cacheKey, entry)
-
-            if (key === 'main') {
-              setPythonEngineState(engineState)
-              if (projection) setProjectionEngine(projection)
-            }
-
-            setBootStep(key, 'done', `${normalizedSymbol} ${normalizedTimeframe} • ${candles.length} candles ready`)
+            const entry = storeBootPayload(snapshot, candles, 'dashboard_boot_snapshot')
+            setBootStep(key, 'done', `${normalizedSymbol} ${normalizedTimeframe} • ${candles.length} snapshot candles ready`)
             return entry
           }
 
-          setBootStep(key, 'warning', `${normalizedSymbol} ${normalizedTimeframe} • backend returned ${candles.length} candles; retrying`)
+          setBootStep(
+            key,
+            'warning',
+            `${normalizedSymbol} ${normalizedTimeframe} • snapshot returned ${candles.length}/${minimum}; forcing direct historical refresh`
+          )
         } catch (error) {
           setBootStep(
             key,
             'warning',
-            `${normalizedSymbol} ${normalizedTimeframe} • ${error instanceof Error ? error.message : 'snapshot unavailable'}; retrying`
+            `${normalizedSymbol} ${normalizedTimeframe} • snapshot unavailable; forcing direct historical refresh`
+          )
+        }
+
+        try {
+          const historical = await fetchBackendHistoricalRefreshPayload(
+            bootApiBaseUrl,
+            normalizedSymbol,
+            normalizedTimeframe,
+            limit
+          )
+          const historicalCandles = normalizeCandlePayload(historical)
+
+          if (historicalCandles.length >= minimum) {
+            const entry = storeBootPayload(historical, historicalCandles, 'frontend_forced_same_timeframe_historical_refresh')
+            setBootStep(
+              key,
+              'done',
+              `${normalizedSymbol} ${normalizedTimeframe} • ${historicalCandles.length} direct historical candles ready`
+            )
+            return entry
+          }
+
+          if (historicalCandles.length > 0) {
+            const entry = storeBootPayload(historical, historicalCandles, 'frontend_partial_same_timeframe_historical_refresh')
+            setBootStep(
+              key,
+              'warning',
+              `${normalizedSymbol} ${normalizedTimeframe} • direct history returned ${historicalCandles.length}/${minimum}; retrying`
+            )
+            if (attempt === 4) return entry
+          } else {
+            setBootStep(key, 'warning', `${normalizedSymbol} ${normalizedTimeframe} • direct history returned 0 candles; retrying`)
+          }
+        } catch (error) {
+          setBootStep(
+            key,
+            'warning',
+            `${normalizedSymbol} ${normalizedTimeframe} • ${error instanceof Error ? error.message : 'direct history unavailable'}; retrying`
           )
         }
 
