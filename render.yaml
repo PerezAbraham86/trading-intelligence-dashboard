@@ -8,9 +8,19 @@ services:
       - key: PYTHON_VERSION
         value: 3.11.9
       - key: SITE_CACHE_DB_FILE
-        value: /tmp/trading_dashboard_site_cache.sqlite3
+        value: /var/data/trading_dashboard_site_cache.sqlite3
+      - key: CANDLE_CACHE_FILE
+        value: /var/data/trading_dashboard_candle_cache.json
       - key: CANDLE_SITE_CACHE_MAX_AGE_SECONDS
         value: "86400"
+      - key: MAX_STORED_CANDLES_PER_CACHE_ENTRY
+        value: "0"
+      - key: INSIGHTSENTRY_HISTORY_TIMEOUT_SECONDS
+        value: "30"
+      - key: INSIGHTSENTRY_HISTORY_CACHE_SECONDS
+        value: "20"
+      - key: CANDLE_CLEAN_START_YM
+        value: "2026-06"
 
   - type: worker
     name: trading-intelligence-dashboard-cache-worker
@@ -20,22 +30,19 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
-      # IMPORTANT:
-      # Set this to your live Render backend URL after deploy.
-      # Example: https://trading-intelligence-dashboard-backend.onrender.com
+      # Set this in Render to your web service URL, for example:
+      # https://trading-intelligence-dashboard-backend.onrender.com
       - key: BACKEND_BASE_URL
         sync: false
       - key: CACHE_WORKER_SYMBOLS
-        value: MES1!,BTCUSD,ETHUSD,SPY
+        value: MES1!
       - key: CACHE_WORKER_TIMEFRAMES
-        value: 1m,5m,15m
+        value: 1m,3m,5m,10m
       - key: CACHE_WORKER_LIMIT
-        value: "500"
+        value: "0"
       - key: CACHE_WORKER_INTERVAL_SECONDS
         value: "60"
       - key: CACHE_WORKER_FORCE_FIRST_RUN
         value: "true"
       - key: CACHE_WORKER_FORCE_EACH_RUN
         value: "false"
-      - key: CACHE_WORKER_TOUCH_CONTEXT
-        value: "true"
