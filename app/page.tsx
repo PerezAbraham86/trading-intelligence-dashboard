@@ -5986,7 +5986,7 @@ function DashboardBootScreen({
   const activeStep = steps.find((step) => step.status === 'loading') ?? steps.find((step) => step.status === 'warning') ?? steps[steps.length - 1]
 
   return (
-    <div className="flex min-h-screen items-center justify-center overflow-hidden bg-[#101010] px-6 py-10 text-gray-100">
+    <div className="fixed inset-0 z-[9999] flex min-h-screen items-center justify-center overflow-hidden bg-[#101010] px-6 py-10 text-gray-100">
       <div className="absolute inset-0 opacity-30">
         <div className="absolute -right-24 top-16 grid grid-cols-5 gap-2">
           {Array.from({ length: 40 }).map((_, index) => (
@@ -6014,7 +6014,7 @@ function DashboardBootScreen({
               Welcome to MarketBOS
             </h1>
             <p className="mt-3 max-w-2xl text-sm text-gray-400">
-              Waking the backend, loading MES 5m main history first, then MES 10m history, then MES 1m history before charts mount.
+              Waking the backend and preloading MES 5m, MES 10m, and MES 1m history. The dashboard mounts behind this screen so charts and AI Trader can hydrate in parallel.
             </p>
           </div>
 
@@ -6133,11 +6133,7 @@ export default function Dashboard() {
     { key: 'hist5', label: 'Preloading MES 5m main history', detail: 'Waiting for 5-minute historical candles first', status: 'waiting' },
     { key: 'hist10', label: 'Preloading MES 10m history', detail: 'Waiting for 10-minute historical candles second', status: 'waiting' },
     { key: 'hist1', label: 'Preloading MES 1m history', detail: 'Waiting for 1-minute historical candles third', status: 'waiting' },
-    { key: 'main', label: 'Loading visible main chart history', detail: 'Waiting for main chart snapshot', status: 'waiting' },
-    { key: 'mini1', label: 'Loading visible mini chart 1 history', detail: 'Waiting for mini chart 1 snapshot', status: 'waiting' },
-    { key: 'mini2', label: 'Loading visible mini chart 2 history', detail: 'Waiting for mini chart 2 snapshot', status: 'waiting' },
-    { key: 'ai', label: 'Syncing AI Trader', detail: 'Loading backend AI Trader control state', status: 'waiting' },
-    { key: 'ready', label: 'Finalizing dashboard', detail: 'Preparing chart cache and live price state', status: 'waiting' },
+    { key: 'ready', label: 'Finalizing dashboard', detail: 'Preparing shared candle cache, live price state, charts, and AI Trader background sync', status: 'waiting' },
   ])
 
   const [mainChartSelection, setMainChartSelection] = useState<ChartSelection>({
@@ -6323,7 +6319,7 @@ export default function Dashboard() {
   } = useApiPolling({
     symbol: selectedSymbol,
     timeframe: selectedTimeframe,
-    enabled: chartConfigsHydrated && dashboardBootReady,
+    enabled: chartConfigsHydrated,
     pollMs: 10000,
   })
 
@@ -6414,14 +6410,10 @@ export default function Dashboard() {
     const baseSteps: DashboardBootStep[] = [
       { key: 'backend', label: 'Waking backend', detail: `Calling ${bootApiBaseUrl}`, status: 'loading' },
       { key: 'settings', label: 'Syncing chart settings', detail: 'Loading saved chart layout and strategy controls', status: 'waiting' },
-      { key: 'hist5', label: 'Preloading MES 5m main history', detail: 'MES1! 5m • require 300 historical candles before charts mount', status: 'waiting' },
-      { key: 'hist10', label: 'Preloading MES 10m history', detail: 'MES1! 10m • require 300 historical candles before charts mount', status: 'waiting' },
-      { key: 'hist1', label: 'Preloading MES 1m history', detail: 'MES1! 1m • require 300 historical candles before charts mount', status: 'waiting' },
-      { key: 'main', label: 'Loading visible main chart history', detail: `${selectedSymbol} ${selectedTimeframe} • need 20+ candles`, status: 'waiting' },
-      { key: 'mini1', label: 'Loading visible mini chart 1 history', detail: `${miniOneSymbol} ${miniOneTimeframe} • need 20+ candles`, status: 'waiting' },
-      { key: 'mini2', label: 'Loading visible mini chart 2 history', detail: `${miniTwoSymbol} ${miniTwoTimeframe} • need 20+ candles`, status: 'waiting' },
-      { key: 'ai', label: 'Syncing AI Trader', detail: 'Loading backend control state and trade summary', status: 'waiting' },
-      { key: 'ready', label: 'Finalizing dashboard', detail: 'Preparing shared candle cache and live price state', status: 'waiting' },
+      { key: 'hist5', label: 'Preloading MES 5m main history', detail: 'MES1! 5m • warming backend/browser candle cache', status: 'waiting' },
+      { key: 'hist10', label: 'Preloading MES 10m history', detail: 'MES1! 10m • warming backend/browser candle cache', status: 'waiting' },
+      { key: 'hist1', label: 'Preloading MES 1m history', detail: 'MES1! 1m • warming backend/browser candle cache', status: 'waiting' },
+      { key: 'ready', label: 'Finalizing dashboard', detail: 'Preparing shared candle cache, live price state, charts, and AI Trader background sync', status: 'waiting' },
     ]
 
     const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms))
@@ -6607,7 +6599,7 @@ export default function Dashboard() {
       }
 
       if (missing.length > 0) {
-        throw new Error(`MES historical preload incomplete — ${missing.join(' • ')}`)
+        setDashboardBootError(`MES historical preload still warming — ${missing.join(' • ')}. Dashboard is mounted behind the loader and will keep hydrating from cache/live feed.`)
       }
 
       // Pull the freshly warmed backend cache into the browser shared candle cache
@@ -6617,7 +6609,11 @@ export default function Dashboard() {
         const entry = await warmSnapshot(chart)
         const candleCount = Array.isArray(entry?.candles) ? entry.candles.length : 0
         if (candleCount < chart.minimum) {
-          throw new Error(`${chart.symbol} ${chart.timeframe} backend cache warmed but browser received only ${candleCount}/${chart.minimum} candles`)
+          setBootStep(
+            chart.key,
+            'warning',
+            `${chart.symbol} ${chart.timeframe} backend cache warmed but browser received ${candleCount}/${chart.minimum}; chart will continue hydrating after mount`
+          )
         }
         await sleep(250)
       }
@@ -6646,33 +6642,9 @@ export default function Dashboard() {
 
         await warmRequiredMesHistoryBundle(requiredCoreHistory)
 
-        const visibleCharts = [
-          { key: 'main', symbol: selectedSymbol, timeframe: selectedTimeframe, limit: 700, minimum: 20 },
-          { key: 'mini1', symbol: miniOneSymbol, timeframe: miniOneTimeframe, limit: 300, minimum: 20 },
-          { key: 'mini2', symbol: miniTwoSymbol, timeframe: miniTwoTimeframe, limit: 300, minimum: 20 },
-        ].filter((chart) => {
-          const normalizedSymbol = normalizeSymbol(chart.symbol)
-          const normalizedTimeframe = normalizeTimeframe(chart.timeframe)
-          const isAlreadyRequiredCoreMesHistory =
-            normalizedSymbol === 'MES1!' && ['1m', '5m', '10m'].includes(normalizedTimeframe)
-
-          return !isAlreadyRequiredCoreMesHistory
-        })
-
-        for (const chart of visibleCharts) {
-          await warmSnapshot(chart)
-          await sleep(250)
-        }
-
-        setBootStep('ai', 'loading', 'Requesting AI Trader control, summary, and diagnostics')
-        const aiRequests = await Promise.allSettled([
-          fetch(`${bootApiBaseUrl}/api/ai-trader/control`, { cache: 'no-store' }),
-          fetch(`${bootApiBaseUrl}/api/ai-trader/summary?symbol=${encodeURIComponent(selectedSymbol)}&timeframe=${encodeURIComponent(selectedTimeframe)}`, { cache: 'no-store' }),
-          fetch(`${bootApiBaseUrl}/api/ai-trader/diagnostics?symbol=${encodeURIComponent(selectedSymbol)}&timeframe=${encodeURIComponent(selectedTimeframe)}`, { cache: 'no-store' }),
-        ])
-        const aiOkCount = aiRequests.filter((result) => result.status === 'fulfilled' && result.value.ok).length
-        setBootStep('ai', aiOkCount > 0 ? 'done' : 'warning', `AI Trader backend checks ready: ${aiOkCount}/3`)
-
+        // Visible chart history and AI Trader are intentionally not hard boot blockers.
+        // The dashboard is mounted behind this overlay, so the main chart, mini charts,
+        // shared live price, and AiTraderPanel can hydrate themselves in parallel.
         const remainingBootHoldMs = Math.max(0, MIN_DASHBOARD_BOOT_MS - (Date.now() - bootStartedAt))
         setBootStep(
           'ready',
@@ -6691,8 +6663,12 @@ export default function Dashboard() {
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Dashboard boot failed'
-        setDashboardBootError(message)
-        setBootStep('ready', 'error', message)
+        setDashboardBootError(`${message}. Dashboard opened anyway; charts and AI Trader will continue hydrating in the background.`)
+        setBootStep('ready', 'warning', 'Boot warmup had warnings; dashboard opened and background hydration continues')
+        await sleep(1500)
+        if (!cancelled) {
+          setDashboardBootReady(true)
+        }
       }
     }
 
@@ -7124,18 +7100,7 @@ export default function Dashboard() {
     return null
   }
 
-  if (!dashboardBootReady) {
-    return (
-      <DashboardBootScreen
-        steps={dashboardBootSteps}
-        errorText={dashboardBootError}
-        onForceContinue={() => {
-          setDashboardBootError('Dashboard opened manually before every warmup task completed.')
-          setDashboardBootReady(true)
-        }}
-      />
-    )
-  }
+  const showDashboardBootOverlay = !dashboardBootReady
 
   const maxSignalsToShow = 25
   const visibleRecentSignals = recentSignals
@@ -7153,7 +7118,8 @@ export default function Dashboard() {
     .slice(0, maxSignalsToShow)
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-dark-900 via-dark-800 to-dark-900 p-6">
+    <>
+      <div className="min-h-screen bg-gradient-to-b from-dark-900 via-dark-800 to-dark-900 p-6">
       {/* Header */}
       <motion.div
         initial={{ opacity: 0, y: -20 }}
@@ -7251,7 +7217,7 @@ export default function Dashboard() {
             saveStatus={lastSavedChartKey === 'main' ? 'Saved' : ''}
             apiBaseUrl={apiBaseUrl}
             isClient={isClient}
-            enabled={chartConfigsHydrated && dashboardBootReady}
+            enabled={chartConfigsHydrated}
             priority="main"
             livePrice={selectedLivePrice}
             onLivePriceUpdate={handleLivePriceUpdate}
@@ -7295,7 +7261,7 @@ export default function Dashboard() {
               saveStatus={lastSavedChartKey === 'mini1' ? 'Saved' : ''}
               apiBaseUrl={apiBaseUrl}
               isClient={isClient}
-              enabled={chartConfigsHydrated && dashboardBootReady && mainCandlesReady}
+              enabled={chartConfigsHydrated && mainCandlesReady}
               priority="mini"
               livePrice={miniOneLivePrice}
               onLivePriceUpdate={handleLivePriceUpdate}
@@ -7328,7 +7294,7 @@ export default function Dashboard() {
               saveStatus={lastSavedChartKey === 'mini2' ? 'Saved' : ''}
               apiBaseUrl={apiBaseUrl}
               isClient={isClient}
-              enabled={chartConfigsHydrated && dashboardBootReady && mainCandlesReady}
+              enabled={chartConfigsHydrated && mainCandlesReady}
               priority="mini"
               livePrice={miniTwoLivePrice}
               onLivePriceUpdate={handleLivePriceUpdate}
@@ -7516,6 +7482,18 @@ export default function Dashboard() {
           {apiBaseUrl}
         </p>
       </motion.div>
-    </div>
+      </div>
+
+      {showDashboardBootOverlay ? (
+        <DashboardBootScreen
+          steps={dashboardBootSteps}
+          errorText={dashboardBootError}
+          onForceContinue={() => {
+            setDashboardBootError('Dashboard opened manually before every warmup task completed.')
+            setDashboardBootReady(true)
+          }}
+        />
+      ) : null}
+    </>
   )
 }
