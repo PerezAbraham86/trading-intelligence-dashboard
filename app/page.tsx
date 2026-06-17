@@ -1758,6 +1758,43 @@ async function fetchSharedCandlePayload(
           )
         )
 
+    if (isFuturesCandleSymbol(normalizedSymbol) && (providerForce || previousCount === 0)) {
+      try {
+        const forcedHistory = await fetchBackendHistoricalRefreshPayload(
+          apiBaseUrl,
+          normalizedSymbol,
+          normalizedTimeframe,
+          apiLimit
+        )
+        const forcedCandles = normalizeCandlePayload(forcedHistory)
+
+        if (forcedCandles.length > 0) {
+          const overlayPayload = getUnifiedOverlayPayload(forcedHistory)
+          const unifiedIntelligence = getUnifiedIntelligencePayload(forcedHistory)
+          const mergedCandles = mergeHistoricalCandles(
+            previous?.candles,
+            forcedCandles,
+            noFrontendLimit ? 0 : SHARED_CANDLE_CACHE_MAX_BARS
+          )
+          const entry: SharedCandleCacheEntry = {
+            candles: mergedCandles,
+            overlayPayload: overlayPayload ?? previous?.overlayPayload ?? null,
+            unifiedIntelligence: unifiedIntelligence ?? previous?.unifiedIntelligence ?? null,
+            updatedAt: Date.now(),
+            limit: Math.max(apiLimit, previous?.limit ?? 0, mergedCandles.length),
+            provider: typeof forcedHistory?.provider === 'string' ? forcedHistory.provider : 'dashboard_candles',
+            source: typeof forcedHistory?.source === 'string'
+              ? `${forcedHistory.source}+futures_direct_forced_history_first`
+              : 'futures_direct_forced_history_first',
+          }
+          SHARED_CANDLE_CACHE.set(key, entry)
+          return entry
+        }
+      } catch (error) {
+        console.warn('Direct futures historical refresh failed, trying snapshot next:', error)
+      }
+    }
+
     try {
       const snapshot = await fetchDashboardSnapshotPayload(apiBaseUrl, normalizedSymbol, normalizedTimeframe, apiLimit)
       const snapshotCandles = normalizeCandlePayload(snapshot)
@@ -4428,7 +4465,10 @@ function useChartCandles(
 
     function startPolling() {
       if (intervalId || liveSourceConnected) return
-      intervalId = setInterval(fetchCandles, pollMs)
+      intervalId = setInterval(() => {
+        const forceHistory = isFuturesCandleSymbol(symbol) && !fullSharedCacheHasHistorical()
+        fetchCandles(forceHistory, forceHistory ? 'poll-force-history-empty-cache' : 'poll')
+      }, pollMs)
     }
 
     function minimumHistoricalCandles() {
@@ -4472,7 +4512,7 @@ function useChartCandles(
       // are loaded, then live candles can safely merge into that history.
       if (now - lastInitialHistoryRetryAt >= 5000) {
         lastInitialHistoryRetryAt = now
-        fetchCandles(false, 'initial-history-after-live')
+        fetchCandles(isFuturesCandleSymbol(symbol) && !fullSharedCacheHasHistorical(), 'initial-history-after-live')
       }
     }
 
@@ -4619,6 +4659,7 @@ function useChartCandles(
       }
 
       fetchCandlesInFlight = true
+      let retryForcedHistoryAfterError = false
 
       try {
         const cacheReason = force ? `before-force-fetch:${reason}` : `before-fetch:${reason}`
@@ -4694,6 +4735,21 @@ function useChartCandles(
         }
 
         const cachedWasApplied = applyCachedPayload('after-fetch-error')
+        retryForcedHistoryAfterError = Boolean(
+          !force &&
+          !cachedWasApplied &&
+          isFuturesCandleSymbol(symbol) &&
+          !fullSharedCacheHasHistorical()
+        )
+
+        if (retryForcedHistoryAfterError) {
+          addCandleDebugLog('force-history-retry-scheduled', {
+            reason,
+            error: message,
+            priority,
+          }, 'warn')
+        }
+
         if (!cachedWasApplied) {
           setErrorText(isZeroCandlePending ? '' : message)
         }
@@ -4701,6 +4757,13 @@ function useChartCandles(
         fetchCandlesInFlight = false
         if (!cancelled) {
           setIsLoading(false)
+          if (retryForcedHistoryAfterError) {
+            window.setTimeout(() => {
+              if (!cancelled) {
+                fetchCandles(true, `${reason}-forced-history-after-error`)
+              }
+            }, 250)
+          }
         }
       }
     }
@@ -4752,7 +4815,7 @@ function useChartCandles(
         lastClose: Number.isFinite(lastClose) ? lastClose : undefined,
         liveClose: Number.isFinite(liveClose) ? liveClose : undefined,
       }, 'warn')
-      fetchCandles(false, 'live-gap')
+      fetchCandles(true, 'live-gap-force-history-repair')
       return true
     }
 
@@ -4767,7 +4830,7 @@ function useChartCandles(
     setCandles([])
     setOverlayPayload(null)
     setUnifiedIntelligence(null)
-    fetchCandles(false, 'initial')
+    fetchCandles(isFuturesCandleSymbol(symbol), isFuturesCandleSymbol(symbol) ? 'initial-force-history' : 'initial')
     startPolling()
 
     if (typeof window !== 'undefined' && typeof EventSource !== 'undefined') {
