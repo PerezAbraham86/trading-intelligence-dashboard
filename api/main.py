@@ -1389,21 +1389,25 @@ def fetch_insightsentry_direct_candles(symbol: str, timeframe: str = "1m", limit
     return []
 
 
-def fetch_insightsentry_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 500) -> List[Dict[str, Any]]:
+def fetch_insightsentry_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 0) -> List[Dict[str, Any]]:
     """
     MES/ES futures candles use the verified InsightSentry Time Series OHLCV route.
 
-    Removed old fallback behavior:
-    - No interval=5min style requests.
-    - No fake relabeling.
-    - No resampling fallback unless the provider returns valid direct candles.
+    MES rule:
+    - Each timeframe is fetched directly from InsightSentry.
+    - limit=0 means keep every real provider candle returned.
+    - No 1m rebuild/resample for 3m/5m/10m.
     """
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(1, min(int(limit or 500), 5000))
+    requested_limit = candle_cache_limit_value(limit)
+    unlimited_futures = is_futures_symbol(normalized_symbol) and requested_limit <= 0
+    safe_limit = 0 if unlimited_futures else max(1, min(requested_limit or 500, 5000))
 
     direct = fetch_insightsentry_direct_candles(normalized_symbol, normalized_timeframe, safe_limit)
-    return direct[-safe_limit:] if direct else []
+    if not direct:
+        return []
+    return direct if unlimited_futures else direct[-safe_limit:]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CANDLE PROVIDERS
@@ -8195,7 +8199,7 @@ def _preload_unique_timeframes(timeframes: str) -> List[str]:
 def _best_cached_candles_for_preload(symbol: str, timeframe: str, limit: int) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(1, min(int(limit or 500), 5000))
+    safe_limit = 0 if is_futures_symbol(normalized_symbol) else max(1, min(candle_cache_limit_value(limit) or 500, 5000))
 
     for route_name in ["dashboard", "historical"]:
         try:
@@ -8217,7 +8221,7 @@ def _best_cached_candles_for_preload(symbol: str, timeframe: str, limit: int) ->
                 normalized_symbol,
             )
             if candles_list:
-                return candles_list[-safe_limit:]
+                return maybe_limit_candles(candles_list, normalized_symbol, safe_limit)
 
     return []
 
@@ -8233,8 +8237,8 @@ def _store_preload_candle_payload(
 ) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(1, min(int(limit or 500), 5000))
-    clean_candles = filter_valid_candles_for_symbol(candles_list, normalized_symbol)[-safe_limit:]
+    safe_limit = 0 if is_futures_symbol(normalized_symbol) else max(1, min(candle_cache_limit_value(limit) or 500, 5000))
+    clean_candles = filter_valid_candles_for_symbol(maybe_limit_candles(candles_list, normalized_symbol, safe_limit), normalized_symbol)
 
     payload = build_candle_route_payload(
         route_source=source,
@@ -8266,8 +8270,8 @@ def _preload_mes_direct_history(timeframe_list: List[str], limit: int) -> List[D
     - start_ym=2026-06 is used for MES because RapidAPI verified it returns real bars
     """
     normalized_symbol = "MES1!"
-    safe_limit = max(1, min(int(limit or 500), 5000))
-    required_count = min(safe_limit, 300)
+    safe_limit = 0
+    required_count = 1
 
     unique_timeframes: List[str] = []
     seen: set[str] = set()
@@ -8290,7 +8294,7 @@ def _preload_mes_direct_history(timeframe_list: List[str], limit: int) -> List[D
                 fetched = fetch_insightsentry_historical_candles(normalized_symbol, tf, safe_limit)
                 fetched = filter_valid_candles_for_symbol(fetched, normalized_symbol)
                 if len(fetched) >= len(tf_candles):
-                    tf_candles = fetched[-safe_limit:]
+                    tf_candles = maybe_limit_candles(fetched, normalized_symbol, safe_limit)
                     source = f"mes_preload_direct_{tf}_history_start_ym_{insightsentry_history_start_ym(normalized_symbol, tf)}"
             except Exception as error:
                 print(f"[Preload candles] MES direct {tf} fetch failed: {error}")
@@ -8692,7 +8696,11 @@ def _safe_snapshot_section(label: str, builder: Any) -> Dict[str, Any]:
 def build_dashboard_snapshot_payload(data: Dict[str, Any]) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(str(data.get("symbol") or "MES1!"))
     normalized_timeframe = normalize_timeframe(str(data.get("timeframe") or "1m"))
-    safe_limit = _snapshot_int(data.get("limit"), 700, 50, 5000)
+    requested_limit_value = candle_cache_limit_value(data.get("limit"))
+    # MES/futures rule: limit=0 means unlimited saved/direct same-timeframe history.
+    # Do not let snapshot clamp that back to 50/700, otherwise boot can receive
+    # a zero/thin snapshot even though /api/candles can force-refresh real history.
+    safe_limit = 0 if is_futures_symbol(normalized_symbol) and requested_limit_value <= 0 else _snapshot_int(data.get("limit"), 700, 50, 5000)
     include_live = _snapshot_bool(data.get("includeLivePrice"), True)
     include_engine = _snapshot_bool(data.get("includeEngineState"), True)
     include_projection = _snapshot_bool(data.get("includeProjectionEngine"), True)
