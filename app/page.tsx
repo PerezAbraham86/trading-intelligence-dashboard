@@ -4578,30 +4578,12 @@ function useChartCandles(
             }
 
             if (requestLiveGapRepairOnce(previousCandles, liveCandle, 'message')) {
-              const merged = mergeLiveCandleIntoCandles(
-                previousCandles,
-                liveCandle,
-                limit,
-                timeframeSeconds,
-                { allowLargeGapAppend: true }
-              )
-              const cacheEntry = writeLiveCandleToSharedCache(
-                symbol,
-                timeframe,
-                limit,
-                liveCandle,
-                overlayPayload,
-                unifiedIntelligence,
-                timeframeSeconds,
-                { allowLargeGapAppend: true }
-              )
-
-              if (cacheEntry) {
-                setOverlayPayload(cacheEntry.overlayPayload ?? null)
-                setUnifiedIntelligence(cacheEntry.unifiedIntelligence ?? null)
-              }
-
-              return merged
+              // Critical: do NOT append the current live candle across a missing
+              // history gap. Appending 1:45 AM live data after a 10:35 PM
+              // historical candle creates a fake chart jump. Keep the last real
+              // historical series visible while the backend same-timeframe
+              // /api/candles route catches up or confirms the provider gap.
+              return previousCandles
             }
 
             const merged = mergeLiveCandleIntoCandles(
@@ -4656,30 +4638,12 @@ function useChartCandles(
             }
 
             if (requestLiveGapRepairOnce(previousCandles, liveCandle, 'candle')) {
-              const merged = mergeLiveCandleIntoCandles(
-                previousCandles,
-                liveCandle,
-                limit,
-                timeframeSeconds,
-                { allowLargeGapAppend: true }
-              )
-              const cacheEntry = writeLiveCandleToSharedCache(
-                symbol,
-                timeframe,
-                limit,
-                liveCandle,
-                overlayPayload,
-                unifiedIntelligence,
-                timeframeSeconds,
-                { allowLargeGapAppend: true }
-              )
-
-              if (cacheEntry) {
-                setOverlayPayload(cacheEntry.overlayPayload ?? null)
-                setUnifiedIntelligence(cacheEntry.unifiedIntelligence ?? null)
-              }
-
-              return merged
+              // Critical: do NOT append the current live candle across a missing
+              // history gap. Appending 1:45 AM live data after a 10:35 PM
+              // historical candle creates a fake chart jump. Keep the last real
+              // historical series visible while the backend same-timeframe
+              // /api/candles route catches up or confirms the provider gap.
+              return previousCandles
             }
 
             const merged = mergeLiveCandleIntoCandles(
