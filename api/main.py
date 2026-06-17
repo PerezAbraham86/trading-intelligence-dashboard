@@ -226,6 +226,28 @@ except Exception:
 
 
 try:
+    from api.databento_history import (
+        databento_parent_symbol,
+        databento_status as get_databento_status,
+        estimate_databento_cost,
+        get_databento_ohlcv,
+    )
+except Exception:
+    try:
+        from databento_history import (
+            databento_parent_symbol,
+            databento_status as get_databento_status,
+            estimate_databento_cost,
+            get_databento_ohlcv,
+        )
+    except Exception:
+        databento_parent_symbol = None
+        get_databento_status = None
+        estimate_databento_cost = None
+        get_databento_ohlcv = None
+
+
+try:
     from api.insightsentry_session import (
         get_insightsentry_session,
         insightsentry_session_status,
@@ -368,6 +390,10 @@ INSIGHTSENTRY_BASE_URL = f"https://{INSIGHTSENTRY_HOST}"
 
 ALPACA_STOCKS_BASE_URL = "https://data.alpaca.markets/v2"
 ALPACA_CRYPTO_BASE_URL = "https://data.alpaca.markets/v1beta3"
+
+DATABENTO_API_KEY = os.getenv("DATABENTO_API_KEY", "")
+DATABENTO_DATASET = os.getenv("DATABENTO_DATASET", "GLBX.MDP3")
+CANDLE_FUTURES_PROVIDER = os.getenv("CANDLE_FUTURES_PROVIDER", "insightsentry").strip().lower()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -824,6 +850,17 @@ def is_crypto_symbol(symbol: str) -> bool:
 
 def is_futures_symbol(symbol: str) -> bool:
     return normalize_symbol(symbol) == "MES1!"
+
+
+def futures_provider_name() -> str:
+    provider = os.getenv("CANDLE_FUTURES_PROVIDER", CANDLE_FUTURES_PROVIDER or "insightsentry").strip().lower()
+    if provider in {"databento", "db", "glbx", "glbx.mdp3", "glbx-mdp3"}:
+        return "databento"
+    return "insightsentry"
+
+
+def use_databento_for_futures() -> bool:
+    return futures_provider_name() == "databento"
 
 
 def is_stock_symbol(symbol: str) -> bool:
@@ -1958,6 +1995,22 @@ def fetch_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 0)
     safe_limit = max(1, min(candle_cache_limit_value(limit) or 500, 5000))
 
     if is_futures_symbol(normalized_symbol):
+        if use_databento_for_futures():
+            if get_databento_ohlcv is None:
+                raise HTTPException(status_code=500, detail="api.databento_history.get_databento_ohlcv is unavailable")
+            try:
+                response = get_databento_ohlcv(
+                    symbol=normalized_symbol,
+                    timeframe=normalized_timeframe,
+                    start_ym=CLEAN_CANDLE_START_YM if "CLEAN_CANDLE_START_YM" in globals() else None,
+                    limit=limit,
+                )
+                candles = response.get("candles") if isinstance(response, dict) else []
+                return filter_valid_candles_for_symbol(merge_candles_by_time(candles), normalized_symbol)
+            except Exception as error:
+                print(f"[Databento] historical failed for {normalized_symbol} {normalized_timeframe}: {error}")
+                return []
+
         candles = fetch_insightsentry_historical_candles(normalized_symbol, normalized_timeframe, 0)
         return filter_valid_candles_for_symbol(merge_candles_by_time(candles), normalized_symbol)
 
@@ -7720,6 +7773,9 @@ def root() -> Dict[str, Any]:
             "/api/live-candle",
             "/api/live-price",
             "/api/provider-debug",
+            "/api/databento/status",
+            "/api/databento/cost",
+            "/api/databento/candles",
             "/api/engine-state",
             "/api/chart-overlays",
             "/api/ghost-ml-status",
@@ -7742,6 +7798,9 @@ def health() -> Dict[str, Any]:
         "alpacaSecretPresent": bool(ALPACA_SECRET_KEY),
         "insightsentryKeyPresent": bool(INSIGHTSENTRY_API_KEY),
         "insightsentryHost": INSIGHTSENTRY_HOST,
+        "databentoKeyPresent": bool(DATABENTO_API_KEY),
+        "databentoDataset": DATABENTO_DATASET,
+        "futuresProvider": futures_provider_name(),
     }
 
 
@@ -8639,20 +8698,35 @@ def fetch_clean_provider_candles(symbol: str, timeframe: str, limit: int = 0, fo
     safe_limit = clean_candle_limit(normalized_symbol, limit)
 
     if is_futures_symbol(normalized_symbol):
-        if get_historical_ohlcv is None:
-            raise HTTPException(status_code=500, detail="api.insightsentry_history.get_historical_ohlcv is unavailable")
+        if use_databento_for_futures():
+            if get_databento_ohlcv is None:
+                raise HTTPException(status_code=500, detail="api.databento_history.get_databento_ohlcv is unavailable")
 
-        response = get_historical_ohlcv(
-            symbol=normalized_symbol,
-            timeframe=normalized_timeframe,
-            start_ym=CLEAN_CANDLE_START_YM,
-            limit=safe_limit,
-            force=force,
-        )
-        raw_candles = response.get("candles") if isinstance(response, dict) else []
-        candles_list = normalize_provider_history_candles(raw_candles, normalized_symbol, normalized_timeframe)
-        provider = "insightsentry"
-        source = str(response.get("source") or "insightsentry_v3_historical_ohlcv") if isinstance(response, dict) else "insightsentry_v3_historical_ohlcv"
+            response = get_databento_ohlcv(
+                symbol=normalized_symbol,
+                timeframe=normalized_timeframe,
+                start_ym=CLEAN_CANDLE_START_YM,
+                limit=safe_limit,
+            )
+            raw_candles = response.get("candles") if isinstance(response, dict) else []
+            candles_list = normalize_provider_history_candles(raw_candles, normalized_symbol, normalized_timeframe)
+            provider = "databento"
+            source = str(response.get("source") or "databento_glbx_mdp3_ohlcv") if isinstance(response, dict) else "databento_glbx_mdp3_ohlcv"
+        else:
+            if get_historical_ohlcv is None:
+                raise HTTPException(status_code=500, detail="api.insightsentry_history.get_historical_ohlcv is unavailable")
+
+            response = get_historical_ohlcv(
+                symbol=normalized_symbol,
+                timeframe=normalized_timeframe,
+                start_ym=CLEAN_CANDLE_START_YM,
+                limit=safe_limit,
+                force=force,
+            )
+            raw_candles = response.get("candles") if isinstance(response, dict) else []
+            candles_list = normalize_provider_history_candles(raw_candles, normalized_symbol, normalized_timeframe)
+            provider = "insightsentry"
+            source = str(response.get("source") or "insightsentry_v3_historical_ohlcv") if isinstance(response, dict) else "insightsentry_v3_historical_ohlcv"
     else:
         candles_list = fetch_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
         candles_list = normalize_provider_history_candles(candles_list, normalized_symbol, normalized_timeframe)
@@ -8672,6 +8746,8 @@ def fetch_clean_provider_candles(symbol: str, timeframe: str, limit: int = 0, fo
     payload["backendWarehouse"] = True
     payload["cacheRoute"] = CLEAN_CANDLE_ROUTE
     payload["source"] = source
+    payload["requestedProvider"] = futures_provider_name() if is_futures_symbol(normalized_symbol) else provider
+    payload["databentoEnabledForFutures"] = use_databento_for_futures() if is_futures_symbol(normalized_symbol) else False
     payload["requestedLimit"] = safe_limit
     payload["noArtificialCandleLimit"] = is_futures_symbol(normalized_symbol)
     payload["noTimeframeBuildFrom1m"] = is_futures_symbol(normalized_symbol)
@@ -8701,13 +8777,133 @@ def store_clean_candles(symbol: str, timeframe: str, limit: int, payload: Dict[s
     return payload
 
 
+@app.get("/api/databento/status")
+def api_databento_status() -> Dict[str, Any]:
+    if get_databento_status is None:
+        return {
+            "eventType": "DATABENTO_STATUS",
+            "status": "Unavailable",
+            "hasApiKey": bool(DATABENTO_API_KEY),
+            "packageInstalled": False,
+            "reason": "api.databento_history is not deployed or failed to import",
+            "futuresProvider": futures_provider_name(),
+            "createdAt": now_iso(),
+        }
+
+    try:
+        status = get_databento_status()
+        if isinstance(status, dict):
+            status["futuresProvider"] = futures_provider_name()
+            status["dashboardRouteReady"] = True
+            status["switchEnv"] = "CANDLE_FUTURES_PROVIDER=databento"
+            return status
+    except Exception as error:
+        return {
+            "eventType": "DATABENTO_STATUS",
+            "status": "Error",
+            "hasApiKey": bool(DATABENTO_API_KEY),
+            "error": str(error),
+            "futuresProvider": futures_provider_name(),
+            "createdAt": now_iso(),
+        }
+
+    return {
+        "eventType": "DATABENTO_STATUS",
+        "status": "Unknown",
+        "hasApiKey": bool(DATABENTO_API_KEY),
+        "futuresProvider": futures_provider_name(),
+        "createdAt": now_iso(),
+    }
+
+
+@app.get("/api/databento/cost")
+def api_databento_cost(
+    symbol: str = "MES1!",
+    timeframe: str = "5m",
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    startYm: Optional[str] = None,
+) -> Dict[str, Any]:
+    if estimate_databento_cost is None:
+        raise HTTPException(status_code=500, detail="api.databento_history.estimate_databento_cost is unavailable")
+
+    try:
+        return estimate_databento_cost(
+            symbol=normalize_symbol(symbol),
+            timeframe=normalize_timeframe(timeframe),
+            start=start,
+            end=end,
+            start_ym=startYm,
+        )
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"Databento cost estimate failed: {error}") from error
+
+
+@app.get("/api/databento/candles")
+def api_databento_candles(
+    symbol: str = "MES1!",
+    timeframe: str = "5m",
+    limit: int = 0,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    startYm: Optional[str] = None,
+) -> Dict[str, Any]:
+    if get_databento_ohlcv is None:
+        raise HTTPException(status_code=500, detail="api.databento_history.get_databento_ohlcv is unavailable")
+
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+    safe_limit = clean_candle_limit(normalized_symbol, limit)
+
+    try:
+        response = get_databento_ohlcv(
+            symbol=normalized_symbol,
+            timeframe=normalized_timeframe,
+            start=start,
+            end=end,
+            start_ym=startYm,
+            limit=safe_limit,
+        )
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"Databento candles failed: {error}") from error
+
+    raw_candles = response.get("candles") if isinstance(response, dict) else []
+    candles_list = normalize_provider_history_candles(raw_candles, normalized_symbol, normalized_timeframe)
+    returned = maybe_limit_candles(candles_list, normalized_symbol, safe_limit)
+
+    payload = build_candle_route_payload(
+        route_source="databento_test_provider_history",
+        symbol=normalized_symbol,
+        timeframe=normalized_timeframe,
+        candles=returned,
+        provider="databento",
+        cache_label="databento_test_no_store",
+    )
+    payload["source"] = str(response.get("source") or "databento_glbx_mdp3_ohlcv") if isinstance(response, dict) else "databento_glbx_mdp3_ohlcv"
+    payload["eventType"] = "DATABENTO_CANDLES_TEST"
+    payload["providerSymbol"] = response.get("providerSymbol") if isinstance(response, dict) else None
+    payload["dataset"] = response.get("dataset") if isinstance(response, dict) else DATABENTO_DATASET
+    payload["schema"] = response.get("schema") if isinstance(response, dict) else None
+    payload["stypeIn"] = response.get("stypeIn") if isinstance(response, dict) else None
+    payload["requestedStart"] = response.get("requestedStart") if isinstance(response, dict) else start
+    payload["requestedEnd"] = response.get("requestedEnd") if isinstance(response, dict) else end
+    payload["cleanCompatible"] = True
+    payload["storedToCleanCache"] = False
+    payload["gapInfo"] = _candle_gap_summary(returned, normalized_timeframe) if is_futures_symbol(normalized_symbol) else None
+    return payload
+
+
 @app.get("/api/candles")
 def candles(symbol: str = "MES1!", timeframe: str = "5m", limit: int = 0, force: bool = False) -> Dict[str, Any]:
     """Single clean chart candle route.
 
     MES rules:
-    - direct same-timeframe InsightSentry history only
-    - no 1m resample fallback
+    - default provider remains InsightSentry until CANDLE_FUTURES_PROVIDER=databento
+    - Databento test routes are available at /api/databento/*
     - limit=0/no artificial cap
     - one cache family: route='candles'
     """
