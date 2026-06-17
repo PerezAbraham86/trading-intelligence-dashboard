@@ -939,7 +939,7 @@ function normalizeCandlePayload(payload: any): DashboardCandle[] {
     })
 }
 
-const SHARED_CANDLE_CACHE_MAX_BARS = 5000
+const SHARED_CANDLE_CACHE_MAX_BARS = 0 // 0 = no frontend candle cap; backend/provider decides MES history size
 const CHART_CANDLE_DEBUG_MAX_ROWS = 16
 
 // Historical OHLCV is expensive and rate-limited. After a good historical
@@ -1045,9 +1045,11 @@ function mergeHistoricalCandles(
     map.set(candleIdentityKey(candle), candle)
   })
 
-  return Array.from(map.values())
-    .sort((left, right) => liveCandleEpoch(left) - liveCandleEpoch(right))
-    .slice(-Math.max(1, maxBars))
+  const sorted = Array.from(map.values()).sort(
+    (left, right) => liveCandleEpoch(left) - liveCandleEpoch(right)
+  )
+
+  return maxBars && maxBars > 0 ? sorted.slice(-Math.max(1, maxBars)) : sorted
 }
 
 function describeCandleRange(candles: DashboardCandle[]) {
@@ -1339,12 +1341,19 @@ async function fetchDashboardSnapshotPayload(
   apiBaseUrl: string,
   symbol: string,
   timeframe: string,
-  limit = 700
+  limit = 0
 ): Promise<any> {
+  const normalizedSymbol = normalizeSymbol(symbol)
+  const normalizedTimeframe = normalizeTimeframe(timeframe)
+  const futuresHistory = isFuturesCandleSymbol(normalizedSymbol)
   const params = new URLSearchParams({
-    symbol: normalizeSymbol(symbol),
-    timeframe: normalizeTimeframe(timeframe),
-    limit: String(Math.max(1, Math.min(Number(limit) || 700, SHARED_CANDLE_CACHE_MAX_BARS))),
+    symbol: normalizedSymbol,
+    timeframe: normalizedTimeframe,
+    // MES/futures rule: no frontend 300/700/5000 cap. Backend returns whatever
+    // InsightSentry saved for that independent timeframe.
+    limit: futuresHistory
+      ? '0'
+      : String(Math.max(1, Math.min(Number(limit) || 700, SHARED_CANDLE_CACHE_MAX_BARS || 5000))),
   })
 
   const response = await fetch(`${apiBaseUrl}/api/dashboard/snapshot?${params.toString()}`, {
@@ -1478,9 +1487,11 @@ function readSharedCandleCache(symbol: string, timeframe: string, limit: number)
   const cached = SHARED_CANDLE_CACHE.get(sharedCandleKey(symbol, timeframe))
   if (!cached) return null
 
+  const noFrontendLimit = isFuturesCandleSymbol(symbol) || !limit || limit <= 0
+
   return {
     ...cached,
-    candles: cached.candles.slice(-Math.max(1, limit)),
+    candles: noFrontendLimit ? cached.candles : cached.candles.slice(-Math.max(1, limit)),
   }
 }
 
@@ -1592,7 +1603,7 @@ function mergeLiveCandleIntoCandles(
   }
 
   merged.sort((a, b) => liveCandleEpoch(a) - liveCandleEpoch(b))
-  return merged.slice(-Math.max(1, limit))
+  return limit && limit > 0 ? merged.slice(-Math.max(1, limit)) : merged
 }
 
 function writeLiveCandleToSharedCache(
@@ -1650,7 +1661,8 @@ async function fetchSharedCandlePayload(
   const normalizedSymbol = normalizeSymbol(symbol)
   const normalizedTimeframe = normalizeTimeframe(timeframe)
   const key = sharedCandleKey(normalizedSymbol, normalizedTimeframe)
-  const requestedLimit = Math.max(1, limit)
+  const noFrontendLimit = isFuturesCandleSymbol(normalizedSymbol) || !limit || limit <= 0
+  const requestedLimit = noFrontendLimit ? 0 : Math.max(1, limit)
 
   const providerForce = force && !isFuturesCandleSymbol(normalizedSymbol)
 
@@ -1659,7 +1671,7 @@ async function fetchSharedCandlePayload(
     const activeResult = await activeRequest
     return {
       ...activeResult,
-      candles: activeResult.candles.slice(-requestedLimit),
+      candles: noFrontendLimit ? activeResult.candles : activeResult.candles.slice(-requestedLimit),
     }
   }
 
@@ -1672,14 +1684,16 @@ async function fetchSharedCandlePayload(
     // should grow after history has loaded once. Increasing the provider limit
     // on occasional historical refreshes lets the cache expand toward 5,000
     // bars instead of permanently staying at the visible chart limit.
-    const apiLimit = Math.min(
-      SHARED_CANDLE_CACHE_MAX_BARS,
-      Math.max(
-        requestedLimit,
-        previous?.limit ?? 0,
-        previousCount > 0 ? previousCount + requestedLimit : requestedLimit
-      )
-    )
+    const apiLimit = noFrontendLimit
+      ? 0
+      : Math.min(
+          SHARED_CANDLE_CACHE_MAX_BARS || 5000,
+          Math.max(
+            requestedLimit,
+            previous?.limit ?? 0,
+            previousCount > 0 ? previousCount + requestedLimit : requestedLimit
+          )
+        )
 
     try {
       const snapshot = await fetchDashboardSnapshotPayload(apiBaseUrl, normalizedSymbol, normalizedTimeframe, apiLimit)
@@ -1704,7 +1718,7 @@ async function fetchSharedCandlePayload(
           snapshotProjectionEngine
         )
 
-        const mergedCandles = mergeHistoricalCandles(previous?.candles, snapshotCandles)
+        const mergedCandles = mergeHistoricalCandles(previous?.candles, snapshotCandles, noFrontendLimit ? 0 : SHARED_CANDLE_CACHE_MAX_BARS)
         const entry: SharedCandleCacheEntry = {
           candles: mergedCandles,
           overlayPayload: snapshotOverlayPayload ?? previous?.overlayPayload ?? null,
@@ -1814,7 +1828,7 @@ async function fetchSharedCandlePayload(
         if (!json && previous?.candles?.length) {
           return {
             ...previous,
-            candles: previous.candles.slice(-requestedLimit),
+            candles: noFrontendLimit ? previous.candles : previous.candles.slice(-requestedLimit),
             updatedAt: Date.now(),
             source: 'frontend_cached_history_after_insightsentry_error',
           }
@@ -1839,7 +1853,7 @@ async function fetchSharedCandlePayload(
       if (previous?.candles?.length) {
         return {
           ...previous,
-          candles: previous.candles.slice(-requestedLimit),
+          candles: noFrontendLimit ? previous.candles : previous.candles.slice(-requestedLimit),
           updatedAt: Date.now(),
           source: `${previous.source ?? 'frontend_cached_history'}_after_zero_candle_response`,
         }
@@ -1850,7 +1864,7 @@ async function fetchSharedCandlePayload(
 
     const overlayPayload = getUnifiedOverlayPayload(json)
     const unifiedIntelligence = getUnifiedIntelligencePayload(json)
-    const mergedCandles = mergeHistoricalCandles(previous?.candles, candles)
+    const mergedCandles = mergeHistoricalCandles(previous?.candles, candles, isFuturesCandleSymbol(normalizedSymbol) ? 0 : SHARED_CANDLE_CACHE_MAX_BARS)
 
     const entry: SharedCandleCacheEntry = {
       candles: mergedCandles,
@@ -1874,7 +1888,7 @@ async function fetchSharedCandlePayload(
     const result = await request
     return {
       ...result,
-      candles: result.candles.slice(-requestedLimit),
+      candles: noFrontendLimit ? result.candles : result.candles.slice(-requestedLimit),
     }
   } finally {
     SHARED_CANDLE_IN_FLIGHT.delete(key)
@@ -6499,7 +6513,7 @@ export default function Dashboard() {
               getUnifiedIntelligencePayload(snapshot, engineState, projection),
               projection
             )
-            const mergedCandles = mergeHistoricalCandles(previous?.candles, candles)
+            const mergedCandles = mergeHistoricalCandles(previous?.candles, candles, isFuturesCandleSymbol(normalizedSymbol) ? 0 : SHARED_CANDLE_CACHE_MAX_BARS)
             const entry: SharedCandleCacheEntry = {
               candles: mergedCandles,
               overlayPayload: overlayPayload ?? previous?.overlayPayload ?? null,
