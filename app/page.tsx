@@ -938,7 +938,7 @@ function normalizeCandlePayload(payload: any): DashboardCandle[] {
 }
 
 const SHARED_CANDLE_CACHE_MAX_BARS = 0 // 0 = no frontend candle cap; backend/provider decides MES history size
-const CHART_CANDLE_DEBUG_MAX_ROWS = 16
+const CHART_CANDLE_DEBUG_MAX_ROWS = 250
 
 // Historical OHLCV is expensive and rate-limited. After a good historical
 // payload is loaded, keep the chart alive from cache + live candles and only
@@ -4578,12 +4578,17 @@ function useChartCandles(
             }
 
             if (requestLiveGapRepairOnce(previousCandles, liveCandle, 'message')) {
-              // Critical: do NOT append the current live candle across a missing
-              // history gap. Appending 1:45 AM live data after a 10:35 PM
-              // historical candle creates a fake chart jump. Keep the last real
-              // historical series visible while the backend same-timeframe
-              // /api/candles route catches up or confirms the provider gap.
-              return previousCandles
+              // Show the current live candle even when the historical provider is delayed,
+              // but do NOT save this gap-appended candle into the shared historical cache.
+              // This gives the user the current live candle without contaminating the
+              // clean /api/candles cache or creating fake bridge candles between sessions.
+              return mergeLiveCandleIntoCandles(
+                previousCandles,
+                liveCandle,
+                limit,
+                timeframeSeconds,
+                { allowLargeGapAppend: true }
+              )
             }
 
             const merged = mergeLiveCandleIntoCandles(
@@ -4638,12 +4643,17 @@ function useChartCandles(
             }
 
             if (requestLiveGapRepairOnce(previousCandles, liveCandle, 'candle')) {
-              // Critical: do NOT append the current live candle across a missing
-              // history gap. Appending 1:45 AM live data after a 10:35 PM
-              // historical candle creates a fake chart jump. Keep the last real
-              // historical series visible while the backend same-timeframe
-              // /api/candles route catches up or confirms the provider gap.
-              return previousCandles
+              // Show the current live candle even when the historical provider is delayed,
+              // but do NOT save this gap-appended candle into the shared historical cache.
+              // This gives the user the current live candle without contaminating the
+              // clean /api/candles cache or creating fake bridge candles between sessions.
+              return mergeLiveCandleIntoCandles(
+                previousCandles,
+                liveCandle,
+                limit,
+                timeframeSeconds,
+                { allowLargeGapAppend: true }
+              )
             }
 
             const merged = mergeLiveCandleIntoCandles(
@@ -5657,7 +5667,7 @@ function LightweightChartPanel({
               ⧉
             </button>
           </summary>
-          <div className="mt-2 max-h-40 space-y-1 overflow-auto font-mono leading-4">
+          <div className="mt-2 max-h-96 space-y-1 overflow-auto font-mono leading-4">
             {debugLog.map((item, index) => (
               <div
                 key={`${item.time}-${item.stage}-${index}`}
