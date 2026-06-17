@@ -1723,7 +1723,11 @@ async function fetchSharedCandlePayload(
   const noFrontendLimit = isFuturesCandleSymbol(normalizedSymbol) || !limit || limit <= 0
   const requestedLimit = noFrontendLimit ? 0 : Math.max(1, limit)
 
-  const providerForce = force && !isFuturesCandleSymbol(normalizedSymbol)
+  // Force must still reach the backend for MES/futures. The frontend is not
+  // calling InsightSentry directly; it is asking our backend to repair/refetch
+  // the same timeframe. Blocking force for futures caused the chart to keep
+  // retrying stale/empty snapshots instead of requesting fresh history.
+  const providerForce = Boolean(force)
 
   const activeRequest = SHARED_CANDLE_IN_FLIGHT.get(key)
   if (activeRequest && !providerForce) {
@@ -1802,7 +1806,45 @@ async function fetchSharedCandlePayload(
         return entry
       }
     } catch (error) {
-      console.warn('Dashboard snapshot candle payload unavailable, falling back to legacy candle route:', error)
+      console.warn('Dashboard snapshot candle payload unavailable, forcing backend historical refresh:', error)
+    }
+
+    // Snapshot is only a convenience wrapper. If it fails, returns zero candles,
+    // or the browser has no warm cache yet, immediately ask the backend candle
+    // warehouse to fetch/repair real same-timeframe history up to now.
+    try {
+      const forcedHistory = await fetchBackendHistoricalRefreshPayload(
+        apiBaseUrl,
+        normalizedSymbol,
+        normalizedTimeframe,
+        apiLimit
+      )
+      const forcedCandles = normalizeCandlePayload(forcedHistory)
+
+      if (forcedCandles.length > 0) {
+        const overlayPayload = getUnifiedOverlayPayload(forcedHistory)
+        const unifiedIntelligence = getUnifiedIntelligencePayload(forcedHistory)
+        const mergedCandles = mergeHistoricalCandles(
+          previous?.candles,
+          forcedCandles,
+          noFrontendLimit ? 0 : SHARED_CANDLE_CACHE_MAX_BARS
+        )
+        const entry: SharedCandleCacheEntry = {
+          candles: mergedCandles,
+          overlayPayload: overlayPayload ?? previous?.overlayPayload ?? null,
+          unifiedIntelligence: unifiedIntelligence ?? previous?.unifiedIntelligence ?? null,
+          updatedAt: Date.now(),
+          limit: Math.max(apiLimit, previous?.limit ?? 0, mergedCandles.length),
+          provider: typeof forcedHistory?.provider === 'string' ? forcedHistory.provider : 'dashboard_candles',
+          source: typeof forcedHistory?.source === 'string'
+            ? `${forcedHistory.source}+snapshot_failover_forced_history`
+            : 'snapshot_failover_forced_history',
+        }
+        SHARED_CANDLE_CACHE.set(key, entry)
+        return entry
+      }
+    } catch (error) {
+      console.warn('Forced backend historical refresh failed, trying normal candle route:', error)
     }
 
     let routeConfig = getHistoricalCandleRouteForSymbol(apiBaseUrl, normalizedSymbol)
@@ -1849,11 +1891,38 @@ async function fetchSharedCandlePayload(
     let providerLabel = activeRouteConfig.provider
     let sourceLabel = activeRouteConfig.source
 
-    const response = await fetch(`${activeRouteConfig.route}?${params.toString()}`, {
-      cache: 'no-store',
-    })
+    let response: Response | null = null
 
-    if (!response.ok) {
+    try {
+      response = await fetch(`${activeRouteConfig.route}?${params.toString()}`, {
+        cache: 'no-store',
+      })
+    } catch (error) {
+      // A browser TypeError("Failed to fetch") usually means the backend was
+      // waking/restarting or the network request was interrupted. Do not stop
+      // the chart here; immediately retry through the forced historical repair
+      // path before surfacing the error to the chart log.
+      try {
+        const forcedHistory = await fetchBackendHistoricalRefreshPayload(
+          apiBaseUrl,
+          normalizedSymbol,
+          normalizedTimeframe,
+          apiLimit
+        )
+        const forcedCandles = normalizeCandlePayload(forcedHistory)
+        if (forcedCandles.length > 0) {
+          json = forcedHistory
+          providerLabel = typeof forcedHistory?.provider === 'string' ? forcedHistory.provider : providerLabel
+          sourceLabel = typeof forcedHistory?.source === 'string'
+            ? `${forcedHistory.source}+network_error_forced_history`
+            : 'network_error_forced_history'
+        }
+      } catch (repairError) {
+        throw error
+      }
+    }
+
+    if (response && !response.ok) {
       if (routeConfig.provider === 'insightsentry') {
         if (response.status === 429) {
           rememberInsightSentryBackoff(key)
@@ -1899,7 +1968,7 @@ async function fetchSharedCandlePayload(
       }
     }
 
-    if (!json) {
+    if (!json && response) {
       json = await response.json()
     }
 
@@ -1909,16 +1978,38 @@ async function fetchSharedCandlePayload(
     // Do not cache it and do not log it as a successful candle load; otherwise
     // mini charts can get stuck showing "0 plotted" until another retry wins.
     if (candles.length === 0) {
-      if (previous?.candles?.length) {
-        return {
-          ...previous,
-          candles: noFrontendLimit ? previous.candles : previous.candles.slice(-requestedLimit),
-          updatedAt: Date.now(),
-          source: `${previous.source ?? 'frontend_cached_history'}_after_zero_candle_response`,
+      try {
+        const forcedHistory = await fetchBackendHistoricalRefreshPayload(
+          apiBaseUrl,
+          normalizedSymbol,
+          normalizedTimeframe,
+          apiLimit
+        )
+        const forcedCandles = normalizeCandlePayload(forcedHistory)
+        if (forcedCandles.length > 0) {
+          json = forcedHistory
+          candles.splice(0, candles.length, ...forcedCandles)
+          providerLabel = typeof forcedHistory?.provider === 'string' ? forcedHistory.provider : providerLabel
+          sourceLabel = typeof forcedHistory?.source === 'string'
+            ? `${forcedHistory.source}+zero_candle_forced_history`
+            : 'zero_candle_forced_history'
         }
+      } catch (error) {
+        // Fall through to previous cache or error below.
       }
 
-      throw new Error(`${providerLabel} returned zero candles for ${normalizedSymbol} ${normalizedTimeframe}`)
+      if (candles.length === 0) {
+        if (previous?.candles?.length) {
+          return {
+            ...previous,
+            candles: noFrontendLimit ? previous.candles : previous.candles.slice(-requestedLimit),
+            updatedAt: Date.now(),
+            source: `${previous.source ?? 'frontend_cached_history'}_after_zero_candle_response`,
+          }
+        }
+
+        throw new Error(`${providerLabel} returned zero candles for ${normalizedSymbol} ${normalizedTimeframe}`)
+      }
     }
 
     const overlayPayload = getUnifiedOverlayPayload(json)
