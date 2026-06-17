@@ -7909,6 +7909,15 @@ CANDLE_WAREHOUSE_LIVE_ENABLED = os.getenv("CANDLE_WAREHOUSE_LIVE_ENABLED", "true
 CANDLE_WAREHOUSE_LIVE_INTERVAL_SECONDS = max(5, int(os.getenv("CANDLE_WAREHOUSE_LIVE_INTERVAL_SECONDS", "15")))
 CANDLE_WAREHOUSE_RECENT_DP = max(2, min(int(os.getenv("CANDLE_WAREHOUSE_RECENT_DP", "25")), 100))
 
+# Tail repair prevents the exact gap you saw:
+# historical candles stop at one time, then the live candle appends much later.
+# Instead of accepting an old cached tail, the backend refreshes the SAME timeframe
+# directly from InsightSentry up to the current provider point, then merges/saves it.
+CANDLE_WAREHOUSE_TAIL_REPAIR_ENABLED = os.getenv("CANDLE_WAREHOUSE_TAIL_REPAIR_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+CANDLE_WAREHOUSE_TAIL_REPAIR_COOLDOWN_SECONDS = max(5, int(os.getenv("CANDLE_WAREHOUSE_TAIL_REPAIR_COOLDOWN_SECONDS", "45")))
+CANDLE_WAREHOUSE_TAIL_STALE_SECONDS = max(60, int(os.getenv("CANDLE_WAREHOUSE_TAIL_STALE_SECONDS", "900")))
+CANDLE_WAREHOUSE_MAX_GAP_MULTIPLIER = max(2.0, to_float(os.getenv("CANDLE_WAREHOUSE_MAX_GAP_MULTIPLIER", "2.5"), 2.5))
+
 _CANDLE_WAREHOUSE_THREAD: Optional[threading.Thread] = None
 _CANDLE_WAREHOUSE_LOCK = threading.RLock()
 _CANDLE_WAREHOUSE_STATUS: Dict[str, Any] = {
@@ -7916,9 +7925,11 @@ _CANDLE_WAREHOUSE_STATUS: Dict[str, Any] = {
     "running": False,
     "lastWarmup": None,
     "lastLiveUpdate": None,
+    "lastTailRepair": None,
     "lastError": None,
     "createdAt": now_iso(),
 }
+_CANDLE_WAREHOUSE_TAIL_REPAIR_AT: Dict[str, float] = {}
 
 
 def _warehouse_symbols() -> List[str]:
@@ -7952,6 +7963,229 @@ def _store_backend_warehouse_candles(symbol: str, timeframe: str, candles_list: 
         return stored_dashboard
 
     return payload
+
+
+def _latest_epoch_from_candles(candles_list: Any) -> float:
+    latest = 0.0
+    if not isinstance(candles_list, list):
+        return latest
+    for candle in candles_list:
+        if not isinstance(candle, dict):
+            continue
+        epoch = to_epoch_seconds(candle.get("epoch") or candle.get("time") or candle.get("timestamp"))
+        if epoch > latest:
+            latest = epoch
+    return latest
+
+
+def _candle_gap_summary(candles_list: Any, timeframe: str) -> Dict[str, Any]:
+    rows = merge_candles_by_time(candles_list if isinstance(candles_list, list) else [])
+    expected = max(timeframe_seconds(timeframe), 60)
+    allowed_gap = expected * CANDLE_WAREHOUSE_MAX_GAP_MULTIPLIER
+    gaps: List[Dict[str, Any]] = []
+    largest_gap_seconds = 0
+    largest_from: Optional[str] = None
+    largest_to: Optional[str] = None
+
+    previous_epoch: Optional[int] = None
+    previous_time: Optional[str] = None
+    for row in rows:
+        epoch = int(to_epoch_seconds(row.get("epoch") or row.get("time") or row.get("timestamp")))
+        if epoch <= 0:
+            continue
+        if previous_epoch is not None:
+            gap_seconds = epoch - previous_epoch
+            if gap_seconds > allowed_gap:
+                gap = {
+                    "from": previous_time,
+                    "to": format_bar_time(epoch),
+                    "gapSeconds": gap_seconds,
+                    "expectedSeconds": expected,
+                    "missingBarsApprox": max(0, int(round(gap_seconds / expected)) - 1),
+                }
+                gaps.append(gap)
+                if gap_seconds > largest_gap_seconds:
+                    largest_gap_seconds = gap_seconds
+                    largest_from = previous_time
+                    largest_to = format_bar_time(epoch)
+        previous_epoch = epoch
+        previous_time = format_bar_time(epoch)
+
+    return {
+        "gapDetected": bool(gaps),
+        "gapCount": len(gaps),
+        "largestGapSeconds": largest_gap_seconds,
+        "largestGapFrom": largest_from,
+        "largestGapTo": largest_to,
+        "expectedSeconds": expected,
+        "allowedGapSeconds": allowed_gap,
+        "gaps": gaps[-10:],
+    }
+
+
+def _futures_tail_seconds_behind(candles_list: Any, symbol: str, timeframe: str) -> float:
+    if not is_futures_symbol(symbol):
+        return 0.0
+    latest_epoch = _latest_epoch_from_candles(candles_list)
+    if latest_epoch <= 0:
+        return 999999999.0
+    return max(0.0, datetime.now(timezone.utc).timestamp() - latest_epoch)
+
+
+def _futures_cache_needs_same_timeframe_refresh(cached_candles: Any, symbol: str, timeframe: str) -> Tuple[bool, str, Dict[str, Any]]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    if not is_futures_symbol(normalized_symbol):
+        return False, "not_futures", {}
+
+    candles_list = cached_candles if isinstance(cached_candles, list) else []
+    if not candles_list:
+        return True, "empty_cache", {"tailSecondsBehind": None}
+
+    latest_epoch = _latest_epoch_from_candles(candles_list)
+    tail_seconds = _futures_tail_seconds_behind(candles_list, normalized_symbol, normalized_timeframe)
+    tf_seconds = max(timeframe_seconds(normalized_timeframe), 60)
+    stale_threshold = max(CANDLE_WAREHOUSE_TAIL_STALE_SECONDS, tf_seconds * CANDLE_WAREHOUSE_MAX_GAP_MULTIPLIER)
+    gap_info = _candle_gap_summary(candles_list, normalized_timeframe)
+
+    if latest_epoch <= 0:
+        return True, "missing_latest_epoch", {"tailSecondsBehind": tail_seconds, **gap_info}
+
+    if tail_seconds > stale_threshold:
+        return True, "cache_tail_behind_current_time", {
+            "tailSecondsBehind": round(tail_seconds, 2),
+            "staleThresholdSeconds": round(stale_threshold, 2),
+            "latestCachedTime": format_bar_time(latest_epoch),
+            **gap_info,
+        }
+
+    if gap_info.get("gapDetected") and to_float(gap_info.get("largestGapSeconds"), 0) > max(tf_seconds * 6, 3600):
+        return True, "large_internal_gap_detected", {
+            "tailSecondsBehind": round(tail_seconds, 2),
+            "latestCachedTime": format_bar_time(latest_epoch),
+            **gap_info,
+        }
+
+    return False, "cache_current_enough", {
+        "tailSecondsBehind": round(tail_seconds, 2),
+        "latestCachedTime": format_bar_time(latest_epoch),
+        **gap_info,
+    }
+
+
+def _tail_repair_key(route: str, symbol: str, timeframe: str) -> str:
+    return f"{route}::{normalize_symbol(symbol)}::{normalize_timeframe(timeframe)}"
+
+
+def _tail_repair_in_cooldown(route: str, symbol: str, timeframe: str) -> bool:
+    key = _tail_repair_key(route, symbol, timeframe)
+    last = _CANDLE_WAREHOUSE_TAIL_REPAIR_AT.get(key, 0.0)
+    return (time.time() - last) < CANDLE_WAREHOUSE_TAIL_REPAIR_COOLDOWN_SECONDS
+
+
+def _mark_tail_repair(route: str, symbol: str, timeframe: str) -> None:
+    _CANDLE_WAREHOUSE_TAIL_REPAIR_AT[_tail_repair_key(route, symbol, timeframe)] = time.time()
+
+
+def refresh_futures_history_to_current(
+    *,
+    symbol: str,
+    timeframe: str,
+    route: str,
+    limit: int = 0,
+    reason: str = "tail_repair",
+    cached_payload: Optional[Dict[str, Any]] = None,
+    force: bool = False,
+) -> Optional[Dict[str, Any]]:
+    normalized_symbol = normalize_symbol(symbol)
+    normalized_timeframe = normalize_timeframe(timeframe)
+
+    if not is_futures_symbol(normalized_symbol):
+        return cached_payload
+
+    if not CANDLE_WAREHOUSE_TAIL_REPAIR_ENABLED and not force:
+        return cached_payload
+
+    if not force and _tail_repair_in_cooldown(route, normalized_symbol, normalized_timeframe):
+        if isinstance(cached_payload, dict):
+            cached_payload = dict(cached_payload)
+            cached_payload["tailRepairSkipped"] = "cooldown"
+        return cached_payload
+
+    _mark_tail_repair(route, normalized_symbol, normalized_timeframe)
+
+    try:
+        fetched = fetch_insightsentry_historical_candles(normalized_symbol, normalized_timeframe, 0)
+        fetched = filter_valid_candles_for_symbol(merge_candles_by_time(fetched), normalized_symbol)
+
+        if not fetched:
+            if isinstance(cached_payload, dict):
+                cached_payload = dict(cached_payload)
+                cached_payload["tailRepairAttempted"] = True
+                cached_payload["tailRepairStatus"] = "provider_returned_no_candles"
+                cached_payload["tailRepairReason"] = reason
+            return cached_payload
+
+        existing_candles = []
+        if isinstance(cached_payload, dict) and isinstance(cached_payload.get("candles"), list):
+            existing_candles = cached_payload.get("candles") or []
+
+        live_rows = get_live_recent_candles(normalized_symbol, normalized_timeframe)
+        merged = filter_valid_candles_for_symbol(
+            merge_candles_by_time([*existing_candles, *fetched, *live_rows]),
+            normalized_symbol,
+        )
+
+        stored = _store_backend_warehouse_candles(
+            normalized_symbol,
+            normalized_timeframe,
+            merged,
+            f"same_timeframe_history_refresh_to_current_{reason}",
+        )
+
+        stored_candles = stored.get("candles") if isinstance(stored, dict) else []
+        gap_info = _candle_gap_summary(stored_candles, normalized_timeframe)
+
+        repaired = dict(stored) if isinstance(stored, dict) else {
+            "symbol": normalized_symbol,
+            "timeframe": normalized_timeframe,
+            "candles": merged,
+        }
+        repaired["tailRepairAttempted"] = True
+        repaired["tailRepairStatus"] = "refreshed_from_insightsentry_same_timeframe"
+        repaired["tailRepairReason"] = reason
+        repaired["directTimeframeFetch"] = True
+        repaired["noTimeframeBuildFrom1m"] = True
+        repaired["providerFetchedCount"] = len(fetched)
+        repaired["mergedCount"] = len(merged)
+        repaired["gapInfo"] = gap_info
+
+        with _CANDLE_WAREHOUSE_LOCK:
+            _CANDLE_WAREHOUSE_STATUS["lastTailRepair"] = {
+                "symbol": normalized_symbol,
+                "timeframe": normalized_timeframe,
+                "route": route,
+                "reason": reason,
+                "providerFetchedCount": len(fetched),
+                "mergedCount": len(merged),
+                "gapInfo": gap_info,
+                "createdAt": now_iso(),
+            }
+
+        return repaired
+    except Exception as error:
+        message = str(error)[:500]
+        print(f"[Candle Warehouse] same-timeframe tail repair failed for {normalized_symbol} {normalized_timeframe}: {message}")
+        with _CANDLE_WAREHOUSE_LOCK:
+            _CANDLE_WAREHOUSE_STATUS["lastError"] = message
+        if isinstance(cached_payload, dict):
+            cached_payload = dict(cached_payload)
+            cached_payload["tailRepairAttempted"] = True
+            cached_payload["tailRepairStatus"] = "error"
+            cached_payload["tailRepairError"] = message
+            cached_payload["tailRepairReason"] = reason
+        return cached_payload
 
 
 def fetch_insightsentry_recent_series_candles(symbol: str, timeframe: str, dp: int = CANDLE_WAREHOUSE_RECENT_DP) -> List[Dict[str, Any]]:
@@ -8072,7 +8306,38 @@ def _update_backend_live_candles_once() -> Dict[str, Any]:
                         stored_candles = stored.get("candles") if isinstance(stored, dict) else []
                         saved_count = len(stored_candles) if isinstance(stored_candles, list) else 0
 
+                    # Before appending a live quote candle, make sure history has caught up.
+                    # This avoids chart gaps like 3:50 PM -> 11:30 PM on 10m.
+                    cached_tail = candle_cache_best(
+                        "dashboard",
+                        normalized_symbol,
+                        normalized_timeframe,
+                        1,
+                        max(CANDLE_SITE_CACHE_MAX_AGE_SECONDS, 7 * 24 * 60 * 60),
+                    )
+                    cached_tail_candles = cached_tail.get("candles") if isinstance(cached_tail, dict) else None
+                    needs_tail_refresh, tail_reason, _tail_debug = _futures_cache_needs_same_timeframe_refresh(
+                        cached_tail_candles,
+                        normalized_symbol,
+                        normalized_timeframe,
+                    )
+                    if needs_tail_refresh:
+                        repaired = refresh_futures_history_to_current(
+                            symbol=normalized_symbol,
+                            timeframe=normalized_timeframe,
+                            route="dashboard",
+                            limit=0,
+                            reason=f"live_loop_{tail_reason}",
+                            cached_payload=cached_tail if isinstance(cached_tail, dict) else None,
+                            force=False,
+                        )
+                        repaired_candles = repaired.get("candles") if isinstance(repaired, dict) else None
+                        if isinstance(repaired_candles, list):
+                            saved_count = max(saved_count, len(repaired_candles))
+
                     # Quote-to-current-candle bridge keeps the active candle moving between series updates.
+                    # It now runs after same-timeframe history repair, so a live row is not stitched
+                    # onto an old historical tail unless the provider truly has not published the bars.
                     live_payload = get_live_price_payload(normalized_symbol, normalized_timeframe)
                     persist_live_candle_to_history_cache(normalized_symbol, normalized_timeframe, live_payload)
 
@@ -8254,9 +8519,36 @@ def historical_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = 0 if is_futures_symbol(normalized_symbol) else max(1, min(candle_cache_limit_value(limit) or 500, 5000))
 
+    cached: Optional[Dict[str, Any]] = None
     if not force:
         cached = candle_cache_best("historical", normalized_symbol, normalized_timeframe, 1, max(CANDLE_SITE_CACHE_MAX_AGE_SECONDS, 7 * 24 * 60 * 60))
-        if cached:
+        cached_candles = cached.get("candles") if isinstance(cached, dict) else None
+
+        if isinstance(cached_candles, list) and is_futures_symbol(normalized_symbol):
+            needs_refresh, reason, refresh_debug = _futures_cache_needs_same_timeframe_refresh(
+                cached_candles,
+                normalized_symbol,
+                normalized_timeframe,
+            )
+
+            if needs_refresh:
+                refreshed = refresh_futures_history_to_current(
+                    symbol=normalized_symbol,
+                    timeframe=normalized_timeframe,
+                    route="historical",
+                    limit=safe_limit,
+                    reason=reason,
+                    cached_payload=cached,
+                    force=False,
+                )
+                if isinstance(refreshed, dict) and isinstance(refreshed.get("candles"), list):
+                    cached = refreshed
+                    cached_candles = refreshed.get("candles")
+            else:
+                cached = dict(cached)
+                cached["tailRepairDebug"] = refresh_debug
+
+        if isinstance(cached, dict):
             cached_candles = cached.get("candles")
             if isinstance(cached_candles, list):
                 returned = maybe_limit_candles(cached_candles, normalized_symbol, safe_limit)
@@ -8272,8 +8564,50 @@ def historical_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int
                 rebuilt["siteCacheAgeSeconds"] = cached.get("siteCacheAgeSeconds")
                 rebuilt["backendWarehouse"] = True
                 rebuilt["noArtificialCandleLimit"] = is_futures_symbol(normalized_symbol)
+                rebuilt["sameTimeframeTailRepair"] = {
+                    "enabled": CANDLE_WAREHOUSE_TAIL_REPAIR_ENABLED,
+                    "attempted": bool(cached.get("tailRepairAttempted")),
+                    "status": cached.get("tailRepairStatus"),
+                    "reason": cached.get("tailRepairReason"),
+                    "providerFetchedCount": cached.get("providerFetchedCount"),
+                    "noTimeframeBuildFrom1m": True,
+                }
+                rebuilt["gapInfo"] = _candle_gap_summary(returned, normalized_timeframe)
                 return rebuilt
             return cached
+
+    if is_futures_symbol(normalized_symbol):
+        refreshed = refresh_futures_history_to_current(
+            symbol=normalized_symbol,
+            timeframe=normalized_timeframe,
+            route="historical",
+            limit=safe_limit,
+            reason="force_refresh" if force else "cache_missing",
+            cached_payload=cached,
+            force=True,
+        )
+        if isinstance(refreshed, dict) and isinstance(refreshed.get("candles"), list):
+            returned = maybe_limit_candles(refreshed.get("candles"), normalized_symbol, safe_limit)
+            payload = build_candle_route_payload(
+                route_source="historical_candle_route_same_timeframe_refresh_to_current",
+                symbol=normalized_symbol,
+                timeframe=normalized_timeframe,
+                candles=returned,
+                provider=refreshed.get("provider") or "insightsentry",
+                cache_label=str(refreshed.get("cache") or "refreshed"),
+            )
+            payload["backendWarehouse"] = True
+            payload["noArtificialCandleLimit"] = True
+            payload["sameTimeframeTailRepair"] = {
+                "enabled": CANDLE_WAREHOUSE_TAIL_REPAIR_ENABLED,
+                "attempted": bool(refreshed.get("tailRepairAttempted")),
+                "status": refreshed.get("tailRepairStatus"),
+                "reason": refreshed.get("tailRepairReason"),
+                "providerFetchedCount": refreshed.get("providerFetchedCount"),
+                "noTimeframeBuildFrom1m": True,
+            }
+            payload["gapInfo"] = _candle_gap_summary(returned, normalized_timeframe)
+            return payload
 
     candles = fetch_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
     candles = maybe_limit_candles(candles, normalized_symbol, safe_limit)
@@ -8289,6 +8623,7 @@ def historical_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int
     )
     payload["backendWarehouse"] = True
     payload["noArtificialCandleLimit"] = is_futures_symbol(normalized_symbol)
+    payload["gapInfo"] = _candle_gap_summary(candles, normalized_timeframe) if is_futures_symbol(normalized_symbol) else None
 
     if candles:
         return candle_cache_set("historical", normalized_symbol, normalized_timeframe, safe_limit, payload)
@@ -8306,28 +8641,95 @@ def candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 0, force
 
     if not force:
         cached = candle_cache_best("dashboard", normalized_symbol, normalized_timeframe, 1, max(CANDLE_SITE_CACHE_MAX_AGE_SECONDS, 7 * 24 * 60 * 60))
-        if cached:
-            cached_candles = cached.get("candles")
-            if isinstance(cached_candles, list):
-                if futures_cached_payload_is_stale_against_live(cached, normalized_symbol, normalized_timeframe):
-                    use_backend_cache = False
+        cached_candles = cached.get("candles") if isinstance(cached, dict) else None
+
+        if isinstance(cached_candles, list) and is_futures_symbol(normalized_symbol):
+            needs_refresh, reason, refresh_debug = _futures_cache_needs_same_timeframe_refresh(
+                cached_candles,
+                normalized_symbol,
+                normalized_timeframe,
+            )
+
+            if needs_refresh or futures_cached_payload_is_stale_against_live(cached, normalized_symbol, normalized_timeframe):
+                refreshed = refresh_futures_history_to_current(
+                    symbol=normalized_symbol,
+                    timeframe=normalized_timeframe,
+                    route="dashboard",
+                    limit=safe_limit,
+                    reason=reason if needs_refresh else "live_price_guard_refresh",
+                    cached_payload=cached,
+                    force=False,
+                )
+                if isinstance(refreshed, dict) and isinstance(refreshed.get("candles"), list):
+                    cached = refreshed
+                    cached_candles = refreshed.get("candles")
                 else:
-                    returned = maybe_limit_candles(cached_candles, normalized_symbol, safe_limit)
-                    rebuilt = build_candle_route_payload(
-                        route_source="dashboard_saved_backend_candles",
-                        symbol=normalized_symbol,
-                        timeframe=normalized_timeframe,
-                        candles=returned,
-                        provider=cached.get("provider"),
-                        cache_label=str(cached.get("cache") or "site_cached"),
-                    )
-                    rebuilt["siteCache"] = cached.get("siteCache", True)
-                    rebuilt["siteCacheAgeSeconds"] = cached.get("siteCacheAgeSeconds")
-                    rebuilt["backendWarehouse"] = True
-                    rebuilt["noArtificialCandleLimit"] = is_futures_symbol(normalized_symbol)
-                    return rebuilt
+                    use_backend_cache = False
+            else:
+                cached = dict(cached)
+                cached["tailRepairDebug"] = refresh_debug
+
+        if isinstance(cached, dict):
+            cached_candles = cached.get("candles")
+            if isinstance(cached_candles, list) and len(cached_candles) > 0:
+                returned = maybe_limit_candles(cached_candles, normalized_symbol, safe_limit)
+                rebuilt = build_candle_route_payload(
+                    route_source="dashboard_saved_backend_candles",
+                    symbol=normalized_symbol,
+                    timeframe=normalized_timeframe,
+                    candles=returned,
+                    provider=cached.get("provider"),
+                    cache_label=str(cached.get("cache") or "site_cached"),
+                )
+                rebuilt["siteCache"] = cached.get("siteCache", True)
+                rebuilt["siteCacheAgeSeconds"] = cached.get("siteCacheAgeSeconds")
+                rebuilt["backendWarehouse"] = True
+                rebuilt["noArtificialCandleLimit"] = is_futures_symbol(normalized_symbol)
+                rebuilt["sameTimeframeTailRepair"] = {
+                    "enabled": CANDLE_WAREHOUSE_TAIL_REPAIR_ENABLED,
+                    "attempted": bool(cached.get("tailRepairAttempted")),
+                    "status": cached.get("tailRepairStatus"),
+                    "reason": cached.get("tailRepairReason"),
+                    "providerFetchedCount": cached.get("providerFetchedCount"),
+                    "noTimeframeBuildFrom1m": True,
+                }
+                rebuilt["gapInfo"] = _candle_gap_summary(returned, normalized_timeframe) if is_futures_symbol(normalized_symbol) else None
+                return rebuilt
             elif not futures_cached_payload_is_stale_against_live(cached, normalized_symbol, normalized_timeframe):
                 return cached
+
+    if is_futures_symbol(normalized_symbol) and (force or not use_backend_cache):
+        refreshed = refresh_futures_history_to_current(
+            symbol=normalized_symbol,
+            timeframe=normalized_timeframe,
+            route="dashboard",
+            limit=safe_limit,
+            reason="force_refresh" if force else "cache_rejected_or_missing",
+            cached_payload=None,
+            force=True,
+        )
+        if isinstance(refreshed, dict) and isinstance(refreshed.get("candles"), list):
+            returned = maybe_limit_candles(refreshed.get("candles"), normalized_symbol, safe_limit)
+            payload = build_candle_route_payload(
+                route_source="dashboard_same_timeframe_history_refresh_to_current",
+                symbol=normalized_symbol,
+                timeframe=normalized_timeframe,
+                candles=returned,
+                provider=refreshed.get("provider") or "insightsentry",
+                cache_label=str(refreshed.get("cache") or "refreshed"),
+            )
+            payload["backendWarehouse"] = True
+            payload["noArtificialCandleLimit"] = True
+            payload["sameTimeframeTailRepair"] = {
+                "enabled": CANDLE_WAREHOUSE_TAIL_REPAIR_ENABLED,
+                "attempted": bool(refreshed.get("tailRepairAttempted")),
+                "status": refreshed.get("tailRepairStatus"),
+                "reason": refreshed.get("tailRepairReason"),
+                "providerFetchedCount": refreshed.get("providerFetchedCount"),
+                "noTimeframeBuildFrom1m": True,
+            }
+            payload["gapInfo"] = _candle_gap_summary(returned, normalized_timeframe)
+            return payload
 
     merged = get_dashboard_candles(normalized_symbol, normalized_timeframe, safe_limit, use_cache=use_backend_cache)
     merged = maybe_limit_candles(merged, normalized_symbol, safe_limit)
@@ -8343,6 +8745,7 @@ def candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 0, force
     )
     payload["backendWarehouse"] = True
     payload["noArtificialCandleLimit"] = is_futures_symbol(normalized_symbol)
+    payload["gapInfo"] = _candle_gap_summary(merged, normalized_timeframe) if is_futures_symbol(normalized_symbol) else None
 
     if merged:
         return candle_cache_set("dashboard", normalized_symbol, normalized_timeframe, safe_limit, payload)
@@ -8592,6 +8995,48 @@ def candle_cache_status(symbol: str = "", timeframes: str = "") -> Dict[str, Any
             "ageSeconds": candle_cache_age_seconds(value),
         })
 
+    continuity: List[Dict[str, Any]] = []
+    symbols_to_check = [requested_symbol] if requested_symbol else _warehouse_symbols()
+    timeframes_to_check = sorted(requested_timeframes) if requested_timeframes else _warehouse_timeframes()
+
+    for item_symbol in symbols_to_check:
+        row_symbol = normalize_symbol(item_symbol)
+        for item_timeframe in timeframes_to_check:
+            row_timeframe = normalize_timeframe(item_timeframe)
+            cached = candle_cache_best(
+                "dashboard",
+                row_symbol,
+                row_timeframe,
+                1,
+                max(CANDLE_SITE_CACHE_MAX_AGE_SECONDS, 7 * 24 * 60 * 60),
+            )
+            candles_list = cached.get("candles") if isinstance(cached, dict) else []
+            if not isinstance(candles_list, list):
+                candles_list = []
+
+            gap_info = _candle_gap_summary(candles_list, row_timeframe)
+            needs_refresh, refresh_reason, refresh_debug = _futures_cache_needs_same_timeframe_refresh(
+                candles_list,
+                row_symbol,
+                row_timeframe,
+            ) if is_futures_symbol(row_symbol) else (False, "not_futures", {})
+
+            continuity.append({
+                "symbol": row_symbol,
+                "timeframe": row_timeframe,
+                "count": len(candles_list),
+                "firstCandleTime": candles_list[0].get("time") if candles_list else None,
+                "lastCandleTime": candles_list[-1].get("time") if candles_list else None,
+                "latestEpoch": _latest_epoch_from_candles(candles_list),
+                "tailSecondsBehind": _futures_tail_seconds_behind(candles_list, row_symbol, row_timeframe) if is_futures_symbol(row_symbol) else None,
+                "needsSameTimeframeRefresh": needs_refresh,
+                "refreshReason": refresh_reason,
+                "refreshDebug": refresh_debug,
+                "gapInfo": gap_info,
+                "directTimeframeFetch": True if is_futures_symbol(row_symbol) else None,
+                "noTimeframeBuildFrom1m": True if is_futures_symbol(row_symbol) else None,
+            })
+
     return {
         "eventType": "CANDLE_CACHE_STATUS",
         "status": "Live",
@@ -8602,8 +9047,12 @@ def candle_cache_status(symbol: str = "", timeframes: str = "") -> Dict[str, Any
         "timeframes": sorted(requested_timeframes) if requested_timeframes else None,
         "count": len(entries),
         "entries": entries,
+        "continuity": continuity,
+        "tailRepairEnabled": CANDLE_WAREHOUSE_TAIL_REPAIR_ENABLED,
+        "tailRepairCooldownSeconds": CANDLE_WAREHOUSE_TAIL_REPAIR_COOLDOWN_SECONDS,
         "createdAt": now_iso(),
     }
+
 
 
 @app.get("/api/site-cache/status")
