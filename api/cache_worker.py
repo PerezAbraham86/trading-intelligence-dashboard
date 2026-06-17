@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import signal
-import sys
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List
@@ -14,29 +13,20 @@ from urllib.request import Request, urlopen
 """
 api/cache_worker.py
 
-Background cache warmer for the Trading Intelligence Dashboard.
+Clean backend candle warmer for the Trading Intelligence Dashboard.
 
-Rate-limit-safe defaults:
-- MES1! only
-- 1m + 5m only
-- every 5 minutes
-- force=true every run, but only for MES1! 1m/5m every 5 minutes
-- no latest-signal touch calls by default
-
-Important design:
-- This worker DOES NOT write directly to SQLite.
-- It calls the Render backend API endpoints.
-- The backend writes candles/settings/signals/scorecards into its own cache/database.
-- This avoids the problem of separate Render services not sharing a local SQLite file.
-
-Render worker command:
-    python -m api.cache_worker
+Rules:
+- MES first until stable.
+- Warm each timeframe directly from backend /api/candles/warm.
+- No frontend calls.
+- No direct SQLite writes from the worker.
+- No latest-signal / AI / snapshot touch during candle overhaul.
 """
 
 DEFAULT_SYMBOLS = "MES1!"
-DEFAULT_TIMEFRAMES = "1m,5m"
-DEFAULT_LIMIT = 500
-DEFAULT_INTERVAL_SECONDS = 300
+DEFAULT_TIMEFRAMES = "1m,3m,5m,10m"
+DEFAULT_LIMIT = 0
+DEFAULT_INTERVAL_SECONDS = 60
 
 _STOP = False
 
@@ -49,11 +39,11 @@ def log(message: str, payload: Any | None = None) -> None:
     prefix = f"[cache-worker {now_iso()}]"
     if payload is None:
         print(f"{prefix} {message}", flush=True)
-    else:
-        try:
-            print(f"{prefix} {message} {json.dumps(payload, default=str)[:1200]}", flush=True)
-        except Exception:
-            print(f"{prefix} {message} {payload}", flush=True)
+        return
+    try:
+        print(f"{prefix} {message} {json.dumps(payload, default=str)[:2000]}", flush=True)
+    except Exception:
+        print(f"{prefix} {message} {payload}", flush=True)
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -78,37 +68,7 @@ def split_csv(value: str, fallback: str) -> List[str]:
 
 def normalize_base_url(value: str) -> str:
     base = str(value or "").strip().rstrip("/")
-    if not base:
-        # This default is only useful for local development.
-        # On Render, set BACKEND_BASE_URL to your web service URL.
-        return "http://127.0.0.1:8000"
-    return base
-
-
-def http_get_json(url: str, timeout: int = 40) -> Dict[str, Any]:
-    request = Request(
-        url,
-        headers={
-            "User-Agent": "MARKETBOS-cache-worker/1.0",
-            "Accept": "application/json",
-        },
-    )
-    with urlopen(request, timeout=timeout) as response:
-        body = response.read().decode("utf-8", errors="ignore")
-        return json.loads(body) if body else {}
-
-
-def safe_get_json(url: str, timeout: int = 40) -> Dict[str, Any]:
-    try:
-        return http_get_json(url, timeout=timeout)
-    except HTTPError as error:
-        body = error.read().decode("utf-8", errors="ignore") if error.fp else ""
-        log(f"HTTP error {error.code} for {url}", {"body": body[:500]})
-    except URLError as error:
-        log(f"URL error for {url}", {"reason": str(error.reason)})
-    except Exception as error:
-        log(f"request failed for {url}", {"error": str(error)})
-    return {}
+    return base or "http://127.0.0.1:8000"
 
 
 def build_url(base_url: str, path: str, params: Dict[str, Any] | None = None) -> str:
@@ -117,40 +77,60 @@ def build_url(base_url: str, path: str, params: Dict[str, Any] | None = None) ->
     return f"{base_url}{path}{'?' + query if query else ''}"
 
 
-def warm_candle_cache(base_url: str, symbols: List[str], timeframes: List[str], limit: int, force: bool) -> Dict[str, Any]:
-    url = build_url(
-        base_url,
-        "/api/warm-candle-cache",
-        {
-            "symbols": ",".join(symbols),
-            "timeframes": ",".join(timeframes),
-            "limit": limit,
-            "force": str(force).lower(),
+def http_get_json(url: str, timeout: int = 60) -> Dict[str, Any]:
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "MARKETBOS-clean-cache-worker/2.0",
+            "Accept": "application/json",
         },
     )
-    return safe_get_json(url, timeout=120)
+    with urlopen(request, timeout=timeout) as response:
+        body = response.read().decode("utf-8", errors="ignore")
+        return json.loads(body) if body else {}
 
 
-def touch_live_context(base_url: str, symbols: List[str], timeframes: List[str]) -> None:
-    """
-    Light calls that keep live/latest context populated without doing heavy work.
-    These calls are intentionally best-effort.
-    """
-    for symbol in symbols:
-        primary_tf = timeframes[0] if timeframes else "1m"
-        safe_get_json(build_url(base_url, "/api/live-price", {"symbol": symbol, "timeframe": primary_tf}), timeout=20)
-        safe_get_json(build_url(base_url, "/api/latest-signal", {"symbol": symbol, "timeframe": primary_tf, "limit": 500}), timeout=40)
+def safe_get_json(url: str, timeout: int = 60) -> Dict[str, Any]:
+    try:
+        return http_get_json(url, timeout=timeout)
+    except HTTPError as error:
+        body = error.read().decode("utf-8", errors="ignore") if error.fp else ""
+        log(f"HTTP error {error.code} for {url}", {"body": body[:1000]})
+    except URLError as error:
+        log(f"URL error for {url}", {"reason": str(error.reason)})
+    except Exception as error:
+        log(f"request failed for {url}", {"error": str(error)})
+    return {}
+
+
+def warm_candles(base_url: str, symbols: List[str], timeframes: List[str], limit: int, force: bool) -> Dict[str, Any]:
+    return safe_get_json(
+        build_url(
+            base_url,
+            "/api/candles/warm",
+            {
+                "symbols": ",".join(symbols),
+                "timeframes": ",".join(timeframes),
+                "limit": int(limit),
+                "force": str(force).lower(),
+            },
+        ),
+        timeout=180,
+    )
+
+
+def candle_status(base_url: str, symbol: str) -> Dict[str, Any]:
+    return safe_get_json(build_url(base_url, "/api/candles/status", {"symbol": symbol}), timeout=60)
 
 
 def worker_loop() -> None:
     base_url = normalize_base_url(os.getenv("BACKEND_BASE_URL", ""))
     symbols = split_csv(os.getenv("CACHE_WORKER_SYMBOLS", DEFAULT_SYMBOLS), DEFAULT_SYMBOLS)
     timeframes = split_csv(os.getenv("CACHE_WORKER_TIMEFRAMES", DEFAULT_TIMEFRAMES), DEFAULT_TIMEFRAMES)
-    limit = env_int("CACHE_WORKER_LIMIT", DEFAULT_LIMIT, 50, 5000)
+    limit = env_int("CACHE_WORKER_LIMIT", DEFAULT_LIMIT, 0, 100000)
     interval_seconds = env_int("CACHE_WORKER_INTERVAL_SECONDS", DEFAULT_INTERVAL_SECONDS, 15, 3600)
-    force_first = env_bool("CACHE_WORKER_FORCE_FIRST_RUN", False)
-    force_each = env_bool("CACHE_WORKER_FORCE_EACH_RUN", True)
-    touch_context = env_bool("CACHE_WORKER_TOUCH_CONTEXT", False)
+    force_first = env_bool("CACHE_WORKER_FORCE_FIRST_RUN", True)
+    force_each = env_bool("CACHE_WORKER_FORCE_EACH_RUN", False)
 
     log("started", {
         "baseUrl": base_url,
@@ -160,7 +140,7 @@ def worker_loop() -> None:
         "intervalSeconds": interval_seconds,
         "forceFirstRun": force_first,
         "forceEachRun": force_each,
-        "touchContext": touch_context,
+        "route": "/api/candles/warm",
     })
 
     iteration = 0
@@ -172,30 +152,26 @@ def worker_loop() -> None:
         if health:
             log("backend health", {
                 "status": health.get("status"),
-                "alpacaKeyPresent": health.get("alpacaKeyPresent"),
                 "insightsentryKeyPresent": health.get("insightsentryKeyPresent"),
             })
 
-        result = warm_candle_cache(base_url, symbols, timeframes, limit, force=force)
-        log("warm-candle-cache result", {
+        result = warm_candles(base_url, symbols, timeframes, limit, force=force)
+        log("candles warm result", {
             "eventType": result.get("eventType"),
             "status": result.get("status"),
             "count": result.get("count"),
-            "results": result.get("results", [])[:12],
+            "results": result.get("results", [])[:20],
         })
 
-        if touch_context:
-            touch_live_context(base_url, symbols, timeframes)
-
-        status = safe_get_json(build_url(base_url, "/api/site-cache/status"), timeout=30)
-        if status:
-            log("site-cache status", {
-                "status": status.get("status"),
-                "candlePayloads": status.get("candlePayloads"),
-                "chartSettings": status.get("chartSettings"),
-                "recentSignals": status.get("recentSignals"),
-                "scorecards": status.get("scorecards"),
-            })
+        for symbol in symbols[:5]:
+            status = candle_status(base_url, symbol)
+            if status:
+                log("candles status", {
+                    "symbol": symbol,
+                    "status": status.get("status"),
+                    "dbFile": status.get("dbFile"),
+                    "timeframes": status.get("timeframes"),
+                })
 
         slept = 0
         while slept < interval_seconds and not _STOP:
