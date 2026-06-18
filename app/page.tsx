@@ -675,6 +675,8 @@ type CandleModeLabel = 'Regular' | 'Heikin Ashi'
 
 const chartSymbols = ['MES1!', 'BTCUSD', 'ETHUSD', 'SPY']
 const chartTimeframes = ['1m', '3m', '5m', '10m', '15m', '30m', '1h', '2h', '4h', '1d']
+const MINI_CHARTS_TEMPORARILY_DISABLED = true
+const MULTI_TIMEFRAME_BOOT_WARM_DISABLED = true
 
 const DASHBOARD_API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ||
@@ -683,6 +685,15 @@ const DASHBOARD_API_BASE_URL =
 const CHART_SETTINGS_USER_KEY = 'abraham-marketbos-dashboard'
 
 type ChartConfigKey = 'main' | 'mini1' | 'mini2'
+
+type MainOverlayToggles = {
+  canvas: boolean
+  smc: boolean
+  ghost: boolean
+  orderBlocks: boolean
+  liquidityProfile: boolean
+  volumeProfile: boolean
+}
 
 type SavedChartConfig = {
   selection: ChartSelection
@@ -5209,6 +5220,7 @@ type LightweightChartPanelProps = {
   saveStatus?: string
   livePrice?: number | null
   onLivePriceUpdate?: (snapshot: LiveFeedSnapshot) => void
+  overlayToggles?: MainOverlayToggles
 }
 
 function LightweightChartPanel({
@@ -5242,6 +5254,14 @@ function LightweightChartPanel({
   saveStatus,
   livePrice,
   onLivePriceUpdate,
+  overlayToggles = {
+    canvas: true,
+    smc: true,
+    ghost: true,
+    orderBlocks: true,
+    liquidityProfile: true,
+    volumeProfile: true,
+  },
 }: LightweightChartPanelProps) {
   const normalizedSymbol = normalizeSymbol(symbol)
   const normalizedTimeframe = normalizeTimeframe(timeframe)
@@ -5285,7 +5305,19 @@ function LightweightChartPanel({
     onUnifiedIntelligenceUpdate?.(unifiedIntelligence)
   }, [onUnifiedIntelligenceUpdate, unifiedIntelligence])
 
+  const allMainOverlaysOff = useMemo(
+    () =>
+      !overlayToggles.canvas &&
+      !overlayToggles.smc &&
+      !overlayToggles.ghost &&
+      !overlayToggles.orderBlocks &&
+      !overlayToggles.liquidityProfile &&
+      !overlayToggles.volumeProfile,
+    [overlayToggles]
+  )
+
   const chartGhostCandles = useMemo(() => {
+    if (allMainOverlaysOff || !overlayToggles.ghost) return []
     if (ghostCandles.length > 0) return ghostCandles
     if (compact) return []
 
@@ -5316,7 +5348,17 @@ function LightweightChartPanel({
     }
 
     return []
-  }, [candles, compact, engineState, ghostCandles, normalizedTimeframe, unifiedIntelligence, unifiedOverlayPayload])
+  }, [
+    allMainOverlaysOff,
+    overlayToggles.ghost,
+    candles,
+    compact,
+    engineState,
+    ghostCandles,
+    normalizedTimeframe,
+    unifiedIntelligence,
+    unifiedOverlayPayload,
+  ])
 
   const overlayStableCandleKey = useMemo(() => {
     if (candles.length === 0) return 'empty'
@@ -5340,7 +5382,18 @@ function LightweightChartPanel({
   }, [candles, overlayStableCandleKey])
 
   const overlayPayload = useMemo(() => {
-    if (!showOverlayLines || compact) return null
+    if (
+      !showOverlayLines ||
+      compact ||
+      allMainOverlaysOff ||
+      !overlayToggles.canvas ||
+      (!overlayToggles.smc &&
+        !overlayToggles.orderBlocks &&
+        !overlayToggles.liquidityProfile &&
+        !overlayToggles.volumeProfile)
+    ) {
+      return null
+    }
 
     const backendOverlayPayload = getUnifiedOverlayPayload(
       unifiedOverlayPayload,
@@ -5373,7 +5426,24 @@ function LightweightChartPanel({
      * - order blocks
      */
     return mergeStableOverlayPayloads(fallbackPayload, backendOverlayPayload, overlayBaseCandles, symbol)
-  }, [compact, engineState, overlayBaseCandles, showOverlayLines, symbol, unifiedOverlayPayload])
+  }, [
+    allMainOverlaysOff,
+    compact,
+    engineState,
+    overlayBaseCandles,
+    overlayToggles,
+    showOverlayLines,
+    symbol,
+    unifiedOverlayPayload,
+  ])
+
+  const shouldShowOverlayLines =
+    !allMainOverlaysOff &&
+    overlayToggles.canvas &&
+    (overlayToggles.smc ||
+      overlayToggles.orderBlocks ||
+      overlayToggles.liquidityProfile ||
+      overlayToggles.volumeProfile)
 
   const scorecards = useMemo(() => {
     return getScorecardsFromOverlayPayload(
@@ -5392,13 +5462,15 @@ function LightweightChartPanel({
   }, [engineState, overlayPayload, unifiedOverlayPayload])
 
   const visualScorecardBundle = useMemo(() => {
+    if (allMainOverlaysOff) return null
+
     return buildVisualOverlayScorecards(
       candles,
       overlayPayload,
       unifiedOverlayPayload,
       engineState
     )
-  }, [candles, engineState, overlayPayload, unifiedOverlayPayload])
+  }, [allMainOverlaysOff, candles, engineState, overlayPayload, unifiedOverlayPayload])
 
   const chartDataReady = candles.length >= 20
 
@@ -5719,14 +5791,14 @@ function LightweightChartPanel({
 
       <LightweightCandlestickChart
         candles={candles}
-        ghostCandles={chartGhostCandles}
-        overlayLines={overlayPayload?.lines ?? []}
-        overlayPayload={overlayPayload}
-        showOverlayLines={showOverlayLines}
-        showCanvasOverlay={showOverlayLines}
-        showOverlayZones={showOverlayLines}
-        showOverlayLabels={showOverlayLines}
-        showLiquidityProfile={showOverlayLines}
+        ghostCandles={overlayToggles.ghost && !allMainOverlaysOff ? chartGhostCandles : []}
+        overlayLines={shouldShowOverlayLines && overlayPayload ? (overlayPayload.lines ?? []) : []}
+        overlayPayload={shouldShowOverlayLines ? overlayPayload : null}
+        showOverlayLines={shouldShowOverlayLines}
+        showCanvasOverlay={shouldShowOverlayLines}
+        showOverlayZones={shouldShowOverlayLines}
+        showOverlayLabels={shouldShowOverlayLines}
+        showLiquidityProfile={shouldShowOverlayLines && (overlayToggles.liquidityProfile || overlayToggles.volumeProfile)}
         // Main and mini charts all show the same user-controlled SMMA + NRTR.
         // Mini charts use NRTR flip state only; NRTR exit logic/table stays off there.
         showSmma20
@@ -5937,7 +6009,9 @@ function DashboardBootScreen({
               Welcome to MarketBOS
             </h1>
             <p className="mt-3 max-w-2xl text-sm text-gray-400">
-              Waking the backend and preloading MES 5m, MES 10m, and MES 1m history. The dashboard mounts behind this screen so charts and AI Trader can hydrate in parallel.
+              {MULTI_TIMEFRAME_BOOT_WARM_DISABLED
+                ? 'Waking the backend and preloading only the selected main timeframe. Mini charts and heavy overlays are temporarily disabled for candle stability testing.'
+                : 'Waking the backend and preloading MES 5m, MES 10m, and MES 1m history. The dashboard mounts behind this screen so charts and AI Trader can hydrate in parallel.'}
             </p>
           </div>
 
@@ -6050,14 +6124,24 @@ export default function Dashboard() {
   const [chartConfigsHydrated, setChartConfigsHydrated] = useState(false)
   const [dashboardBootReady, setDashboardBootReady] = useState(false)
   const [dashboardBootError, setDashboardBootError] = useState('')
-  const [dashboardBootSteps, setDashboardBootSteps] = useState<DashboardBootStep[]>([
-    { key: 'backend', label: 'Waking backend', detail: 'Waiting for Render service to answer', status: 'waiting' },
-    { key: 'settings', label: 'Syncing chart settings', detail: 'Loading saved chart layout and strategy controls', status: 'waiting' },
-    { key: 'hist5', label: 'Preloading MES 5m main history', detail: 'Waiting for 5-minute historical candles first', status: 'waiting' },
-    { key: 'hist10', label: 'Preloading MES 10m history', detail: 'Waiting for 10-minute historical candles second', status: 'waiting' },
-    { key: 'hist1', label: 'Preloading MES 1m history', detail: 'Waiting for 1-minute historical candles third', status: 'waiting' },
-    { key: 'ready', label: 'Finalizing dashboard', detail: 'Preparing shared candle cache, live price state, charts, and AI Trader background sync', status: 'waiting' },
-  ])
+  const [dashboardBootSteps, setDashboardBootSteps] = useState<DashboardBootStep[]>(
+    MULTI_TIMEFRAME_BOOT_WARM_DISABLED
+      ? [
+          { key: 'backend', label: 'Waking backend', detail: 'Waiting for Render service to answer', status: 'waiting' },
+          { key: 'settings', label: 'Syncing chart settings', detail: 'Loading saved chart layout and strategy controls', status: 'waiting' },
+          { key: 'hist1', label: 'Preloading main timeframe history', detail: 'Waiting for selected main timeframe candles', status: 'waiting' },
+          { key: 'ready', label: 'Finalizing dashboard', detail: 'Preparing shared candle cache, live price state, charts, and AI Trader background sync', status: 'waiting' },
+        ]
+      : [
+          { key: 'backend', label: 'Waking backend', detail: 'Waiting for Render service to answer', status: 'waiting' },
+          { key: 'settings', label: 'Syncing chart settings', detail: 'Loading saved chart layout and strategy controls', status: 'waiting' },
+          { key: 'hist5', label: 'Preloading MES 5m main history', detail: 'Waiting for 5-minute historical candles first', status: 'waiting' },
+          { key: 'hist10', label: 'Preloading MES 10m history', detail: 'Waiting for 10-minute historical candles second', status: 'waiting' },
+          { key: 'hist3', label: 'Preloading MES 3m history', detail: 'Waiting for 3-minute historical candles third', status: 'waiting' },
+          { key: 'hist1', label: 'Preloading MES 1m history', detail: 'Waiting for 1-minute historical candles fourth', status: 'waiting' },
+          { key: 'ready', label: 'Finalizing dashboard', detail: 'Preparing shared candle cache, live price state, charts, and AI Trader background sync', status: 'waiting' },
+        ]
+  )
 
   const [mainChartSelection, setMainChartSelection] = useState<ChartSelection>({
     symbol: 'MES1!',
@@ -6078,6 +6162,14 @@ export default function Dashboard() {
   })
   const [miniChartOneManualTimeframe, setMiniChartOneManualTimeframe] = useState(false)
   const [miniChartTwoManualTimeframe, setMiniChartTwoManualTimeframe] = useState(false)
+  const [mainOverlayToggles, setMainOverlayToggles] = useState<MainOverlayToggles>({
+    canvas: false,
+    smc: false,
+    ghost: false,
+    orderBlocks: false,
+    liquidityProfile: false,
+    volumeProfile: false,
+  })
 
 
   useEffect(() => {
@@ -6252,15 +6344,17 @@ export default function Dashboard() {
     let cancelled = false
     let inFlight = false
 
-    const liveRequests = Array.from(
-      new Map(
-        [
-          { symbol: selectedSymbol, timeframe: selectedTimeframe },
-          { symbol: miniOneSymbol, timeframe: miniOneTimeframe },
-          { symbol: miniTwoSymbol, timeframe: miniTwoTimeframe },
-        ].map((item) => [sharedLivePriceKey(item.symbol), item])
-      ).values()
-    )
+    const liveRequests = MINI_CHARTS_TEMPORARILY_DISABLED
+      ? [{ symbol: selectedSymbol, timeframe: selectedTimeframe }]
+      : Array.from(
+          new Map(
+            [
+              { symbol: selectedSymbol, timeframe: selectedTimeframe },
+              { symbol: miniOneSymbol, timeframe: miniOneTimeframe },
+              { symbol: miniTwoSymbol, timeframe: miniTwoTimeframe },
+            ].map((item) => [sharedLivePriceKey(item.symbol), item])
+          ).values()
+        )
 
     async function refreshSharedLivePrices() {
       if (inFlight) return
@@ -6317,7 +6411,10 @@ export default function Dashboard() {
   ])
 
   const dashboardTimeframes = useMemo(
-    () => Array.from(new Set([selectedTimeframe, miniOneTimeframe, miniTwoTimeframe])),
+    () =>
+      MINI_CHARTS_TEMPORARILY_DISABLED
+        ? [selectedTimeframe]
+        : Array.from(new Set([selectedTimeframe, miniOneTimeframe, miniTwoTimeframe])),
     [selectedTimeframe, miniOneTimeframe, miniTwoTimeframe]
   )
 
@@ -6330,15 +6427,22 @@ export default function Dashboard() {
     const MIN_DASHBOARD_BOOT_MS = 12000
     const CORE_MES_HISTORY_MIN_CANDLES = 300
 
-    const baseSteps: DashboardBootStep[] = [
-      { key: 'backend', label: 'Waking backend', detail: `Calling ${bootApiBaseUrl}`, status: 'loading' },
-      { key: 'settings', label: 'Syncing chart settings', detail: 'Loading saved chart layout and strategy controls', status: 'waiting' },
-      { key: 'hist5', label: 'Preloading MES 5m main history', detail: 'MES1! 5m • warming backend/browser candle cache', status: 'waiting' },
-      { key: 'hist10', label: 'Preloading MES 10m history', detail: 'MES1! 10m • warming backend/browser candle cache', status: 'waiting' },
-      { key: 'hist3', label: 'Preloading MES 3m history', detail: 'MES1! 3m • warming backend/browser candle cache', status: 'waiting' },
-      { key: 'hist1', label: 'Preloading MES 1m history', detail: 'MES1! 1m • warming backend/browser candle cache', status: 'waiting' },
-      { key: 'ready', label: 'Finalizing dashboard', detail: 'Preparing shared candle cache, live price state, charts, and AI Trader background sync', status: 'waiting' },
-    ]
+    const baseSteps: DashboardBootStep[] = MULTI_TIMEFRAME_BOOT_WARM_DISABLED
+      ? [
+          { key: 'backend', label: 'Waking backend', detail: `Calling ${bootApiBaseUrl}`, status: 'loading' },
+          { key: 'settings', label: 'Syncing chart settings', detail: 'Loading saved chart layout and strategy controls', status: 'waiting' },
+          { key: 'hist1', label: 'Preloading main timeframe history', detail: `MES1! ${selectedTimeframe} • warming backend/browser candle cache`, status: 'waiting' },
+          { key: 'ready', label: 'Finalizing dashboard', detail: 'Preparing shared candle cache, live price state, charts, and AI Trader background sync', status: 'waiting' },
+        ]
+      : [
+          { key: 'backend', label: 'Waking backend', detail: `Calling ${bootApiBaseUrl}`, status: 'loading' },
+          { key: 'settings', label: 'Syncing chart settings', detail: 'Loading saved chart layout and strategy controls', status: 'waiting' },
+          { key: 'hist5', label: 'Preloading MES 5m main history', detail: 'MES1! 5m • warming backend/browser candle cache', status: 'waiting' },
+          { key: 'hist10', label: 'Preloading MES 10m history', detail: 'MES1! 10m • warming backend/browser candle cache', status: 'waiting' },
+          { key: 'hist3', label: 'Preloading MES 3m history', detail: 'MES1! 3m • warming backend/browser candle cache', status: 'waiting' },
+          { key: 'hist1', label: 'Preloading MES 1m history', detail: 'MES1! 1m • warming backend/browser candle cache', status: 'waiting' },
+          { key: 'ready', label: 'Finalizing dashboard', detail: 'Preparing shared candle cache, live price state, charts, and AI Trader background sync', status: 'waiting' },
+        ]
 
     const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms))
 
@@ -6568,14 +6672,25 @@ export default function Dashboard() {
 
         setBootStep('settings', 'done', 'Chart settings hydrated')
 
-        const requiredCoreHistory = [
-          { key: 'hist5', symbol: 'MES1!', timeframe: '5m', limit: 0, minimum: CORE_MES_HISTORY_MIN_CANDLES },
-          { key: 'hist10', symbol: 'MES1!', timeframe: '10m', limit: 0, minimum: CORE_MES_HISTORY_MIN_CANDLES },
-          { key: 'hist3', symbol: 'MES1!', timeframe: '3m', limit: 0, minimum: CORE_MES_HISTORY_MIN_CANDLES },
-          { key: 'hist1', symbol: 'MES1!', timeframe: '1m', limit: 0, minimum: CORE_MES_HISTORY_MIN_CANDLES },
-        ]
+        const requiredCoreHistory = MULTI_TIMEFRAME_BOOT_WARM_DISABLED
+          ? [
+              { key: 'hist1', symbol: 'MES1!', timeframe: selectedTimeframe, limit: 0, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+            ]
+          : [
+              { key: 'hist5', symbol: 'MES1!', timeframe: '5m', limit: 0, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+              { key: 'hist10', symbol: 'MES1!', timeframe: '10m', limit: 0, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+              { key: 'hist3', symbol: 'MES1!', timeframe: '3m', limit: 0, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+              { key: 'hist1', symbol: 'MES1!', timeframe: '1m', limit: 0, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+            ]
 
-        await warmRequiredMesHistoryBundle(requiredCoreHistory)
+        if (MULTI_TIMEFRAME_BOOT_WARM_DISABLED) {
+          for (const chart of requiredCoreHistory) {
+            await warmSnapshot(chart)
+            await sleep(250)
+          }
+        } else {
+          await warmRequiredMesHistoryBundle(requiredCoreHistory)
+        }
 
         // Visible chart history and AI Trader are intentionally not hard boot blockers.
         // The dashboard is mounted behind this overlay, so the main chart, mini charts,
@@ -6586,12 +6701,14 @@ export default function Dashboard() {
           'loading',
           remainingBootHoldMs > 0
             ? `Holding boot screen ${Math.ceil(remainingBootHoldMs / 1000)}s so 300+ candle history caches finish settling`
-            : '300+ MES 5m / 10m / 1m historical candles are ready; unlocking dashboard UI'
+            : MULTI_TIMEFRAME_BOOT_WARM_DISABLED
+              ? `300+ MES ${selectedTimeframe} historical candles are ready; unlocking dashboard UI`
+              : '300+ MES 5m / 10m / 1m historical candles are ready; unlocking dashboard UI'
         )
         if (remainingBootHoldMs > 0) {
           await sleep(remainingBootHoldMs)
         }
-        setBootStep('ready', 'done', 'Dashboard ready with 300+ MES 5m / 10m / 1m historical candles preloaded')
+        setBootStep('ready', 'done', MULTI_TIMEFRAME_BOOT_WARM_DISABLED ? `Dashboard ready with 300+ MES ${selectedTimeframe} candles preloaded` : 'Dashboard ready with 300+ MES 5m / 10m / 1m historical candles preloaded')
 
         if (!cancelled) {
           setDashboardBootReady(true)
@@ -6627,7 +6744,7 @@ export default function Dashboard() {
   useEffect(() => {
     if (!isClient || !dashboardBootReady) return
 
-    const backgroundWarmItems = [
+    const backgroundWarmItems = MULTI_TIMEFRAME_BOOT_WARM_DISABLED ? [] : [
       { symbol: 'MES1!', timeframe: '15m', limit: 300 },
       { symbol: 'MES1!', timeframe: '30m', limit: 300 },
       { symbol: 'BTCUSD', timeframe: '1m', limit: 300 },
@@ -7145,6 +7262,56 @@ export default function Dashboard() {
             />
           )}
 
+          <div className="mb-3 rounded-xl border border-dark-700 bg-dark-900/50 p-3">
+            <div className="mb-2 flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                  Main Chart Overlay Toggles (Temporary Isolation)
+                </div>
+                <div className="text-[10px] text-gray-500">
+                  All heavy overlays default OFF. Toggle one at a time while testing main chart candle stability.
+                </div>
+              </div>
+              <div className="text-[10px] font-black uppercase tracking-wide text-amber-300">
+                Mini charts disabled
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
+              {[
+                { key: 'canvas', label: 'Canvas' },
+                { key: 'smc', label: 'SMC' },
+                { key: 'ghost', label: 'Ghost' },
+                { key: 'orderBlocks', label: 'Order Blocks' },
+                { key: 'liquidityProfile', label: 'Liquidity/Profile' },
+                { key: 'volumeProfile', label: 'Volume Profile' },
+              ].map((item) => {
+                const key = item.key as keyof MainOverlayToggles
+                const enabled = mainOverlayToggles[key]
+
+                return (
+                  <button
+                    key={item.key}
+                    type="button"
+                    onClick={() =>
+                      setMainOverlayToggles((current) => ({
+                        ...current,
+                        [key]: !current[key],
+                      }))
+                    }
+                    className={`rounded-lg border px-2 py-2 text-[10px] font-black uppercase tracking-wide transition ${
+                      enabled
+                        ? 'border-emerald-400/40 bg-emerald-500/15 text-emerald-300'
+                        : 'border-dark-600 bg-dark-900 text-gray-400 hover:border-amber-400/40 hover:text-amber-200'
+                    }`}
+                  >
+                    {item.label}: {enabled ? 'ON' : 'OFF'}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
           <LightweightChartPanel
             title="Main Chart"
             symbol={selectedSymbol}
@@ -7167,8 +7334,9 @@ export default function Dashboard() {
             livePrice={selectedLivePrice}
             onLivePriceUpdate={handleLivePriceUpdate}
             engineState={primaryEngineState}
-            ghostCandles={buildGhostCandlesForChart(primaryEngineState, mainChartCandles, selectedTimeframe)}
+            ghostCandles={mainOverlayToggles.ghost ? buildGhostCandlesForChart(primaryEngineState, mainChartCandles, selectedTimeframe) : []}
             showOverlayLines
+            overlayToggles={mainOverlayToggles}
             onCandlesUpdate={setMainChartCandles}
             onOverlayPayloadUpdate={setMainChartOverlayPayload}
             onUnifiedIntelligenceUpdate={setMainUnifiedIntelligence}
@@ -7188,7 +7356,8 @@ export default function Dashboard() {
           />
 
           {/* Two Smaller Charts */}
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          {!MINI_CHARTS_TEMPORARILY_DISABLED ? (
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
             <LightweightChartPanel
               title="Mini Chart 1"
               symbol={miniOneSymbol}
@@ -7254,7 +7423,13 @@ export default function Dashboard() {
                 })
               }}
             />
-          </div>
+            </div>
+          ) : (
+            <DashboardWaitingCard
+              title="Mini charts temporarily disabled"
+              message="Both mini charts are disabled while testing main chart candle stability. Main chart candles and the AI Trader panel can still hydrate."
+            />
+          )}
         </div>
 
         {/* Right Column */}
