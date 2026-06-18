@@ -8645,7 +8645,10 @@ def clean_cache_staleness(payload: Any, timeframe: str) -> Tuple[bool, Optional[
     if not isinstance(candles_list, list) or not candles_list:
         return True, None, threshold_seconds
 
-    latest_epoch = max(to_epoch_seconds(c.get("epoch") or c.get("time") or c.get("timestamp")) for c in candles_list if isinstance(c, dict))
+    latest_epoch = max(
+        (to_epoch_seconds(c.get("epoch") or c.get("time") or c.get("timestamp")) for c in candles_list if isinstance(c, dict)),
+        default=0.0,
+    )
     if latest_epoch <= 0:
         return True, None, threshold_seconds
 
