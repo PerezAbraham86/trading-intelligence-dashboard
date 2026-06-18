@@ -8656,6 +8656,16 @@ def clean_cache_staleness(payload: Any, timeframe: str) -> Tuple[bool, Optional[
     return age_seconds > threshold_seconds, round(age_seconds, 2), threshold_seconds
 
 
+def sanitize_clean_candle_payload(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+
+    sanitized = dict(payload)
+    sanitized.pop("error", None)
+    sanitized.pop("detail", None)
+    return sanitized
+
+
 def normalize_provider_history_candles(candles: Any, symbol: str, timeframe: str) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
@@ -8750,7 +8760,7 @@ def clean_cache_payload(symbol: str, timeframe: str, limit: int = 0) -> Optional
     payload["noArtificialCandleLimit"] = is_futures_symbol(normalized_symbol)
     payload["cacheRoute"] = CLEAN_CANDLE_ROUTE
     payload["gapInfo"] = _candle_gap_summary(returned, normalized_timeframe) if is_futures_symbol(normalized_symbol) else None
-    return payload
+    return sanitize_clean_candle_payload(payload)
 
 
 def fetch_clean_provider_candles(symbol: str, timeframe: str, limit: int = 0, force: bool = False) -> Dict[str, Any]:
