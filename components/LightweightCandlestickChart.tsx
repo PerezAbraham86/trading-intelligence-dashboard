@@ -22,7 +22,7 @@ import {
   ChartOverlayPayload,
   OverlayCandle,
 } from "@/lib/chartOverlayPrep";
-import LightweightChartOverlayCanvas from "@/components/LightweightChartOverlayCanvas";
+import LightweightChartOverlayCanvas from "@/components/charts/LightweightChartOverlayCanvas";
 
 /**
  * LightweightCandlestickChart.tsx
