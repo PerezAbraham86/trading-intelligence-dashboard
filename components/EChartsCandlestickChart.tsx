@@ -154,6 +154,12 @@ const WARM_ALL_OVERLAY_TOGGLES: OverlayToggles = {
 
 const warmedOverlayRawCacheKeys = new Set<string>()
 
+// Minimum canvas height reserved before chart initialization to prevent CLS.
+const CHART_CANVAS_MIN_HEIGHT = 200
+
+// Minimum interval between live-tick setOption calls to reduce main-thread load.
+const LIVE_TICK_THROTTLE_MS = 300
+
 function hasAnyOverlayEnabled(toggles: OverlayToggles) {
   return toggles.smc || toggles.ghost || toggles.liquidityProfile || toggles.orderBlocks
 }
@@ -3667,7 +3673,7 @@ export default function EChartsCandlestickChart({
     // Identity changes and overlay layout changes always pass through immediately.
     if (!identityChanged && !overlayLayoutChanged && dataChanged) {
       const now = Date.now()
-      if (now - lastLiveSetOptionAtRef.current < 300) {
+      if (now - lastLiveSetOptionAtRef.current < LIVE_TICK_THROTTLE_MS) {
         return
       }
       lastLiveSetOptionAtRef.current = now
@@ -3926,7 +3932,7 @@ export default function EChartsCandlestickChart({
         </div>
       )}
 
-      <div ref={chartRef} className="min-h-0 flex-1" style={{ minHeight: 200 }} />
+      <div ref={chartRef} className="min-h-0 flex-1" style={{ minHeight: CHART_CANVAS_MIN_HEIGHT }} />
     </div>
   )
 }
