@@ -8987,7 +8987,7 @@ def candles(symbol: str = "MES1!", timeframe: str = "5m", limit: int = 0, force:
         if isinstance(cached, dict) and isinstance(cached.get("candles"), list) and cached.get("candles"):
             cache_is_stale, cache_age_seconds, stale_threshold_seconds = clean_cache_staleness(cached, normalized_timeframe)
             if not cache_is_stale:
-                return cached
+                return sanitize_clean_candle_payload(cached)
             print(
                 f"[Clean candles] bypassing stale cache for {normalized_symbol} {normalized_timeframe}: "
                 f"age={cache_age_seconds}s threshold={stale_threshold_seconds}s"
@@ -8995,13 +8995,13 @@ def candles(symbol: str = "MES1!", timeframe: str = "5m", limit: int = 0, force:
 
     try:
         fresh = fetch_clean_provider_candles(normalized_symbol, normalized_timeframe, safe_limit, force=force)
-        return store_clean_candles(normalized_symbol, normalized_timeframe, safe_limit, fresh)
+        return sanitize_clean_candle_payload(store_clean_candles(normalized_symbol, normalized_timeframe, safe_limit, fresh))
     except HTTPException:
         stale = clean_cache_payload(normalized_symbol, normalized_timeframe, safe_limit)
         if isinstance(stale, dict) and stale.get("candles"):
             stale["warning"] = "Provider refresh failed; returned last saved clean candle cache."
             stale["cache"] = "clean_stale_after_provider_error"
-            return stale
+            return sanitize_clean_candle_payload(stale)
         raise
     except Exception as error:
         print(f"[Clean candles] provider refresh failed for {normalized_symbol} {normalized_timeframe}: {error}")
@@ -9009,7 +9009,7 @@ def candles(symbol: str = "MES1!", timeframe: str = "5m", limit: int = 0, force:
         if isinstance(stale, dict) and stale.get("candles"):
             stale["warning"] = "Provider refresh failed; returned last saved clean candle cache."
             stale["cache"] = "clean_stale_after_provider_error"
-            return stale
+            return sanitize_clean_candle_payload(stale)
         raise HTTPException(status_code=502, detail="Clean candle service failed.") from error
 
 
