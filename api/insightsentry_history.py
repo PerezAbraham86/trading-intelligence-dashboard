@@ -20,9 +20,10 @@ from fastapi import HTTPException
 #
 #   GET https://insightsentry.p.rapidapi.com/v3/symbols/{symbol_code}/history
 #
-# Confirmed MES path param:
+# Confirmed MES path params:
 #
-#   CME_MINI:MES1!
+#   CME_MINI:MES1!      continuous code, but historical candles can lag during rollover
+#   CME_MINI:MESU2026   Sep 2026 contract, current enough during Jun 2026 rollover test
 #
 # Confirmed params:
 #
@@ -72,6 +73,15 @@ INSIGHTSENTRY_BASE_URL = (
 
 INSIGHTSENTRY_HISTORY_TIMEOUT_SECONDS = float(os.getenv("INSIGHTSENTRY_HISTORY_TIMEOUT_SECONDS", "20"))
 INSIGHTSENTRY_HISTORY_CACHE_SECONDS = float(os.getenv("INSIGHTSENTRY_HISTORY_CACHE_SECONDS", "60"))
+
+# Futures rollover override. Keep the dashboard display symbol as MES1!, but let
+# the provider history request use the active contract. RapidAPI tests on
+# 2026-06-18 showed CME_MINI:MES1! and CME_MINI:MESM2026 historical candles
+# lagging by hours while CME_MINI:MESU2026 was current enough for the dashboard.
+INSIGHTSENTRY_MES_HISTORY_SYMBOL = (
+    os.getenv("INSIGHTSENTRY_MES_HISTORY_SYMBOL")
+    or "CME_MINI:MESU2026"
+).strip().upper()
 
 # In-memory cache so chart reloads/timeframe refreshes do not hammer RapidAPI.
 _HISTORY_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -175,10 +185,18 @@ def normalize_symbol(value: Any = "MES1!") -> str:
 
 
 def provider_symbol(symbol: Any = "MES1!") -> str:
+    text = str(symbol or "").strip().upper()
+
+    # If a specific exchange-prefixed futures contract is supplied, respect it.
+    # But keep continuous dashboard aliases like CME_MINI:MES1! on the active
+    # rollover override so stale continuous history does not poison the chart.
+    if ":" in text and not text.endswith(":MES1!") and not text.endswith(":ES1!") and not text.endswith(":NQ1!"):
+        return text
+
     normalized = normalize_symbol(symbol)
 
     if normalized == "MES1!":
-        return "CME_MINI:MES1!"
+        return INSIGHTSENTRY_MES_HISTORY_SYMBOL or "CME_MINI:MESU2026"
     if normalized == "ES1!":
         return "CME_MINI:ES1!"
     if normalized == "NQ1!":
@@ -191,11 +209,6 @@ def provider_symbol(symbol: Any = "MES1!") -> str:
         return "BINANCE:BTCUSDT"
     if normalized == "ETHUSD":
         return "BINANCE:ETHUSDT"
-
-    # If user already passes exchange-prefixed code, use it.
-    text = str(symbol or "").strip().upper()
-    if ":" in text:
-        return text
 
     return normalized
 
