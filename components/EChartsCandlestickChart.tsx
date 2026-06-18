@@ -3152,6 +3152,8 @@ export default function EChartsCandlestickChart({
   const overlayIdentityRef = useRef<string>('')
   const lastGoodChartOverlaysRef = useRef<ChartOverlays | null>(null)
   const userZoomedRef = useRef(false)
+  const lastLiveSetOptionAtRef = useRef<number>(0)
+  const [chartMounted, setChartMounted] = useState(false)
   const [mainCandleGateTick, setMainCandleGateTick] = useState(0)
 
   const chartSettingsKey = getChartSettingsKey(compact, chartTitle, defaultTimeframe)
@@ -3628,8 +3630,14 @@ export default function EChartsCandlestickChart({
     [historicalCandles]
   )
 
+  // Defer chart initialization past first paint to reduce LCP render delay.
   useEffect(() => {
-    if (!chartRef.current) return
+    const id = window.setTimeout(() => setChartMounted(true), 0)
+    return () => window.clearTimeout(id)
+  }, [])
+
+  useEffect(() => {
+    if (!chartMounted || !chartRef.current) return
 
     if (!chartInstance.current) {
       chartInstance.current = echarts.init(chartRef.current)
@@ -3638,9 +3646,32 @@ export default function EChartsCandlestickChart({
       })
     }
 
+    // Compute identity and signatures before building the option so we can
+    // skip expensive buildChartOption calls for throttled live-tick updates.
+    const chartIdentity = `${symbol}::${timeframe}::${candleMode}::${compact}`
     const effectiveChartOverlays =
       chartOverlays ??
       (hasAnyOverlayEnabled(overlayToggles) ? lastGoodChartOverlaysRef.current : null)
+    const dataSignature = candleDataSignature(candles)
+    const layoutSignature = overlayLayoutSignature(effectiveChartOverlays)
+
+    const identityChanged = chartIdentityRef.current !== chartIdentity
+    const dataChanged = dataSignatureRef.current !== dataSignature
+    const overlayLayoutChanged = overlayLayoutSignatureRef.current !== layoutSignature
+
+    chartIdentityRef.current = chartIdentity
+    dataSignatureRef.current = dataSignature
+    overlayLayoutSignatureRef.current = layoutSignature
+
+    // Throttle live-tick-only redraws to at most once per 300 ms.
+    // Identity changes and overlay layout changes always pass through immediately.
+    if (!identityChanged && !overlayLayoutChanged && dataChanged) {
+      const now = Date.now()
+      if (now - lastLiveSetOptionAtRef.current < 300) {
+        return
+      }
+      lastLiveSetOptionAtRef.current = now
+    }
 
     if (!compact && hasAnyOverlayEnabled(overlayToggles) && candles.length > 0) {
       const hasBackendOverlayData = overlayHasRequestedData(effectiveChartOverlays, overlayToggles)
@@ -3667,16 +3698,6 @@ export default function EChartsCandlestickChart({
       nrtrPresetMode,
       sharedLivePrice,
     })
-
-    const chartIdentity = `${symbol}::${timeframe}::${candleMode}::${compact}`
-    const dataSignature = candleDataSignature(candles)
-    const layoutSignature = overlayLayoutSignature(effectiveChartOverlays)
-    const identityChanged = chartIdentityRef.current !== chartIdentity
-    const dataChanged = dataSignatureRef.current !== dataSignature
-    const overlayLayoutChanged = overlayLayoutSignatureRef.current !== layoutSignature
-    chartIdentityRef.current = chartIdentity
-    dataSignatureRef.current = dataSignature
-    overlayLayoutSignatureRef.current = layoutSignature
 
     if (identityChanged) {
       // Full reset only when symbol/timeframe/candle type changes.
@@ -3710,7 +3731,7 @@ export default function EChartsCandlestickChart({
     return () => {
       window.removeEventListener('resize', resize)
     }
-  }, [symbol, timeframe, candleMode, candles, compact, status, chartOverlays, overlayToggles, smmaOverlayLength, nrtrOverlayMode, nrtrExitMode, nrtrPresetMode, sharedLivePrice])
+  }, [chartMounted, symbol, timeframe, candleMode, candles, compact, status, chartOverlays, overlayToggles, smmaOverlayLength, nrtrOverlayMode, nrtrExitMode, nrtrPresetMode, sharedLivePrice])
 
   useEffect(() => {
     return () => {
@@ -3905,7 +3926,7 @@ export default function EChartsCandlestickChart({
         </div>
       )}
 
-      <div ref={chartRef} className="min-h-0 flex-1" />
+      <div ref={chartRef} className="min-h-0 flex-1" style={{ minHeight: 200 }} />
     </div>
   )
 }
