@@ -944,9 +944,9 @@ const CHART_CANDLE_DEBUG_MAX_ROWS = 250
 // payload is loaded, keep the chart alive from cache + live candles and only
 // refetch full history when the cache is stale, the symbol/timeframe changes,
 // or a live/history gap needs repair.
-const MAIN_HISTORICAL_REFRESH_MS = 2 * 60 * 1000
-const MINI_HISTORICAL_REFRESH_MS = 5 * 60 * 1000
-const LIVE_GAP_REPAIR_COOLDOWN_MS = 45 * 1000
+const MAIN_HISTORICAL_REFRESH_MS = 15 * 60 * 1000
+const MINI_HISTORICAL_REFRESH_MS = 20 * 60 * 1000
+const LIVE_GAP_REPAIR_COOLDOWN_MS = 10 * 60 * 1000
 const LIVE_GAP_REPAIR_LOG_THROTTLE_MS = 5 * 1000
 
 type ChartCandleDebugLogEntry = {
@@ -4104,7 +4104,7 @@ function useChartCandles(
   symbol: string,
   timeframe: string,
   limit = 500,
-  pollMs = 5000,
+  pollMs = 60000,
   enabled = true,
   priority: 'main' | 'mini' = 'main',
   onLivePriceUpdate?: (snapshot: LiveFeedSnapshot) => void
@@ -4506,8 +4506,37 @@ function useChartCandles(
         lastClose: Number.isFinite(lastClose) ? lastClose : undefined,
         liveClose: Number.isFinite(liveClose) ? liveClose : undefined,
       }, 'warn')
-      fetchCandles(true, 'live-gap-force-history-repair')
+      // Emergency bandwidth guard: do not force a full historical reload on every
+      // live/history gap. This used to download thousands of MES candles repeatedly.
+      // Keep cached history visible and display the current live candle separately.
+      addCandleDebugLog('live-gap-repair-disabled-bandwidth-guard', {
+        streamSource,
+        cooldownMs: LIVE_GAP_REPAIR_COOLDOWN_MS,
+        cacheCount: fullCache?.candles?.length ?? previousCandles.length,
+        gapSeconds,
+        liveTooFarFromHistory,
+      }, 'warn')
       return true
+    }
+
+    function buildDisplayOnlyLiveGapCandle(previousCandles: DashboardCandle[], liveCandle: any) {
+      const lastHistorical = previousCandles[previousCandles.length - 1]
+      const lastEpoch = liveCandleEpoch(lastHistorical)
+      const timeframeSeconds = timeframeToSeconds(timeframe)
+
+      if (lastEpoch <= 0 || timeframeSeconds <= 0) return liveCandle
+
+      const displayEpoch = lastEpoch + timeframeSeconds
+
+      return {
+        ...liveCandle,
+        time: displayEpoch,
+        timestamp: displayEpoch,
+        t: displayEpoch,
+        actualTime: liveCandle?.time ?? liveCandle?.timestamp ?? liveCandle?.t ?? liveCandle?.createdAt ?? null,
+        displayOnlyLiveGapCandle: true,
+        source: `${String(liveCandle?.source ?? 'phase8_live_feed_sse')}+display_after_history_gap`,
+      }
     }
 
     if (!enabled) {
@@ -4578,13 +4607,13 @@ function useChartCandles(
             }
 
             if (requestLiveGapRepairOnce(previousCandles, liveCandle, 'message')) {
-              // Show the current live candle even when the historical provider is delayed,
-              // but do NOT save this gap-appended candle into the shared historical cache.
-              // This gives the user the current live candle without contaminating the
-              // clean /api/candles cache or creating fake bridge candles between sessions.
+              // Display the current live price as the next visible candle after the
+              // last historical candle, but do NOT save it into shared history.
+              // This avoids the giant empty time jump while backend history catches up.
+              const displayLiveCandle = buildDisplayOnlyLiveGapCandle(previousCandles, liveCandle)
               return mergeLiveCandleIntoCandles(
                 previousCandles,
-                liveCandle,
+                displayLiveCandle,
                 limit,
                 timeframeSeconds,
                 { allowLargeGapAppend: true }
@@ -4643,13 +4672,13 @@ function useChartCandles(
             }
 
             if (requestLiveGapRepairOnce(previousCandles, liveCandle, 'candle')) {
-              // Show the current live candle even when the historical provider is delayed,
-              // but do NOT save this gap-appended candle into the shared historical cache.
-              // This gives the user the current live candle without contaminating the
-              // clean /api/candles cache or creating fake bridge candles between sessions.
+              // Display the current live price as the next visible candle after the
+              // last historical candle, but do NOT save it into shared history.
+              // This avoids the giant empty time jump while backend history catches up.
+              const displayLiveCandle = buildDisplayOnlyLiveGapCandle(previousCandles, liveCandle)
               return mergeLiveCandleIntoCandles(
                 previousCandles,
-                liveCandle,
+                displayLiveCandle,
                 limit,
                 timeframeSeconds,
                 { allowLargeGapAppend: true }
