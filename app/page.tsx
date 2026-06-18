@@ -948,7 +948,7 @@ function normalizeCandlePayload(payload: any): DashboardCandle[] {
     })
 }
 
-const SHARED_CANDLE_CACHE_MAX_BARS = 0 // 0 = no frontend candle cap; backend/provider decides MES history size
+const SHARED_CANDLE_CACHE_MAX_BARS = 2000 // Frontend/backend request candle cap; keeps MES from plotting 18k+ bars during isolation
 const CHART_CANDLE_DEBUG_MAX_ROWS = 250
 
 // Historical OHLCV is expensive and rate-limited. After a good historical
@@ -1360,9 +1360,15 @@ async function fetchDashboardSnapshotPayload(
     timeframe: normalizedTimeframe,
     // MES/futures rule: no frontend 300/700/5000 cap. Backend returns whatever
     // InsightSentry saved for that independent timeframe.
-    limit: futuresHistory
-      ? '0'
-      : String(Math.max(1, Math.min(Number(limit) || 700, SHARED_CANDLE_CACHE_MAX_BARS || 5000))),
+    limit: String(
+      Math.max(
+        1,
+        Math.min(
+          Number(limit) || (futuresHistory ? SHARED_CANDLE_CACHE_MAX_BARS : 700),
+          SHARED_CANDLE_CACHE_MAX_BARS || 5000
+        )
+      )
+    ),
   })
 
   const response = await fetch(`${apiBaseUrl}/api/dashboard/snapshot?${params.toString()}`, {
@@ -1387,9 +1393,15 @@ async function fetchBackendHistoricalRefreshPayload(
   const normalizedSymbol = normalizeSymbol(symbol)
   const normalizedTimeframe = normalizeTimeframe(timeframe)
   const futuresHistory = isFuturesCandleSymbol(normalizedSymbol)
-  const safeLimit = futuresHistory
-    ? '0'
-    : String(Math.max(1, Math.min(Number(limit) || 700, SHARED_CANDLE_CACHE_MAX_BARS || 5000)))
+  const safeLimit = String(
+    Math.max(
+      1,
+      Math.min(
+        Number(limit) || (futuresHistory ? SHARED_CANDLE_CACHE_MAX_BARS : 700),
+        SHARED_CANDLE_CACHE_MAX_BARS || 5000
+      )
+    )
+  )
 
   const params = new URLSearchParams({
     symbol: normalizedSymbol,
@@ -1529,11 +1541,17 @@ function readSharedCandleCache(symbol: string, timeframe: string, limit: number)
   const cached = SHARED_CANDLE_CACHE.get(sharedCandleKey(symbol, timeframe))
   if (!cached) return null
 
-  const noFrontendLimit = isFuturesCandleSymbol(symbol) || !limit || limit <= 0
+  const requestedLimit = Math.max(
+    1,
+    Math.min(
+      Number(limit) > 0 ? Number(limit) : SHARED_CANDLE_CACHE_MAX_BARS,
+      SHARED_CANDLE_CACHE_MAX_BARS || 5000
+    )
+  )
 
   return {
     ...cached,
-    candles: noFrontendLimit ? cached.candles : cached.candles.slice(-Math.max(1, limit)),
+    candles: cached.candles.slice(-requestedLimit),
   }
 }
 
@@ -1703,8 +1721,16 @@ async function fetchSharedCandlePayload(
   const normalizedSymbol = normalizeSymbol(symbol)
   const normalizedTimeframe = normalizeTimeframe(timeframe)
   const key = sharedCandleKey(normalizedSymbol, normalizedTimeframe)
-  const noFrontendLimit = isFuturesCandleSymbol(normalizedSymbol) || !limit || limit <= 0
-  const requestedLimit = noFrontendLimit ? 0 : Math.max(1, limit)
+  const noFrontendLimit = SHARED_CANDLE_CACHE_MAX_BARS <= 0 && (!limit || limit <= 0)
+  const requestedLimit = noFrontendLimit
+    ? 0
+    : Math.max(
+        1,
+        Math.min(
+          Number(limit) > 0 ? Number(limit) : SHARED_CANDLE_CACHE_MAX_BARS,
+          SHARED_CANDLE_CACHE_MAX_BARS || 5000
+        )
+      )
   const providerForce = Boolean(force)
 
   const activeRequest = SHARED_CANDLE_IN_FLIGHT.get(key)
@@ -5265,7 +5291,7 @@ function LightweightChartPanel({
 }: LightweightChartPanelProps) {
   const normalizedSymbol = normalizeSymbol(symbol)
   const normalizedTimeframe = normalizeTimeframe(timeframe)
-  const candleFetchLimit = isFuturesCandleSymbol(normalizedSymbol) ? 0 : compact ? 300 : 700
+  const candleFetchLimit = isFuturesCandleSymbol(normalizedSymbol) ? SHARED_CANDLE_CACHE_MAX_BARS : compact ? 300 : 700
 
   const { candles, overlayPayload: unifiedOverlayPayload, unifiedIntelligence, isLoading, errorText, debugLog } = useChartCandles(
     apiBaseUrl,
@@ -6503,7 +6529,7 @@ export default function Dashboard() {
         const mergedCandles = mergeHistoricalCandles(
           previous?.candles,
           candles,
-          isFuturesCandleSymbol(normalizedSymbol) ? 0 : SHARED_CANDLE_CACHE_MAX_BARS
+          SHARED_CANDLE_CACHE_MAX_BARS
         )
         const entry: SharedCandleCacheEntry = {
           candles: mergedCandles,
@@ -6674,13 +6700,13 @@ export default function Dashboard() {
 
         const requiredCoreHistory = MULTI_TIMEFRAME_BOOT_WARM_DISABLED
           ? [
-              { key: 'hist1', symbol: 'MES1!', timeframe: selectedTimeframe, limit: 0, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+              { key: 'hist1', symbol: 'MES1!', timeframe: selectedTimeframe, limit: SHARED_CANDLE_CACHE_MAX_BARS, minimum: CORE_MES_HISTORY_MIN_CANDLES },
             ]
           : [
-              { key: 'hist5', symbol: 'MES1!', timeframe: '5m', limit: 0, minimum: CORE_MES_HISTORY_MIN_CANDLES },
-              { key: 'hist10', symbol: 'MES1!', timeframe: '10m', limit: 0, minimum: CORE_MES_HISTORY_MIN_CANDLES },
-              { key: 'hist3', symbol: 'MES1!', timeframe: '3m', limit: 0, minimum: CORE_MES_HISTORY_MIN_CANDLES },
-              { key: 'hist1', symbol: 'MES1!', timeframe: '1m', limit: 0, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+              { key: 'hist5', symbol: 'MES1!', timeframe: '5m', limit: SHARED_CANDLE_CACHE_MAX_BARS, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+              { key: 'hist10', symbol: 'MES1!', timeframe: '10m', limit: SHARED_CANDLE_CACHE_MAX_BARS, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+              { key: 'hist3', symbol: 'MES1!', timeframe: '3m', limit: SHARED_CANDLE_CACHE_MAX_BARS, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+              { key: 'hist1', symbol: 'MES1!', timeframe: '1m', limit: SHARED_CANDLE_CACHE_MAX_BARS, minimum: CORE_MES_HISTORY_MIN_CANDLES },
             ]
 
         if (MULTI_TIMEFRAME_BOOT_WARM_DISABLED) {
@@ -6770,7 +6796,7 @@ export default function Dashboard() {
             DASHBOARD_API_BASE_URL,
             item.symbol,
             item.timeframe,
-            isFuturesCandleSymbol(item.symbol) ? 0 : item.limit,
+            item.limit || SHARED_CANDLE_CACHE_MAX_BARS,
             false
           )
           const candles = normalizeCandlePayload(payload)
@@ -6782,7 +6808,7 @@ export default function Dashboard() {
             candles: mergeHistoricalCandles(
               previous?.candles,
               candles,
-              isFuturesCandleSymbol(item.symbol) ? 0 : SHARED_CANDLE_CACHE_MAX_BARS
+              SHARED_CANDLE_CACHE_MAX_BARS
             ),
             overlayPayload: getUnifiedOverlayPayload(payload) ?? previous?.overlayPayload ?? null,
             unifiedIntelligence: getUnifiedIntelligencePayload(payload) ?? previous?.unifiedIntelligence ?? null,
