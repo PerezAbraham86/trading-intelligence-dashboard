@@ -8689,7 +8689,7 @@ def normalize_provider_history_candles(candles: Any, symbol: str, timeframe: str
     return filter_valid_candles_for_symbol(merge_candles_by_time(rows), normalized_symbol)
 
 
-def clean_cache_payload(symbol: str, timeframe: str, limit: int = 0) -> Optional[Dict[str, Any]]:
+def clean_cache_payload(symbol: str, timeframe: str, limit: int = 0, allow_stale: bool = False) -> Optional[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = clean_candle_limit(normalized_symbol, limit)
@@ -8711,6 +8711,30 @@ def clean_cache_payload(symbol: str, timeframe: str, limit: int = 0) -> Optional
         return None
 
     normalized = normalize_provider_history_candles(candles_list, normalized_symbol, normalized_timeframe)
+
+    if is_futures_symbol(normalized_symbol):
+        needs_refresh, refresh_reason, refresh_debug = _futures_cache_needs_same_timeframe_refresh(
+            normalized,
+            normalized_symbol,
+            normalized_timeframe,
+        )
+
+        # Surgical stale-cache guard:
+        # Do not serve an old clean candle cache as "current" when the cache tail is
+        # too far behind the requested timeframe. Returning None here lets /api/candles
+        # do exactly one controlled provider refresh instead of stitching live candles
+        # onto a stale historical tail.
+        if needs_refresh and not allow_stale:
+            print(
+                f"[Clean candles] bypassing stale cache for {normalized_symbol} {normalized_timeframe}: "
+                f"reason={refresh_reason} debug={refresh_debug}"
+            )
+            return None
+    else:
+        needs_refresh = False
+        refresh_reason = "not_futures"
+        refresh_debug = {}
+
     returned = maybe_limit_candles(normalized, normalized_symbol, safe_limit)
 
     payload = build_candle_route_payload(
@@ -8729,6 +8753,12 @@ def clean_cache_payload(symbol: str, timeframe: str, limit: int = 0) -> Optional
     payload["noArtificialCandleLimit"] = is_futures_symbol(normalized_symbol)
     payload["cacheRoute"] = CLEAN_CANDLE_ROUTE
     payload["gapInfo"] = _candle_gap_summary(returned, normalized_timeframe) if is_futures_symbol(normalized_symbol) else None
+    payload["staleCacheGuard"] = {
+        "allowStale": bool(allow_stale),
+        "needsRefresh": bool(needs_refresh),
+        "reason": refresh_reason,
+        "debug": refresh_debug,
+    } if is_futures_symbol(normalized_symbol) else None
     return payload
 
 
@@ -8960,14 +8990,14 @@ def candles(symbol: str = "MES1!", timeframe: str = "5m", limit: int = 0, force:
         fresh = fetch_clean_provider_candles(normalized_symbol, normalized_timeframe, safe_limit, force=force)
         return store_clean_candles(normalized_symbol, normalized_timeframe, safe_limit, fresh)
     except HTTPException:
-        stale = clean_cache_payload(normalized_symbol, normalized_timeframe, safe_limit)
+        stale = clean_cache_payload(normalized_symbol, normalized_timeframe, safe_limit, allow_stale=True)
         if isinstance(stale, dict) and stale.get("candles"):
             stale["warning"] = "Provider refresh failed; returned last saved clean candle cache."
             stale["cache"] = "clean_stale_after_provider_error"
             return stale
         raise
     except Exception as error:
-        stale = clean_cache_payload(normalized_symbol, normalized_timeframe, safe_limit)
+        stale = clean_cache_payload(normalized_symbol, normalized_timeframe, safe_limit, allow_stale=True)
         if isinstance(stale, dict) and stale.get("candles"):
             stale["warning"] = "Provider refresh failed; returned last saved clean candle cache."
             stale["error"] = str(error)
