@@ -414,6 +414,11 @@ MAX_TICKER_NEWS_CACHE_ITEMS = int(os.getenv("MAX_TICKER_NEWS_CACHE_ITEMS", "30")
 MAX_OPTIONS_PRESSURE_CACHE_ITEMS = int(os.getenv("MAX_OPTIONS_PRESSURE_CACHE_ITEMS", "30"))
 CANDLE_CACHE_FILE = Path(os.getenv("CANDLE_CACHE_FILE", "/tmp/trading_dashboard_candle_cache.json"))
 CANDLE_SITE_CACHE_MAX_AGE_SECONDS = int(os.getenv("CANDLE_SITE_CACHE_MAX_AGE_SECONDS", "21600"))
+# Emergency bandwidth/rate-limit guard. MES history payloads were reaching 9M+ chars
+# and being refetched repeatedly during live-gap repair. Keep outbound/cache size safe
+# until Databento fully replaces InsightSentry. Set 0 only for controlled manual tests.
+EMERGENCY_FUTURES_MAX_CANDLES = int(os.getenv("EMERGENCY_FUTURES_MAX_CANDLES", "2000"))
+INSIGHTSENTRY_LIVE_QUOTE_HTTP_ENABLED = os.getenv("INSIGHTSENTRY_LIVE_QUOTE_HTTP_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 MAX_RECENT_SIGNALS = 50
 MAX_RECENT_CANDLES = int(os.getenv("MAX_RECENT_CANDLES", "50000"))
@@ -1419,7 +1424,7 @@ def fetch_insightsentry_direct_candles(symbol: str, timeframe: str = "1m", limit
                         f"api_symbol={api_symbol} timeframe={normalized_timeframe} api_interval={api_interval} "
                         f"count={len(candles)}"
                     )
-                    return candles
+                    return maybe_limit_candles(candles, normalized_symbol, safe_limit)
 
                 last_error = f"No bars parsed from {url}"
 
@@ -1674,6 +1679,14 @@ def should_limit_candles(symbol: str, limit: Any) -> bool:
 
 def maybe_limit_candles(candles: List[Dict[str, Any]], symbol: str, limit: Any) -> List[Dict[str, Any]]:
     rows = merge_candles_by_time(candles or [])
+
+    # Emergency Render bandwidth guard for MES/futures. The provider can return
+    # 17k+ 1m candles, which produced 9M+ char payloads and exhausted Render
+    # bandwidth when live-gap repair repeated the request. Keep a safe tail by
+    # default; set EMERGENCY_FUTURES_MAX_CANDLES=0 only for a one-time manual test.
+    if is_futures_symbol(symbol) and EMERGENCY_FUTURES_MAX_CANDLES > 0:
+        return rows[-max(1, EMERGENCY_FUTURES_MAX_CANDLES):]
+
     if not should_limit_candles(symbol, limit):
         return rows
     return rows[-candle_cache_limit_value(limit):]
@@ -1708,7 +1721,7 @@ def candle_cache_get(route: str, symbol: str, timeframe: str, limit: int, max_ag
     return None
 
 
-MAX_STORED_CANDLES_PER_CACHE_ENTRY = int(os.getenv("MAX_STORED_CANDLES_PER_CACHE_ENTRY", "0"))  # 0 = keep every candle returned/saved
+MAX_STORED_CANDLES_PER_CACHE_ENTRY = int(os.getenv("MAX_STORED_CANDLES_PER_CACHE_ENTRY", str(EMERGENCY_FUTURES_MAX_CANDLES)))  # emergency default caps huge MES cache payloads
 
 
 def find_existing_candle_cache_payload_for_merge(route: str, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
@@ -2365,6 +2378,13 @@ def fetch_alpaca_crypto_live_price(symbol: str, timeframe: str = "1m") -> Option
 
 
 def build_insightsentry_live_quote_urls(api_symbol: str) -> List[str]:
+    # Emergency rate-limit guard: these quote endpoints are not valid for the
+    # RapidAPI InsightSentry plan currently in use and were producing repeated
+    # 404 + 429 loops. Leave disabled unless a verified working quote endpoint
+    # is added later. The SSE/live-feed path can still provide live updates.
+    if not INSIGHTSENTRY_LIVE_QUOTE_HTTP_ENABLED:
+        return []
+
     encoded_path_symbol = quote(api_symbol, safe="")
     encoded_query_symbol = quote(api_symbol, safe="")
     return [
@@ -2437,6 +2457,26 @@ def get_live_price_payload(symbol: str, timeframe: str = "1m") -> Dict[str, Any]
 
     if live is not None:
         return live
+
+    # Emergency guard: do not answer /api/live-price for MES by launching a fresh
+    # full historical fetch. That fallback caused repeated 17k-candle InsightSentry
+    # pulls, 429s, and Render bandwidth usage. Return no_live_price instead and
+    # let the chart use SSE/shared cached live price.
+    if is_futures_symbol(normalized_symbol):
+        current_epoch = datetime.now(timezone.utc).timestamp()
+        return {
+            "symbol": normalized_symbol,
+            "timeframe": normalized_timeframe,
+            "price": 0,
+            "time": now_iso(),
+            "timestamp": now_iso(),
+            "epoch": current_epoch,
+            "bucketEpoch": floor_epoch_to_timeframe(current_epoch, normalized_timeframe),
+            "timeframeSeconds": timeframe_seconds(normalized_timeframe),
+            "provider": None,
+            "source": "no_live_price_insightsentry_http_disabled",
+            "createdAt": now_iso(),
+        }
 
     # Last-resort fallback: latest historical close, so charts continue to work if live quote is unavailable.
     candles = fetch_historical_candles(normalized_symbol, normalized_timeframe, 1)
