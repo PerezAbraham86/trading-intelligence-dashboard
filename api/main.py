@@ -8994,13 +8994,13 @@ def candles(symbol: str = "MES1!", timeframe: str = "5m", limit: int = 0, force:
             return stale
         raise
     except Exception as error:
+        print(f"[Clean candles] provider refresh failed for {normalized_symbol} {normalized_timeframe}: {error}")
         stale = clean_cache_payload(normalized_symbol, normalized_timeframe, safe_limit)
         if isinstance(stale, dict) and stale.get("candles"):
             stale["warning"] = "Provider refresh failed; returned last saved clean candle cache."
-            stale["error"] = str(error)
             stale["cache"] = "clean_stale_after_provider_error"
             return stale
-        raise HTTPException(status_code=502, detail=f"Clean candle service failed: {error}") from error
+        raise HTTPException(status_code=502, detail="Clean candle service failed.") from error
 
 
 @app.get("/api/historical-candles")

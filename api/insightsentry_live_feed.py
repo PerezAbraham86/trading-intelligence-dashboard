@@ -263,16 +263,17 @@ def timeframe_seconds(timeframe: Any = "1m") -> int:
         return mapping[tf]
 
     try:
+        quantity = tf[:-1]
         if tf.endswith("m"):
-            return max(1, int(tf[:-1] or "1")) * 60
+            return max(1, int(quantity) if quantity else 1) * 60
         if tf.endswith("h"):
-            return max(1, int(tf[:-1] or "1")) * 3600
+            return max(1, int(quantity) if quantity else 1) * 3600
         if tf.endswith("d"):
-            return max(1, int(tf[:-1] or "1")) * 86400
+            return max(1, int(quantity) if quantity else 1) * 86400
         if tf.endswith("w"):
-            return max(1, int(tf[:-1] or "1")) * 604800
+            return max(1, int(quantity) if quantity else 1) * 604800
         if tf.endswith("s"):
-            return max(1, int(tf[:-1] or "1"))
+            return max(1, int(quantity) if quantity else 1)
     except Exception:
         pass
 
@@ -541,7 +542,10 @@ def update_cache_from_candle(symbol: str, timeframe: str, candle: Dict[str, Any]
 
     if not replaced:
         history.append(candle)
-        history.sort(key=lambda item: int(item.get("time") or item.get("timestamp") or item.get("t") or 0))
+        if len(history) > 1:
+            previous_bucket_time = int(history[-2].get("time") or history[-2].get("timestamp") or history[-2].get("t") or 0)
+            if previous_bucket_time > bucket_time:
+                history.sort(key=lambda item: int(item.get("time") or item.get("timestamp") or item.get("t") or 0))
 
     if len(history) > LIVE_FEED_MAX_CANDLES:
         del history[:-LIVE_FEED_MAX_CANDLES]
