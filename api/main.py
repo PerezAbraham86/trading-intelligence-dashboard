@@ -8635,6 +8635,24 @@ def clean_candle_limit(symbol: str, limit: Any) -> int:
     return max(1, min(parsed or 500, 5000))
 
 
+def clean_cache_max_stale_seconds(timeframe: str) -> int:
+    return max(timeframe_seconds(timeframe) * 3, 900)
+
+
+def clean_cache_staleness(payload: Any, timeframe: str) -> Tuple[bool, Optional[float], int]:
+    threshold_seconds = clean_cache_max_stale_seconds(timeframe)
+    candles_list = payload.get("candles") if isinstance(payload, dict) else None
+    if not isinstance(candles_list, list) or not candles_list:
+        return True, None, threshold_seconds
+
+    latest_epoch = max(to_epoch_seconds(c.get("epoch") or c.get("time") or c.get("timestamp")) for c in candles_list if isinstance(c, dict))
+    if latest_epoch <= 0:
+        return True, None, threshold_seconds
+
+    age_seconds = max(0.0, datetime.now(timezone.utc).timestamp() - latest_epoch)
+    return age_seconds > threshold_seconds, round(age_seconds, 2), threshold_seconds
+
+
 def normalize_provider_history_candles(candles: Any, symbol: str, timeframe: str) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
@@ -8954,7 +8972,13 @@ def candles(symbol: str = "MES1!", timeframe: str = "5m", limit: int = 0, force:
     if not force:
         cached = clean_cache_payload(normalized_symbol, normalized_timeframe, safe_limit)
         if isinstance(cached, dict) and isinstance(cached.get("candles"), list) and cached.get("candles"):
-            return cached
+            cache_is_stale, cache_age_seconds, stale_threshold_seconds = clean_cache_staleness(cached, normalized_timeframe)
+            if not cache_is_stale:
+                return cached
+            print(
+                f"[Clean candles] bypassing stale cache for {normalized_symbol} {normalized_timeframe}: "
+                f"age={cache_age_seconds}s threshold={stale_threshold_seconds}s"
+            )
 
     try:
         fresh = fetch_clean_provider_candles(normalized_symbol, normalized_timeframe, safe_limit, force=force)

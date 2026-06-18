@@ -251,6 +251,40 @@ def ws_bar_to_timeframe(message: Dict[str, Any], fallback: str = "1m") -> str:
     return normalize_timeframe(fallback)
 
 
+def timeframe_seconds(timeframe: Any = "1m") -> int:
+    tf = normalize_timeframe(timeframe)
+    mapping = {
+        "1m": 60,
+        "3m": 180,
+        "5m": 300,
+        "10m": 600,
+    }
+    if tf in mapping:
+        return mapping[tf]
+
+    try:
+        if tf.endswith("m"):
+            return max(1, int(tf[:-1] or "1")) * 60
+        if tf.endswith("h"):
+            return max(1, int(tf[:-1] or "1")) * 3600
+        if tf.endswith("d"):
+            return max(1, int(tf[:-1] or "1")) * 86400
+        if tf.endswith("w"):
+            return max(1, int(tf[:-1] or "1")) * 604800
+        if tf.endswith("s"):
+            return max(1, int(tf[:-1] or "1"))
+    except Exception:
+        pass
+
+    return 60
+
+
+def bucket_timestamp(timestamp: Any, timeframe: Any = "1m") -> int:
+    raw_timestamp = int(to_float(timestamp, time.time()))
+    bucket_seconds = max(1, timeframe_seconds(timeframe))
+    return int((raw_timestamp // bucket_seconds) * bucket_seconds)
+
+
 def cache_key(symbol: Any, timeframe: Any = "1m") -> str:
     return f"{normalize_symbol(symbol)}::{normalize_timeframe(timeframe)}"
 
@@ -441,15 +475,18 @@ def normalize_series_candle(symbol: str, timeframe: str, raw_candle: Dict[str, A
     if low_price <= 0:
         low_price = min(open_price, close_price)
 
-    timestamp = to_float(raw_candle.get("time") or raw_candle.get("timestamp") or raw_candle.get("t"), time.time())
+    raw_timestamp = int(to_float(raw_candle.get("time") or raw_candle.get("timestamp") or raw_candle.get("t"), time.time()))
+    bucket_time = bucket_timestamp(raw_timestamp, timeframe)
     volume = to_float(raw_candle.get("volume") or raw_candle.get("v"), 0.0)
 
     return {
         "symbol": normalize_symbol(symbol),
         "timeframe": normalize_timeframe(timeframe),
-        "time": int(timestamp),
-        "timestamp": int(timestamp),
-        "t": int(timestamp),
+        "time": bucket_time,
+        "timestamp": bucket_time,
+        "t": bucket_time,
+        "rawTime": raw_timestamp,
+        "actualTime": raw_timestamp,
         "open": round(open_price, 8),
         "high": round(max(high_price, open_price, close_price), 8),
         "low": round(min(low_price, open_price, close_price), 8),
@@ -468,11 +505,16 @@ def normalize_series_candle(symbol: str, timeframe: str, raw_candle: Dict[str, A
 def update_cache_from_candle(symbol: str, timeframe: str, candle: Dict[str, Any], raw_message: Optional[Dict[str, Any]] = None) -> None:
     key = cache_key(symbol, timeframe)
     sym_key = symbol_key(symbol)
+    bucket_time = int(candle.get("time") or candle.get("timestamp") or candle.get("t") or 0)
     close_price = to_float(candle.get("close") or candle.get("c"), 0.0)
 
-    if close_price <= 0:
+    if close_price <= 0 or bucket_time <= 0:
         return
 
+    candle = dict(candle)
+    candle["time"] = bucket_time
+    candle["timestamp"] = bucket_time
+    candle["t"] = bucket_time
     _LIVE_CANDLE_CACHE[key] = candle
     _LIVE_PRICE_CACHE[sym_key] = {
         "eventType": "LIVE_PRICE_UPDATE",
@@ -489,13 +531,20 @@ def update_cache_from_candle(symbol: str, timeframe: str, candle: Dict[str, Any]
     _LIVE_LAST_ERROR.pop(key, None)
 
     history = _LIVE_CANDLE_HISTORY.setdefault(key, [])
+    replaced = False
+    for index in range(len(history) - 1, -1, -1):
+        history_bucket_time = int(history[index].get("time") or history[index].get("timestamp") or history[index].get("t") or 0)
+        if history_bucket_time == bucket_time:
+            history[index] = candle
+            replaced = True
+            break
 
-    if history and int(history[-1].get("time", 0)) == int(candle.get("time", 0)):
-        history[-1] = candle
-    else:
+    if not replaced:
         history.append(candle)
-        if len(history) > LIVE_FEED_MAX_CANDLES:
-            del history[:-LIVE_FEED_MAX_CANDLES]
+        history.sort(key=lambda item: int(item.get("time") or item.get("timestamp") or item.get("t") or 0))
+
+    if len(history) > LIVE_FEED_MAX_CANDLES:
+        del history[:-LIVE_FEED_MAX_CANDLES]
 
 
 def handle_ws_data_message(message: Dict[str, Any]) -> None:
