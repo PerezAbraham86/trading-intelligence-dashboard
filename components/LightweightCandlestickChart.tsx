@@ -88,6 +88,12 @@ type LightweightCandlestickChartProps = {
   nrtrStatsCollapsedOnly?: boolean;
 };
 
+// Delay before createChart runs, giving the browser a chance to paint the
+// empty container first (reduces LCP render delay). A slightly longer value
+// than EChartsCandlestickChart (0 ms) is used here because Lightweight Charts
+// creates multiple series in the same synchronous call.
+const CHART_INIT_DELAY_MS = 50;
+
 function isValidCandle(candle: DashboardCandle | null | undefined): candle is DashboardCandle {
   return Boolean(
     candle &&
@@ -1050,6 +1056,13 @@ export default function LightweightCandlestickChart({
     }
   }, [overlayPayload]);
 
+  // Clear stale overlay cache whenever the chart identity changes so that
+  // profile/zone draws from the previous symbol or timeframe do not appear
+  // anchored to the wrong position on the canvas after a switch.
+  useEffect(() => {
+    lastOverlayPayloadRef.current = null;
+  }, [symbol, timeframe]);
+
   const stableOverlayPayload = hasRenderableOverlayPayload(overlayPayload)
     ? overlayPayload
     : lastOverlayPayloadRef.current;
@@ -1130,6 +1143,9 @@ export default function LightweightCandlestickChart({
 
     const container = containerRef.current;
 
+    // Delay heavy chart initialization past the first browser paint to reduce
+    // LCP render delay and avoid a 200+ ms synchronous layout task on mount.
+    const initTimeoutId = window.setTimeout(() => {
     const chart = createChart(container, {
       height,
       width: container.clientWidth,
@@ -1270,14 +1286,12 @@ export default function LightweightCandlestickChart({
 
     resizeObserverRef.current.observe(container);
 
-    const redrawNrtrCanvas = () => {
-      setOverlaySize((previous) => ({ ...previous }));
-    };
-
-    chart.timeScale().subscribeVisibleTimeRangeChange(redrawNrtrCanvas);
+    }, CHART_INIT_DELAY_MS); // end of initTimeoutId setTimeout
 
     return () => {
-      chart.timeScale().unsubscribeVisibleTimeRangeChange(redrawNrtrCanvas);
+      // clearTimeout is a no-op if the timer already fired. The remaining
+      // cleanup below handles both cases (unmount before/after init).
+      window.clearTimeout(initTimeoutId);
 
       if (nrtrAnimationFrameRef.current !== null) {
         window.cancelAnimationFrame(nrtrAnimationFrameRef.current);
