@@ -407,6 +407,78 @@ RECENT_CANDLES: List[Dict[str, Any]] = []
 CHART_OVERLAY_CACHE: Dict[str, Any] = {}
 CHART_OVERLAY_RAW_CACHE: Dict[str, Any] = {}
 CANDLE_RESPONSE_CACHE: Dict[str, Any] = {}
+
+AI_TRADER_ROUTE_CACHE: Dict[str, Dict[str, Any]] = {}
+AI_TRADER_ROUTE_LOCK = threading.RLock()
+
+AI_TRADER_DIAGNOSTICS_MIN_SECONDS = float(os.getenv("AI_TRADER_DIAGNOSTICS_MIN_SECONDS", "10"))
+AI_TRADER_DECISION_MIN_SECONDS = float(os.getenv("AI_TRADER_DECISION_MIN_SECONDS", "15"))
+AI_TRADER_VALIDATE_PLAN_MIN_SECONDS = float(os.getenv("AI_TRADER_VALIDATE_PLAN_MIN_SECONDS", "15"))
+AI_TRADER_CONTROL_MIN_SECONDS = float(os.getenv("AI_TRADER_CONTROL_MIN_SECONDS", "15"))
+AI_TRADER_SUMMARY_MIN_SECONDS = float(os.getenv("AI_TRADER_SUMMARY_MIN_SECONDS", "15"))
+
+
+def ai_trader_cache_key(route: str, payload: Optional[Dict[str, Any]] = None, symbol: Any = "", timeframe: Any = "") -> str:
+    data = payload if isinstance(payload, dict) else {}
+    normalized_symbol = normalize_symbol(str(data.get("symbol") or symbol or "MES1!"))
+    normalized_timeframe = normalize_timeframe(str(data.get("timeframe") or timeframe or "1m"))
+
+    if route in {"decision", "validate-plan", "diagnostics"}:
+        setup_key = str(data.get("setupKey") or "")
+        side = str(data.get("side") or "")
+        current_price = round_price(normalized_symbol, data.get("currentPrice") or data.get("livePrice") or data.get("price") or 0)
+        target_price = round_price(normalized_symbol, data.get("targetPrice") or 0)
+        stop_price = round_price(normalized_symbol, data.get("stopPrice") or 0)
+        signal = str(data.get("signal") or "")
+        return f"{route}::{normalized_symbol}::{normalized_timeframe}::{setup_key}::{side}::{current_price}::{target_price}::{stop_price}::{signal}"
+
+    return f"{route}::{normalized_symbol}::{normalized_timeframe}"
+
+
+def ai_trader_cached_response(key: str, min_seconds: float) -> Optional[Dict[str, Any]]:
+    now = time.monotonic()
+
+    with AI_TRADER_ROUTE_LOCK:
+        cached = AI_TRADER_ROUTE_CACHE.get(key)
+        if not isinstance(cached, dict):
+            return None
+
+        created_at = to_float(cached.get("createdAtMonotonic"), 0.0)
+        response = cached.get("response")
+
+        if created_at <= 0 or not isinstance(response, dict):
+            return None
+
+        age = now - created_at
+        if age < max(0.0, min_seconds):
+            cloned = dict(response)
+            cloned["backendThrottleCache"] = True
+            cloned["backendThrottleAgeSeconds"] = round(age, 3)
+            cloned["backendThrottleKey"] = key
+            return cloned
+
+    return None
+
+
+def ai_trader_store_cached_response(key: str, response: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(response, dict):
+        return response
+
+    with AI_TRADER_ROUTE_LOCK:
+        AI_TRADER_ROUTE_CACHE[key] = {
+            "createdAtMonotonic": time.monotonic(),
+            "response": dict(response),
+        }
+
+        if len(AI_TRADER_ROUTE_CACHE) > 250:
+            oldest = sorted(
+                AI_TRADER_ROUTE_CACHE.items(),
+                key=lambda item: to_float(item[1].get("createdAtMonotonic"), 0.0) if isinstance(item[1], dict) else 0.0,
+            )
+            for old_key, _ in oldest[: max(0, len(AI_TRADER_ROUTE_CACHE) - 200)]:
+                AI_TRADER_ROUTE_CACHE.pop(old_key, None)
+
+    return response
 MAX_CANDLE_RESPONSE_CACHE_ITEMS = int(os.getenv("MAX_CANDLE_RESPONSE_CACHE_ITEMS", "40"))
 MAX_CHART_OVERLAY_CACHE_ITEMS = int(os.getenv("MAX_CHART_OVERLAY_CACHE_ITEMS", "30"))
 MAX_CHART_OVERLAY_RAW_CACHE_ITEMS = int(os.getenv("MAX_CHART_OVERLAY_RAW_CACHE_ITEMS", "12"))
@@ -7437,8 +7509,14 @@ def ai_trader_decision_route(payload: AiTraderDecisionPayload) -> Dict[str, Any]
             "createdAt": now_iso(),
         }
 
-    return get_ai_trader_decision(**model_to_dict(payload))
+    data = model_to_dict(payload)
+    cache_key = ai_trader_cache_key("decision", data)
+    cached = ai_trader_cached_response(cache_key, AI_TRADER_DECISION_MIN_SECONDS)
+    if cached is not None:
+        return cached
 
+    result = get_ai_trader_decision(**data)
+    return ai_trader_store_cached_response(cache_key, result if isinstance(result, dict) else {})
 
 @app.post("/api/ai-trader/validate-plan")
 @app.post("/api/ai-trader-validate-plan")
@@ -7455,8 +7533,14 @@ def ai_trader_validate_plan_route(payload: AiTraderValidatePlanPayload) -> Dict[
             "createdAt": now_iso(),
         }
 
-    return validate_ai_trade_plan(**model_to_dict(payload))
+    data = model_to_dict(payload)
+    cache_key = ai_trader_cache_key("validate-plan", data)
+    cached = ai_trader_cached_response(cache_key, AI_TRADER_VALIDATE_PLAN_MIN_SECONDS)
+    if cached is not None:
+        return cached
 
+    result = validate_ai_trade_plan(**data)
+    return ai_trader_store_cached_response(cache_key, result if isinstance(result, dict) else {})
 
 @app.post("/api/ai-trader/open")
 @app.post("/api/ai-trader-open")
@@ -7533,16 +7617,28 @@ def ai_trader_diagnostics_route(payload: Optional[AiTraderDiagnosticsPayload] = 
     data = model_to_dict(payload) if payload is not None else {}
     data.setdefault("symbol", symbol)
     data.setdefault("timeframe", timeframe)
-    return ai_trader_diagnostics(**data)
 
+    cache_key = ai_trader_cache_key("diagnostics", data, symbol, timeframe)
+    cached = ai_trader_cached_response(cache_key, AI_TRADER_DIAGNOSTICS_MIN_SECONDS)
+    if cached is not None:
+        return cached
+
+    result = ai_trader_diagnostics(**data)
+    return ai_trader_store_cached_response(cache_key, result if isinstance(result, dict) else {})
 
 @app.get("/api/ai-trader/control")
 @app.get("/api/ai-trader-control")
 def ai_trader_control_get_route(symbol: str = "MES1!", timeframe: str = "1m") -> Dict[str, Any]:
     if get_ai_trader_control_state is None:
         raise HTTPException(status_code=503, detail="AI Trader control module unavailable")
-    return get_ai_trader_control_state(symbol=symbol, timeframe=timeframe)
 
+    cache_key = ai_trader_cache_key("control", symbol=symbol, timeframe=timeframe)
+    cached = ai_trader_cached_response(cache_key, AI_TRADER_CONTROL_MIN_SECONDS)
+    if cached is not None:
+        return cached
+
+    result = get_ai_trader_control_state(symbol=symbol, timeframe=timeframe)
+    return ai_trader_store_cached_response(cache_key, result if isinstance(result, dict) else {})
 
 @app.post("/api/ai-trader/control")
 @app.post("/api/ai-trader-control")
@@ -7566,8 +7662,13 @@ def ai_trader_summary_route(symbol: str = "", timeframe: str = "") -> Dict[str, 
             "createdAt": now_iso(),
         }
 
-    return ai_trader_summary(symbol=symbol, timeframe=timeframe)
+    cache_key = ai_trader_cache_key("summary", symbol=symbol, timeframe=timeframe)
+    cached = ai_trader_cached_response(cache_key, AI_TRADER_SUMMARY_MIN_SECONDS)
+    if cached is not None:
+        return cached
 
+    result = ai_trader_summary(symbol=symbol, timeframe=timeframe)
+    return ai_trader_store_cached_response(cache_key, result if isinstance(result, dict) else {})
 
 @app.get("/api/ai-trader/export")
 @app.get("/api/ai-trader-export")
