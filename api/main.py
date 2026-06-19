@@ -8114,9 +8114,15 @@ CANDLE_WAREHOUSE_RECENT_DP = max(2, min(int(os.getenv("CANDLE_WAREHOUSE_RECENT_D
 # Instead of accepting an old cached tail, the backend refreshes the SAME timeframe
 # directly from InsightSentry up to the current provider point, then merges/saves it.
 CANDLE_WAREHOUSE_TAIL_REPAIR_ENABLED = os.getenv("CANDLE_WAREHOUSE_TAIL_REPAIR_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-CANDLE_WAREHOUSE_TAIL_REPAIR_COOLDOWN_SECONDS = max(5, int(os.getenv("CANDLE_WAREHOUSE_TAIL_REPAIR_COOLDOWN_SECONDS", "45")))
-CANDLE_WAREHOUSE_TAIL_STALE_SECONDS = max(60, int(os.getenv("CANDLE_WAREHOUSE_TAIL_STALE_SECONDS", "900")))
+CANDLE_WAREHOUSE_TAIL_REPAIR_COOLDOWN_SECONDS = max(30, int(os.getenv("CANDLE_WAREHOUSE_TAIL_REPAIR_COOLDOWN_SECONDS", "300")))
+# MES/ES history can legally pause for the CME maintenance break and weekend close.
+# Do not hammer InsightSentry just because the saved provider tail is a few hours old.
+CANDLE_WAREHOUSE_TAIL_STALE_SECONDS = max(3600, int(os.getenv("CANDLE_WAREHOUSE_TAIL_STALE_SECONDS", "43200")))
 CANDLE_WAREHOUSE_MAX_GAP_MULTIPLIER = max(2.0, to_float(os.getenv("CANDLE_WAREHOUSE_MAX_GAP_MULTIPLIER", "2.5"), 2.5))
+CME_FUTURES_SESSION_GAP_FILTER_ENABLED = os.getenv("CME_FUTURES_SESSION_GAP_FILTER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+CME_FUTURES_DAILY_BREAK_START_MINUTE = int(os.getenv("CME_FUTURES_DAILY_BREAK_START_MINUTE", str(20 * 60 + 50)))
+CME_FUTURES_DAILY_BREAK_END_MINUTE = int(os.getenv("CME_FUTURES_DAILY_BREAK_END_MINUTE", str(22 * 60 + 10)))
+LIVE_FEED_MIN_POLL_SECONDS = max(1.0, to_float(os.getenv("LIVE_FEED_MIN_POLL_SECONDS", "5"), 5.0))
 
 _CANDLE_WAREHOUSE_THREAD: Optional[threading.Thread] = None
 _CANDLE_WAREHOUSE_LOCK = threading.RLock()
@@ -8178,11 +8184,70 @@ def _latest_epoch_from_candles(candles_list: Any) -> float:
     return latest
 
 
-def _candle_gap_summary(candles_list: Any, timeframe: str) -> Dict[str, Any]:
+def _utc_datetime_from_epoch(epoch: Any) -> Optional[datetime]:
+    try:
+        parsed_epoch = to_float(epoch, 0.0)
+        if parsed_epoch <= 0:
+            return None
+        return datetime.fromtimestamp(parsed_epoch, tz=timezone.utc)
+    except Exception:
+        return None
+
+
+def _utc_minutes_of_day(value: datetime) -> int:
+    return int(value.hour) * 60 + int(value.minute)
+
+
+def _is_expected_cme_futures_session_gap(previous_epoch: Any, next_epoch: Any, expected_seconds: int) -> bool:
+    """Treat CME maintenance/weekend breaks as expected gaps, not bad missing data.
+
+    MES/ES commonly stop around 20:55-20:59 UTC and resume around 22:00 UTC.
+    The old gap detector treated those normal breaks as broken data and forced
+    repeated provider refreshes, which caused InsightSentry 429 loops.
+    """
+    if not CME_FUTURES_SESSION_GAP_FILTER_ENABLED:
+        return False
+
+    previous_dt = _utc_datetime_from_epoch(previous_epoch)
+    next_dt = _utc_datetime_from_epoch(next_epoch)
+    if previous_dt is None or next_dt is None or next_dt <= previous_dt:
+        return False
+
+    gap_seconds = (next_dt - previous_dt).total_seconds()
+    previous_minute = _utc_minutes_of_day(previous_dt)
+    next_minute = _utc_minutes_of_day(next_dt)
+
+    start_window_low = max(0, CME_FUTURES_DAILY_BREAK_START_MINUTE)
+    start_window_high = min(24 * 60 - 1, 21 * 60 + 10)
+    end_window_low = max(0, 21 * 60 + 45)
+    end_window_high = min(24 * 60 - 1, CME_FUTURES_DAILY_BREAK_END_MINUTE)
+
+    starts_near_break = start_window_low <= previous_minute <= start_window_high
+    ends_near_reopen = end_window_low <= next_minute <= end_window_high
+
+    if not starts_near_break or not ends_near_reopen:
+        return False
+
+    # Normal weekday maintenance break.
+    if gap_seconds <= max(2 * 60 * 60, expected_seconds * 18):
+        return True
+
+    # Friday close into Sunday evening reopen. This is normal, especially on 5m+ caches.
+    previous_weekday = previous_dt.weekday()  # Monday=0, Friday=4, Sunday=6
+    next_weekday = next_dt.weekday()
+    if previous_weekday == 4 and next_weekday == 6 and gap_seconds <= 60 * 60 * 60:
+        return True
+
+    return False
+
+
+def _candle_gap_summary(candles_list: Any, timeframe: str, symbol: str = "") -> Dict[str, Any]:
     rows = merge_candles_by_time(candles_list if isinstance(candles_list, list) else [])
     expected = max(timeframe_seconds(timeframe), 60)
     allowed_gap = expected * CANDLE_WAREHOUSE_MAX_GAP_MULTIPLIER
+    normalized_symbol = normalize_symbol(str(symbol or ""))
     gaps: List[Dict[str, Any]] = []
+    ignored_session_gaps: List[Dict[str, Any]] = []
     largest_gap_seconds = 0
     largest_from: Optional[str] = None
     largest_to: Optional[str] = None
@@ -8203,11 +8268,15 @@ def _candle_gap_summary(candles_list: Any, timeframe: str) -> Dict[str, Any]:
                     "expectedSeconds": expected,
                     "missingBarsApprox": max(0, int(round(gap_seconds / expected)) - 1),
                 }
-                gaps.append(gap)
-                if gap_seconds > largest_gap_seconds:
-                    largest_gap_seconds = gap_seconds
-                    largest_from = previous_time
-                    largest_to = format_bar_time(epoch)
+
+                if is_futures_symbol(normalized_symbol) and _is_expected_cme_futures_session_gap(previous_epoch, epoch, expected):
+                    ignored_session_gaps.append({**gap, "ignoredReason": "expected_cme_futures_session_break"})
+                else:
+                    gaps.append(gap)
+                    if gap_seconds > largest_gap_seconds:
+                        largest_gap_seconds = gap_seconds
+                        largest_from = previous_time
+                        largest_to = format_bar_time(epoch)
         previous_epoch = epoch
         previous_time = format_bar_time(epoch)
 
@@ -8220,6 +8289,8 @@ def _candle_gap_summary(candles_list: Any, timeframe: str) -> Dict[str, Any]:
         "expectedSeconds": expected,
         "allowedGapSeconds": allowed_gap,
         "gaps": gaps[-10:],
+        "ignoredSessionGapCount": len(ignored_session_gaps),
+        "ignoredSessionGaps": ignored_session_gaps[-10:],
     }
 
 
@@ -8247,7 +8318,7 @@ def _futures_cache_needs_same_timeframe_refresh(cached_candles: Any, symbol: str
     tail_seconds = _futures_tail_seconds_behind(candles_list, normalized_symbol, normalized_timeframe)
     tf_seconds = max(timeframe_seconds(normalized_timeframe), 60)
     stale_threshold = max(CANDLE_WAREHOUSE_TAIL_STALE_SECONDS, tf_seconds * CANDLE_WAREHOUSE_MAX_GAP_MULTIPLIER)
-    gap_info = _candle_gap_summary(candles_list, normalized_timeframe)
+    gap_info = _candle_gap_summary(candles_list, normalized_timeframe, normalized_symbol)
 
     if latest_epoch <= 0:
         return True, "missing_latest_epoch", {"tailSecondsBehind": tail_seconds, **gap_info}
@@ -8345,7 +8416,7 @@ def refresh_futures_history_to_current(
         )
 
         stored_candles = stored.get("candles") if isinstance(stored, dict) else []
-        gap_info = _candle_gap_summary(stored_candles, normalized_timeframe)
+        gap_info = _candle_gap_summary(stored_candles, normalized_timeframe, normalized_symbol)
 
         repaired = dict(stored) if isinstance(stored, dict) else {
             "symbol": normalized_symbol,
@@ -8826,11 +8897,19 @@ def clean_cache_payload(symbol: str, timeframe: str, limit: int = 0, allow_stale
         # do exactly one controlled provider refresh instead of stitching live candles
         # onto a stale historical tail.
         if needs_refresh and not allow_stale:
-            print(
-                f"[Clean candles] bypassing stale cache for {normalized_symbol} {normalized_timeframe}: "
-                f"reason={refresh_reason} debug={refresh_debug}"
-            )
-            return None
+            if _tail_repair_in_cooldown(CLEAN_CANDLE_ROUTE, normalized_symbol, normalized_timeframe):
+                print(
+                    f"[Clean candles] serving saved cache during provider refresh cooldown for "
+                    f"{normalized_symbol} {normalized_timeframe}: reason={refresh_reason} debug={refresh_debug}"
+                )
+                allow_stale = True
+            else:
+                _mark_tail_repair(CLEAN_CANDLE_ROUTE, normalized_symbol, normalized_timeframe)
+                print(
+                    f"[Clean candles] bypassing stale cache for {normalized_symbol} {normalized_timeframe}: "
+                    f"reason={refresh_reason} debug={refresh_debug}"
+                )
+                return None
     else:
         needs_refresh = False
         refresh_reason = "not_futures"
@@ -8853,7 +8932,7 @@ def clean_cache_payload(symbol: str, timeframe: str, limit: int = 0, allow_stale
     payload["siteCacheDbFile"] = cached.get("siteCacheDbFile")
     payload["noArtificialCandleLimit"] = is_futures_symbol(normalized_symbol)
     payload["cacheRoute"] = CLEAN_CANDLE_ROUTE
-    payload["gapInfo"] = _candle_gap_summary(returned, normalized_timeframe) if is_futures_symbol(normalized_symbol) else None
+    payload["gapInfo"] = _candle_gap_summary(returned, normalized_timeframe, normalized_symbol) if is_futures_symbol(normalized_symbol) else None
     payload["staleCacheGuard"] = {
         "allowStale": bool(allow_stale),
         "needsRefresh": bool(needs_refresh),
@@ -8923,7 +9002,7 @@ def fetch_clean_provider_candles(symbol: str, timeframe: str, limit: int = 0, fo
     payload["noArtificialCandleLimit"] = is_futures_symbol(normalized_symbol)
     payload["noTimeframeBuildFrom1m"] = is_futures_symbol(normalized_symbol)
     payload["startYm"] = CLEAN_CANDLE_START_YM if is_futures_symbol(normalized_symbol) else None
-    payload["gapInfo"] = _candle_gap_summary(returned, normalized_timeframe) if is_futures_symbol(normalized_symbol) else None
+    payload["gapInfo"] = _candle_gap_summary(returned, normalized_timeframe, normalized_symbol) if is_futures_symbol(normalized_symbol) else None
     return payload
 
 
@@ -9064,7 +9143,7 @@ def api_databento_candles(
     payload["requestedEnd"] = response.get("requestedEnd") if isinstance(response, dict) else end
     payload["cleanCompatible"] = True
     payload["storedToCleanCache"] = False
-    payload["gapInfo"] = _candle_gap_summary(returned, normalized_timeframe) if is_futures_symbol(normalized_symbol) else None
+    payload["gapInfo"] = _candle_gap_summary(returned, normalized_timeframe, normalized_symbol) if is_futures_symbol(normalized_symbol) else None
     return payload
 
 
@@ -10637,8 +10716,9 @@ def api_live_feed_stream(
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
     }
+    safe_poll_seconds = max(LIVE_FEED_MIN_POLL_SECONDS, to_float(pollSeconds, LIVE_FEED_MIN_POLL_SECONDS))
     return StreamingResponse(
-        live_feed_event_generator(symbol=symbol, timeframe=timeframe, limit=limit, pollSeconds=pollSeconds),
+        live_feed_event_generator(symbol=symbol, timeframe=timeframe, limit=limit, pollSeconds=safe_poll_seconds),
         media_type="text/event-stream",
         headers=headers,
     )
