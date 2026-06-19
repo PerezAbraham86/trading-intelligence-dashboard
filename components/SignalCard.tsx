@@ -9,6 +9,7 @@ import {
   ShieldAlert,
   Activity,
 } from 'lucide-react'
+import { cachedJsonFetch } from '@/lib/frontendRequestCache'
 
 type TradingSignal = {
   symbol: string
@@ -199,13 +200,8 @@ export default function SignalCard({ signal }: SignalCardProps) {
           limit: '500',
         })
 
-        const response = await fetch(`${API_BASE_URL}/api/latest-sentiment?${params.toString()}`, {
-          cache: 'no-store',
-        })
-
-        if (!response.ok) return
-
-        const json = await response.json()
+        const url = `${API_BASE_URL}/api/latest-sentiment?${params.toString()}`
+        const json = await cachedJsonFetch<TechnicalSentiment>(url, 30000)
 
         if (!cancelled) {
           setTechnicalSentiment(json && typeof json === 'object' ? json : null)
