@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
+import { cachedJsonFetch } from '@/lib/frontendRequestCache'
 
 type TechnicalIndicator = {
   name: string
@@ -587,13 +588,10 @@ export default function PressureGauges({ signal, unifiedIntelligence }: Pressure
           limit: '500',
         })
 
-        const response = await fetch(`${API_BASE_URL}/api/latest-sentiment?${params.toString()}`, {
-          cache: 'no-store',
-        })
-
-        if (!response.ok) return
-
-        const json = await response.json()
+        const json = await cachedJsonFetch<TechnicalSentiment | null>(
+          `${API_BASE_URL}/api/latest-sentiment?${params.toString()}`,
+          30000
+        )
 
         if (!cancelled) {
           setFetchedTechnicalSentiment(json && typeof json === 'object' ? json : null)
