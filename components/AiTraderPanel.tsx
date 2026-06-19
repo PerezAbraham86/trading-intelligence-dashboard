@@ -3352,8 +3352,11 @@ export default function AiTraderPanel({
         return;
       }
 
-      const allowForcedBootstrap = force && !decision;
-      if (!allowForcedBootstrap && now - lastDecisionRequestAtRef.current < decisionThrottleMs) {
+      const allowInitialForcedDecisionFetch = force && !decision;
+      if (
+        !allowInitialForcedDecisionFetch &&
+        now - lastDecisionRequestAtRef.current < decisionThrottleMs
+      ) {
         return;
       }
 
