@@ -6566,33 +6566,31 @@ export default function Dashboard() {
         setBootStep(key, 'loading', `${normalizedSymbol} ${normalizedTimeframe} • requesting /api/candles attempt ${attempt}/3`)
 
         try {
-          const historical = await fetchBackendHistoricalRefreshPayload(
+          const sharedEntry = await fetchSharedCandlePayload(
             bootApiBaseUrl,
             normalizedSymbol,
             normalizedTimeframe,
             limit,
             false
           )
-          const historicalCandles = normalizeCandlePayload(historical)
+          const historicalCandles = sharedEntry.candles
 
           if (historicalCandles.length >= minimum) {
-            const entry = storeBootPayload(historical, historicalCandles, 'dashboard_boot_clean_candle_route')
             setBootStep(
               key,
               'done',
               `${normalizedSymbol} ${normalizedTimeframe} • ${historicalCandles.length} clean backend candles ready`
             )
-            return entry
+            return sharedEntry
           }
 
           if (historicalCandles.length > 0) {
-            const entry = storeBootPayload(historical, historicalCandles, 'dashboard_boot_partial_clean_candle_route')
             setBootStep(
               key,
               'warning',
               `${normalizedSymbol} ${normalizedTimeframe} • /api/candles returned ${historicalCandles.length}/${minimum}; retrying`
             )
-            if (attempt === 3) return entry
+            if (attempt === 3) return sharedEntry
           } else {
             setBootStep(key, 'warning', `${normalizedSymbol} ${normalizedTimeframe} • /api/candles returned 0 candles; retrying`)
           }
@@ -6792,31 +6790,13 @@ export default function Dashboard() {
         if (cancelled) return
 
         try {
-          const payload = await fetchBackendHistoricalRefreshPayload(
+          await fetchSharedCandlePayload(
             DASHBOARD_API_BASE_URL,
             item.symbol,
             item.timeframe,
             item.limit || SHARED_CANDLE_CACHE_MAX_BARS,
             false
           )
-          const candles = normalizeCandlePayload(payload)
-          if (candles.length === 0) return
-
-          const cacheKey = sharedCandleKey(item.symbol, item.timeframe)
-          const previous = SHARED_CANDLE_CACHE.get(cacheKey)
-          SHARED_CANDLE_CACHE.set(cacheKey, {
-            candles: mergeHistoricalCandles(
-              previous?.candles,
-              candles,
-              SHARED_CANDLE_CACHE_MAX_BARS
-            ),
-            overlayPayload: getUnifiedOverlayPayload(payload) ?? previous?.overlayPayload ?? null,
-            unifiedIntelligence: getUnifiedIntelligencePayload(payload) ?? previous?.unifiedIntelligence ?? null,
-            updatedAt: Date.now(),
-            limit: Math.max(item.limit, previous?.limit ?? 0, candles.length),
-            provider: typeof payload?.provider === 'string' ? payload.provider : 'clean_backend_candles_background_boot',
-            source: typeof payload?.source === 'string' ? payload.source : 'clean_backend_candles_background_warm',
-          })
         } catch {
           // Background warming is best effort only.
         }
