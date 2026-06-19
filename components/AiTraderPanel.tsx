@@ -2556,11 +2556,19 @@ export default function AiTraderPanel({
   const activePaperTradeLockRef = useRef(false);
   const closedTradeKeysRef = useRef<Set<string>>(new Set());
   const recentOpenSetupKeysRef = useRef<Map<string, number>>(new Map());
+  const lastDiagnosticsRequestAtRef = useRef(0);
   const lastDecisionRequestAtRef = useRef(0);
   const lastSummaryRequestAtRef = useRef(0);
+  const lastValidatePlanRequestAtRef = useRef(0);
+  const lastValidatePlanSignatureRef = useRef("");
   const lastEvaluateRequestAtRef = useRef(0);
   const lastOpenRequestAtRef = useRef(0);
   const lastLoggedActionStatusRef = useRef("");
+  const diagnosticsThrottleMs = 10000;
+  const decisionThrottleMs = 15000;
+  const validatePlanThrottleMs = 15000;
+  const controlThrottleMs = 15000;
+  const summaryThrottleMs = 15000;
 
   const pushAiActivityLog = useCallback(
     (message: string, tone: "info" | "success" | "warn" | "error" = "info") => {
@@ -3037,7 +3045,7 @@ export default function AiTraderPanel({
     async (inputPayload: any = safePayload, force = false) => {
       if (!apiBaseUrl) return null;
 
-      if (validateRequestInFlightRef.current && !force) {
+      if (validateRequestInFlightRef.current) {
         return validation;
       }
 
@@ -3054,6 +3062,40 @@ export default function AiTraderPanel({
           (outboundPayload as any)?.rawDecision ??
           (outboundPayload as any)?.decision,
       );
+      const normalizePlanSignatureValue = (value: unknown) => {
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? numeric.toFixed(8) : String(value ?? "");
+      };
+      const planSignature = JSON.stringify({
+        symbol: String((outboundPayload as any)?.symbol ?? symbol ?? ""),
+        timeframe: String((outboundPayload as any)?.timeframe ?? timeframe ?? ""),
+        side:
+          outboundSide ??
+          String(
+            (outboundPayload as any)?.decision ??
+              (outboundPayload as any)?.rawDecision ??
+              "",
+          ),
+        entryPrice: normalizePlanSignatureValue(
+          (outboundPayload as any)?.entryPrice ?? (outboundPayload as any)?.entry,
+        ),
+        targetPrice: normalizePlanSignatureValue((outboundPayload as any)?.targetPrice),
+        stopLoss: normalizePlanSignatureValue(
+          (outboundPayload as any)?.stopLoss ?? (outboundPayload as any)?.stopPrice,
+        ),
+        currentPrice: normalizePlanSignatureValue(
+          (outboundPayload as any)?.currentPrice ?? liveActivePrice,
+        ),
+      });
+      const now = Date.now();
+
+      if (
+        lastValidatePlanSignatureRef.current === planSignature &&
+        now - lastValidatePlanRequestAtRef.current < validatePlanThrottleMs
+      ) {
+        if (force) return validation;
+        return validation;
+      }
 
       if (outboundSide === "HOLD") {
         const waiting: AiTraderValidation = {
@@ -3076,6 +3118,8 @@ export default function AiTraderPanel({
       }
 
       validateRequestInFlightRef.current = true;
+      lastValidatePlanRequestAtRef.current = now;
+      lastValidatePlanSignatureRef.current = planSignature;
       const timeout = createRequestTimeout(22000);
 
       try {
@@ -3113,15 +3157,31 @@ export default function AiTraderPanel({
         validateRequestInFlightRef.current = false;
       }
     },
-    [apiBaseUrl, candles, decision, liveActivePrice, safePayload, symbol, timeframe, validation],
+    [
+      apiBaseUrl,
+      candles,
+      decision,
+      liveActivePrice,
+      safePayload,
+      symbol,
+      timeframe,
+      validatePlanThrottleMs,
+      validation,
+    ],
   );
 
   const fetchDiagnostics = useCallback(
     async (force = false) => {
       if (!apiBaseUrl) return;
-      if (diagnosticsRequestInFlightRef.current && !force) return;
+      if (diagnosticsRequestInFlightRef.current) return;
+      const now = Date.now();
+      if (now - lastDiagnosticsRequestAtRef.current < diagnosticsThrottleMs) {
+        if (force) return;
+        return;
+      }
 
       diagnosticsRequestInFlightRef.current = true;
+      lastDiagnosticsRequestAtRef.current = now;
       const timeout = createRequestTimeout(12000);
 
       try {
@@ -3155,7 +3215,7 @@ export default function AiTraderPanel({
         diagnosticsRequestInFlightRef.current = false;
       }
     },
-    [apiBaseUrl, candles, liveActivePrice, safePayload, symbol, timeframe],
+    [apiBaseUrl, candles, diagnosticsThrottleMs, liveActivePrice, safePayload, symbol, timeframe],
   );
 
   const applyBackendControlState = useCallback((control: AiTraderControlState | null | undefined) => {
@@ -3194,7 +3254,10 @@ export default function AiTraderPanel({
     if (!apiBaseUrl || controlRequestInFlightRef.current) return;
 
     const now = Date.now();
-    if (!force && now - lastControlRequestAtRef.current < 12000) return;
+    if (now - lastControlRequestAtRef.current < controlThrottleMs) {
+      if (force) return;
+      return;
+    }
 
     controlRequestInFlightRef.current = true;
     lastControlRequestAtRef.current = now;
@@ -3218,7 +3281,7 @@ export default function AiTraderPanel({
       timeout.clear();
       controlRequestInFlightRef.current = false;
     }
-  }, [apiBaseUrl, applyBackendControlState, symbol, timeframe]);
+  }, [apiBaseUrl, applyBackendControlState, controlThrottleMs, symbol, timeframe]);
 
   const updateBackendControlState = useCallback(async (patch: Partial<AiTraderControlState>, statusMessage?: string) => {
     const nextPayload = buildAiTraderControlPayloadFromState({
@@ -3296,7 +3359,8 @@ export default function AiTraderPanel({
         return;
       }
 
-      if (!force && now - lastDecisionRequestAtRef.current < 8000) {
+      const allowForcedBootstrap = force && !decision;
+      if (!allowForcedBootstrap && now - lastDecisionRequestAtRef.current < decisionThrottleMs) {
         return;
       }
 
@@ -3366,7 +3430,17 @@ export default function AiTraderPanel({
         setIsLoading(false);
       }
     },
-    [apiBaseUrl, candles, decision, liveActivePrice, safePayload, symbol, timeframe, validateBackendPlan],
+    [
+      apiBaseUrl,
+      candles,
+      decision,
+      decisionThrottleMs,
+      liveActivePrice,
+      safePayload,
+      symbol,
+      timeframe,
+      validateBackendPlan,
+    ],
   );
 
   const fetchSummary = useCallback(
@@ -3376,7 +3450,10 @@ export default function AiTraderPanel({
       const now = Date.now();
 
       if (summaryRequestInFlightRef.current) return;
-      if (!force && now - lastSummaryRequestAtRef.current < 12000) return;
+      if (now - lastSummaryRequestAtRef.current < summaryThrottleMs) {
+        if (force) return;
+        return;
+      }
 
       summaryRequestInFlightRef.current = true;
       lastSummaryRequestAtRef.current = now;
@@ -3431,7 +3508,7 @@ export default function AiTraderPanel({
         summaryRequestInFlightRef.current = false;
       }
     },
-    [apiBaseUrl, saveClosedTrades, saveOpenTrades],
+    [apiBaseUrl, saveClosedTrades, saveOpenTrades, summaryThrottleMs],
   );
 
   const evaluateOpenTrades = useCallback(
