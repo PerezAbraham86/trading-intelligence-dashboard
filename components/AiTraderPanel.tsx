@@ -2561,6 +2561,10 @@ export default function AiTraderPanel({
   const lastEvaluateRequestAtRef = useRef(0);
   const lastOpenRequestAtRef = useRef(0);
   const lastLoggedActionStatusRef = useRef("");
+  const lastDiagnosticsRequestAtRef = useRef(0);
+  const lastValidateRequestAtRef = useRef(0);
+  const lastValidatePlanSignatureRef = useRef("");
+  const lastInitialRefreshSignatureRef = useRef("");
 
   const pushAiActivityLog = useCallback(
     (message: string, tone: "info" | "success" | "warn" | "error" = "info") => {
@@ -3075,7 +3079,30 @@ export default function AiTraderPanel({
         return waiting;
       }
 
+      const now = Date.now();
+      const validateSignature = JSON.stringify({
+        symbol,
+        timeframe,
+        side: outboundSide,
+        setupKey: (outboundPayload as any)?.setupKey ?? "",
+        entry: toFiniteNumber((outboundPayload as any)?.entry ?? (outboundPayload as any)?.entryPrice, 0),
+        target: toFiniteNumber((outboundPayload as any)?.target ?? (outboundPayload as any)?.targetPrice, 0),
+        stop: toFiniteNumber((outboundPayload as any)?.stop ?? (outboundPayload as any)?.stopPrice, 0),
+      });
+
+      // Auto-refresh can re-render this component many times per candle. Do not
+      // re-submit the exact same validation plan over and over. Manual button
+      // force still refreshes after the short protection window.
+      if (
+        validateSignature === lastValidatePlanSignatureRef.current &&
+        now - lastValidateRequestAtRef.current < (force ? 5000 : 15000)
+      ) {
+        return validation;
+      }
+
       validateRequestInFlightRef.current = true;
+      lastValidateRequestAtRef.current = now;
+      lastValidatePlanSignatureRef.current = validateSignature;
       const timeout = createRequestTimeout(22000);
 
       try {
@@ -3121,7 +3148,13 @@ export default function AiTraderPanel({
       if (!apiBaseUrl) return;
       if (diagnosticsRequestInFlightRef.current && !force) return;
 
+      const now = Date.now();
+      if (now - lastDiagnosticsRequestAtRef.current < (force ? 5000 : 10000)) {
+        return;
+      }
+
       diagnosticsRequestInFlightRef.current = true;
+      lastDiagnosticsRequestAtRef.current = now;
       const timeout = createRequestTimeout(12000);
 
       try {
@@ -3296,7 +3329,7 @@ export default function AiTraderPanel({
         return;
       }
 
-      if (!force && now - lastDecisionRequestAtRef.current < 8000) {
+      if (!force && now - lastDecisionRequestAtRef.current < 15000) {
         return;
       }
 
@@ -3801,11 +3834,20 @@ export default function AiTraderPanel({
   );
 
   useEffect(() => {
+    if (!apiBaseUrl) return;
+
+    const signature = `${apiBaseUrl}|${String(symbol ?? "").toUpperCase()}|${String(timeframe ?? "")}`;
+    if (lastInitialRefreshSignatureRef.current === signature) return;
+    lastInitialRefreshSignatureRef.current = signature;
+
+    // Run the expensive startup sync once per API/symbol/timeframe. The
+    // callback dependencies change whenever payload/price/candles update, so
+    // depending on the callbacks here can accidentally create a request storm.
     fetchBackendControlState(true);
     fetchDecision(true);
     fetchSummary(true);
     fetchDiagnostics(true);
-  }, [apiBaseUrl, symbol, timeframe, fetchBackendControlState, fetchDecision, fetchSummary, fetchDiagnostics]);
+  }, [apiBaseUrl, symbol, timeframe]);
 
   useEffect(() => {
     if (!autoPaperMode) return;
@@ -3856,7 +3898,7 @@ export default function AiTraderPanel({
       fetchSummary(false);
       evaluateOpenTrades(false);
       fetchDiagnostics(false);
-    }, 20000);
+    }, 30000);
 
     return () => window.clearInterval(id);
   }, [fetchBackendControlState, fetchDecision, fetchSummary, evaluateOpenTrades, fetchDiagnostics]);
