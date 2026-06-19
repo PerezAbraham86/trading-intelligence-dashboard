@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
+import { cachedJsonFetch } from '@/lib/frontendRequestCache'
 
 type TradingSignal = {
   eventType?: string
@@ -511,13 +512,11 @@ export default function MarketSentimentGauge({
           limit: '500',
         })
 
-        const response = await fetch(`${API_BASE_URL}/api/latest-sentiment?${params.toString()}`, {
-          cache: 'no-store',
-        })
+        const data = await cachedJsonFetch<SentimentData>(
+          `${API_BASE_URL}/api/latest-sentiment?${params.toString()}`,
+          30000
+        )
 
-        if (!response.ok) return
-
-        const data: SentimentData = await response.json()
         setApiSentiment(data)
       } catch (error) {
         console.error('Failed to fetch sentiment:', error)
