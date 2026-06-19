@@ -6790,6 +6790,9 @@ export default function Dashboard() {
         if (cancelled) return
 
         try {
+          // Return value is intentionally unused: fetchSharedCandlePayload
+          // normalizes, merges, and stores the result into SHARED_CANDLE_CACHE
+          // internally, so no further processing is needed here.
           await fetchSharedCandlePayload(
             DASHBOARD_API_BASE_URL,
             item.symbol,
