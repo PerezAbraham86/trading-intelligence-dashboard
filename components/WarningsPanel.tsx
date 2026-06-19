@@ -10,8 +10,9 @@ import {
   TrendingUp,
   Zap,
 } from 'lucide-react'
-import SP500Heatmap from '@/components/SP500Heatmap'
-import TickerNewsFeed from '@/components/TickerNewsFeed'
+import SP500Heatmap from '@/components/market-data/SP500Heatmap'
+import TickerNewsFeed from '@/components/market-data/TickerNewsFeed'
+import { cachedJsonFetch } from '@/lib/frontendRequestCache'
 
 type TradingSignal = {
   symbol?: string
@@ -462,13 +463,10 @@ export default function WarningsPanel({ signal }: WarningsPanelProps) {
           limit: '500',
         })
 
-        const response = await fetch(`${API_BASE_URL}/api/latest-sentiment?${params.toString()}`, {
-          cache: 'no-store',
-        })
-
-        if (!response.ok) return
-
-        const json = await response.json()
+        const json = await cachedJsonFetch<TechnicalSentiment | null>(
+          `${API_BASE_URL}/api/latest-sentiment?${params.toString()}`,
+          30000
+        )
 
         if (!cancelled) {
           setTechnicalSentiment(json && typeof json === 'object' ? json : null)
