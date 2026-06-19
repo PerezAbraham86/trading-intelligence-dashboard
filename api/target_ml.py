@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+from threading import RLock, get_ident
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -30,13 +31,23 @@ from typing import Any, Dict, List, Optional, Tuple
 
 TARGET_ML_MEMORY: List[Dict[str, Any]] = []
 TARGET_ML_STATE: Dict[str, Any] = {}
+TARGET_ML_MEMORY_LOCK = RLock()
 TARGET_ML_MAX_RECORDS = int(os.getenv("TARGET_ML_MAX_RECORDS", "5000"))
-TARGET_ML_STORE_FILE = Path(
-    os.getenv(
-        "TARGET_ML_STORE_FILE",
-        str(Path(__file__).with_name("target_ml_memory.json")),
-    )
-)
+
+
+def resolve_target_ml_store_file() -> Path:
+    explicit_path = os.getenv("TARGET_ML_STORE_FILE")
+    if explicit_path:
+        return Path(explicit_path)
+
+    render_disk_path = os.getenv("RENDER_DISK_PATH")
+    if render_disk_path:
+        return Path(render_disk_path) / "target_ml_memory.json"
+
+    return Path(__file__).with_name("target_ml_memory.json")
+
+
+TARGET_ML_STORE_FILE = resolve_target_ml_store_file()
 TARGET_ML_MIN_EVALUATED_FOR_ADJUSTMENT = int(os.getenv("TARGET_ML_MIN_EVALUATED_FOR_ADJUSTMENT", "12"))
 
 
@@ -178,52 +189,89 @@ def target_record_key(symbol: str, timeframe: str, projection_time: str, directi
 
 def load_target_ml_memory() -> Dict[str, Any]:
     global TARGET_ML_MEMORY, TARGET_ML_STATE
-    try:
-        if not TARGET_ML_STORE_FILE.exists():
+
+    with TARGET_ML_MEMORY_LOCK:
+        try:
+            if not TARGET_ML_STORE_FILE.exists():
+                TARGET_ML_MEMORY = []
+                TARGET_ML_STATE = {}
+                print(f"[Target ML] memory load: empty path={TARGET_ML_STORE_FILE}")
+                return {"status": "empty", "loaded": 0, "path": str(TARGET_ML_STORE_FILE)}
+
+            with TARGET_ML_STORE_FILE.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+
+            records = payload.get("records") if isinstance(payload, dict) else payload
+            if not isinstance(records, list):
+                records = []
+
+            cleaned = [record for record in records if isinstance(record, dict)]
+            TARGET_ML_MEMORY = cleaned[-TARGET_ML_MAX_RECORDS:]
+            TARGET_ML_STATE = (
+                payload.get("state", {})
+                if isinstance(payload, dict) and isinstance(payload.get("state"), dict)
+                else {}
+            )
+
+            print(f"[Target ML] memory load: loaded={len(TARGET_ML_MEMORY)} path={TARGET_ML_STORE_FILE}")
+            return {"status": "loaded", "loaded": len(TARGET_ML_MEMORY), "path": str(TARGET_ML_STORE_FILE)}
+        except Exception as error:
+            print(f"[Target ML] memory load failed: path={TARGET_ML_STORE_FILE} error={error}")
             TARGET_ML_MEMORY = []
             TARGET_ML_STATE = {}
-            return {"status": "empty", "loaded": 0, "path": str(TARGET_ML_STORE_FILE)}
-        with TARGET_ML_STORE_FILE.open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-        records = payload.get("records") if isinstance(payload, dict) else payload
-        if not isinstance(records, list):
-            records = []
-        cleaned = [record for record in records if isinstance(record, dict)]
-        TARGET_ML_MEMORY = cleaned[-TARGET_ML_MAX_RECORDS:]
-        TARGET_ML_STATE = payload.get("state", {}) if isinstance(payload, dict) and isinstance(payload.get("state"), dict) else {}
-        return {"status": "loaded", "loaded": len(TARGET_ML_MEMORY), "path": str(TARGET_ML_STORE_FILE)}
-    except Exception as error:
-        print(f"[Target ML] memory load failed: {error}")
-        TARGET_ML_MEMORY = []
-        TARGET_ML_STATE = {}
-        return {"status": "error", "loaded": 0, "path": str(TARGET_ML_STORE_FILE), "error": str(error)}
+            return {"status": "error", "loaded": 0, "path": str(TARGET_ML_STORE_FILE), "error": str(error)}
 
 
 def save_target_ml_memory() -> Dict[str, Any]:
-    try:
-        TARGET_ML_STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "version": "target-ml-v1-smc-alpha-dlm-ob-ghost",
-            "createdAt": now_iso(),
-            "maxRecords": TARGET_ML_MAX_RECORDS,
-            "state": TARGET_ML_STATE,
-            "records": TARGET_ML_MEMORY[-TARGET_ML_MAX_RECORDS:],
-        }
-        temp_path = TARGET_ML_STORE_FILE.with_suffix(TARGET_ML_STORE_FILE.suffix + ".tmp")
-        with temp_path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, separators=(",", ":"), ensure_ascii=False)
-        temp_path.replace(TARGET_ML_STORE_FILE)
-        return {"status": "saved", "saved": len(TARGET_ML_MEMORY), "path": str(TARGET_ML_STORE_FILE)}
-    except Exception as error:
-        print(f"[Target ML] memory save failed: {error}")
-        return {"status": "error", "saved": 0, "path": str(TARGET_ML_STORE_FILE), "error": str(error)}
+    temp_path: Optional[Path] = None
+
+    with TARGET_ML_MEMORY_LOCK:
+        try:
+            TARGET_ML_STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+            records_snapshot = TARGET_ML_MEMORY[-TARGET_ML_MAX_RECORDS:]
+            state_snapshot = dict(TARGET_ML_STATE) if isinstance(TARGET_ML_STATE, dict) else {}
+
+            payload = {
+                "version": "target-ml-v1-smc-alpha-dlm-ob-ghost",
+                "createdAt": now_iso(),
+                "maxRecords": TARGET_ML_MAX_RECORDS,
+                "state": state_snapshot,
+                "records": records_snapshot,
+            }
+
+            temp_path = TARGET_ML_STORE_FILE.with_name(
+                f"{TARGET_ML_STORE_FILE.name}.{os.getpid()}.{get_ident()}.tmp"
+            )
+
+            with temp_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, separators=(",", ":"), ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+
+            os.replace(temp_path, TARGET_ML_STORE_FILE)
+
+            return {"status": "saved", "saved": len(records_snapshot), "path": str(TARGET_ML_STORE_FILE)}
+        except Exception as error:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+            print(
+                f"[Target ML] memory save failed: temp={temp_path} "
+                f"dest={TARGET_ML_STORE_FILE} error={error}"
+            )
+            return {"status": "error", "saved": 0, "path": str(TARGET_ML_STORE_FILE), "error": str(error)}
 
 
 def trim_target_ml_memory() -> None:
     global TARGET_ML_MEMORY
-    if len(TARGET_ML_MEMORY) > TARGET_ML_MAX_RECORDS:
-        TARGET_ML_MEMORY = TARGET_ML_MEMORY[-TARGET_ML_MAX_RECORDS:]
 
+    with TARGET_ML_MEMORY_LOCK:
+        if len(TARGET_ML_MEMORY) > TARGET_ML_MAX_RECORDS:
+            TARGET_ML_MEMORY = TARGET_ML_MEMORY[-TARGET_ML_MAX_RECORDS:]
 
 load_target_ml_memory()
 
