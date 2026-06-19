@@ -10,8 +10,8 @@ import {
   TrendingUp,
   Zap,
 } from 'lucide-react'
-import SP500Heatmap from '@/components/market-data/SP500Heatmap'
-import TickerNewsFeed from '@/components/market-data/TickerNewsFeed'
+import SP500Heatmap from '@/components/SP500Heatmap'
+import TickerNewsFeed from '@/components/TickerNewsFeed'
 import { cachedJsonFetch } from '@/lib/frontendRequestCache'
 
 type TradingSignal = {
