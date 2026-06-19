@@ -171,17 +171,6 @@ function formatChartTime12h(value: unknown) {
   if (!seconds) return "";
 
   const date = new Date(seconds * 1000);
-  const now = new Date();
-  const sameDay = date.toDateString() === now.toDateString();
-
-  if (sameDay) {
-    return date.toLocaleTimeString([], {
-      hour: "numeric",
-      minute: "2-digit",
-      hour12: true,
-    });
-  }
-
   return date.toLocaleString([], {
     month: "short",
     day: "numeric",
