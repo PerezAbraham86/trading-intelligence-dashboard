@@ -3042,7 +3042,7 @@ export default function AiTraderPanel({
   );
 
   const validateBackendPlan = useCallback(
-    async (inputPayload: any = safePayload, force = false) => {
+    async (inputPayload: any = safePayload) => {
       if (!apiBaseUrl) return null;
 
       if (validateRequestInFlightRef.current) {
@@ -3093,7 +3093,6 @@ export default function AiTraderPanel({
         lastValidatePlanSignatureRef.current === planSignature &&
         now - lastValidatePlanRequestAtRef.current < validatePlanThrottleMs
       ) {
-        if (force) return validation;
         return validation;
       }
 
@@ -3175,10 +3174,7 @@ export default function AiTraderPanel({
       if (!apiBaseUrl) return;
       if (diagnosticsRequestInFlightRef.current) return;
       const now = Date.now();
-      if (now - lastDiagnosticsRequestAtRef.current < diagnosticsThrottleMs) {
-        if (force) return;
-        return;
-      }
+      if (now - lastDiagnosticsRequestAtRef.current < diagnosticsThrottleMs) return;
 
       diagnosticsRequestInFlightRef.current = true;
       lastDiagnosticsRequestAtRef.current = now;
@@ -3254,10 +3250,7 @@ export default function AiTraderPanel({
     if (!apiBaseUrl || controlRequestInFlightRef.current) return;
 
     const now = Date.now();
-    if (now - lastControlRequestAtRef.current < controlThrottleMs) {
-      if (force) return;
-      return;
-    }
+    if (now - lastControlRequestAtRef.current < controlThrottleMs) return;
 
     controlRequestInFlightRef.current = true;
     lastControlRequestAtRef.current = now;
@@ -3407,7 +3400,6 @@ export default function AiTraderPanel({
             timeframe,
             candles,
           }),
-          true,
         );
         setPersistentLearningStats((current: any) => {
           const withBackendStats = mergeAiDecisionStats(
@@ -3450,10 +3442,7 @@ export default function AiTraderPanel({
       const now = Date.now();
 
       if (summaryRequestInFlightRef.current) return;
-      if (now - lastSummaryRequestAtRef.current < summaryThrottleMs) {
-        if (force) return;
-        return;
-      }
+      if (now - lastSummaryRequestAtRef.current < summaryThrottleMs) return;
 
       summaryRequestInFlightRef.current = true;
       lastSummaryRequestAtRef.current = now;
@@ -3727,7 +3716,6 @@ export default function AiTraderPanel({
           livePrice: liveActivePrice,
           entryPrice: (executionPayload as any)?.entryPrice ?? liveActivePrice,
         },
-        true,
       );
 
       if (backendValidation && backendValidation.valid === false) {
@@ -4858,7 +4846,6 @@ export default function AiTraderPanel({
                   timeframe,
                   candles,
                 }),
-                true,
               )
             }
             className="rounded-lg border border-purple-400/30 bg-purple-400/10 px-3 py-2 text-xs font-bold text-purple-200 hover:bg-purple-400/20"
