@@ -5,6 +5,7 @@ import math
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import RLock, get_ident
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -30,14 +31,22 @@ from typing import Any, Dict, List, Optional, Tuple
 
 TARGET_ML_MEMORY: List[Dict[str, Any]] = []
 TARGET_ML_STATE: Dict[str, Any] = {}
+TARGET_ML_MEMORY_LOCK = RLock()
 TARGET_ML_MAX_RECORDS = int(os.getenv("TARGET_ML_MAX_RECORDS", "5000"))
-TARGET_ML_STORE_FILE = Path(
-    os.getenv(
-        "TARGET_ML_STORE_FILE",
-        str(Path(__file__).with_name("target_ml_memory.json")),
-    )
-)
 TARGET_ML_MIN_EVALUATED_FOR_ADJUSTMENT = int(os.getenv("TARGET_ML_MIN_EVALUATED_FOR_ADJUSTMENT", "12"))
+
+
+def resolve_target_ml_store_file() -> Path:
+    explicit_path = os.getenv("TARGET_ML_STORE_FILE")
+    if explicit_path:
+        return Path(explicit_path)
+    render_disk_path = os.getenv("RENDER_DISK_PATH")
+    if render_disk_path:
+        return Path(render_disk_path) / "target_ml_memory.json"
+    return Path(__file__).with_name("target_ml_memory.json")
+
+
+TARGET_ML_STORE_FILE = resolve_target_ml_store_file()
 
 
 def now_iso() -> str:
@@ -178,51 +187,66 @@ def target_record_key(symbol: str, timeframe: str, projection_time: str, directi
 
 def load_target_ml_memory() -> Dict[str, Any]:
     global TARGET_ML_MEMORY, TARGET_ML_STATE
-    try:
-        if not TARGET_ML_STORE_FILE.exists():
+    with TARGET_ML_MEMORY_LOCK:
+        try:
+            if not TARGET_ML_STORE_FILE.exists():
+                TARGET_ML_MEMORY = []
+                TARGET_ML_STATE = {}
+                print(f"[Target ML] memory load path={TARGET_ML_STORE_FILE} records=0")
+                return {"status": "empty", "loaded": 0, "path": str(TARGET_ML_STORE_FILE)}
+            with TARGET_ML_STORE_FILE.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            records = payload.get("records") if isinstance(payload, dict) else payload
+            if not isinstance(records, list):
+                records = []
+            cleaned = [record for record in records if isinstance(record, dict)]
+            TARGET_ML_MEMORY = cleaned[-TARGET_ML_MAX_RECORDS:]
+            TARGET_ML_STATE = payload.get("state", {}) if isinstance(payload, dict) and isinstance(payload.get("state"), dict) else {}
+            print(f"[Target ML] memory load path={TARGET_ML_STORE_FILE} records={len(TARGET_ML_MEMORY)}")
+            return {"status": "loaded", "loaded": len(TARGET_ML_MEMORY), "path": str(TARGET_ML_STORE_FILE)}
+        except Exception as error:
+            print(f"[Target ML] memory load failed: path={TARGET_ML_STORE_FILE} error={error}")
             TARGET_ML_MEMORY = []
             TARGET_ML_STATE = {}
-            return {"status": "empty", "loaded": 0, "path": str(TARGET_ML_STORE_FILE)}
-        with TARGET_ML_STORE_FILE.open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-        records = payload.get("records") if isinstance(payload, dict) else payload
-        if not isinstance(records, list):
-            records = []
-        cleaned = [record for record in records if isinstance(record, dict)]
-        TARGET_ML_MEMORY = cleaned[-TARGET_ML_MAX_RECORDS:]
-        TARGET_ML_STATE = payload.get("state", {}) if isinstance(payload, dict) and isinstance(payload.get("state"), dict) else {}
-        return {"status": "loaded", "loaded": len(TARGET_ML_MEMORY), "path": str(TARGET_ML_STORE_FILE)}
-    except Exception as error:
-        print(f"[Target ML] memory load failed: {error}")
-        TARGET_ML_MEMORY = []
-        TARGET_ML_STATE = {}
-        return {"status": "error", "loaded": 0, "path": str(TARGET_ML_STORE_FILE), "error": str(error)}
+            return {"status": "error", "loaded": 0, "path": str(TARGET_ML_STORE_FILE), "error": str(error)}
 
 
 def save_target_ml_memory() -> Dict[str, Any]:
-    try:
-        TARGET_ML_STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "version": "target-ml-v1-smc-alpha-dlm-ob-ghost",
-            "createdAt": now_iso(),
-            "maxRecords": TARGET_ML_MAX_RECORDS,
-            "state": TARGET_ML_STATE,
-            "records": TARGET_ML_MEMORY[-TARGET_ML_MAX_RECORDS:],
-        }
-        temp_path = TARGET_ML_STORE_FILE.with_suffix(TARGET_ML_STORE_FILE.suffix + ".tmp")
-        with temp_path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, separators=(",", ":"), ensure_ascii=False)
-        temp_path.replace(TARGET_ML_STORE_FILE)
-        return {"status": "saved", "saved": len(TARGET_ML_MEMORY), "path": str(TARGET_ML_STORE_FILE)}
-    except Exception as error:
-        print(f"[Target ML] memory save failed: {error}")
-        return {"status": "error", "saved": 0, "path": str(TARGET_ML_STORE_FILE), "error": str(error)}
+    temp_path: Optional[Path] = None
+    with TARGET_ML_MEMORY_LOCK:
+        try:
+            TARGET_ML_STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "version": "target-ml-v1-smc-alpha-dlm-ob-ghost",
+                "createdAt": now_iso(),
+                "maxRecords": TARGET_ML_MAX_RECORDS,
+                "state": TARGET_ML_STATE,
+                "records": TARGET_ML_MEMORY[-TARGET_ML_MAX_RECORDS:],
+            }
+            temp_path = TARGET_ML_STORE_FILE.with_name(f"{TARGET_ML_STORE_FILE.name}.{get_ident()}.tmp")
+            with temp_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, separators=(",", ":"), ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, TARGET_ML_STORE_FILE)
+            return {"status": "saved", "saved": len(TARGET_ML_MEMORY), "path": str(TARGET_ML_STORE_FILE)}
+        except Exception as error:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink()
+                except FileNotFoundError:
+                    pass
+                except Exception:
+                    pass
+            print(f"[Target ML] memory save failed: source={temp_path} destination={TARGET_ML_STORE_FILE} error={error}")
+            return {"status": "error", "saved": 0, "path": str(TARGET_ML_STORE_FILE), "error": str(error)}
 
 
 def trim_target_ml_memory() -> None:
     global TARGET_ML_MEMORY
-    if len(TARGET_ML_MEMORY) > TARGET_ML_MAX_RECORDS:
-        TARGET_ML_MEMORY = TARGET_ML_MEMORY[-TARGET_ML_MAX_RECORDS:]
+    with TARGET_ML_MEMORY_LOCK:
+        if len(TARGET_ML_MEMORY) > TARGET_ML_MAX_RECORDS:
+            TARGET_ML_MEMORY = TARGET_ML_MEMORY[-TARGET_ML_MAX_RECORDS:]
 
 
 load_target_ml_memory()
@@ -456,68 +480,69 @@ def smooth_target_ml_plan(symbol: str, timeframe: str, plan: Dict[str, Any]) -> 
     if not isinstance(plan, dict):
         return plan
 
-    target_price = to_float(plan.get("targetPrice") or plan.get("target"), 0.0)
-    confidence = clamp(to_float(plan.get("targetConfidence"), 0.0), 0.0, 100.0)
-    source = str(plan.get("targetSource") or plan.get("source") or "unknown")
-    key = target_ml_state_key(symbol, timeframe)
-    state = TARGET_ML_STATE.get(key, {}) if isinstance(TARGET_ML_STATE.get(key), dict) else {}
+    with TARGET_ML_MEMORY_LOCK:
+        target_price = to_float(plan.get("targetPrice") or plan.get("target"), 0.0)
+        confidence = clamp(to_float(plan.get("targetConfidence"), 0.0), 0.0, 100.0)
+        source = str(plan.get("targetSource") or plan.get("source") or "unknown")
+        key = target_ml_state_key(symbol, timeframe)
+        state = TARGET_ML_STATE.get(key, {}) if isinstance(TARGET_ML_STATE.get(key), dict) else {}
 
-    if target_price <= 0:
-        if state:
-            return {
-                **plan,
-                "targetConfidence": to_float(state.get("smoothedConfidence"), confidence),
-                "liveTargetConfidence": confidence,
-                "smoothedTargetConfidence": to_float(state.get("smoothedConfidence"), confidence),
-                "learnedReliability": to_float(state.get("learnedReliability"), 50.0),
-                "targetSourceLockActive": True,
-                "targetSourceLocked": state.get("source"),
-                "targetMlReason": plan.get("targetMlReason") or "using_previous_target_confidence_lock",
-            }
-        return plan
+        if target_price <= 0:
+            if state:
+                return {
+                    **plan,
+                    "targetConfidence": to_float(state.get("smoothedConfidence"), confidence),
+                    "liveTargetConfidence": confidence,
+                    "smoothedTargetConfidence": to_float(state.get("smoothedConfidence"), confidence),
+                    "learnedReliability": to_float(state.get("learnedReliability"), 50.0),
+                    "targetSourceLockActive": True,
+                    "targetSourceLocked": state.get("source"),
+                    "targetMlReason": plan.get("targetMlReason") or "using_previous_target_confidence_lock",
+                }
+            return plan
 
-    previous_smoothed = to_float(state.get("smoothedConfidence"), confidence)
-    previous_source = str(state.get("source") or source)
-    previous_samples = int(state.get("observations") or 0)
+        previous_smoothed = to_float(state.get("smoothedConfidence"), confidence)
+        previous_source = str(state.get("source") or source)
+        previous_samples = int(state.get("observations") or 0)
 
-    # Faster rise, slower drop.
-    alpha = 0.60 if confidence >= previous_smoothed else 0.18
-    smoothed = clamp(previous_smoothed * (1.0 - alpha) + confidence * alpha, 0.0, 100.0)
+        # Faster rise, slower drop.
+        alpha = 0.60 if confidence >= previous_smoothed else 0.18
+        smoothed = clamp(previous_smoothed * (1.0 - alpha) + confidence * alpha, 0.0, 100.0)
 
-    # If source changes and new confidence is much weaker, keep previous confidence as a display lock.
-    lock_active = False
-    if previous_source != source and confidence < previous_smoothed - 10:
-        smoothed = previous_smoothed
-        lock_active = True
+        # If source changes and new confidence is much weaker, keep previous confidence as a display lock.
+        lock_active = False
+        if previous_source != source and confidence < previous_smoothed - 10:
+            smoothed = previous_smoothed
+            lock_active = True
 
-    learned_reliability = clamp(smoothed * 0.55 + to_float(plan.get("targetMlHitRate"), 0.0) * 0.45, 0.0, 100.0)
+        learned_reliability = clamp(smoothed * 0.55 + to_float(plan.get("targetMlHitRate"), 0.0) * 0.45, 0.0, 100.0)
 
-    TARGET_ML_STATE[key] = {
-        "symbol": normalize_symbol(symbol),
-        "timeframe": normalize_timeframe(timeframe),
-        "source": previous_source if lock_active else source,
-        "liveSource": source,
-        "targetPrice": target_price,
-        "liveConfidence": confidence,
-        "smoothedConfidence": round(smoothed, 4),
-        "learnedReliability": round(learned_reliability, 4),
-        "observations": previous_samples + 1,
-        "targetSourceLockActive": lock_active,
-        "updatedAt": now_iso(),
-    }
-    save_target_ml_memory()
+        TARGET_ML_STATE[key] = {
+            "symbol": normalize_symbol(symbol),
+            "timeframe": normalize_timeframe(timeframe),
+            "source": previous_source if lock_active else source,
+            "liveSource": source,
+            "targetPrice": target_price,
+            "liveConfidence": confidence,
+            "smoothedConfidence": round(smoothed, 4),
+            "learnedReliability": round(learned_reliability, 4),
+            "observations": previous_samples + 1,
+            "targetSourceLockActive": lock_active,
+            "updatedAt": now_iso(),
+        }
+        save_target_ml_memory()
 
-    return {
-        **plan,
-        "targetConfidence": round(smoothed, 2),
-        "liveTargetConfidence": round(confidence, 2),
-        "smoothedTargetConfidence": round(smoothed, 2),
-        "learnedReliability": round(learned_reliability, 2),
-        "targetSourceLockActive": lock_active,
-        "targetSourceLocked": TARGET_ML_STATE[key]["source"],
-        "targetMlStateSamples": previous_samples + 1,
-        "targetMlReason": plan.get("targetMlReason") or ("target_source_lock" if lock_active else "target_confidence_smoothed"),
-    }
+        return {
+            **plan,
+            "targetConfidence": round(smoothed, 2),
+            "liveTargetConfidence": round(confidence, 2),
+            "smoothedTargetConfidence": round(smoothed, 2),
+            "learnedReliability": round(learned_reliability, 2),
+            "targetSourceLockActive": lock_active,
+            "targetSourceLocked": TARGET_ML_STATE[key]["source"],
+            "targetMlStateSamples": previous_samples + 1,
+            "targetMlReason": plan.get("targetMlReason") or ("target_source_lock" if lock_active else "target_confidence_smoothed"),
+        }
 
 
 def build_target_ml_plan(symbol: str, timeframe: str, candles: List[Dict[str, Any]], overlays: Dict[str, Any], ghosts: Optional[List[Dict[str, Any]]] = None, signal: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -596,22 +621,23 @@ def record_target_ml_projection(symbol: str, timeframe: str, candles: List[Dict[
     if not projection_time:
         return None
     key = target_record_key(normalized_symbol, normalized_timeframe, projection_time, direction, source)
-    for record in TARGET_ML_MEMORY:
-        if record.get("key") == key:
-            return record
-    atr = average_true_range(candles, 14)
-    horizon = int(target_plan.get("horizon") or max(3, min(12, round(abs(target_price - entry_price) / max(atr, 0.000001)))))
-    horizon = max(3, min(20, horizon))
-    record = {
-        "key": key, "symbol": normalized_symbol, "timeframe": normalized_timeframe, "projectionTime": projection_time, "createdAt": now_iso(), "status": "pending",
-        "entryPrice": round_price(normalized_symbol, entry_price), "targetPrice": round_price(normalized_symbol, target_price), "stopPrice": round_price(normalized_symbol, to_float(target_plan.get("stopPrice") or target_plan.get("stop"), 0)),
-        "direction": direction, "source": source, "horizon": horizon, "riskReward": to_float(target_plan.get("riskReward"), 0), "targetConfidence": to_float(target_plan.get("targetConfidence"), 0), "candidateCount": len(list_value(target_plan.get("candidates"))),
-        "features": target_feature_snapshot(overlays or {}, ghosts or [], target_plan), "evaluation": None,
-    }
-    TARGET_ML_MEMORY.append(record)
-    trim_target_ml_memory()
-    save_target_ml_memory()
-    return record
+    with TARGET_ML_MEMORY_LOCK:
+        for record in TARGET_ML_MEMORY:
+            if record.get("key") == key:
+                return record
+        atr = average_true_range(candles, 14)
+        horizon = int(target_plan.get("horizon") or max(3, min(12, round(abs(target_price - entry_price) / max(atr, 0.000001)))))
+        horizon = max(3, min(20, horizon))
+        record = {
+            "key": key, "symbol": normalized_symbol, "timeframe": normalized_timeframe, "projectionTime": projection_time, "createdAt": now_iso(), "status": "pending",
+            "entryPrice": round_price(normalized_symbol, entry_price), "targetPrice": round_price(normalized_symbol, target_price), "stopPrice": round_price(normalized_symbol, to_float(target_plan.get("stopPrice") or target_plan.get("stop"), 0)),
+            "direction": direction, "source": source, "horizon": horizon, "riskReward": to_float(target_plan.get("riskReward"), 0), "targetConfidence": to_float(target_plan.get("targetConfidence"), 0), "candidateCount": len(list_value(target_plan.get("candidates"))),
+            "features": target_feature_snapshot(overlays or {}, ghosts or [], target_plan), "evaluation": None,
+        }
+        TARGET_ML_MEMORY.append(record)
+        trim_target_ml_memory()
+        save_target_ml_memory()
+        return record
 
 
 def evaluate_target_ml_records(symbol: str, timeframe: str, candles: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -620,72 +646,73 @@ def evaluate_target_ml_records(symbol: str, timeframe: str, candles: List[Dict[s
     if not candles:
         return {"evaluatedNow": 0, "pending": 0, "saved": False}
     time_to_index = {candle_time(candle): index for index, candle in enumerate(candles) if candle_time(candle)}
-    evaluated_now = 0
-    for record in TARGET_ML_MEMORY:
-        if record.get("symbol") != normalized_symbol or record.get("timeframe") != normalized_timeframe or record.get("status") == "evaluated":
-            continue
-        start_index = time_to_index.get(str(record.get("projectionTime") or ""))
-        horizon = max(1, int(record.get("horizon") or 5))
-        if start_index is None:
-            continue
-        future = candles[start_index + 1:start_index + 1 + horizon]
-        if len(future) < horizon:
-            continue
-        entry = to_float(record.get("entryPrice"), 0)
-        target = to_float(record.get("targetPrice"), 0)
-        stop = to_float(record.get("stopPrice"), 0)
-        direction = str(record.get("direction") or "neutral").lower()
-        if not price_is_valid(entry) or not price_is_valid(target) or direction not in {"bullish", "bearish"}:
-            continue
-        actual_max_high = max(to_float(item.get("high"), entry) for item in future)
-        actual_min_low = min(to_float(item.get("low"), entry) for item in future)
-        actual_final_close = to_float(future[-1].get("close"), entry)
-        target_hit = actual_max_high >= target if direction == "bullish" else actual_min_low <= target
-        stop_hit = False
-        if price_is_valid(stop):
-            stop_hit = actual_min_low <= stop if direction == "bullish" else actual_max_high >= stop
-        bars_to_target: Optional[int] = None
-        bars_to_stop: Optional[int] = None
-        for offset, candle in enumerate(future, start=1):
-            high = to_float(candle.get("high"), entry)
-            low = to_float(candle.get("low"), entry)
-            if bars_to_target is None:
-                if direction == "bullish" and high >= target:
-                    bars_to_target = offset
-                if direction == "bearish" and low <= target:
-                    bars_to_target = offset
-            if bars_to_stop is None and price_is_valid(stop):
-                if direction == "bullish" and low <= stop:
-                    bars_to_stop = offset
-                if direction == "bearish" and high >= stop:
-                    bars_to_stop = offset
-        if bars_to_target is not None and bars_to_stop is not None:
-            first_hit = "target" if bars_to_target <= bars_to_stop else "stop"
-        elif bars_to_target is not None:
-            first_hit = "target"
-        elif bars_to_stop is not None:
-            first_hit = "stop"
-        else:
-            first_hit = "none"
-        favorable_move = actual_max_high - entry if direction == "bullish" else entry - actual_min_low
-        adverse_move = entry - actual_min_low if direction == "bullish" else actual_max_high - entry
-        target_distance = abs(target - entry)
-        adverse_ratio = adverse_move / max(target_distance, 0.000001)
-        favorable_ratio = favorable_move / max(target_distance, 0.000001)
-        close_direction_ok = actual_final_close > entry if direction == "bullish" else actual_final_close < entry
-        quality_score = round(clamp((100 if target_hit else 0) * 0.45 + (100 if first_hit == "target" else 0) * 0.25 + (100 if close_direction_ok else 0) * 0.12 + clamp(favorable_ratio * 100, 0, 100) * 0.10 + max(0, 100 - adverse_ratio * 100) * 0.08, 0, 100), 2)
-        record["status"] = "evaluated"
-        record["evaluatedAt"] = now_iso()
-        record["evaluation"] = {
-            "targetHit": bool(target_hit), "stopHit": bool(stop_hit), "firstHit": first_hit, "barsToTarget": bars_to_target, "barsToStop": bars_to_stop,
-            "actualFinalClose": round(actual_final_close, 5), "actualMaxHigh": round(actual_max_high, 5), "actualMinLow": round(actual_min_low, 5),
-            "favorableMove": round(favorable_move, 5), "adverseMove": round(adverse_move, 5), "favorableRatio": round(favorable_ratio, 5), "adverseRatio": round(adverse_ratio, 5), "closeDirectionOk": bool(close_direction_ok), "qualityScore": quality_score,
-        }
-        evaluated_now += 1
-    pending = len([record for record in TARGET_ML_MEMORY if record.get("symbol") == normalized_symbol and record.get("timeframe") == normalized_timeframe and record.get("status") != "evaluated"])
-    if evaluated_now > 0:
-        save_target_ml_memory()
-    return {"evaluatedNow": evaluated_now, "pending": pending, "saved": evaluated_now > 0}
+    with TARGET_ML_MEMORY_LOCK:
+        evaluated_now = 0
+        for record in TARGET_ML_MEMORY:
+            if record.get("symbol") != normalized_symbol or record.get("timeframe") != normalized_timeframe or record.get("status") == "evaluated":
+                continue
+            start_index = time_to_index.get(str(record.get("projectionTime") or ""))
+            horizon = max(1, int(record.get("horizon") or 5))
+            if start_index is None:
+                continue
+            future = candles[start_index + 1:start_index + 1 + horizon]
+            if len(future) < horizon:
+                continue
+            entry = to_float(record.get("entryPrice"), 0)
+            target = to_float(record.get("targetPrice"), 0)
+            stop = to_float(record.get("stopPrice"), 0)
+            direction = str(record.get("direction") or "neutral").lower()
+            if not price_is_valid(entry) or not price_is_valid(target) or direction not in {"bullish", "bearish"}:
+                continue
+            actual_max_high = max(to_float(item.get("high"), entry) for item in future)
+            actual_min_low = min(to_float(item.get("low"), entry) for item in future)
+            actual_final_close = to_float(future[-1].get("close"), entry)
+            target_hit = actual_max_high >= target if direction == "bullish" else actual_min_low <= target
+            stop_hit = False
+            if price_is_valid(stop):
+                stop_hit = actual_min_low <= stop if direction == "bullish" else actual_max_high >= stop
+            bars_to_target: Optional[int] = None
+            bars_to_stop: Optional[int] = None
+            for offset, candle in enumerate(future, start=1):
+                high = to_float(candle.get("high"), entry)
+                low = to_float(candle.get("low"), entry)
+                if bars_to_target is None:
+                    if direction == "bullish" and high >= target:
+                        bars_to_target = offset
+                    if direction == "bearish" and low <= target:
+                        bars_to_target = offset
+                if bars_to_stop is None and price_is_valid(stop):
+                    if direction == "bullish" and low <= stop:
+                        bars_to_stop = offset
+                    if direction == "bearish" and high >= stop:
+                        bars_to_stop = offset
+            if bars_to_target is not None and bars_to_stop is not None:
+                first_hit = "target" if bars_to_target <= bars_to_stop else "stop"
+            elif bars_to_target is not None:
+                first_hit = "target"
+            elif bars_to_stop is not None:
+                first_hit = "stop"
+            else:
+                first_hit = "none"
+            favorable_move = actual_max_high - entry if direction == "bullish" else entry - actual_min_low
+            adverse_move = entry - actual_min_low if direction == "bullish" else actual_max_high - entry
+            target_distance = abs(target - entry)
+            adverse_ratio = adverse_move / max(target_distance, 0.000001)
+            favorable_ratio = favorable_move / max(target_distance, 0.000001)
+            close_direction_ok = actual_final_close > entry if direction == "bullish" else actual_final_close < entry
+            quality_score = round(clamp((100 if target_hit else 0) * 0.45 + (100 if first_hit == "target" else 0) * 0.25 + (100 if close_direction_ok else 0) * 0.12 + clamp(favorable_ratio * 100, 0, 100) * 0.10 + max(0, 100 - adverse_ratio * 100) * 0.08, 0, 100), 2)
+            record["status"] = "evaluated"
+            record["evaluatedAt"] = now_iso()
+            record["evaluation"] = {
+                "targetHit": bool(target_hit), "stopHit": bool(stop_hit), "firstHit": first_hit, "barsToTarget": bars_to_target, "barsToStop": bars_to_stop,
+                "actualFinalClose": round(actual_final_close, 5), "actualMaxHigh": round(actual_max_high, 5), "actualMinLow": round(actual_min_low, 5),
+                "favorableMove": round(favorable_move, 5), "adverseMove": round(adverse_move, 5), "favorableRatio": round(favorable_ratio, 5), "adverseRatio": round(adverse_ratio, 5), "closeDirectionOk": bool(close_direction_ok), "qualityScore": quality_score,
+            }
+            evaluated_now += 1
+        pending = len([record for record in TARGET_ML_MEMORY if record.get("symbol") == normalized_symbol and record.get("timeframe") == normalized_timeframe and record.get("status") != "evaluated"])
+        if evaluated_now > 0:
+            save_target_ml_memory()
+        return {"evaluatedNow": evaluated_now, "pending": pending, "saved": evaluated_now > 0}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -696,7 +723,8 @@ def evaluate_target_ml_records(symbol: str, timeframe: str, candles: List[Dict[s
 def matching_records(symbol: str, timeframe: str) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    return [record for record in TARGET_ML_MEMORY if record.get("symbol") == normalized_symbol and record.get("timeframe") == normalized_timeframe]
+    with TARGET_ML_MEMORY_LOCK:
+        return [record for record in TARGET_ML_MEMORY if record.get("symbol") == normalized_symbol and record.get("timeframe") == normalized_timeframe]
 
 
 def evaluated_records(symbol: str, timeframe: str) -> List[Dict[str, Any]]:
@@ -776,33 +804,37 @@ def target_ml_summary_from_candles(symbol: str, timeframe: str, candles: List[Di
     evaluated = [record for record in records if record.get("status") == "evaluated" and isinstance(record.get("evaluation"), dict)]
     pending = [record for record in records if record.get("status") != "evaluated"]
     overall = summarize_target_records(records)
+    with TARGET_ML_MEMORY_LOCK:
+        state = TARGET_ML_STATE.get(target_ml_state_key(normalized_symbol, normalized_timeframe), {})
     return {
         "eventType": "TARGET_ML_STATUS", "status": "Learning" if records else "Waiting", "symbol": normalized_symbol, "timeframe": normalized_timeframe,
         "memorySize": len(records), "evaluatedSamples": len(evaluated), "pendingSamples": len(pending), "evaluatedNow": eval_result.get("evaluatedNow", 0),
         "hitRate": overall["hitRate"], "firstTargetRate": overall["firstTargetRate"], "avgQualityScore": overall["avgQualityScore"], "avgFavorableRatio": overall["avgFavorableRatio"], "avgAdverseRatio": overall["avgAdverseRatio"], "avgBarsToTarget": overall["avgBarsToTarget"],
-        "readyForLiveTargetAdjustment": overall["samples"] >= TARGET_ML_MIN_EVALUATED_FOR_ADJUSTMENT, "sourceWeights": get_target_ml_source_weights(normalized_symbol, normalized_timeframe), "state": TARGET_ML_STATE.get(target_ml_state_key(normalized_symbol, normalized_timeframe), {}), "storeFile": str(TARGET_ML_STORE_FILE), "recent": records[-20:],
+        "readyForLiveTargetAdjustment": overall["samples"] >= TARGET_ML_MIN_EVALUATED_FOR_ADJUSTMENT, "sourceWeights": get_target_ml_source_weights(normalized_symbol, normalized_timeframe), "state": state, "storeFile": str(TARGET_ML_STORE_FILE), "recent": records[-20:],
         "mlHierarchy": "SMC_ALPHA_DLM_ORDERBLOCKS_TARGET_GHOST_ONLY", "nrtrUsedForMl": 0, "smmaUsedForMl": 0, "createdAt": now_iso(),
     }
 
 
 def target_ml_export() -> Dict[str, Any]:
-    return {"eventType": "TARGET_ML_EXPORT", "version": "target-ml-v1-smc-alpha-dlm-ob-ghost", "createdAt": now_iso(), "memorySize": len(TARGET_ML_MEMORY), "state": TARGET_ML_STATE, "records": TARGET_ML_MEMORY, "mlHierarchy": "SMC_ALPHA_DLM_ORDERBLOCKS_TARGET_GHOST_ONLY", "nrtrUsedForMl": 0, "smmaUsedForMl": 0}
+    with TARGET_ML_MEMORY_LOCK:
+        return {"eventType": "TARGET_ML_EXPORT", "version": "target-ml-v1-smc-alpha-dlm-ob-ghost", "createdAt": now_iso(), "memorySize": len(TARGET_ML_MEMORY), "state": TARGET_ML_STATE, "records": TARGET_ML_MEMORY, "mlHierarchy": "SMC_ALPHA_DLM_ORDERBLOCKS_TARGET_GHOST_ONLY", "nrtrUsedForMl": 0, "smmaUsedForMl": 0}
 
 
 def reset_target_ml_memory(symbol: Optional[str] = None, timeframe: Optional[str] = None) -> Dict[str, Any]:
     global TARGET_ML_MEMORY, TARGET_ML_STATE
-    if symbol is None and timeframe is None:
-        removed = len(TARGET_ML_MEMORY)
-        TARGET_ML_MEMORY = []
-        TARGET_ML_STATE = {}
+    with TARGET_ML_MEMORY_LOCK:
+        if symbol is None and timeframe is None:
+            removed = len(TARGET_ML_MEMORY)
+            TARGET_ML_MEMORY = []
+            TARGET_ML_STATE = {}
+            save_target_ml_memory()
+            return {"status": "reset", "scope": "all", "removed": removed, "remaining": 0}
+        normalized_symbol = normalize_symbol(symbol or "")
+        normalized_timeframe = normalize_timeframe(timeframe or "")
+        before = len(TARGET_ML_MEMORY)
+        TARGET_ML_MEMORY = [record for record in TARGET_ML_MEMORY if not ((not symbol or record.get("symbol") == normalized_symbol) and (not timeframe or record.get("timeframe") == normalized_timeframe))]
+        removed = before - len(TARGET_ML_MEMORY)
+        state_key = target_ml_state_key(normalized_symbol, normalized_timeframe)
+        TARGET_ML_STATE.pop(state_key, None)
         save_target_ml_memory()
-        return {"status": "reset", "scope": "all", "removed": removed, "remaining": 0}
-    normalized_symbol = normalize_symbol(symbol or "")
-    normalized_timeframe = normalize_timeframe(timeframe or "")
-    before = len(TARGET_ML_MEMORY)
-    TARGET_ML_MEMORY = [record for record in TARGET_ML_MEMORY if not ((not symbol or record.get("symbol") == normalized_symbol) and (not timeframe or record.get("timeframe") == normalized_timeframe))]
-    removed = before - len(TARGET_ML_MEMORY)
-    state_key = target_ml_state_key(normalized_symbol, normalized_timeframe)
-    TARGET_ML_STATE.pop(state_key, None)
-    save_target_ml_memory()
-    return {"status": "reset", "scope": "filtered", "symbol": normalized_symbol if symbol else None, "timeframe": normalized_timeframe if timeframe else None, "removed": removed, "remaining": len(TARGET_ML_MEMORY)}
+        return {"status": "reset", "scope": "filtered", "symbol": normalized_symbol if symbol else None, "timeframe": normalized_timeframe if timeframe else None, "removed": removed, "remaining": len(TARGET_ML_MEMORY)}
