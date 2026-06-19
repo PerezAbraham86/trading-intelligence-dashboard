@@ -5299,7 +5299,7 @@ function LightweightChartPanel({
     normalizedSymbol,
     normalizedTimeframe,
     candleFetchLimit,
-    compact ? 10000 : 5000,
+    60000,
     enabled,
     priority,
     onLivePriceUpdate
