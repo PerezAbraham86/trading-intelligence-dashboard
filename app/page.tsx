@@ -1,5 +1,6 @@
 'use client'
 
+import { marketDataMessage, providerStatus, reconnectDelay, readableApiResponse } from '@/lib/marketDataConnection'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import SignalCard from '@/components/SignalCard'
 import LightweightCandlestickChart, { ChartMode, DashboardCandle, NrtrOverlayMode } from '@/components/LightweightCandlestickChart'
@@ -1412,18 +1413,19 @@ async function fetchBackendHistoricalRefreshPayload(
   })
 
   const response = await fetch(`${apiBaseUrl}/api/candles?${params.toString()}`, {
+    signal: AbortSignal.timeout(20000),
     cache: 'no-store',
   })
 
   if (!response.ok) {
-    throw new Error(`/api/candles returned ${response.status}`)
+    await readableApiResponse(response)
   }
 
-  const payload = await response.json()
+  const payload = await readableApiResponse(response)
   const candles = normalizeCandlePayload(payload)
 
-  if (candles.length === 0) {
-    throw new Error(`/api/candles returned 0 candles for ${normalizedSymbol} ${normalizedTimeframe}`)
+  if (candles.length === 0 && payload?.status !== 'IBKR Not Connected') {
+    throw new Error(marketDataMessage(payload, 'No historical candles available for this contract and timeframe.'))
   }
 
   return {
@@ -1765,15 +1767,6 @@ async function fetchSharedCandlePayload(
       )
       candles = normalizeCandlePayload(json)
     } catch (error) {
-      if (previous?.candles?.length) {
-        return {
-          ...previous,
-          candles: noFrontendLimit ? previous.candles : previous.candles.slice(-requestedLimit),
-          updatedAt: Date.now(),
-          source: `${previous.source ?? 'frontend_cached_history'}_after_clean_candle_error`,
-        }
-      }
-
       throw error
     }
 
@@ -1782,7 +1775,6 @@ async function fetchSharedCandlePayload(
         return {
           ...previous,
           candles: noFrontendLimit ? previous.candles : previous.candles.slice(-requestedLimit),
-          updatedAt: Date.now(),
           source: `${previous.source ?? 'frontend_cached_history'}_after_zero_clean_candles`,
         }
       }
@@ -4195,6 +4187,9 @@ function useChartCandles(
     let fetchCandlesInFlight = false
     let lastFetchInFlightLoggedAt = 0
     let lastHistoryEmptyLoggedAt = 0
+    let reconnectAt = 0
+    let reconnectAttempts = 0
+    let disconnectedCacheRead = false
 
     setDebugLog([])
     addCandleDebugLog('mount', { enabled, limit, pollMs })
@@ -4382,6 +4377,7 @@ function useChartCandles(
     }
 
     async function fetchCandles(force = false, reason = 'poll') {
+      if (cancelled || Date.now() < reconnectAt) return
       if (!enabled) {
         applyCachedPayload()
         setIsLoading(false)
@@ -4404,6 +4400,29 @@ function useChartCandles(
       let retryForcedHistoryAfterError = false
 
       try {
+        const provider = await providerStatus(activeApiBaseUrl, symbol)
+        if (cancelled) return
+        if (!provider.ready) {
+          reconnectAt = Date.now() + reconnectDelay(reconnectAttempts++, provider.retryAfterSeconds)
+          liveEventSource?.close()
+          liveEventSource = null
+          liveSourceConnected = false
+          const message = marketDataMessage(provider)
+          // One cache-only backend read per disconnected period preserves saved history.
+          if (!disconnectedCacheRead) {
+            disconnectedCacheRead = true
+            try {
+              const cached = await fetchSharedCandlePayload(activeApiBaseUrl, symbol, timeframe, limit, false)
+              if (!cancelled) setCandles(cached.candles)
+            } catch { applyCachedPayload('disconnected-cache') }
+          }
+          if (!cancelled) setErrorText(`${message}${getFullSharedCacheEntry()?.candles?.length ? ' • displaying saved historical candles; not live.' : ' • no historical candles available.'}`)
+          return
+        }
+        reconnectAt = 0
+        reconnectAttempts = 0
+        disconnectedCacheRead = false
+        startLiveStream()
         const cacheReason = force ? `before-force-fetch:${reason}` : `before-fetch:${reason}`
         const cachedWasApplied = applyCachedPayload(cacheReason)
 
@@ -4457,7 +4476,11 @@ function useChartCandles(
       } catch (error) {
         if (cancelled) return
 
-        const message = error instanceof Error ? error.message : 'Candle API error'
+        const message = marketDataMessage(error, 'Browser/network error: backend response could not be read. Check connection and CORS.')
+        reconnectAt = Date.now() + reconnectDelay(reconnectAttempts++)
+        liveEventSource?.close()
+        liveEventSource = null
+        liveSourceConnected = false
         const isZeroCandlePending = message.toLowerCase().includes('returned zero candles')
 
         if (isZeroCandlePending) {
@@ -4479,9 +4502,7 @@ function useChartCandles(
         const cachedWasApplied = applyCachedPayload('after-fetch-error')
         retryForcedHistoryAfterError = false
 
-        if (!cachedWasApplied) {
-          setErrorText(isZeroCandlePending ? '' : message)
-        }
+        setErrorText(`${message}${cachedWasApplied ? ' • displaying saved historical candles; not live.' : ''}`)
       } finally {
         fetchCandlesInFlight = false
         if (!cancelled) {
@@ -4591,7 +4612,8 @@ function useChartCandles(
     fetchCandles(false, 'initial')
     startPolling()
 
-    if (typeof window !== 'undefined' && typeof EventSource !== 'undefined') {
+    function startLiveStream() {
+      if (liveEventSource || cancelled || typeof EventSource === 'undefined') return
       const params = new URLSearchParams({
         symbol: normalizeSymbol(symbol),
         timeframe: normalizeTimeframe(timeframe),
@@ -4751,9 +4773,27 @@ function useChartCandles(
         }
       })
 
+      liveEventSource.addEventListener('status', (event: MessageEvent) => {
+        if (cancelled) return
+        try {
+          const payload = JSON.parse(event.data)
+          if (payload.ready === false || /unavailable|Not Connected/i.test(payload.status ?? '')) {
+            setErrorText(marketDataMessage(payload))
+            liveEventSource?.close()
+            liveEventSource = null
+            liveSourceConnected = false
+            reconnectAt = Date.now() + reconnectDelay(reconnectAttempts++, payload.retryAfterSeconds)
+            startPolling()
+          }
+        } catch { /* Ignore malformed stream status. */ }
+      })
+
       liveEventSource.onerror = () => {
         // Restart historical polling only when the live stream disconnects.
         liveSourceConnected = false
+        liveEventSource?.close()
+        liveEventSource = null
+        reconnectAt = Date.now() + reconnectDelay(reconnectAttempts++)
         startPolling()
       }
     }
@@ -6451,7 +6491,13 @@ export default function Dashboard() {
     let cancelled = false
     const bootStartedAt = Date.now()
     const bootApiBaseUrl = DASHBOARD_API_BASE_URL
-    const MIN_DASHBOARD_BOOT_MS = 12000
+    const MIN_DASHBOARD_BOOT_MS = 0
+    const bootDeadline = window.setTimeout(() => {
+      if (!cancelled) {
+        setDashboardBootError('Backend initialization is still pending. Dashboard opened; provider checks continue in the background.')
+        setDashboardBootReady(true)
+      }
+    }, 15000)
     const CORE_MES_HISTORY_MIN_CANDLES = 300
 
     const baseSteps: DashboardBootStep[] = MULTI_TIMEFRAME_BOOT_WARM_DISABLED
@@ -6696,10 +6742,21 @@ export default function Dashboard() {
 
       try {
         try {
-          await fetch(`${bootApiBaseUrl}/`, { cache: 'no-store' })
-          setBootStep('backend', 'done', 'Render backend answered')
+          const provider = await providerStatus(bootApiBaseUrl, 'MES1!')
+          if (!provider.ready) {
+            const message = marketDataMessage(provider)
+            setDashboardBootError(message)
+            setBootStep('backend', 'warning', message)
+            setBootStep('ready', 'warning', 'Dashboard available; IBKR historical warmup paused')
+            setDashboardBootReady(true)
+            return
+          }
+          setBootStep('backend', 'done', 'Render backend and IBKR answered')
         } catch (error) {
-          setBootStep('backend', 'warning', 'Backend wake request did not answer immediately; continuing with clean candle routes')
+          setDashboardBootError(marketDataMessage(error))
+          setBootStep('backend', 'warning', marketDataMessage(error))
+          setDashboardBootReady(true)
+          return
         }
 
         setBootStep('settings', 'done', 'Chart settings hydrated')
@@ -6733,14 +6790,12 @@ export default function Dashboard() {
           'loading',
           remainingBootHoldMs > 0
             ? `Holding boot screen ${Math.ceil(remainingBootHoldMs / 1000)}s so 300+ candle history caches finish settling`
-            : MULTI_TIMEFRAME_BOOT_WARM_DISABLED
-              ? `300+ MES ${selectedTimeframe} historical candles are ready; unlocking dashboard UI`
-              : '300+ MES 5m / 10m / 1m historical candles are ready; unlocking dashboard UI'
+            : 'Historical initialization finished; unlocking dashboard UI'
         )
         if (remainingBootHoldMs > 0) {
           await sleep(remainingBootHoldMs)
         }
-        setBootStep('ready', 'done', MULTI_TIMEFRAME_BOOT_WARM_DISABLED ? `Dashboard ready with 300+ MES ${selectedTimeframe} candles preloaded` : 'Dashboard ready with 300+ MES 5m / 10m / 1m historical candles preloaded')
+        setBootStep('ready', 'done', 'Dashboard available; chart status reports historical data availability')
 
         if (!cancelled) {
           setDashboardBootReady(true)
@@ -6760,6 +6815,7 @@ export default function Dashboard() {
 
     return () => {
       cancelled = true
+      window.clearTimeout(bootDeadline)
     }
   }, [
     chartConfigsHydrated,
@@ -6798,6 +6854,8 @@ export default function Dashboard() {
         if (cancelled) return
 
         try {
+          const provider = await providerStatus(DASHBOARD_API_BASE_URL, item.symbol)
+          if (cancelled || !provider.ready) return
           const payload = await fetchBackendHistoricalRefreshPayload(
             DASHBOARD_API_BASE_URL,
             item.symbol,

@@ -272,13 +272,25 @@ except Exception:
 
 app = FastAPI(title="Trading Intelligence Dashboard API")
 
+CORS_ORIGINS = sorted({"https://trading-intelligence-dashboard-2.onrender.com", *[origin.strip().rstrip("/") for origin in os.getenv("CORS_ALLOWED_ORIGINS", "https://trading-intelligence-dashboard.onrender.com,https://trading-intelligence-dashboard.vercel.app,http://localhost:3000").split(",") if origin.strip() and origin.strip() != "*"]})
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[origin.strip().rstrip("/") for origin in os.getenv("CORS_ALLOWED_ORIGINS", "https://trading-intelligence-dashboard.onrender.com,https://trading-intelligence-dashboard.vercel.app,http://localhost:3000").split(",") if origin.strip() and origin.strip() != "*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Webhook-Secret"],
 )
+
+
+@app.exception_handler(Exception)
+async def readable_server_error(request, exc):
+    # ServerErrorMiddleware sits outside user middleware; include restricted CORS
+    # on its 500 response as well. Do not disclose internal exception details.
+    from fastapi.responses import JSONResponse
+    origin = request.headers.get("origin")
+    headers = {"Access-Control-Allow-Origin": origin, "Vary": "Origin"} if origin in CORS_ORIGINS else {}
+    return JSONResponse(status_code=500, content={"detail": "Backend unavailable: internal server error."}, headers=headers)
 
 
 @app.on_event("startup")

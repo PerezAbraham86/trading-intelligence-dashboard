@@ -70,8 +70,10 @@ def request_json(path: str, params: dict | None = None) -> Any:
         try:
             response = _SESSION.get(IBKR_BASE_URL + path, params=params, timeout=_TIMEOUT, verify=verify, allow_redirects=False)
             _LAST_REQUEST = time.monotonic()
-            if response.status_code in {401, 403}:
-                raise HTTPException(503, "IBKR session or market-data permission unavailable. Sign in to the gateway and check subscriptions.")
+            if response.status_code == 401:
+                raise HTTPException(503, "IBKR gateway session is unauthenticated. Sign in to Client Portal Gateway.")
+            if response.status_code == 403:
+                raise HTTPException(503, "IBKR access denied. Check gateway authorization and market-data entitlement.")
             if response.status_code == 429:
                 raise HTTPException(429, "IBKR rate limit reached. Retry after the polling interval.")
             if response.status_code != 200:

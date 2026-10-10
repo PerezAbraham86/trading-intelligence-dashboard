@@ -1,6 +1,8 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { marketDataMessage, providerStatus, reconnectDelay } from '@/lib/marketDataConnection'
+
+import { useCallback, useRef, useEffect, useState } from 'react'
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ||
@@ -428,6 +430,8 @@ export function useApiPolling(options: UseApiPollingOptions = {}) {
   const [lastUpdateTime, setLastUpdateTime] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
+  const retryState = useRef({ at: 0, attempts: 0 })
+
   const fetchDashboardData = useCallback(async () => {
     if (!enabled) {
       setConnectionStatus('Waiting')
@@ -440,7 +444,16 @@ export function useApiPolling(options: UseApiPollingOptions = {}) {
       limit: '50',
     })
 
+    if (Date.now() < retryState.current.at) return
     try {
+      const provider = await providerStatus(API_BASE_URL, normalizedSymbol)
+      if (!provider.ready) {
+        retryState.current.at = Date.now() + reconnectDelay(retryState.current.attempts++, provider.retryAfterSeconds)
+        setConnectionStatus('IBKR Not Connected')
+        setErrorMessage(marketDataMessage(provider))
+        return
+      }
+      retryState.current = { at: 0, attempts: 0 }
       const [latestRes, recentRes, candlesRes, connectionRes] = await Promise.all([
         fetch(`${API_BASE_URL}/api/latest-signal?${params.toString()}`, {
           cache: 'no-store',
@@ -490,7 +503,8 @@ export function useApiPolling(options: UseApiPollingOptions = {}) {
     } catch (error) {
       console.error('API polling error:', error)
       setConnectionStatus('Error')
-      setErrorMessage(error instanceof Error ? error.message : 'Unknown API polling error')
+      retryState.current.at = Date.now() + reconnectDelay(retryState.current.attempts++)
+      setErrorMessage(marketDataMessage(error))
       setLatestSignal((prev) => prev ?? fallbackSignal)
     }
   }, [enabled, normalizedSymbol, normalizedTimeframe])
