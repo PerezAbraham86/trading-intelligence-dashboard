@@ -78,7 +78,7 @@ type WarningItem = {
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ||
-  'https://trading-intelligence-dashboard.onrender.com'
+  'https://trading-intelligence-dashboard-1.onrender.com'
 
 function clamp(value: number) {
   if (!Number.isFinite(value)) return 0

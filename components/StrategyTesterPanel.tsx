@@ -284,7 +284,7 @@ function getTesterCandleRoute(apiBaseUrl: string, symbol: string) {
 
   return {
     route: `${apiBaseUrl}/api/candles`,
-    provider: isTesterCryptoSymbol(normalized) ? "alpaca_crypto" : "dashboard_candles",
+    provider: "ibkr",
   };
 }
 

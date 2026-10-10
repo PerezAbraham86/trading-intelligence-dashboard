@@ -40,9 +40,9 @@ type TickerNewsFeedProps = {
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ||
-  'https://trading-intelligence-dashboard.onrender.com'
+  'https://trading-intelligence-dashboard-1.onrender.com'
 
-const NEWS_CACHE_PREFIX = 'marketbos:ticker-news-cache:v2:'
+const NEWS_CACHE_PREFIX = 'marketbos:ibkr-ticker-news-cache:v2:'
 const NEWS_CACHE_TTL_MS = 1000 * 60 * 5
 const NEWS_REFRESH_MS = 1000 * 60 * 5
 

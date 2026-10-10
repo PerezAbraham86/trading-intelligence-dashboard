@@ -155,7 +155,9 @@ def worker_loop() -> None:
                 "ibkrConfigured": health.get("ibkrConfigured"),
             })
 
-        result = warm_candles(base_url, symbols, timeframes, limit, force=force)
+        connections = [safe_get_json(build_url(base_url, "/api/ibkr/status", {"symbol": symbol}), timeout=20) for symbol in symbols]
+        ready_symbols = [symbol for symbol, connection in zip(symbols, connections) if connection.get("ready")]
+        result = warm_candles(base_url, ready_symbols, timeframes, limit, force=force) if ready_symbols else {"status": "IBKR Not Connected", "results": [], "count": 0}
         log("candles warm result", {
             "eventType": result.get("eventType"),
             "status": result.get("status"),

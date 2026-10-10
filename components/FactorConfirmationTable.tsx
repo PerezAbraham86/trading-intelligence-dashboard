@@ -6,7 +6,7 @@ import { CheckCircle2, XCircle } from 'lucide-react'
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ||
-  'https://trading-intelligence-dashboard.onrender.com'
+  'https://trading-intelligence-dashboard-1.onrender.com'
 
 type ExternalFactorPayload = {
   status?: string
@@ -547,14 +547,14 @@ function buildExternalRows(signal?: TradingSignal, externalData?: ExternalDataSt
       scalarStrength: scalars.footprintStrength,
     },
     {
-      name: 'FRED Macro',
+      name: 'Macro Data',
       factor: factors.fredMacro,
       signalText: signalFields.fredMacro,
       fallbackSignalText: signal?.fredMacro,
       scalarStrength: scalars.fredMacroStrength ?? signal?.fredMacroStrength,
     },
     {
-      name: 'FINRA Short Volume',
+      name: 'Short Volume',
       factor: factors.finraShortVolume,
       signalText: signalFields.finraShortVolume,
       fallbackSignalText: signal?.finraShortVolume,

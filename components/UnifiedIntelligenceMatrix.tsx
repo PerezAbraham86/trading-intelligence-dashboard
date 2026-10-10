@@ -627,8 +627,8 @@ function buildRows(props: UnifiedIntelligenceMatrixProps): MatrixRow[] {
     ['options-flow', 'Options Flow', components.optionsFlow, signal?.optionsFlowDirection, signal?.optionsFlowScore, 'Options flow source available'],
     ['open-interest', 'Open Interest', components.openInterest, signal?.openInterestDirection, signal?.openInterestScore, 'Open interest unavailable'],
     ['footprint-delta', 'Footprint Delta', components.footprint, signal?.footprintDirection, signal?.footprintScore, 'Footprint feed unavailable'],
-    ['fred-macro', 'FRED Macro', components.fred, signal?.fredDirection, signal?.fredScore, 'Macro context active'],
-    ['finra-short-volume', 'FINRA Short Volume', components.finra, signal?.finraDirection, signal?.finraScore, 'Short volume feed unavailable'],
+    ['fred-macro', 'Macro Data', components.fred, signal?.fredDirection, signal?.fredScore, 'Macro context active'],
+    ['finra-short-volume', 'Short Volume', components.finra, signal?.finraDirection, signal?.finraScore, 'Short volume feed unavailable'],
     ['cot', 'COT', components.cot, signal?.cotDirection, signal?.cotScore, 'COT feed unavailable'],
   ] as const
 

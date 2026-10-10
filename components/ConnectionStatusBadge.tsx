@@ -1,7 +1,7 @@
 'use client'
 
 type ConnectionStatusBadgeProps = {
-  status: 'Connected' | 'Waiting' | 'Error'
+  status: 'Connected' | 'Waiting' | 'Error' | 'IBKR Not Connected'
   lastUpdateTime?: string | Date | null
 }
 

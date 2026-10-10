@@ -4,9 +4,9 @@ import { useCallback, useEffect, useState } from 'react'
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ||
-  'https://trading-intelligence-dashboard.onrender.com'
+  'https://trading-intelligence-dashboard-1.onrender.com'
 
-export type ConnectionStatus = 'Connected' | 'Waiting' | 'Error'
+export type ConnectionStatus = 'Connected' | 'Waiting' | 'Error' | 'IBKR Not Connected'
 
 type ChartOverlayToggles = {
   smc?: boolean
@@ -441,7 +441,7 @@ export function useApiPolling(options: UseApiPollingOptions = {}) {
     })
 
     try {
-      const [latestRes, recentRes, candlesRes] = await Promise.all([
+      const [latestRes, recentRes, candlesRes, connectionRes] = await Promise.all([
         fetch(`${API_BASE_URL}/api/latest-signal?${params.toString()}`, {
           cache: 'no-store',
         }),
@@ -451,6 +451,7 @@ export function useApiPolling(options: UseApiPollingOptions = {}) {
         fetch(`${API_BASE_URL}/api/recent-candles?${params.toString()}`, {
           cache: 'no-store',
         }),
+        fetch(`${API_BASE_URL}/api/ibkr/status?${params.toString()}`, { cache: 'no-store' }),
       ])
 
       if (!latestRes.ok) {
@@ -482,7 +483,8 @@ export function useApiPolling(options: UseApiPollingOptions = {}) {
         nextRecentCandles.length > 0 ? nextRecentCandles : prev
       )
 
-      setConnectionStatus('Connected')
+      const ibkr = connectionRes.ok ? await connectionRes.json() : null
+      setConnectionStatus(ibkr?.ready === true ? 'Connected' : 'IBKR Not Connected')
       setLastUpdateTime(new Date().toLocaleTimeString())
       setErrorMessage(null)
     } catch (error) {

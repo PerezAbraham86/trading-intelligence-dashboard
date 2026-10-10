@@ -25,6 +25,8 @@ type HeatmapSector = {
 
 type HeatmapPayload = {
   eventType?: string
+  status?: string
+  reason?: string
   source?: string
   note?: string
   isLiveSnapshot?: boolean
@@ -41,9 +43,9 @@ type HeatmapPayload = {
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ||
-  'https://trading-intelligence-dashboard.onrender.com'
+  'https://trading-intelligence-dashboard-1.onrender.com'
 
-const HEATMAP_CACHE_KEY = 'marketbos:sp500-heatmap-cache:v2'
+const HEATMAP_CACHE_KEY = 'marketbos:sp500-heatmap-cache:ibkr-v3'
 const HEATMAP_CACHE_TTL_MS = 1000 * 60 * 10
 const HEATMAP_REFRESH_MS = 1000 * 60 * 3
 
@@ -98,7 +100,7 @@ function textColor(changePercent: number | undefined) {
 function isValidHeatmapPayload(value: unknown): value is HeatmapPayload {
   if (!value || typeof value !== 'object') return false
   const data = value as HeatmapPayload
-  return Array.isArray(data.sectors) && data.sectors.length > 0
+  return data.source === 'ibkr' && Array.isArray(data.sectors)
 }
 
 function readCachedHeatmap() {
@@ -233,7 +235,7 @@ export default function SP500Heatmap() {
         if (!cancelled && isValidHeatmapPayload(json)) {
           setData(json)
           saveCachedHeatmap(json)
-          setError('')
+          setError(json.status === 'Unavailable' ? (json.reason ?? 'IBKR heatmap unavailable') : '')
         }
       } catch (err) {
         console.error('S&P 500 heatmap fetch error:', err)
@@ -292,7 +294,7 @@ export default function SP500Heatmap() {
         </div>
 
         <div className={`rounded-full border border-dark-600 bg-dark-900/50 px-3 py-1 text-xs font-bold ${textColor(overall)}`}>
-          {formatPct(overall)}
+          {hasData ? formatPct(overall) : 'Unavailable'}
         </div>
       </div>
 

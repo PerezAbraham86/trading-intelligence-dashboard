@@ -13,9 +13,13 @@ from api import external_data_engine as external
 class IBKRTests(unittest.TestCase):
     def setUp(self):
         ib._CACHE.clear()
+        ib._RETRY_AT = 0
         self.env = patch.dict(os.environ, {"IBKR_CONID_MAP": '{"MES1!": 123456}', "IBKR_VERIFY_TLS": "true"})
         self.env.start()
         self.addCleanup(self.env.stop)
+        readiness = patch.object(ib, "connection_status", side_effect=lambda symbol=None: {"ready": True, "status": "IBKR Connected", "provider": "ibkr", "conid": ib.contract_id(symbol or "MES")})
+        readiness.start()
+        self.addCleanup(readiness.stop)
 
     def history(self):
         return {"barLength": 60, "data": [{"t": 1700000040000, "o": 5000, "h": 5002, "l": 4999, "c": 5001, "v": 17}]}
@@ -90,7 +94,7 @@ class IBKRTests(unittest.TestCase):
             self.assertNotEqual(key, main.candle_cache_key("candles", "MES1!", "1m", 0))
 
     def test_chart_router_and_options_unavailability(self):
-        payload = {"provider": "ibkr", "source": "ibkr_historical_ohlcv", "candles": [{"time": "2026-10-10T12:00:00+00:00", "epoch": 1791633600, "open": 5000, "high": 5002, "low": 4999, "close": 5001, "volume": 17, "provider": "ibkr", "conid": 123456}]}
+        payload = {"provider": "ibkr", "conid": 123456, "source": "ibkr_historical_ohlcv", "candles": [{"time": "2026-10-10T12:00:00+00:00", "epoch": 1791633600, "open": 5000, "high": 5002, "low": 4999, "close": 5001, "volume": 17, "provider": "ibkr", "conid": 123456}]}
         with patch.object(main, "get_historical_ohlcv", return_value=payload):
             response = main.fetch_clean_provider_candles("MES1!", "1m")
             self.assertEqual(response["provider"], "ibkr")

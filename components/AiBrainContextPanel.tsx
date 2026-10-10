@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 
-const RENDER_NEURAL_BRAIN_API_BASE = 'https://trading-intelligence-dashboard.onrender.com'
+const RENDER_NEURAL_BRAIN_API_BASE = 'https://trading-intelligence-dashboard-1.onrender.com'
 
 function uniqueStrings(values: string[]) {
   return Array.from(new Set(values.filter(Boolean)))

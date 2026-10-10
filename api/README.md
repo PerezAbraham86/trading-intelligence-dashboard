@@ -66,8 +66,8 @@ Request body:
   "openInterest": "Bullish Buildup",
   "footprint": "Positive Delta",
   "session": "RTH Valid",
-  "fredMacro": "Neutral",
-  "finraShortVolume": "Medium Squeeze Risk",
+  "fredMacro": "Unavailable",
+  "finraShortVolume": "Unavailable",
   "cot": "Bullish Background",
   "warnings": []
 }
@@ -101,8 +101,8 @@ Example response:
   "openInterest": "Bullish Buildup",
   "footprint": "Positive Delta",
   "session": "RTH Valid",
-  "fredMacro": "Neutral",
-  "finraShortVolume": "Medium Squeeze Risk",
+  "fredMacro": "Unavailable",
+  "finraShortVolume": "Unavailable",
   "cot": "Bullish Background",
   "warnings": [],
   "createdAt": "2026-05-17T14:30:45.123456+00:00"
@@ -157,8 +157,8 @@ All signals follow this schema:
 | openInterest | string | Open Interest analysis |
 | footprint | string | Footprint analysis |
 | session | string | Session validity |
-| fredMacro | string | FRED Macro analysis |
-| finraShortVolume | string | FINRA Short Volume analysis |
+| fredMacro | string | Macro Data analysis |
+| finraShortVolume | string | Short Volume analysis |
 | cot | string | COT (Commitments of Traders) analysis |
 | warnings | array | Any trading warnings |
 | createdAt | string | UTC ISO 8601 timestamp (auto-generated) |
@@ -192,12 +192,15 @@ history. Futures caches are isolated by IBKR contract ID so previous-provider
 history and different expiries cannot be merged into the new feed.
 
 Live quotes are shared/cached for five seconds and forwarded through the existing
-SSE route. Historical OHLCV refreshes are cached; the adapter does not create
-synthetic OHLCV or volume from price snapshots. Delayed/stale quotes are marked
-explicitly and do not feed the live candle stream. Futures options-flow and options
-open-interest analytics return unavailable until those IBKR data sources are
-implemented. Other independent data sources (crypto/stocks, macro and market
-analytics) keep their existing integrations.
+SSE route. Historical OHLCV is cached. IBKR is the sole external market-data
+provider for every symbol. No alternative quote, news, macro, options or crypto
+feed is contacted. Data-dependent panels remain visible and report unavailable
+until the matching IBKR input is configured. Brokerage orders are never submitted.
+
+Startup is independent of gateway availability. Warmups skip unavailable symbols;
+connection checks and failed requests use a retry cooldown. `/health` always reports
+service health separately from IBKR connectivity. Cached history is labeled as
+historical with its source, contract ID and last-candle age. It is never marked live.
 
 Remove the previous market-data provider's keys and host settings from the hosting
 dashboard separately, and cancel its subscription if no longer needed. Repository

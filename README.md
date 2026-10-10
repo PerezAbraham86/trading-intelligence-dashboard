@@ -7,7 +7,7 @@ A modern, real-time trading dashboard built with **Next.js 14**, **TypeScript**,
 ✅ **Real-time Signal Display** - ES1! trading signals with BUY/SELL indicators  
 ✅ **Interactive Candlestick Charts** - lightweight-charts v4 with ghost candles  
 ✅ **Pressure Gauges** - Bull, Bear, Ghost Confidence, Chop Risk, Macro Risk  
-✅ **Factor Confirmation** - 9-factor analysis (SMC, AlphaX, Ghost, OI, Delta, Session, FRED, FINRA, COT)  
+✅ **Factor Confirmation** - 9-factor analysis (SMC, AlphaX, Ghost, OI, Delta, Session, Macro, Short Volume, COT)
 ✅ **Ghost Candle Projections** - 3 projected candles with confidence levels  
 ✅ **Warnings Panel** - FOMC alerts, macro risks, gap analysis  
 ✅ **Recent Signals Table** - Trade history with P&L tracking  

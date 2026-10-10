@@ -68,7 +68,7 @@ type MarketSentimentGaugeProps = {
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ||
-  'https://trading-intelligence-dashboard.onrender.com'
+  'https://trading-intelligence-dashboard-1.onrender.com'
 
 const DEFAULT_SENTIMENT: SentimentData = {
   eventType: 'SENTIMENT_UPDATE',

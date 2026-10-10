@@ -117,7 +117,7 @@ type OverlayPayload = {
   status?: string
 }
 
-const API_BASE_URL = 'https://trading-intelligence-dashboard.onrender.com'
+const API_BASE_URL = 'https://trading-intelligence-dashboard-1.onrender.com'
 
 function roundPrice(value: number) {
   return Number(value.toFixed(2))

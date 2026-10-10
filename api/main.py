@@ -1,18 +1,12 @@
 from __future__ import annotations
 
-import csv
-import io
 import json
 import math
 import os
 import threading
 import time
-import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
@@ -25,6 +19,7 @@ from api.ibkr_client import (
     get_latest_live_snapshot, live_feed_event_generator, live_feed_ping_generator,
     live_feed_status, get_quote as get_ibkr_quote, get_ibkr_session,
     session_status as ibkr_session_status, contract_id as ibkr_contract_id,
+    connection_status as ibkr_connection_status,
 )
 
 from api.ghost_ml import (
@@ -190,37 +185,6 @@ except Exception:
         unified_memory_status = None
 
 
-
-
-
-
-
-try:
-    from api.databento_history import (
-        databento_parent_symbol,
-        databento_status as get_databento_status,
-        estimate_databento_cost,
-        get_databento_ohlcv,
-    )
-except Exception:
-    try:
-        from databento_history import (
-            databento_parent_symbol,
-            databento_status as get_databento_status,
-            estimate_databento_cost,
-            get_databento_ohlcv,
-        )
-    except Exception:
-        databento_parent_symbol = None
-        get_databento_status = None
-        estimate_databento_cost = None
-        get_databento_ohlcv = None
-
-
-
-
-
-
 try:
     from api.ml_feature_store import (
         get_ml_feature_store_summary,
@@ -327,16 +291,10 @@ def load_site_candle_cache_on_startup() -> None:
 # ENVIRONMENT
 # ─────────────────────────────────────────────────────────────────────────────
 
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
-ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
 DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", os.getenv("WEBHOOK_SECRET", "my_trading_secret_123"))
 
 
-ALPACA_STOCKS_BASE_URL = "https://data.alpaca.markets/v2"
-ALPACA_CRYPTO_BASE_URL = "https://data.alpaca.markets/v1beta3"
 
-DATABENTO_API_KEY = os.getenv("DATABENTO_API_KEY", "")
-DATABENTO_DATASET = os.getenv("DATABENTO_DATASET", "GLBX.MDP3")
 CANDLE_FUTURES_PROVIDER = "ibkr"
 
 
@@ -482,8 +440,6 @@ class TradingViewPayload(BaseModel):
     finraShortVolume: Optional[str] = None
     cot: Optional[str] = None
     warnings: Optional[List[str]] = Field(default_factory=list)
-
-
 
 
 class EntryMlConfidencePayload(BaseModel):
@@ -807,26 +763,6 @@ def timeframe_seconds(timeframe: str) -> int:
     return mapping.get(tf, 60)
 
 
-def alpaca_timeframe(timeframe: str) -> str:
-    mapping = {
-        "1m": "1Min",
-        "3m": "3Min",
-        "5m": "5Min",
-        "10m": "10Min",
-        "15m": "15Min",
-        "30m": "30Min",
-        "1h": "1Hour",
-        "2h": "2Hour",
-        "4h": "4Hour",
-        "1d": "1Day",
-        "1w": "1Week",
-    }
-    return mapping.get(normalize_timeframe(timeframe), "1Min")
-
-
-
-
-
 def _cache_created_epoch(value: Any) -> float:
     try:
         if not isinstance(value, dict):
@@ -873,10 +809,6 @@ def is_futures_symbol(symbol: str) -> bool:
 
 def futures_provider_name() -> str:
     return "ibkr"
-
-
-def use_databento_for_futures() -> bool:
-    return futures_provider_name() == "databento"
 
 
 def is_stock_symbol(symbol: str) -> bool:
@@ -935,16 +867,6 @@ def is_candle_valid_for_symbol(candle: Dict[str, Any], symbol: str) -> bool:
 def filter_valid_candles_for_symbol(candles: List[Dict[str, Any]], symbol: str) -> List[Dict[str, Any]]:
     normalized = normalize_symbol(symbol)
     return [candle for candle in candles if is_candle_valid_for_symbol(candle, normalized)]
-
-
-def to_alpaca_crypto_symbol(symbol: str) -> str:
-    normalized = normalize_symbol(symbol)
-    if normalized == "BTCUSD":
-        return "BTC/USD"
-    if normalized == "ETHUSD":
-        return "ETH/USD"
-    return normalized
-
 
 
 def to_epoch_seconds(value: Any) -> float:
@@ -1076,80 +998,10 @@ def merge_candles_by_time(candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 # HTTP / DATA PROVIDER HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def alpaca_headers() -> Dict[str, str]:
-    if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
-        raise HTTPException(status_code=500, detail="Missing ALPACA_API_KEY and/or ALPACA_SECRET_KEY")
-    return {
-        "APCA-API-KEY-ID": ALPACA_API_KEY,
-        "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
-    }
-
-
-
-
-
-
-def http_get_json(url: str, headers: Optional[Dict[str, str]] = None, provider: str = "Data provider") -> Any:
-    request = Request(url, headers=headers or {})
-    try:
-        with urlopen(request, timeout=12) as response:
-            body = response.read().decode("utf-8")
-            return json.loads(body)
-    except HTTPError as error:
-        body = error.read().decode("utf-8", errors="ignore")
-        raise HTTPException(status_code=error.code, detail=f"{provider} request failed: {body or error.reason}")
-    except URLError as error:
-        raise HTTPException(status_code=502, detail=f"{provider} connection failed: {error.reason}")
-    except HTTPException:
-        raise
-    except Exception as error:
-        raise HTTPException(status_code=500, detail=f"{provider} request failed: {str(error)}")
-
-
-def http_get_json_or_none(url: str, headers: Optional[Dict[str, str]] = None, provider: str = "Data provider") -> Any:
-    try:
-        return http_get_json(url, headers=headers, provider=provider)
-    except Exception as error:
-        print(f"[{provider}] failed: {error}")
-        return None
-
-
-def normalize_alpaca_bar(raw: Dict[str, Any], symbol: str, timeframe: str) -> Dict[str, Any]:
-    raw_time = raw.get("t") or raw.get("timestamp") or raw.get("time")
-    formatted_time = format_bar_time(raw_time)
-    return {
-        "time": formatted_time,
-        "timestamp": formatted_time,
-        "epoch": to_epoch_seconds(formatted_time),
-        "open": to_float(raw.get("o", raw.get("open"))),
-        "high": to_float(raw.get("h", raw.get("high"))),
-        "low": to_float(raw.get("l", raw.get("low"))),
-        "close": to_float(raw.get("c", raw.get("close"))),
-        "volume": to_float(raw.get("v", raw.get("volume"))),
-        "symbol": normalize_symbol(symbol),
-        "timeframe": normalize_timeframe(timeframe),
-        "createdAt": now_iso(),
-        "provider": "alpaca",
-    }
-
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # IBKR HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def ibkr_bar_type_interval(timeframe: str) -> Tuple[str, int]:
@@ -1198,20 +1050,8 @@ def candles_match_requested_timeframe(candles: List[Dict[str, Any]], timeframe: 
     return expected * 0.5 <= median_gap <= expected * 2.5
 
 
-
-
-
-
-
-
-
-
 def ibkr_history_start_ym(symbol: str, timeframe: str) -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m")
-
-
-
-
 
 
 def fetch_ibkr_direct_candles(symbol: str, timeframe: str = "1m", limit: int = 0) -> List[Dict[str, Any]]:
@@ -1227,43 +1067,6 @@ def fetch_ibkr_historical_candles(symbol: str, timeframe: str = "1m", limit: int
 # CANDLE PROVIDERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def alpaca_start_time_for_limit(timeframe: str, limit: int) -> str:
-    """
-    Use a wide UTC lookback window so Alpaca has enough history to return the
-    requested candle count. The request itself must still be sorted descending
-    and end at now, otherwise Alpaca returns the first candles after start.
-    """
-    tf = normalize_timeframe(timeframe)
-    safe_limit = max(1, min(int(limit or 500), 5000))
-    seconds = timeframe_seconds(tf)
-
-    required_seconds = safe_limit * max(seconds, 60)
-    buffer_seconds = max(required_seconds * 3, 2 * 24 * 60 * 60)
-
-    minimum_by_tf = {
-        "1m": 2,
-        "3m": 4,
-        "5m": 7,
-        "10m": 14,
-        "15m": 21,
-        "30m": 35,
-        "1h": 90,
-        "2h": 120,
-        "4h": 180,
-        "1d": 900,
-        "1w": 2500,
-    }
-    min_days = minimum_by_tf.get(tf, 14)
-    lookback_seconds = max(buffer_seconds, min_days * 24 * 60 * 60)
-
-    start = datetime.now(timezone.utc) - timedelta(seconds=lookback_seconds)
-    return start.isoformat().replace("+00:00", "Z")
-
-
-def alpaca_end_time_now() -> str:
-    # Pin provider requests to the current UTC time so historical candles end at latest available bar.
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
 
 def candles_are_fresh(candles: List[Dict[str, Any]], timeframe: str, max_extra_seconds: int = 600) -> bool:
     if not candles:
@@ -1273,76 +1076,6 @@ def candles_are_fresh(candles: List[Dict[str, Any]], timeframe: str, max_extra_s
         return False
     allowed_age = max(timeframe_seconds(timeframe) * 3, max_extra_seconds)
     return (datetime.now(timezone.utc).timestamp() - latest_epoch) <= allowed_age
-
-
-def fetch_alpaca_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 500) -> List[Dict[str, Any]]:
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-    alpaca_tf = alpaca_timeframe(normalized_timeframe)
-    safe_limit = max(1, min(int(limit or 500), 5000))
-    headers = alpaca_headers()
-    start_time = alpaca_start_time_for_limit(normalized_timeframe, safe_limit)
-
-    if is_crypto_symbol(normalized_symbol):
-        slash_symbol = to_alpaca_crypto_symbol(normalized_symbol)
-        candidates = [slash_symbol, normalized_symbol]
-
-        for candidate in candidates:
-            params = urlencode({
-                "symbols": candidate,
-                "timeframe": alpaca_tf,
-                "limit": safe_limit,
-                "start": start_time,
-                "end": alpaca_end_time_now(),
-                # Critical: desc returns the newest candles first. merge_candles_by_time()
-                # sorts them back ascending before returning to the dashboard.
-                "sort": "desc",
-            })
-            url = f"{ALPACA_CRYPTO_BASE_URL}/crypto/us/bars?{params}"
-            data = http_get_json(url, headers=headers, provider="Alpaca crypto")
-            bars_by_symbol = data.get("bars", {}) if isinstance(data, dict) else {}
-            bars = (
-                bars_by_symbol.get(candidate)
-                or bars_by_symbol.get(slash_symbol)
-                or bars_by_symbol.get(normalized_symbol)
-                or []
-            )
-
-            if bars:
-                normalized = [normalize_alpaca_bar(bar, normalized_symbol, normalized_timeframe) for bar in bars]
-                candles = merge_candles_by_time(normalized)[-safe_limit:]
-                candles = filter_valid_candles_for_symbol(candles, normalized_symbol)
-                if candles:
-                    if candles_are_fresh(candles, normalized_timeframe):
-                        return candles
-                    print(
-                        f"[Alpaca crypto] stale latest candle for {normalized_symbol} {normalized_timeframe}: "
-                        f"latest={candles[-1].get('time')} count={len(candles)}"
-                    )
-
-        return []
-
-    if normalized_symbol == "SPY":
-        request_limit = max(safe_limit, 1000)
-        params = urlencode({
-            "symbols": normalized_symbol,
-            "timeframe": alpaca_tf,
-            "limit": min(request_limit, 10000),
-            "start": start_time,
-            "end": alpaca_end_time_now(),
-            "adjustment": "raw",
-            "feed": "iex",
-            "sort": "desc",
-        })
-        url = f"{ALPACA_STOCKS_BASE_URL}/stocks/bars?{params}"
-        data = http_get_json(url, headers=headers, provider="Alpaca stock")
-        bars_by_symbol = data.get("bars", {}) if isinstance(data, dict) else {}
-        bars = bars_by_symbol.get(normalized_symbol, [])
-        normalized = [normalize_alpaca_bar(bar, normalized_symbol, normalized_timeframe) for bar in bars]
-        candles = merge_candles_by_time(normalized)[-safe_limit:]
-        return filter_valid_candles_for_symbol(candles, normalized_symbol)
-
-    return []
 
 
 try:
@@ -1391,7 +1124,6 @@ def load_persistent_candle_cache() -> None:
         except Exception as error:
             print(f"[Site DB Cache] startup failed, using memory/json fallback: {error}")
 
-    global CANDLE_RESPONSE_CACHE
     try:
         if not CANDLE_CACHE_FILE.exists():
             return
@@ -1466,10 +1198,6 @@ def maybe_limit_candles(candles: List[Dict[str, Any]], symbol: str, limit: Any) 
 
 
 def candle_cache_namespace(route: str, symbol: str) -> str:
-    if not is_futures_symbol(symbol):
-        return route
-    if use_databento_for_futures():
-        return f"databento::{route}"
     try:
         conid = str(ibkr_contract_id(symbol))
     except HTTPException:
@@ -1613,8 +1341,6 @@ def candle_cache_stale(route: str, symbol: str, timeframe: str, limit: int) -> O
     if not isinstance(cached, dict):
         return None
     return candle_cache_payload(cached, "site_cached_stale")
-
-
 
 
 def candle_cache_best(route: str, symbol: str, timeframe: str, limit: int, max_age_seconds: int = CANDLE_SITE_CACHE_MAX_AGE_SECONDS) -> Optional[Dict[str, Any]]:
@@ -1769,56 +1495,8 @@ def timeframe_to_1m_fetch_limit(timeframe: str, limit: int) -> int:
 
 
 def fetch_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 0) -> List[Dict[str, Any]]:
-    """Dashboard candles use the configured provider; IBKR returns a bounded contract-specific window."""
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(1, min(candle_cache_limit_value(limit) or 500, 5000))
+    return get_historical_ohlcv(symbol=normalize_symbol(symbol), timeframe=normalize_timeframe(timeframe), limit=limit).get("candles", [])
 
-    if is_futures_symbol(normalized_symbol):
-        if use_databento_for_futures():
-            if get_databento_ohlcv is None:
-                raise HTTPException(status_code=500, detail="api.databento_history.get_databento_ohlcv is unavailable")
-            try:
-                response = get_databento_ohlcv(
-                    symbol=normalized_symbol,
-                    timeframe=normalized_timeframe,
-                    start_ym=CLEAN_CANDLE_START_YM if "CLEAN_CANDLE_START_YM" in globals() else None,
-                    limit=limit,
-                )
-                candles = response.get("candles") if isinstance(response, dict) else []
-                return filter_valid_candles_for_symbol(merge_candles_by_time(candles), normalized_symbol)
-            except Exception as error:
-                print(f"[Databento] historical failed for {normalized_symbol} {normalized_timeframe}: {error}")
-                return []
-
-        candles = fetch_ibkr_historical_candles(normalized_symbol, normalized_timeframe, 0)
-        return filter_valid_candles_for_symbol(merge_candles_by_time(candles), normalized_symbol)
-
-    if is_crypto_symbol(normalized_symbol):
-        try:
-            candles = fetch_alpaca_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
-            if not candles and normalized_timeframe != "1m":
-                one_min_limit = timeframe_to_1m_fetch_limit(normalized_timeframe, safe_limit)
-                one_min = fetch_alpaca_historical_candles(normalized_symbol, "1m", one_min_limit)
-                candles = resample_candles_to_timeframe(one_min, normalized_timeframe, safe_limit)
-        except Exception as error:
-            print(f"[Alpaca crypto] failed for {normalized_symbol} {normalized_timeframe}: {error}")
-            candles = []
-        return candles[-safe_limit:]
-
-    if normalized_symbol == "SPY":
-        try:
-            candles = fetch_alpaca_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
-            if not candles and normalized_timeframe != "1m":
-                one_min_limit = timeframe_to_1m_fetch_limit(normalized_timeframe, safe_limit)
-                one_min = fetch_alpaca_historical_candles(normalized_symbol, "1m", one_min_limit)
-                candles = resample_candles_to_timeframe(one_min, normalized_timeframe, safe_limit)
-        except Exception as error:
-            print(f"[Alpaca stock] failed for {normalized_symbol} {normalized_timeframe}: {error}")
-            candles = []
-        return candles[-safe_limit:]
-
-    return []
 
 def get_live_recent_candles(symbol: str, timeframe: str) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_symbol(symbol)
@@ -1837,6 +1515,9 @@ def get_dashboard_candles(symbol: str, timeframe: str = "1m", limit: int = 0, us
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = 0 if is_futures_symbol(normalized_symbol) else max(1, min(candle_cache_limit_value(limit) or 500, 5000))
+
+    if not ibkr_connection_status(normalized_symbol).get("ready"):
+        return disconnected_candle_payload(normalized_symbol, normalized_timeframe, safe_limit).get("candles", [])
 
     if use_cache:
         # Critical rate-limit protection:
@@ -1979,8 +1660,6 @@ def get_sentiment_candles(symbol: str, timeframe: str = "1m", limit: int = 500) 
     return candles, debug
 
 
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # LIVE PRICE HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2083,70 +1762,6 @@ def normalize_live_price_payload(
     }
 
 
-def fetch_alpaca_crypto_live_price(symbol: str, timeframe: str = "1m") -> Optional[Dict[str, Any]]:
-    normalized_symbol = normalize_symbol(symbol)
-    if not is_crypto_symbol(normalized_symbol):
-        return None
-
-    headers = alpaca_headers()
-    slash_symbol = to_alpaca_crypto_symbol(normalized_symbol)
-
-    # Prefer latest trade because it behaves closest to TradingView's moving last price.
-    trade_params = urlencode({"symbols": slash_symbol})
-    trade_url = f"{ALPACA_CRYPTO_BASE_URL}/crypto/us/latest/trades?{trade_params}"
-
-    try:
-        data = http_get_json(trade_url, headers=headers, provider="Alpaca crypto latest trade")
-        trades = data.get("trades", {}) if isinstance(data, dict) else {}
-        trade = trades.get(slash_symbol) or trades.get(normalized_symbol) or trades
-        price = recursive_find_number(trade, {"p", "price", "last", "lastprice", "close"})
-        raw_time = recursive_find_time(trade)
-        if price and is_price_valid_for_symbol(price, normalized_symbol):
-            return normalize_live_price_payload(
-                normalized_symbol,
-                timeframe,
-                price,
-                raw_time=raw_time,
-                provider="alpaca",
-                source="alpaca_latest_trade",
-                raw=trade,
-            )
-    except Exception as error:
-        print(f"[Alpaca live trade] failed for {normalized_symbol}: {error}")
-
-    # Fallback to latest quote midpoint.
-    quote_params = urlencode({"symbols": slash_symbol})
-    quote_url = f"{ALPACA_CRYPTO_BASE_URL}/crypto/us/latest/quotes?{quote_params}"
-
-    try:
-        data = http_get_json(quote_url, headers=headers, provider="Alpaca crypto latest quote")
-        quotes = data.get("quotes", {}) if isinstance(data, dict) else {}
-        quote_payload = quotes.get(slash_symbol) or quotes.get(normalized_symbol) or quotes
-        price = recursive_find_number(
-            quote_payload,
-            {"p", "price", "last", "lastprice", "ap", "ask", "bp", "bid", "close"},
-        )
-        raw_time = recursive_find_time(quote_payload)
-        if price and is_price_valid_for_symbol(price, normalized_symbol):
-            return normalize_live_price_payload(
-                normalized_symbol,
-                timeframe,
-                price,
-                raw_time=raw_time,
-                provider="alpaca",
-                source="alpaca_latest_quote",
-                raw=quote_payload,
-            )
-    except Exception as error:
-        print(f"[Alpaca live quote] failed for {normalized_symbol}: {error}")
-
-    return None
-
-
-
-
-
-
 def fetch_ibkr_live_price(symbol: str, timeframe: str = "1m") -> Optional[Dict[str, Any]]:
     quote_payload = get_ibkr_quote(symbol, timeframe)
     if not quote_payload.get("isRealtime"):
@@ -2156,66 +1771,8 @@ def fetch_ibkr_live_price(symbol: str, timeframe: str = "1m") -> Optional[Dict[s
 
 
 def get_live_price_payload(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
+    return get_ibkr_quote(normalize_symbol(symbol), normalize_timeframe(timeframe))
 
-    live: Optional[Dict[str, Any]] = None
-
-    if is_crypto_symbol(normalized_symbol):
-        live = fetch_alpaca_crypto_live_price(normalized_symbol, normalized_timeframe)
-    elif is_futures_symbol(normalized_symbol):
-        live = fetch_ibkr_live_price(normalized_symbol, normalized_timeframe)
-
-    if live is not None:
-        return live
-
-    # Emergency guard: do not answer /api/live-price for MES by launching a fresh
-    # pulls, 429s, and Render bandwidth usage. Return no_live_price instead and
-    # let the chart use SSE/shared cached live price.
-    if is_futures_symbol(normalized_symbol):
-        current_epoch = datetime.now(timezone.utc).timestamp()
-        return {
-            "symbol": normalized_symbol,
-            "timeframe": normalized_timeframe,
-            "price": 0,
-            "time": now_iso(),
-            "timestamp": now_iso(),
-            "epoch": current_epoch,
-            "bucketEpoch": floor_epoch_to_timeframe(current_epoch, normalized_timeframe),
-            "timeframeSeconds": timeframe_seconds(normalized_timeframe),
-            "provider": None,
-            "source": "no_live_price_ibkr_unavailable",
-            "createdAt": now_iso(),
-        }
-
-    # Last-resort fallback: latest historical close, so charts continue to work if live quote is unavailable.
-    candles = fetch_historical_candles(normalized_symbol, normalized_timeframe, 1)
-    latest = candles[-1] if candles else None
-
-    if latest:
-        return normalize_live_price_payload(
-            normalized_symbol,
-            normalized_timeframe,
-            to_float(latest.get("close")),
-            raw_time=latest.get("time") or latest.get("timestamp") or latest.get("epoch"),
-            provider=str(latest.get("provider") or "historical"),
-            source="historical_latest_close_fallback",
-            raw=None,
-        )
-
-    return {
-        "symbol": normalized_symbol,
-        "timeframe": normalized_timeframe,
-        "price": 0,
-        "time": now_iso(),
-        "timestamp": now_iso(),
-        "epoch": datetime.now(timezone.utc).timestamp(),
-        "bucketEpoch": floor_epoch_to_timeframe(datetime.now(timezone.utc).timestamp(), normalized_timeframe),
-        "timeframeSeconds": timeframe_seconds(normalized_timeframe),
-        "provider": None,
-        "source": "no_live_price",
-        "createdAt": now_iso(),
-    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3059,9 +2616,6 @@ def build_python_ghost_candles(
         ghost for ghost in ghosts
         if is_candle_valid_for_symbol({**ghost, "symbol": normalized_symbol}, normalized_symbol)
     ]
-
-
-
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4922,7 +4476,6 @@ def empty_overlay_payload() -> Dict[str, Any]:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # S&P 500 HEATMAP — FREE LIVE/NEAR-LIVE QUOTE SNAPSHOT
-# Source: Yahoo Finance quote endpoint, no API key.
 # Note: free market data can be delayed by exchange/vendor rules.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -4989,285 +4542,16 @@ def flatten_sp500_heatmap_symbols() -> List[str]:
     return symbols
 
 
-def yahoo_chart_symbol(symbol: str) -> str:
-    # Yahoo chart uses BRK-B style while dashboard display can use BRK.B.
-    return str(symbol).upper().strip().replace(".", "-")
-
-
-def stooq_symbol(symbol: str) -> str:
-    # Stooq US stocks use lowercase ticker + .us. BRK-B is accepted as brk-b.us.
-    return f"{str(symbol).lower().strip().replace('.', '-')}.us"
-
-
-def http_get_text_or_none(url: str, headers: Optional[Dict[str, str]] = None, provider: str = "Data provider") -> Optional[str]:
-    request = Request(url, headers=headers or {})
-    try:
-        with urlopen(request, timeout=25) as response:
-            return response.read().decode("utf-8", errors="ignore")
-    except Exception as error:
-        print(f"[{provider}] failed: {error}")
-        return None
-
-
-
-def http_get_json_quick(url: str, headers: Optional[Dict[str, str]] = None, provider: str = "Quick JSON", timeout: int = 7) -> Optional[Dict[str, Any]]:
-    request = Request(url, headers=headers or {})
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8", errors="ignore"))
-    except Exception as error:
-        print(f"[{provider}] quick failed: {error}")
-        return None
-
-
-def http_get_text_quick(url: str, headers: Optional[Dict[str, str]] = None, provider: str = "Quick text", timeout: int = 7) -> Optional[str]:
-    request = Request(url, headers=headers or {})
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            return response.read().decode("utf-8", errors="ignore")
-    except Exception as error:
-        print(f"[{provider}] quick failed: {error}")
-        return None
-
-def parse_yahoo_chart_row(symbol: str, chart: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    try:
-        result = chart.get("chart", {}).get("result", [])
-        if not isinstance(result, list) or not result:
-            return None
-
-        item = result[0]
-        meta = item.get("meta", {}) if isinstance(item, dict) else {}
-        timestamps = item.get("timestamp", []) if isinstance(item.get("timestamp"), list) else []
-        quote = item.get("indicators", {}).get("quote", [])
-        quote_item = quote[0] if isinstance(quote, list) and quote else {}
-
-        closes = quote_item.get("close", []) if isinstance(quote_item.get("close"), list) else []
-        latest_price = 0.0
-        latest_index = -1
-
-        for index in range(len(closes) - 1, -1, -1):
-            parsed = to_float(closes[index], 0.0)
-            if parsed > 0:
-                latest_price = parsed
-                latest_index = index
-                break
-
-        previous_close = to_float(
-            meta.get("previousClose") or
-            meta.get("chartPreviousClose") or
-            meta.get("regularMarketPreviousClose"),
-            0.0,
-        )
-
-        if latest_price <= 0:
-            latest_price = to_float(meta.get("regularMarketPrice"), 0.0)
-
-        if previous_close <= 0:
-            first_valid = next((to_float(close, 0.0) for close in closes if to_float(close, 0.0) > 0), 0.0)
-            previous_close = first_valid
-
-        if latest_price <= 0:
-            return None
-
-        change = latest_price - previous_close if previous_close > 0 else 0.0
-        change_pct = (change / previous_close) * 100.0 if previous_close > 0 else 0.0
-
-        market_time = timestamps[latest_index] if latest_index >= 0 and latest_index < len(timestamps) else meta.get("regularMarketTime")
-        market_cap = to_float(meta.get("marketCap"), 0.0)
-
-        return {
-            "symbol": symbol,
-            "shortName": symbol,
-            "longName": symbol,
-            "regularMarketPrice": latest_price,
-            "regularMarketChange": change,
-            "regularMarketChangePercent": change_pct,
-            "regularMarketPreviousClose": previous_close,
-            "regularMarketTime": market_time,
-            "marketCap": market_cap,
-            "quoteSourceName": "yahoo_chart",
-        }
-    except Exception as error:
-        print(f"[S&P 500 Heatmap] Yahoo chart parse failed for {symbol}: {error}")
-        return None
-
-
-def fetch_yahoo_chart_quotes(symbols: List[str]) -> List[Dict[str, Any]]:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; MARKETBOS-Dashboard/1.0)",
-        "Accept": "application/json",
-    }
-
-    rows: List[Dict[str, Any]] = []
-
+def fetch_ibkr_quote_batch(symbols: List[str]) -> List[Dict[str, Any]]:
+    rows = []
     for symbol in symbols:
-        yahoo_symbol = yahoo_chart_symbol(symbol)
-        params = urlencode({
-            "range": "1d",
-            "interval": "1m",
-            "includePrePost": "true",
-            "events": "div,splits",
-        })
-
-        for host in ["query1.finance.yahoo.com", "query2.finance.yahoo.com"]:
-            url = f"https://{host}/v8/finance/chart/{quote(yahoo_symbol)}?{params}"
-            data = http_get_json_or_none(url, headers=headers, provider="Yahoo Finance chart")
-            if isinstance(data, dict):
-                row = parse_yahoo_chart_row(symbol, data)
-                if row:
-                    rows.append(row)
-                    break
-
+        if not ibkr_connection_status(symbol).get("ready"):
+            continue
+        quote_payload = get_ibkr_quote(symbol)
+        if quote_payload.get("price") is None or quote_payload.get("changePercent") is None:
+            continue
+        rows.append({"symbol": symbol, "shortName": symbol, "regularMarketPrice": quote_payload["price"], "regularMarketChange": quote_payload.get("change"), "regularMarketChangePercent": quote_payload["changePercent"], "regularMarketPreviousClose": quote_payload.get("previousClose"), "regularMarketTime": quote_payload.get("epoch"), "marketCap": 0, "quoteSourceName": "ibkr", "isRealtime": quote_payload.get("isRealtime", False)})
     return rows
-
-
-def fetch_stooq_quote_batch(symbols: List[str]) -> List[Dict[str, Any]]:
-    safe_symbols = [str(symbol).upper().strip() for symbol in symbols if str(symbol).strip()]
-    if not safe_symbols:
-        return []
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; MARKETBOS-Dashboard/1.0)",
-        "Accept": "text/csv,*/*",
-    }
-
-    # Stooq is a no-key fallback. It is delayed, but it usually works on server hosts.
-    # Fields requested: symbol,date,time,open,high,low,close,volume,name.
-    stooq_symbols = ",".join(stooq_symbol(symbol) for symbol in safe_symbols)
-    url = f"https://stooq.com/q/l/?s={quote(stooq_symbols, safe=',')}&f=sd2t2ohlcvn&h&e=csv"
-    text = http_get_text_quick(url, headers=headers, provider="Stooq quotes", timeout=7)
-
-    if not text or "," not in text:
-        return []
-
-    rows: List[Dict[str, Any]] = []
-
-    try:
-        reader = csv.DictReader(io.StringIO(text))
-        for item in reader:
-            raw_symbol = str(item.get("Symbol") or item.get("symbol") or "").upper().replace(".US", "")
-            if not raw_symbol:
-                continue
-
-            dashboard_symbol = raw_symbol.replace(".", "-")
-            price = to_float(item.get("Close") or item.get("Last") or item.get("close") or item.get("last"), 0.0)
-            open_price = to_float(item.get("Open") or item.get("open"), 0.0)
-
-            if price <= 0:
-                continue
-
-            change = price - open_price if open_price > 0 else 0.0
-            change_pct = (change / open_price) * 100.0 if open_price > 0 else 0.0
-
-            rows.append({
-                "symbol": dashboard_symbol,
-                "shortName": dashboard_symbol,
-                "longName": str(item.get("Name") or dashboard_symbol),
-                "regularMarketPrice": price,
-                "regularMarketChange": change,
-                "regularMarketChangePercent": change_pct,
-                "regularMarketPreviousClose": open_price,
-                "regularMarketTime": None,
-                "marketCap": 0.0,
-                "quoteSourceName": "stooq_quote",
-            })
-    except Exception as error:
-        print(f"[S&P 500 Heatmap] Stooq CSV parse failed: {error}")
-        return []
-
-    return rows
-
-
-def fetch_yahoo_quote_batch(symbols: List[str]) -> List[Dict[str, Any]]:
-    safe_symbols = [str(symbol).upper().strip() for symbol in symbols if str(symbol).strip()]
-    if not safe_symbols:
-        return []
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; MARKETBOS-Dashboard/1.0)",
-        "Accept": "application/json,text/plain,*/*",
-    }
-
-    # 1) Yahoo quote endpoint — fast timeout so dashboard does not hang.
-    primary_params = urlencode({
-        "symbols": ",".join(safe_symbols),
-        "formatted": "false",
-        "region": "US",
-        "lang": "en-US",
-        "corsDomain": "finance.yahoo.com",
-        "fields": "symbol,shortName,longName,regularMarketPrice,regularMarketChangePercent,regularMarketChange,regularMarketPreviousClose,regularMarketTime,marketCap",
-    })
-
-    for host in ["query1.finance.yahoo.com", "query2.finance.yahoo.com"]:
-        data = http_get_json_quick(
-            f"https://{host}/v7/finance/quote?{primary_params}",
-            headers=headers,
-            provider="Yahoo Finance quote",
-            timeout=6,
-        )
-        result = data.get("quoteResponse", {}).get("result", []) if isinstance(data, dict) else []
-        if isinstance(result, list):
-            valid = [
-                row for row in result
-                if to_float(row.get("regularMarketPrice"), 0.0) > 0
-            ]
-            if valid:
-                return valid
-
-    # 2) Yahoo spark endpoint — batch fallback.
-    spark_params = urlencode({
-        "symbols": ",".join(safe_symbols),
-        "range": "1d",
-        "interval": "1m",
-        "includePrePost": "true",
-        "includeTimestamps": "true",
-    })
-
-    for host in ["query1.finance.yahoo.com", "query2.finance.yahoo.com"]:
-        data = http_get_json_quick(
-            f"https://{host}/v7/finance/spark?{spark_params}",
-            headers=headers,
-            provider="Yahoo Finance spark",
-            timeout=6,
-        )
-
-        rows: List[Dict[str, Any]] = []
-        spark_result = data.get("spark", {}).get("result", []) if isinstance(data, dict) else []
-
-        if isinstance(spark_result, list):
-            for item in spark_result:
-                if not isinstance(item, dict):
-                    continue
-
-                symbol = str(item.get("symbol") or "").upper().strip()
-                response = item.get("response", [])
-                response_item = response[0] if isinstance(response, list) and response else {}
-
-                if not symbol or not isinstance(response_item, dict):
-                    continue
-
-                row = parse_yahoo_chart_row(symbol, {"chart": {"result": [response_item]}})
-                if row:
-                    row["quoteSourceName"] = "yahoo_spark"
-                    rows.append(row)
-
-        if rows:
-            return rows
-
-    # 3) Stooq delayed batch fallback. This is faster than one-symbol chart calls
-    # and prevents the dashboard from staying stuck on "Loading".
-    stooq_rows = fetch_stooq_quote_batch(safe_symbols)
-    if stooq_rows:
-        return stooq_rows
-
-    # 4) Yahoo chart one-symbol-at-a-time fallback. This is the slowest option,
-    # so only use it after batch providers fail.
-    chart_rows = fetch_yahoo_chart_quotes(safe_symbols)
-    if chart_rows:
-        return chart_rows
-
-    return []
-
 
 
 def _sp500_cache_is_fresh(max_age_seconds: int = 90) -> bool:
@@ -5302,7 +4586,7 @@ def build_sp500_heatmap_payload(force_refresh: bool = False) -> Dict[str, Any]:
     try:
         for index in range(0, len(all_symbols), 60):
             batch = all_symbols[index:index + 60]
-            for quote_row in fetch_yahoo_quote_batch(batch):
+            for quote_row in fetch_ibkr_quote_batch(batch):
                 symbol = str(quote_row.get("symbol") or "").upper().strip()
                 if symbol:
                     quote_rows[symbol] = quote_row
@@ -5324,7 +4608,9 @@ def build_sp500_heatmap_payload(force_refresh: bool = False) -> Dict[str, Any]:
         weighted_change_sum = 0.0
 
         for symbol in symbols:
-            quote_row = quote_rows.get(symbol) or {}
+            quote_row = quote_rows.get(symbol)
+            if not quote_row:
+                continue
             display_symbol = symbol.replace("-", ".")
             market_cap = max(to_float(quote_row.get("marketCap")), 0.0)
             change_pct = to_float(quote_row.get("regularMarketChangePercent"), 0.0)
@@ -5372,9 +4658,11 @@ def build_sp500_heatmap_payload(force_refresh: bool = False) -> Dict[str, Any]:
 
     payload = {
         "eventType": "SP500_HEATMAP",
-        "source": "fast_yahoo_quote_spark_stooq_chart_plus_static_cap_weights",
-        "note": "Free quote source. Data may be delayed depending on exchange/vendor rules. Tile size uses static approximate market-cap weights when live market cap is unavailable.",
-        "isLiveSnapshot": True,
+        "source": "ibkr",
+        "note": "IBKR quotes for explicitly mapped contracts only. Tile size uses approximate static market-cap weights.",
+        "status": "Available" if quote_rows else "Unavailable",
+        "reason": None if quote_rows else "IBKR heatmap quotes are unavailable. Configure the stock contract IDs and authenticate IBKR.",
+        "isLiveSnapshot": bool(quote_rows) and all(row.get("isRealtime") for row in quote_rows.values()),
         "cache": "refreshed",
         "createdAt": now_iso(),
         "count": len(all_stocks),
@@ -5400,7 +4688,6 @@ def build_sp500_heatmap_payload(force_refresh: bool = False) -> Dict[str, Any]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TICKER NEWS FEED — FREE RSS FALLBACK + OPTIONAL ALPHA VANTAGE
 # ─────────────────────────────────────────────────────────────────────────────
 
 NEWS_BULLISH_WORDS = [
@@ -5500,135 +4787,6 @@ def parse_datetime_to_iso(value: str) -> str:
     return now_iso()
 
 
-def fetch_yahoo_rss_news(symbol: str, limit: int = 10) -> List[Dict[str, Any]]:
-    news_symbol = normalize_news_symbol(symbol)
-    encoded_symbol = quote(news_symbol)
-    url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={encoded_symbol}&region=US&lang=en-US"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; MARKETBOS-Dashboard/1.0)",
-        "Accept": "application/rss+xml, application/xml, text/xml, */*",
-    }
-
-    text = http_get_text_or_none(url, headers=headers, provider="Yahoo Finance RSS")
-    if not text:
-        return []
-
-    try:
-        root = ET.fromstring(text)
-    except Exception as error:
-        print(f"[Ticker News] Yahoo RSS parse failed: {error}")
-        return []
-
-    articles: List[Dict[str, Any]] = []
-
-    for item in root.findall(".//item"):
-        title = (item.findtext("title") or "").strip()
-        link = (item.findtext("link") or "").strip()
-        published = (item.findtext("pubDate") or "").strip()
-        description = (item.findtext("description") or "").strip()
-
-        if not title:
-            continue
-
-        sentiment = score_news_sentiment(title, description)
-
-        articles.append({
-            "title": title,
-            "summary": description,
-            "url": link,
-            "source": "Yahoo Finance",
-            "publishedAt": parse_datetime_to_iso(published),
-            "tickers": [news_symbol],
-            "sentiment": sentiment["signal"],
-            "sentimentScore": sentiment["score"],
-            "bullishHits": sentiment["bullishHits"],
-            "bearishHits": sentiment["bearishHits"],
-        })
-
-        if len(articles) >= limit:
-            break
-
-    return articles
-
-
-def fetch_alpha_vantage_news(symbol: str, limit: int = 10) -> List[Dict[str, Any]]:
-    api_key = os.getenv("ALPHA_VANTAGE_API_KEY", "").strip()
-    if not api_key:
-        return []
-
-    news_symbol = normalize_news_symbol(symbol)
-
-    # Alpha Vantage uses CRYPTO:BTC for BTC; stocks/ETFs use ticker directly.
-    alpha_ticker = "CRYPTO:BTC" if news_symbol == "BTC-USD" else "CRYPTO:ETH" if news_symbol == "ETH-USD" else news_symbol
-
-    params = urlencode({
-        "function": "NEWS_SENTIMENT",
-        "tickers": alpha_ticker,
-        "limit": str(max(1, min(int(limit or 10), 50))),
-        "apikey": api_key,
-    })
-
-    url = f"https://www.alphavantage.co/query?{params}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; MARKETBOS-Dashboard/1.0)",
-        "Accept": "application/json",
-    }
-
-    data = http_get_json_or_none(url, headers=headers, provider="Alpha Vantage news")
-    if not isinstance(data, dict):
-        return []
-
-    feed = data.get("feed", [])
-    if not isinstance(feed, list):
-        return []
-
-    articles: List[Dict[str, Any]] = []
-
-    for item in feed[:max(1, min(int(limit or 10), 50))]:
-        if not isinstance(item, dict):
-            continue
-
-        title = str(item.get("title") or "").strip()
-        if not title:
-            continue
-
-        ticker_sentiment = item.get("ticker_sentiment", [])
-        ticker_symbols = []
-        if isinstance(ticker_sentiment, list):
-            ticker_symbols = [
-                str(row.get("ticker") or "").strip()
-                for row in ticker_sentiment
-                if isinstance(row, dict) and str(row.get("ticker") or "").strip()
-            ]
-
-        raw_label = str(item.get("overall_sentiment_label") or "").upper()
-        raw_score = to_float(item.get("overall_sentiment_score"), 0.0)
-
-        if "BULL" in raw_label:
-            sentiment = "BULLISH"
-        elif "BEAR" in raw_label:
-            sentiment = "BEARISH"
-        else:
-            sentiment = "NEUTRAL"
-
-        sentiment_score = clamp(50 + raw_score * 50, 0, 100)
-
-        articles.append({
-            "title": title,
-            "summary": str(item.get("summary") or "").strip(),
-            "url": str(item.get("url") or "").strip(),
-            "source": str(item.get("source") or "Alpha Vantage").strip(),
-            "publishedAt": parse_datetime_to_iso(str(item.get("time_published") or "")),
-            "tickers": ticker_symbols[:8] or [news_symbol],
-            "sentiment": sentiment,
-            "sentimentScore": round(sentiment_score, 2),
-            "bullishHits": 0,
-            "bearishHits": 0,
-        })
-
-    return articles
-
-
 def ticker_news_cache_key(symbol: str, limit: int) -> str:
     return f"{normalize_symbol(symbol)}::{int(limit or 10)}"
 
@@ -5675,71 +4833,8 @@ def ticker_news_cache_set(symbol: str, limit: int, payload: Dict[str, Any]) -> D
 
 
 def build_ticker_news_payload(symbol: str, limit: int = 10, force_refresh: bool = False) -> Dict[str, Any]:
-    normalized_symbol = normalize_symbol(symbol)
-    news_symbol = normalize_news_symbol(normalized_symbol)
-    safe_limit = max(1, min(int(limit or 10), 25))
+    return {"eventType": "TICKER_NEWS_FEED", "symbol": normalize_symbol(symbol), "source": "ibkr", "status": "Unavailable", "reason": "IBKR news retrieval is not configured.", "createdAt": now_iso(), "count": 0, "limit": limit, "newsScore": None, "bullish": 0, "bearish": 0, "neutral": 0, "articles": []}
 
-    if not force_refresh:
-        cached = ticker_news_cache_get(normalized_symbol, safe_limit, 300)
-        if cached:
-            return cached
-
-    source = "yahoo_finance_rss"
-    articles: List[Dict[str, Any]] = []
-
-    try:
-        articles = fetch_alpha_vantage_news(normalized_symbol, safe_limit)
-
-        if articles:
-            source = "alpha_vantage_news_sentiment"
-        else:
-            articles = fetch_yahoo_rss_news(normalized_symbol, safe_limit)
-    except Exception as error:
-        print(f"[Ticker News] fetch failed for {normalized_symbol}: {error}")
-        stale = ticker_news_cache_stale(normalized_symbol, safe_limit)
-        if stale:
-            stale["error"] = str(error)
-            return stale
-
-    bullish = len([item for item in articles if str(item.get("sentiment")) == "BULLISH"])
-    bearish = len([item for item in articles if str(item.get("sentiment")) == "BEARISH"])
-    neutral = max(0, len(articles) - bullish - bearish)
-
-    if articles:
-        news_score = round(sum(to_float(item.get("sentimentScore"), 50) for item in articles) / len(articles), 2)
-    else:
-        news_score = 50.0
-
-    if news_score >= 60:
-        status = "Bullish News"
-    elif news_score <= 40:
-        status = "Bearish News"
-    else:
-        status = "Neutral News"
-
-    payload = {
-        "eventType": "TICKER_NEWS_FEED",
-        "symbol": normalized_symbol,
-        "newsSymbol": news_symbol,
-        "category": news_category_for_symbol(normalized_symbol),
-        "source": source,
-        "cache": "refreshed",
-        "createdAt": now_iso(),
-        "count": len(articles),
-        "limit": safe_limit,
-        "newsScore": news_score,
-        "status": status,
-        "bullish": bullish,
-        "bearish": bearish,
-        "neutral": neutral,
-        "articles": articles,
-    }
-
-    if articles:
-        return ticker_news_cache_set(normalized_symbol, safe_limit, payload)
-
-    stale = ticker_news_cache_stale(normalized_symbol, safe_limit)
-    return stale or payload
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5979,14 +5074,17 @@ def build_python_dashboard_signal(symbol: str = "BTCUSD", timeframe: str = "1m",
         ghosts,
     )
     scorecards = analyze_python_core_scorecards(candles, sentiment, ghosts, overlays)
-    fred_macro = build_fred_macro_context()
+    fred_macro = build_macro_context()
     options_pressure = build_options_pressure_context(normalized_symbol)
     external_data = build_external_data_context(normalized_symbol, normalized_timeframe) if build_external_data_context else {}
     external_fields = external_data.get("signalFields", {}) if isinstance(external_data, dict) else {}
     external_scalars = external_data.get("scalars", {}) if isinstance(external_data, dict) else {}
     price = to_float(candles[-1].get("close")) if candles else 0
 
-    status = "Live Snapshot" if candles else "Waiting"
+    connection = ibkr_connection_status(normalized_symbol)
+    status = "Historical Analysis" if candles else "Waiting"
+    if not connection.get("ready"):
+        status = "IBKR Not Connected"
     created_at = now_iso()
 
     return {
@@ -6036,7 +5134,7 @@ def build_python_dashboard_signal(symbol: str = "BTCUSD", timeframe: str = "1m",
         "openInterest": external_fields.get("openInterest", "Open Interest Unavailable"),
         "footprint": external_fields.get("footprint", "Footprint Delta Unavailable"),
         "session": "Neutral Session",
-        "fredMacro": fred_macro.get("label", external_fields.get("fredMacro", "Active FRED Macro")),
+        "fredMacro": fred_macro.get("label", external_fields.get("fredMacro", "Active Macro")),
         "fredMacroStrength": fred_macro.get("strength", external_scalars.get("fredMacroStrength", 45)),
         "fredMacroDirection": fred_macro.get("direction", external_scalars.get("fredMacroDirection", "active")),
         "fredMacroRisk": fred_macro.get("risk", external_scalars.get("fredMacroRisk", 35)),
@@ -6070,41 +5168,10 @@ def build_python_dashboard_signal(symbol: str = "BTCUSD", timeframe: str = "1m",
 # No webhook. Uses public FRED CSV endpoints when available.
 # ─────────────────────────────────────────────────────────────────────────────
 
-FRED_MACRO_CACHE: Dict[str, Any] = {
+MACRO_CONTEXT_CACHE: Dict[str, Any] = {
     "createdAt": "",
     "payload": None,
 }
-
-
-def _parse_fred_csv_latest(series_id: str, lookback: int = 12) -> List[float]:
-    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={quote(series_id)}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; MARKETBOS-Dashboard/1.0)",
-        "Accept": "text/csv,*/*",
-    }
-
-    text = http_get_text_or_none(url, headers=headers, provider=f"FRED {series_id}")
-    if not text:
-        return []
-
-    values: List[float] = []
-    try:
-        for line in text.splitlines()[1:]:
-            parts = line.strip().split(",")
-            if len(parts) < 2:
-                continue
-            value_text = parts[-1].strip()
-            if value_text == "." or value_text == "":
-                continue
-            value = to_float(value_text, None)
-            if value is None:
-                continue
-            values.append(float(value))
-    except Exception as error:
-        print(f"[FRED Macro] parse failed for {series_id}: {error}")
-        return []
-
-    return values[-max(lookback, 2):]
 
 
 def _series_delta(values: List[float]) -> float:
@@ -6121,26 +5188,11 @@ def _series_trend(values: List[float], lookback: int = 5) -> float:
     return right - left
 
 
-def build_fred_macro_context() -> Dict[str, Any]:
-    # Keep FRED calls light; refresh roughly every 60 minutes.
-    cached_payload = FRED_MACRO_CACHE.get("payload")
-    cached_created_at = str(FRED_MACRO_CACHE.get("createdAt") or "")
-
-    try:
-        if cached_payload and cached_created_at:
-            cached_dt = datetime.fromisoformat(cached_created_at.replace("Z", "+00:00"))
-            if (datetime.now(timezone.utc) - cached_dt).total_seconds() < 3600:
-                payload = dict(cached_payload)
-                payload["cache"] = "fresh"
-                return payload
-    except Exception:
-        pass
-
-    dgs10 = _parse_fred_csv_latest("DGS10", 10)      # 10-year treasury yield
-    dff = _parse_fred_csv_latest("DFF", 10)          # effective fed funds rate
-    vix = _parse_fred_csv_latest("VIXCLS", 10)       # CBOE volatility index
-    sp500 = _parse_fred_csv_latest("SP500", 10)      # S&P 500 index
-
+def build_macro_context(series: Optional[Dict[str, List[float]]] = None) -> Dict[str, Any]:
+    series = series or {}
+    dgs10, dff, vix, sp500 = [series.get(key, []) for key in ("DGS10", "DFF", "VIXCLS", "SP500")]
+    if not all((dgs10, dff, vix, sp500)):
+        return {"status": "unavailable", "label": "Macro Data Unavailable", "direction": "inactive", "risk": 0, "strength": 0, "source": "ibkr", "reason": "Required macro series are not configured.", "series": {}, "notes": ["Macro inputs unavailable"], "createdAt": now_iso()}
     yield_delta = _series_delta(dgs10)
     yield_trend = _series_trend(dgs10, 5)
     fed_delta = _series_delta(dff)
@@ -6201,16 +5253,16 @@ def build_fred_macro_context() -> Dict[str, Any]:
 
     if bull_points > bear_points:
         direction = "bullish"
-        label = "Bullish FRED Macro"
+        label = "Bullish Macro"
     elif bear_points > bull_points:
         direction = "bearish"
-        label = "Bearish FRED Macro"
+        label = "Bearish Macro"
     else:
         direction = "active"
-        label = "Active FRED Macro"
+        label = "Active Macro"
 
     if not notes:
-        notes.append("FRED macro data active")
+        notes.append("Macro data active")
 
     payload = {
         "label": label,
@@ -6227,17 +5279,16 @@ def build_fred_macro_context() -> Dict[str, Any]:
             "SP500": sp500[-1] if sp500 else None,
         },
         "createdAt": now_iso(),
-        "source": "fred_public_csv",
+        "source": "supplied_macro_series",
     }
 
-    FRED_MACRO_CACHE["createdAt"] = now_iso()
-    FRED_MACRO_CACHE["payload"] = payload
+    MACRO_CONTEXT_CACHE["createdAt"] = now_iso()
+    MACRO_CONTEXT_CACHE["payload"] = payload
     return payload
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PYTHON-ONLY OPTIONS PRESSURE CONTEXT
-# Uses Alpha Vantage if ALPHA_VANTAGE_API_KEY is configured.
 # No webhook. Designed first for SPY / ES / MES options pressure.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -6269,7 +5320,7 @@ def normalize_option_type(value: Any) -> str:
     return ""
 
 
-def parse_alpha_vantage_option_rows(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+def parse_option_rows(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     if not isinstance(data, dict):
         return []
 
@@ -6327,49 +5378,9 @@ def parse_alpha_vantage_option_rows(data: Dict[str, Any]) -> List[Dict[str, Any]
     return rows
 
 
-def fetch_alpha_vantage_options_chain(underlying: str) -> Dict[str, Any]:
-    api_key = os.getenv("ALPHA_VANTAGE_API_KEY", "").strip()
-    if not api_key or not underlying:
-        return {
-            "ok": False,
-            "reason": "missing_alpha_vantage_key_or_underlying",
-            "rows": [],
-        }
+def fetch_options_chain(underlying: str) -> Dict[str, Any]:
+    return {"ok": False, "reason": "IBKR options-chain retrieval is not configured.", "rows": []}
 
-    params = urlencode({
-        "function": "REALTIME_OPTIONS",
-        "symbol": underlying,
-        "apikey": api_key,
-    })
-
-    url = f"https://www.alphavantage.co/query?{params}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; MARKETBOS-Dashboard/1.0)",
-        "Accept": "application/json",
-    }
-
-    data = http_get_json_or_none(url, headers=headers, provider="Alpha Vantage realtime options")
-    if not isinstance(data, dict):
-        return {
-            "ok": False,
-            "reason": "no_response",
-            "rows": [],
-        }
-
-    if "Information" in data or "Note" in data or "Error Message" in data:
-        return {
-            "ok": False,
-            "reason": str(data.get("Information") or data.get("Note") or data.get("Error Message")),
-            "rows": [],
-            "rawMeta": {key: data.get(key) for key in ["Information", "Note", "Error Message"] if key in data},
-        }
-
-    rows = parse_alpha_vantage_option_rows(data)
-    return {
-        "ok": bool(rows),
-        "reason": "ok" if rows else "empty_options_rows",
-        "rows": rows,
-    }
 
 
 def build_options_pressure_context(symbol: str, underlying_override: str = "") -> Dict[str, Any]:
@@ -6394,7 +5405,7 @@ def build_options_pressure_context(symbol: str, underlying_override: str = "") -
             "conflictRisk": 0,
             "reversalRisk": 0,
             "reason": "options_not_applicable_for_symbol",
-            "source": "alpha_vantage_realtime_options",
+            "source": "ibkr_options_not_configured",
         }
 
     cache_key = underlying
@@ -6407,7 +5418,7 @@ def build_options_pressure_context(symbol: str, underlying_override: str = "") -
     except Exception:
         pass
 
-    chain = fetch_alpha_vantage_options_chain(underlying)
+    chain = fetch_options_chain(underlying)
     rows = chain.get("rows", []) if isinstance(chain, dict) else []
 
     if not rows:
@@ -6428,7 +5439,7 @@ def build_options_pressure_context(symbol: str, underlying_override: str = "") -
             "conflictRisk": 0,
             "reversalRisk": 0,
             "reason": chain.get("reason", "options_unavailable") if isinstance(chain, dict) else "options_unavailable",
-            "source": "alpha_vantage_realtime_options",
+            "source": "ibkr_options_not_configured",
             "createdAt": now_iso(),
         }
         OPTIONS_PRESSURE_CACHE[cache_key] = payload
@@ -6505,7 +5516,7 @@ def build_options_pressure_context(symbol: str, underlying_override: str = "") -
         "conflictRisk": round(conflict_risk),
         "reversalRisk": round(reversal_risk),
         "reason": "ok",
-        "source": "alpha_vantage_realtime_options",
+        "source": "ibkr_options_not_configured",
         "createdAt": now_iso(),
     }
 
@@ -6923,15 +5934,6 @@ def build_fast_chart_overlay_payload(
 # ─────────────────────────────────────────────────────────────────────────────
 # BASIC ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
 
 
 @app.get("/api/chart-overlays")
@@ -7392,9 +6394,9 @@ def target_ml_reset_route(symbol: Optional[str] = None, timeframe: Optional[str]
 def options_pressure(symbol: str = "SPY", underlying: str = "") -> Dict[str, Any]:
     return build_options_pressure_context(symbol, underlying)
 
-@app.get("/api/fred-macro")
-def fred_macro() -> Dict[str, Any]:
-    return build_fred_macro_context()
+@app.get("/api/macro")
+def macro_context() -> Dict[str, Any]:
+    return build_macro_context()
 
 @app.get("/api/external-data/status")
 def external_data_status(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]:
@@ -7404,7 +6406,7 @@ def external_data_status(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[
             "status": "Unavailable",
             "symbol": normalize_symbol(symbol),
             "timeframe": normalize_timeframe(timeframe),
-            "massiveKeyPresent": bool(os.getenv("MASSIVE_API_KEY", "")),
+            "marketDataProvider": "ibkr",
             "error": "external_data_engine module unavailable",
             "createdAt": now_iso(),
         }
@@ -7427,8 +6429,6 @@ def external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict
     return build_external_data_context(symbol, timeframe)
 
 
-
-
 @app.get("/api/unified-intelligence")
 def unified_intelligence(symbol: str = "MES1!", timeframe: str = "1m", limit: int = 500, force: bool = False) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
@@ -7444,7 +6444,7 @@ def unified_intelligence(symbol: str = "MES1!", timeframe: str = "1m", limit: in
         else {
             "symbol": normalized_symbol,
             "timeframe": normalized_timeframe,
-            "providerStatus": {"massive": {"configured": False}},
+            "providerStatus": {"ibkr": {"ready": False}},
             "signalFields": {},
             "scalars": {},
             "source": "external_data_engine_unavailable",
@@ -7546,9 +6546,6 @@ def root() -> Dict[str, Any]:
             "/api/live-candle",
             "/api/live-price",
             "/api/provider-debug",
-            "/api/databento/status",
-            "/api/databento/cost",
-            "/api/databento/candles",
             "/api/engine-state",
             "/api/chart-overlays",
             "/api/ghost-ml-status",
@@ -7564,25 +6561,17 @@ def root() -> Dict[str, Any]:
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    return {
-        "status": "ok",
-        "time": now_iso(),
-        "alpacaKeyPresent": bool(ALPACA_API_KEY),
-        "alpacaSecretPresent": bool(ALPACA_SECRET_KEY),
-        "ibkrConfigured": bool(IBKR_BASE_URL),
-        "marketDataProvider": "ibkr",
-        "databentoKeyPresent": bool(DATABENTO_API_KEY),
-        "databentoDataset": DATABENTO_DATASET,
-        "futuresProvider": futures_provider_name(),
-    }
-
-
+    connection = ibkr_connection_status()
+    return {"status": "ok", "time": now_iso(), "marketDataProvider": "ibkr", "ibkrConfigured": bool(IBKR_BASE_URL), "ibkr": connection, "readOnly": True, "commit": os.getenv("RENDER_GIT_COMMIT", "unknown")}
 
 
 @app.get("/api/backend-version")
 def backend_version() -> Dict[str, Any]:
     return {
-        "backendVersion": "unified-intelligence-v1",
+        "backendVersion": "ibkr-only-v2",
+        "commit": os.getenv("RENDER_GIT_COMMIT", "unknown"),
+        "marketDataProviders": ["ibkr"],
+        "readOnly": True,
         "hasMlFeatureStoreRoutes": True,
         "hasUnifiedIntelligenceRoute": True,
         "module": __name__,
@@ -7620,7 +6609,7 @@ def build_candle_route_payload(
         else {
             "symbol": symbol,
             "timeframe": timeframe,
-            "providerStatus": {"massive": {"configured": False}},
+            "providerStatus": {"ibkr": {"ready": False}},
             "signalFields": {},
             "scalars": {},
             "source": "external_data_engine_unavailable",
@@ -7754,6 +6743,7 @@ CME_FUTURES_DAILY_BREAK_START_MINUTE = int(os.getenv("CME_FUTURES_DAILY_BREAK_ST
 CME_FUTURES_DAILY_BREAK_END_MINUTE = int(os.getenv("CME_FUTURES_DAILY_BREAK_END_MINUTE", str(22 * 60 + 10)))
 LIVE_FEED_MIN_POLL_SECONDS = max(1.0, to_float(os.getenv("LIVE_FEED_MIN_POLL_SECONDS", "5"), 5.0))
 
+_CANDLE_WAREHOUSE_STOP = threading.Event()
 _CANDLE_WAREHOUSE_THREAD: Optional[threading.Thread] = None
 _CANDLE_WAREHOUSE_LOCK = threading.RLock()
 _CANDLE_WAREHOUSE_STATUS: Dict[str, Any] = {
@@ -8100,6 +7090,10 @@ def warm_backend_candle_warehouse(symbols: Optional[List[str]] = None, timeframe
 
     for item_symbol in symbol_list:
         normalized_symbol = normalize_symbol(item_symbol)
+        connection = ibkr_connection_status(normalized_symbol)
+        if not connection.get("ready"):
+            results.append({"symbol": normalized_symbol, "status": "IBKR Not Connected", "reason": connection.get("reason"), "count": 0, "skipped": True})
+            continue
         for item_timeframe in timeframe_list:
             tf = normalize_timeframe(item_timeframe)
             try:
@@ -8142,7 +7136,7 @@ def warm_backend_candle_warehouse(symbols: Optional[List[str]] = None, timeframe
 
     summary = {
         "eventType": "BACKEND_CANDLE_WAREHOUSE_WARMUP",
-        "status": "Ready" if any(int(row.get("count", 0) or 0) > 0 for row in results) else "Waiting",
+        "status": "Ready" if any(int(row.get("count", 0) or 0) > 0 for row in results) else "IBKR Not Connected",
         "results": results,
         "count": len(results),
         "createdAt": now_iso(),
@@ -8156,6 +7150,10 @@ def _update_backend_live_candles_once() -> Dict[str, Any]:
     results: List[Dict[str, Any]] = []
     for item_symbol in _warehouse_symbols():
         normalized_symbol = normalize_symbol(item_symbol)
+        connection = ibkr_connection_status(normalized_symbol)
+        if not connection.get("ready"):
+            results.append({"symbol": normalized_symbol, "status": "IBKR Not Connected", "reason": connection.get("reason"), "savedCount": 0, "skipped": True})
+            continue
         for tf in _warehouse_timeframes():
             normalized_timeframe = normalize_timeframe(tf)
             try:
@@ -8226,7 +7224,7 @@ def _update_backend_live_candles_once() -> Dict[str, Any]:
 
     payload = {
         "eventType": "BACKEND_CANDLE_WAREHOUSE_LIVE_UPDATE",
-        "status": "Live",
+        "status": "IBKR Connected" if any(not row.get("skipped") and row.get("savedCount", 0) > 0 for row in results) else "IBKR Not Connected",
         "results": results,
         "count": len(results),
         "createdAt": now_iso(),
@@ -8241,16 +7239,22 @@ def _backend_candle_warehouse_loop() -> None:
         _CANDLE_WAREHOUSE_STATUS["running"] = True
         _CANDLE_WAREHOUSE_STATUS["startedAt"] = now_iso()
 
-    if CANDLE_WAREHOUSE_STARTUP_WARM_ENABLED:
-        warm_backend_candle_warehouse()
-
-    while CANDLE_WAREHOUSE_LIVE_ENABLED:
-        try:
-            _update_backend_live_candles_once()
-        except Exception as error:
-            with _CANDLE_WAREHOUSE_LOCK:
-                _CANDLE_WAREHOUSE_STATUS["lastError"] = str(error)[:500]
-        time.sleep(CANDLE_WAREHOUSE_LIVE_INTERVAL_SECONDS)
+    warmed = False
+    while CANDLE_WAREHOUSE_LIVE_ENABLED or (CANDLE_WAREHOUSE_STARTUP_WARM_ENABLED and not warmed):
+        ready = any(ibkr_connection_status(symbol).get("ready") for symbol in _warehouse_symbols())
+        with _CANDLE_WAREHOUSE_LOCK:
+            _CANDLE_WAREHOUSE_STATUS["status"] = "IBKR Connected" if ready else "IBKR Not Connected"
+        if ready:
+            if CANDLE_WAREHOUSE_STARTUP_WARM_ENABLED and not warmed:
+                warm_backend_candle_warehouse()
+                warmed = True
+            if CANDLE_WAREHOUSE_LIVE_ENABLED:
+                _update_backend_live_candles_once()
+        _CANDLE_WAREHOUSE_STOP.wait(CANDLE_WAREHOUSE_LIVE_INTERVAL_SECONDS if ready else 60)
+        if _CANDLE_WAREHOUSE_STOP.is_set():
+            break
+    with _CANDLE_WAREHOUSE_LOCK:
+        _CANDLE_WAREHOUSE_STATUS["running"] = False
 
 
 def start_backend_candle_warehouse() -> Dict[str, Any]:
@@ -8258,6 +7262,7 @@ def start_backend_candle_warehouse() -> Dict[str, Any]:
     with _CANDLE_WAREHOUSE_LOCK:
         if _CANDLE_WAREHOUSE_THREAD is not None and _CANDLE_WAREHOUSE_THREAD.is_alive():
             return dict(_CANDLE_WAREHOUSE_STATUS)
+        _CANDLE_WAREHOUSE_STOP.clear()
         _CANDLE_WAREHOUSE_STATUS["started"] = True
         _CANDLE_WAREHOUSE_STATUS["symbols"] = _warehouse_symbols()
         _CANDLE_WAREHOUSE_STATUS["timeframes"] = _warehouse_timeframes()
@@ -8271,12 +7276,19 @@ def start_backend_candle_warehouse() -> Dict[str, Any]:
         return dict(_CANDLE_WAREHOUSE_STATUS)
 
 
+@app.on_event("shutdown")
+def stop_backend_candle_warehouse() -> None:
+    _CANDLE_WAREHOUSE_STOP.set()
+    if _CANDLE_WAREHOUSE_THREAD:
+        _CANDLE_WAREHOUSE_THREAD.join(timeout=2)
+
+
 @app.get("/api/candle-warehouse/status")
 def candle_warehouse_status() -> Dict[str, Any]:
     with _CANDLE_WAREHOUSE_LOCK:
         return {
             "eventType": "BACKEND_CANDLE_WAREHOUSE_STATUS",
-            "status": "Live" if _CANDLE_WAREHOUSE_STATUS.get("started") else "Waiting",
+            "status": _CANDLE_WAREHOUSE_STATUS.get("status", "IBKR Not Connected"),
             **dict(_CANDLE_WAREHOUSE_STATUS),
             "createdAt": now_iso(),
         }
@@ -8545,69 +7557,13 @@ def clean_cache_payload(symbol: str, timeframe: str, limit: int = 0, allow_stale
 def fetch_clean_provider_candles(symbol: str, timeframe: str, limit: int = 0, force: bool = False) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = clean_candle_limit(normalized_symbol, limit)
-
-    if is_futures_symbol(normalized_symbol):
-        if use_databento_for_futures():
-            if get_databento_ohlcv is None:
-                raise HTTPException(status_code=500, detail="api.databento_history.get_databento_ohlcv is unavailable")
-
-            response = get_databento_ohlcv(
-                symbol=normalized_symbol,
-                timeframe=normalized_timeframe,
-                start_ym=CLEAN_CANDLE_START_YM,
-                limit=safe_limit,
-            )
-            raw_candles = response.get("candles") if isinstance(response, dict) else []
-            candles_list = normalize_provider_history_candles(raw_candles, normalized_symbol, normalized_timeframe)
-            provider = "databento"
-            source = str(response.get("source") or "databento_glbx_mdp3_ohlcv") if isinstance(response, dict) else "databento_glbx_mdp3_ohlcv"
-        else:
-            if get_historical_ohlcv is None:
-                raise HTTPException(status_code=500, detail="api.ibkr_history.get_historical_ohlcv is unavailable")
-
-            response = get_historical_ohlcv(
-                symbol=normalized_symbol,
-                timeframe=normalized_timeframe,
-                start_ym=CLEAN_CANDLE_START_YM,
-                limit=safe_limit,
-                force=force,
-            )
-            raw_candles = response.get("candles") if isinstance(response, dict) else []
-            candles_list = normalize_provider_history_candles(raw_candles, normalized_symbol, normalized_timeframe)
-            provider = "ibkr"
-            source = str(response.get("source") or "ibkr_historical_ohlcv") if isinstance(response, dict) else "ibkr_historical_ohlcv"
-    else:
-        candles_list = fetch_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
-        candles_list = normalize_provider_history_candles(candles_list, normalized_symbol, normalized_timeframe)
-        provider = candles_list[-1].get("provider") if candles_list else None
-        source = "legacy_provider_router_non_mes"
-
-    returned = maybe_limit_candles(candles_list, normalized_symbol, safe_limit)
-    payload = build_candle_route_payload(
-        route_source="clean_backend_provider_history",
-        symbol=normalized_symbol,
-        timeframe=normalized_timeframe,
-        candles=returned,
-        provider=provider,
-        cache_label="provider_refresh",
-    )
-    payload["cleanCandleService"] = True
-    payload["backendWarehouse"] = True
-    payload["cacheRoute"] = CLEAN_CANDLE_ROUTE
-    payload["source"] = source
-    payload["requestedProvider"] = futures_provider_name() if is_futures_symbol(normalized_symbol) else provider
-    payload["databentoEnabledForFutures"] = use_databento_for_futures() if is_futures_symbol(normalized_symbol) else False
-    payload["requestedLimit"] = safe_limit
-    payload["noArtificialCandleLimit"] = False
-    payload["providerWindowLimited"] = True
-    payload["continuousContract"] = False
-    if payload.get("provider") == "ibkr":
-        payload["conid"] = ibkr_contract_id(normalized_symbol)
-    payload["noTimeframeBuildFrom1m"] = is_futures_symbol(normalized_symbol)
-    payload["startYm"] = CLEAN_CANDLE_START_YM if is_futures_symbol(normalized_symbol) else None
-    payload["gapInfo"] = _candle_gap_summary(returned, normalized_timeframe, normalized_symbol) if is_futures_symbol(normalized_symbol) else None
+    response = get_historical_ohlcv(symbol=normalized_symbol, timeframe=normalized_timeframe, limit=clean_candle_limit(normalized_symbol, limit), force=force)
+    candles_list = normalize_provider_history_candles(response.get("candles", []), normalized_symbol, normalized_timeframe)
+    payload = build_candle_route_payload(route_source="clean_backend_provider_history", symbol=normalized_symbol, timeframe=normalized_timeframe, candles=candles_list, provider="ibkr", cache_label="provider_refresh")
+    payload.update({k: v for k, v in response.items() if k != "candles"})
+    payload.update(candles=candles_list, count=len(candles_list), candleCount=len(candles_list), cleanCandleService=True, backendWarehouse=True, cacheRoute=CLEAN_CANDLE_ROUTE, requestedProvider="ibkr", noArtificialCandleLimit=False, providerWindowLimited=True, noTimeframeBuildFrom1m=True)
     return payload
+
 
 
 def store_clean_candles(symbol: str, timeframe: str, limit: int, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -8631,123 +7587,19 @@ def store_clean_candles(symbol: str, timeframe: str, limit: int, payload: Dict[s
     return payload
 
 
-@app.get("/api/databento/status")
-def api_databento_status() -> Dict[str, Any]:
-    if get_databento_status is None:
-        return {
-            "eventType": "DATABENTO_STATUS",
-            "status": "Unavailable",
-            "hasApiKey": bool(DATABENTO_API_KEY),
-            "packageInstalled": False,
-            "reason": "api.databento_history is not deployed or failed to import",
-            "futuresProvider": futures_provider_name(),
-            "createdAt": now_iso(),
-        }
-
-    try:
-        status = get_databento_status()
-        if isinstance(status, dict):
-            status["futuresProvider"] = futures_provider_name()
-            status["dashboardRouteReady"] = True
-            status["switchEnv"] = "CANDLE_FUTURES_PROVIDER=databento"
-            return status
-    except Exception as error:
-        return {
-            "eventType": "DATABENTO_STATUS",
-            "status": "Error",
-            "hasApiKey": bool(DATABENTO_API_KEY),
-            "error": str(error),
-            "futuresProvider": futures_provider_name(),
-            "createdAt": now_iso(),
-        }
-
-    return {
-        "eventType": "DATABENTO_STATUS",
-        "status": "Unknown",
-        "hasApiKey": bool(DATABENTO_API_KEY),
-        "futuresProvider": futures_provider_name(),
-        "createdAt": now_iso(),
-    }
-
-
-@app.get("/api/databento/cost")
-def api_databento_cost(
-    symbol: str = "MES1!",
-    timeframe: str = "5m",
-    start: Optional[str] = None,
-    end: Optional[str] = None,
-    startYm: Optional[str] = None,
-) -> Dict[str, Any]:
-    if estimate_databento_cost is None:
-        raise HTTPException(status_code=500, detail="api.databento_history.estimate_databento_cost is unavailable")
-
-    try:
-        return estimate_databento_cost(
-            symbol=normalize_symbol(symbol),
-            timeframe=normalize_timeframe(timeframe),
-            start=start,
-            end=end,
-            start_ym=startYm,
-        )
-    except HTTPException:
-        raise
-    except Exception as error:
-        raise HTTPException(status_code=502, detail=f"Databento cost estimate failed: {error}") from error
-
-
-@app.get("/api/databento/candles")
-def api_databento_candles(
-    symbol: str = "MES1!",
-    timeframe: str = "5m",
-    limit: int = 0,
-    start: Optional[str] = None,
-    end: Optional[str] = None,
-    startYm: Optional[str] = None,
-) -> Dict[str, Any]:
-    if get_databento_ohlcv is None:
-        raise HTTPException(status_code=500, detail="api.databento_history.get_databento_ohlcv is unavailable")
-
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = clean_candle_limit(normalized_symbol, limit)
-
-    try:
-        response = get_databento_ohlcv(
-            symbol=normalized_symbol,
-            timeframe=normalized_timeframe,
-            start=start,
-            end=end,
-            start_ym=startYm,
-            limit=safe_limit,
-        )
-    except HTTPException:
-        raise
-    except Exception as error:
-        raise HTTPException(status_code=502, detail=f"Databento candles failed: {error}") from error
-
-    raw_candles = response.get("candles") if isinstance(response, dict) else []
-    candles_list = normalize_provider_history_candles(raw_candles, normalized_symbol, normalized_timeframe)
-    returned = maybe_limit_candles(candles_list, normalized_symbol, safe_limit)
-
-    payload = build_candle_route_payload(
-        route_source="databento_test_provider_history",
-        symbol=normalized_symbol,
-        timeframe=normalized_timeframe,
-        candles=returned,
-        provider="databento",
-        cache_label="databento_test_no_store",
-    )
-    payload["source"] = str(response.get("source") or "databento_glbx_mdp3_ohlcv") if isinstance(response, dict) else "databento_glbx_mdp3_ohlcv"
-    payload["eventType"] = "DATABENTO_CANDLES_TEST"
-    payload["providerSymbol"] = response.get("providerSymbol") if isinstance(response, dict) else None
-    payload["dataset"] = response.get("dataset") if isinstance(response, dict) else DATABENTO_DATASET
-    payload["schema"] = response.get("schema") if isinstance(response, dict) else None
-    payload["stypeIn"] = response.get("stypeIn") if isinstance(response, dict) else None
-    payload["requestedStart"] = response.get("requestedStart") if isinstance(response, dict) else start
-    payload["requestedEnd"] = response.get("requestedEnd") if isinstance(response, dict) else end
-    payload["cleanCompatible"] = True
-    payload["storedToCleanCache"] = False
-    payload["gapInfo"] = _candle_gap_summary(returned, normalized_timeframe, normalized_symbol) if is_futures_symbol(normalized_symbol) else None
+def disconnected_candle_payload(symbol: str, timeframe: str, limit: int = 0) -> Dict[str, Any]:
+    cached = None
+    for route in ("candles", "dashboard", "historical"):
+        candidate = candle_cache_best(route, symbol, timeframe, 1)
+        if isinstance(candidate, dict) and candidate.get("candles"):
+            cached = dict(candidate)
+            break
+    payload = cached or {"symbol": symbol, "timeframe": timeframe, "candles": [], "count": 0, "provider": "ibkr", "source": "ibkr", "cache": "empty"}
+    last = max([to_epoch_seconds(row.get("epoch") or row.get("time")) for row in payload.get("candles", [])] or [0])
+    payload.update(status="IBKR Not Connected", isLive=False, isRealtime=False, historicalOnly=True, connection=ibkr_connection_status(symbol), lastCandleAgeSeconds=max(0, time.time() - last) if last else None, freshness="stale" if last else "unavailable")
+    if cached:
+        payload["cache"] = "historical_while_disconnected"
+        payload["warning"] = "Saved historical candles; IBKR is disconnected."
     return payload
 
 
@@ -8757,6 +7609,9 @@ def candles(symbol: str = "MES1!", timeframe: str = "5m", limit: int = 0, force:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = clean_candle_limit(normalized_symbol, limit)
+
+    if not ibkr_connection_status(normalized_symbol).get("ready"):
+        return disconnected_candle_payload(normalized_symbol, normalized_timeframe, safe_limit)
 
     if not force:
         cached = clean_cache_payload(normalized_symbol, normalized_timeframe, safe_limit)
@@ -8871,6 +7726,10 @@ def _store_preload_candle_payload(
 def _preload_mes_direct_history(timeframe_list: List[str], limit: int) -> List[Dict[str, Any]]:
     """Dashboard candles use the configured provider; IBKR returns a bounded contract-specific window."""
     normalized_symbol = "MES1!"
+    connection = ibkr_connection_status(normalized_symbol)
+    if not connection.get("ready"):
+        return [{"symbol": normalized_symbol, "timeframe": tf, "count": 0, "status": "IBKR Not Connected", "reason": connection.get("reason"), "preloaded": False, "skipped": True} for tf in timeframe_list]
+
     safe_limit = 0
     required_count = 1
 
@@ -8934,7 +7793,7 @@ def _preload_mes_direct_history(timeframe_list: List[str], limit: int) -> List[D
             "source": stored.get("source") if isinstance(stored, dict) else source,
             "preloaded": stored_count >= required_count,
             "historicalOnly": True,
-            "ibkrContractId": ibkr_contract_id(normalized_symbol),
+            "ibkrContractId": ibkr_connection_status(normalized_symbol).get("conid"),
             "barType": "minute",
             "barInterval": ibkr_bar_type_interval(tf)[1],
             "startYm": ibkr_history_start_ym(normalized_symbol, tf),
@@ -8976,7 +7835,7 @@ def preload_candles(
 
     return {
         "eventType": "CANDLE_PRELOAD",
-        "status": "Ready" if all(int(item.get("count", 0) or 0) >= int(item.get("requiredCount", min(safe_limit, 300)) or min(safe_limit, 300)) for item in results) else "Partial",
+        "status": "Ready" if results and all(item.get("preloaded") for item in results) else "IBKR Not Connected" if not any(item.get("count", 0) for item in results) else "Partial",
         "count": len(results),
         "results": results,
         "createdAt": now_iso(),
@@ -9244,40 +8103,8 @@ def merged_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 5
 
 @app.get("/api/live-candle")
 def live_candle(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]:
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-    live = get_live_recent_candles(normalized_symbol, normalized_timeframe)
-    latest = live[-1] if live else None
-
-    if latest is None:
-        live_price = get_live_price_payload(normalized_symbol, normalized_timeframe)
-        if to_float(live_price.get("price"), 0) > 0:
-            bucket_epoch = int(live_price.get("bucketEpoch") or floor_epoch_to_timeframe(to_epoch_seconds(live_price.get("epoch")), normalized_timeframe))
-            price = to_float(live_price.get("price"))
-            latest = {
-                "time": format_bar_time(bucket_epoch),
-                "timestamp": format_bar_time(bucket_epoch),
-                "epoch": bucket_epoch,
-                "open": price,
-                "high": price,
-                "low": price,
-                "close": price,
-                "volume": 0,
-                "symbol": normalized_symbol,
-                "timeframe": normalized_timeframe,
-                "createdAt": now_iso(),
-                "provider": live_price.get("provider"),
-                "source": live_price.get("source"),
-            }
-
-    return {
-        "symbol": normalized_symbol,
-        "timeframe": normalized_timeframe,
-        "latest": latest,
-        "candle": latest,
-        "count": len(live),
-        "source": "live_candle",
-    }
+    payload = get_latest_live_snapshot(symbol=normalize_symbol(symbol), timeframe=normalize_timeframe(timeframe))
+    return {**payload, "latest": payload.get("candle"), "count": 1 if payload.get("candle") else 0}
 
 
 @app.get("/api/live-price")
@@ -9315,6 +8142,8 @@ def latest_sentiment(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int =
         "count": len(candles),
         "createdAt": now_iso(),
         "debug": debug,
+        "status": "Historical Analysis" if ibkr_connection_status(normalized_symbol).get("ready") and candles else "IBKR Not Connected",
+        "historicalOnly": True,
     })
 
     return sentiment
@@ -9343,7 +8172,9 @@ def engine_state(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500
 
     return {
         "eventType": "ENGINE_STATE",
-        "status": "Live" if candles else "Waiting",
+        "status": "Historical Analysis" if ibkr_connection_status(normalized_symbol).get("ready") and candles else "IBKR Not Connected",
+        "marketDataConnection": ibkr_connection_status(normalized_symbol),
+        "historicalOnly": True,
         "symbol": normalized_symbol,
         "timeframe": normalized_timeframe,
         "price": to_float(candles[-1].get("close")) if candles else 0,
@@ -9541,7 +8372,9 @@ def build_dashboard_snapshot_payload(data: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "eventType": "DASHBOARD_SNAPSHOT",
-        "status": "Live",
+        "status": "Live" if live_payload.get("isRealtime") else "IBKR Not Connected" if not ibkr_connection_status(normalized_symbol).get("ready") else "Historical Analysis",
+        "marketDataConnection": ibkr_connection_status(normalized_symbol),
+        "isLive": bool(live_payload.get("isRealtime")),
         "symbol": normalized_symbol,
         "timeframe": normalized_timeframe,
         "limit": safe_limit,
@@ -9667,8 +8500,6 @@ async def webhook_tradingview(request: FastAPIRequest) -> Dict[str, Any]:
         "storedCandles": len(RECENT_CANDLES),
         "createdAt": now_iso(),
     }
-
-
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -10224,13 +9055,8 @@ def api_live_feed_status_alias() -> Dict[str, Any]:
 
 
 @app.get("/api/ibkr/status")
-def api_ibkr_status() -> Dict[str, Any]:
-    return ibkr_session_status()
-
-
-
-
-
+def api_ibkr_status(symbol: str = "MES1!") -> Dict[str, Any]:
+    return ibkr_connection_status(normalize_symbol(symbol))
 
 
 @app.get("/api/live-feed/latest")
@@ -10290,97 +9116,9 @@ def api_live_feed_ping() -> StreamingResponse:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/api/ibkr/history")
-def api_ibkr_history(
-    symbol: str = "MES1!",
-    timeframe: str = "1m",
-    start_ym: str | None = None,
-    limit: int = 700,
-    extended: bool = True,
-    badj: bool = True,
-    dadj: bool = False,
-    force: bool = False,
-) -> Dict[str, Any]:
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(1, min(int(limit or 700), 5000))
+def api_ibkr_history(symbol: str = "MES1!", timeframe: str = "1m", start_ym: str | None = None, limit: int = 700, extended: bool = True, badj: bool = False, dadj: bool = False, force: bool = False) -> Dict[str, Any]:
+    return candles(symbol=symbol, timeframe=timeframe, limit=limit, force=force)
 
-    if get_historical_ohlcv is None:
-        raise HTTPException(status_code=503, detail="IBKR history unavailable")
-
-    provider_force = force and not is_futures_symbol(normalized_symbol)
-
-    # MES/ES should not bypass cache on normal dashboard refreshes. The frontend can
-    # request force=true after a live/history gap, but sending that directly to
-    # history fallback and only refresh through the bounded backend cache path.
-    if force and is_futures_symbol(normalized_symbol):
-        fallback = cached_futures_history_payload_for_rate_limit(
-            normalized_symbol,
-            normalized_timeframe,
-            safe_limit,
-        )
-        if fallback:
-            return fallback
-
-    try:
-        provider_payload = get_historical_ohlcv(
-            symbol=normalized_symbol,
-            timeframe=normalized_timeframe,
-            start_ym=start_ym,
-            limit=safe_limit,
-            extended=extended,
-            badj=badj,
-            dadj=dadj,
-            force=provider_force,
-        )
-
-        if isinstance(provider_payload, dict):
-            rebuilt = rebuild_history_payload_with_saved_live_candles(
-                route_source="ibkr_history_plus_persistent_live",
-                symbol=normalized_symbol,
-                timeframe=normalized_timeframe,
-                payload=provider_payload,
-                limit=safe_limit,
-            )
-
-            if rebuilt.get("candles"):
-                return candle_cache_set("historical", normalized_symbol, normalized_timeframe, safe_limit, rebuilt)
-
-        return provider_payload
-    except HTTPException as error:
-        if error.status_code == 429 and is_futures_symbol(normalized_symbol):
-            fallback = cached_futures_history_payload_for_rate_limit(
-                normalized_symbol,
-                normalized_timeframe,
-                safe_limit,
-            )
-            if fallback:
-                rebuilt = rebuild_history_payload_with_saved_live_candles(
-                    route_source="ibkr_history_rate_limit_cache_plus_persistent_live",
-                    symbol=normalized_symbol,
-                    timeframe=normalized_timeframe,
-                    payload=fallback,
-                    limit=safe_limit,
-                )
-                return rebuilt
-        raise
-    except Exception as error:
-        text = str(error).lower()
-        if is_futures_symbol(normalized_symbol) and ("429" in text or "rate" in text or "too many" in text):
-            fallback = cached_futures_history_payload_for_rate_limit(
-                normalized_symbol,
-                normalized_timeframe,
-                safe_limit,
-            )
-            if fallback:
-                rebuilt = rebuild_history_payload_with_saved_live_candles(
-                    route_source="ibkr_history_rate_limit_cache_plus_persistent_live",
-                    symbol=normalized_symbol,
-                    timeframe=normalized_timeframe,
-                    payload=fallback,
-                    limit=safe_limit,
-                )
-                return rebuilt
-        raise
 
 
 @app.get("/ibkr/history")

@@ -346,12 +346,11 @@ function getHistoricalCandleRouteForSymbol(apiBaseUrl: string, symbol: string) {
   }
 
   // BTCUSD / ETHUSD / SPY should keep the original backend candle router.
-  // api/main.py routes crypto through Alpaca crypto and SPY through Alpaca stock.
   // This prevents BTCUSD from being incorrectly treated as an IBKR futures symbol.
   return {
     route: `${apiBaseUrl}/api/candles`,
-    provider: isCryptoCandleSymbol(normalized) ? 'alpaca_crypto' : 'dashboard_candles',
-    source: isCryptoCandleSymbol(normalized) ? 'alpaca_crypto_historical_ohlcv' : 'dashboard_candle_router',
+    provider: 'ibkr',
+    source: 'ibkr_historical_ohlcv',
   }
 }
 
@@ -680,7 +679,7 @@ const MULTI_TIMEFRAME_BOOT_WARM_DISABLED = true
 
 const DASHBOARD_API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ||
-  'https://trading-intelligence-dashboard.onrender.com'
+  'https://trading-intelligence-dashboard-1.onrender.com'
 
 const CHART_SETTINGS_USER_KEY = 'abraham-marketbos-dashboard'
 
@@ -1246,8 +1245,6 @@ function getLivePriceSourcePriority(source: any) {
     text.includes('api/live-price') ||
     text.includes('backend_live_price') ||
     text.includes('ibkr_live_quote') ||
-    text.includes('alpaca_latest_trade') ||
-    text.includes('alpaca_latest_quote') ||
     text.includes('live_quote') ||
     text.includes('latest_trade') ||
     text.includes('latest_quote')
@@ -6578,6 +6575,11 @@ export default function Dashboard() {
             false
           )
           const historicalCandles = normalizeCandlePayload(historical)
+          if (historical?.status === 'IBKR Not Connected') {
+            const entry = storeBootPayload(historical, historicalCandles, 'ibkr_cached_history')
+            setBootStep(key, 'warning', `${normalizedSymbol} ${normalizedTimeframe} • IBKR Not Connected${historicalCandles.length ? ` • ${historicalCandles.length} saved historical candles` : ''}`)
+            return entry
+          }
 
           if (historicalCandles.length >= minimum) {
             const entry = storeBootPayload(historical, historicalCandles, 'dashboard_boot_clean_candle_route')
@@ -7269,7 +7271,7 @@ export default function Dashboard() {
           </div>
 
           <ConnectionStatusBadge
-            status={coreDashboardDataLoaded ? 'Connected' : connectionStatus}
+            status={connectionStatus}
             lastUpdateTime={coreDashboardDataLoaded ? (lastUpdateTime ?? new Date().toISOString()) : lastUpdateTime}
           />
         </div>
