@@ -1,4 +1,5 @@
 // Shared readiness checks prevent every chart from waking the gateway independently.
+const attempts = new Map<string, number>()
 const checks = new Map<string, { until: number; promise: Promise<any> }>()
 
 export function reconnectDelay(attempt: number, retrySeconds = 0): number {
@@ -30,7 +31,18 @@ export function providerStatus(base: string, symbol: string): Promise<any> {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 10000)
     try {
-      return await readableApiResponse(await fetch(`${base}/api/ibkr/status?symbol=${encodeURIComponent(symbol)}`, { cache: 'no-store', signal: controller.signal }))
+      const payload = await readableApiResponse(await fetch(`${base}/api/ibkr/status?symbol=${encodeURIComponent(symbol)}`, { cache: 'no-store', signal: controller.signal }))
+      const count = attempts.get(key) ?? 0
+      attempts.set(key, payload.ready ? 0 : count + 1)
+      const entry = checks.get(key)
+      if (entry) entry.until = Date.now() + (payload.ready ? 15000 : reconnectDelay(count, payload.retryAfterSeconds))
+      return payload
+    } catch (error) {
+      const count = attempts.get(key) ?? 0
+      attempts.set(key, count + 1)
+      const entry = checks.get(key)
+      if (entry) entry.until = Date.now() + reconnectDelay(count)
+      throw error
     } finally { clearTimeout(timeout) }
   })()
   checks.set(key, { until: Date.now() + 15000, promise })

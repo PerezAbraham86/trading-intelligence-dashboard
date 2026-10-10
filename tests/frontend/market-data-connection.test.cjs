@@ -3,9 +3,9 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const vm = require('node:vm')
 const ts = require('typescript')
-function load(fetch) {
+function load(fetch, clock = Date) {
   const exports = {}
-  vm.runInNewContext(ts.transpileModule(fs.readFileSync('lib/marketDataConnection.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports, fetch, AbortController, setTimeout, clearTimeout, Date })
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync('lib/marketDataConnection.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports, fetch, AbortController, setTimeout, clearTimeout, Date: clock })
   return exports
 }
 test('Disconnected reconnection delays increase and cap at five minutes', () => {
@@ -16,10 +16,17 @@ test('Disconnected reconnection delays increase and cap at five minutes', () => 
 })
 test('Readiness is shared across charts and does not hide disconnection', async () => {
   let calls = 0
-  const api = load(async () => { calls++; return { ok: true, json: async () => ({ ready: false, reason: 'IBKR_BASE_URL is not configured.' }) } })
+  let now = 0
+  const api = load(async () => { calls++; return { ok: true, json: async () => ({ ready: false, reason: 'IBKR_BASE_URL is not configured.' }) } }, { now: () => now })
   const statuses = await Promise.all([api.providerStatus('https://backend', 'MES1!'), api.providerStatus('https://backend', 'MES1!')])
   assert.equal(calls, 1)
   assert.equal(statuses[0].ready, false)
+  now = 16000
+  await api.providerStatus('https://backend', 'MES1!')
+  assert.equal(calls, 1, 'quote polling must not probe disconnected provider after 15s')
+  now = 61000
+  await api.providerStatus('https://backend', 'MES1!')
+  assert.equal(calls, 2)
   assert.match(api.marketDataMessage(statuses[0]), /missing gateway configuration/)
 })
 test('Messages distinguish mapping, entitlement, network and HTTP errors', async () => {

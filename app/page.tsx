@@ -6429,7 +6429,11 @@ export default function Dashboard() {
 
       try {
         const snapshots = await Promise.allSettled(
-          liveRequests.map((item) => fetchBackendSharedLivePrice(apiBaseUrl, item.symbol, item.timeframe))
+          liveRequests.map(async (item) => {
+            const provider = await providerStatus(apiBaseUrl, item.symbol)
+            if (cancelled || !provider.ready) return null
+            return fetchBackendSharedLivePrice(apiBaseUrl, item.symbol, item.timeframe)
+          })
         )
 
         if (cancelled) return
@@ -6946,6 +6950,8 @@ export default function Dashboard() {
 
     async function fetchDashboardSnapshots() {
       try {
+        const provider = await providerStatus(apiBaseUrl, selectedSymbol)
+        if (cancelled || !provider.ready) return
         const entries = await Promise.all(
           dashboardTimeframes.map(async (timeframe) => {
             try {
