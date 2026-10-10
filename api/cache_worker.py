@@ -152,7 +152,7 @@ def worker_loop() -> None:
         if health:
             log("backend health", {
                 "status": health.get("status"),
-                "insightsentryKeyPresent": health.get("insightsentryKeyPresent"),
+                "ibkrConfigured": health.get("ibkrConfigured"),
             })
 
         result = warm_candles(base_url, symbols, timeframes, limit, force=force)

@@ -38,3 +38,8 @@ yarn-error.log*
 
 # OS
 Thumbs.db
+
+# Python runtime files
+__pycache__/
+*.pyc
+*.tsbuildinfo

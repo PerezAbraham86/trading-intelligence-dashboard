@@ -20,6 +20,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from api.ibkr_client import (
+    IBKR_BASE_URL, get_historical_ohlcv, historical_ohlcv_status,
+    get_latest_live_snapshot, live_feed_event_generator, live_feed_ping_generator,
+    live_feed_status, get_quote as get_ibkr_quote, get_ibkr_session,
+    session_status as ibkr_session_status, contract_id as ibkr_contract_id,
+)
+
 from api.ghost_ml import (
     apply_ghost_ml_confidence,
     evaluate_ghost_ml_records,
@@ -184,45 +191,8 @@ except Exception:
 
 
 
-try:
-    from api.insightsentry_live_feed import (
-        get_latest_live_snapshot,
-        live_feed_event_generator,
-        live_feed_ping_generator,
-        live_feed_status,
-        refresh_insightsentry_websocket_key,
-    )
-except Exception:
-    try:
-        from insightsentry_live_feed import (
-            get_latest_live_snapshot,
-            live_feed_event_generator,
-            live_feed_ping_generator,
-            live_feed_status,
-            refresh_insightsentry_websocket_key,
-        )
-    except Exception:
-        get_latest_live_snapshot = None
-        live_feed_event_generator = None
-        live_feed_ping_generator = None
-        live_feed_status = None
-        refresh_insightsentry_websocket_key = None
 
 
-try:
-    from api.insightsentry_history import (
-        get_historical_ohlcv,
-        historical_ohlcv_status,
-    )
-except Exception:
-    try:
-        from insightsentry_history import (
-            get_historical_ohlcv,
-            historical_ohlcv_status,
-        )
-    except Exception:
-        get_historical_ohlcv = None
-        historical_ohlcv_status = None
 
 
 try:
@@ -247,20 +217,6 @@ except Exception:
         get_databento_ohlcv = None
 
 
-try:
-    from api.insightsentry_session import (
-        get_insightsentry_session,
-        insightsentry_session_status,
-    )
-except Exception:
-    try:
-        from insightsentry_session import (
-            get_insightsentry_session,
-            insightsentry_session_status,
-        )
-    except Exception:
-        get_insightsentry_session = None
-        insightsentry_session_status = None
 
 
 
@@ -375,25 +331,13 @@ ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
 DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", os.getenv("WEBHOOK_SECRET", "my_trading_secret_123"))
 
-INSIGHTSENTRY_API_KEY = (
-    os.getenv("INSIGHTSENTRY_API_KEY", "")
-    or os.getenv("INSIGHTSENTRY_RAPIDAPI_KEY", "")
-    or os.getenv("RAPIDAPI_KEY", "")
-    or os.getenv("X_RAPIDAPI_KEY", "")
-)
-INSIGHTSENTRY_HOST = (
-    os.getenv("INSIGHTSENTRY_HOST", "")
-    or os.getenv("INSIGHTSENTRY_RAPIDAPI_HOST", "")
-    or "insightsentry.p.rapidapi.com"
-)
-INSIGHTSENTRY_BASE_URL = f"https://{INSIGHTSENTRY_HOST}"
 
 ALPACA_STOCKS_BASE_URL = "https://data.alpaca.markets/v2"
 ALPACA_CRYPTO_BASE_URL = "https://data.alpaca.markets/v1beta3"
 
 DATABENTO_API_KEY = os.getenv("DATABENTO_API_KEY", "")
 DATABENTO_DATASET = os.getenv("DATABENTO_DATASET", "GLBX.MDP3")
-CANDLE_FUTURES_PROVIDER = os.getenv("CANDLE_FUTURES_PROVIDER", "insightsentry").strip().lower()
+CANDLE_FUTURES_PROVIDER = "ibkr"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -488,9 +432,7 @@ CANDLE_CACHE_FILE = Path(os.getenv("CANDLE_CACHE_FILE", "/tmp/trading_dashboard_
 CANDLE_SITE_CACHE_MAX_AGE_SECONDS = int(os.getenv("CANDLE_SITE_CACHE_MAX_AGE_SECONDS", "21600"))
 # Emergency bandwidth/rate-limit guard. MES history payloads were reaching 9M+ chars
 # and being refetched repeatedly during live-gap repair. Keep outbound/cache size safe
-# until Databento fully replaces InsightSentry. Set 0 only for controlled manual tests.
 EMERGENCY_FUTURES_MAX_CANDLES = int(os.getenv("EMERGENCY_FUTURES_MAX_CANDLES", "2000"))
-INSIGHTSENTRY_LIVE_QUOTE_HTTP_ENABLED = os.getenv("INSIGHTSENTRY_LIVE_QUOTE_HTTP_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 MAX_RECENT_SIGNALS = 50
 MAX_RECENT_CANDLES = int(os.getenv("MAX_RECENT_CANDLES", "50000"))
@@ -930,10 +872,7 @@ def is_futures_symbol(symbol: str) -> bool:
 
 
 def futures_provider_name() -> str:
-    provider = os.getenv("CANDLE_FUTURES_PROVIDER", CANDLE_FUTURES_PROVIDER or "insightsentry").strip().lower()
-    if provider in {"databento", "db", "glbx", "glbx.mdp3", "glbx-mdp3"}:
-        return "databento"
-    return "insightsentry"
+    return "ibkr"
 
 
 def use_databento_for_futures() -> bool:
@@ -1146,14 +1085,8 @@ def alpaca_headers() -> Dict[str, str]:
     }
 
 
-def insightsentry_headers() -> Dict[str, str]:
-    if not INSIGHTSENTRY_API_KEY:
-        raise HTTPException(status_code=500, detail="Missing INSIGHTSENTRY_API_KEY, INSIGHTSENTRY_RAPIDAPI_KEY, or RAPIDAPI_KEY")
-    return {
-        "Content-Type": "application/json",
-        "x-rapidapi-host": INSIGHTSENTRY_HOST,
-        "x-rapidapi-key": INSIGHTSENTRY_API_KEY,
-    }
+
+
 
 
 def http_get_json(url: str, headers: Optional[Dict[str, str]] = None, provider: str = "Data provider") -> Any:
@@ -1202,43 +1135,24 @@ def normalize_alpaca_bar(raw: Dict[str, Any], symbol: str, timeframe: str) -> Di
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# INSIGHTSENTRY HELPERS
+# IBKR HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-INSIGHTSENTRY_SYMBOL_MAP = {
-    "MES": "CME_MINI:MES1!",
-    "MES1": "CME_MINI:MES1!",
-    "MES1!": "CME_MINI:MES1!",
-    "SPY": "SPY",
-    "BTCUSD": "BTCUSD",
-    "ETHUSD": "ETHUSD",
-}
 
 
-def to_insightsentry_symbol(symbol: str) -> str:
-    normalized = normalize_symbol(symbol)
-    return INSIGHTSENTRY_SYMBOL_MAP.get(normalized, normalized)
 
 
-def insightsentry_symbol_candidates(symbol: str) -> List[str]:
-    normalized = normalize_symbol(symbol)
-
-    # Confirmed by InsightSentry Search:
-    # name=MES1!, code=CME_MINI:MES1!, type=FUTURES, exchange=CME.
-    # Keep this strict. No ES and no fallback aliases.
-    if normalized == "MES1!":
-        return ["CME_MINI:MES1!"]
-
-    return [to_insightsentry_symbol(normalized)]
 
 
-def insightsentry_interval_candidates(timeframe: str) -> List[str]:
-    tf = normalize_timeframe(timeframe)
-    allowed = {"1m", "3m", "5m", "10m", "15m", "30m"}
-    return [tf] if tf in allowed else ["1m"]
 
 
-def insightsentry_bar_type_interval(timeframe: str) -> Tuple[str, int]:
+
+
+
+
+
+
+def ibkr_bar_type_interval(timeframe: str) -> Tuple[str, int]:
     tf = normalize_timeframe(timeframe)
     mapping = {
         "1m": ("minute", 1),
@@ -1284,243 +1198,30 @@ def candles_match_requested_timeframe(candles: List[Dict[str, Any]], timeframe: 
     return expected * 0.5 <= median_gap <= expected * 2.5
 
 
-def extract_insightsentry_bars(payload: Any) -> List[Any]:
-    if isinstance(payload, list):
-        return payload
-
-    if not isinstance(payload, dict):
-        return []
-
-    direct_keys = [
-        "candles",
-        "bars",
-        "data",
-        "items",
-        "results",
-        "values",
-        "series",
-        "time_series",
-        "ohlcv",
-        "historical",
-    ]
-
-    for key in direct_keys:
-        value = payload.get(key)
-        if isinstance(value, list):
-            return value
-
-    for parent_key in ["result", "payload", "response"]:
-        nested = payload.get(parent_key)
-        if isinstance(nested, list):
-            return nested
-        if isinstance(nested, dict):
-            for key in direct_keys:
-                value = nested.get(key)
-                if isinstance(value, list):
-                    return value
-
-    data = payload.get("data")
-    if isinstance(data, dict):
-        for value in data.values():
-            if isinstance(value, list):
-                return value
-
-    return []
 
 
-def normalize_insightsentry_bar(raw: Any, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
-    if isinstance(raw, list):
-        if len(raw) < 4:
-            return None
-
-        first_is_time = isinstance(raw[0], str) or to_epoch_seconds(raw[0]) > 100000
-        if first_is_time:
-            raw_time = raw[0]
-            open_value = raw[1] if len(raw) > 1 else None
-            high_value = raw[2] if len(raw) > 2 else None
-            low_value = raw[3] if len(raw) > 3 else None
-            close_value = raw[4] if len(raw) > 4 else None
-            volume_value = raw[5] if len(raw) > 5 else 0
-        else:
-            raw_time = raw[5] if len(raw) > 5 else None
-            open_value = raw[0]
-            high_value = raw[1] if len(raw) > 1 else None
-            low_value = raw[2] if len(raw) > 2 else None
-            close_value = raw[3] if len(raw) > 3 else None
-            volume_value = raw[4] if len(raw) > 4 else 0
-    elif isinstance(raw, dict):
-        raw_time = (
-            raw.get("time")
-            or raw.get("timestamp")
-            or raw.get("datetime")
-            or raw.get("date")
-            or raw.get("t")
-            or raw.get("T")
-        )
-        open_value = raw.get("open", raw.get("o", raw.get("Open", raw.get("OPEN"))))
-        high_value = raw.get("high", raw.get("h", raw.get("High", raw.get("HIGH"))))
-        low_value = raw.get("low", raw.get("l", raw.get("Low", raw.get("LOW"))))
-        close_value = raw.get("close", raw.get("c", raw.get("Close", raw.get("CLOSE", raw.get("price", raw.get("last"))))))
-        volume_value = raw.get("volume", raw.get("v", raw.get("Volume", 0)))
-    else:
-        return None
-
-    if open_value is None or high_value is None or low_value is None or close_value is None:
-        return None
-
-    formatted_time = format_bar_time(raw_time)
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-
-    candle = {
-        "time": formatted_time,
-        "timestamp": formatted_time,
-        "epoch": to_epoch_seconds(formatted_time),
-        "open": to_float(open_value),
-        "high": to_float(high_value),
-        "low": to_float(low_value),
-        "close": to_float(close_value),
-        "volume": to_float(volume_value),
-        "symbol": normalized_symbol,
-        "timeframe": normalized_timeframe,
-        "createdAt": now_iso(),
-        "provider": "insightsentry",
-    }
-
-    if candle["open"] <= 0 or candle["high"] <= 0 or candle["low"] <= 0 or candle["close"] <= 0:
-        return None
-
-    if not is_candle_valid_for_symbol(candle, normalized_symbol):
-        return None
-
-    return candle
 
 
-def insightsentry_history_start_ym(symbol: str, timeframe: str) -> str:
-    """Return the verified earliest stable start_ym for InsightSentry futures history.
 
-    RapidAPI manual tests confirmed:
-    - CME_MINI:MES1! 1m with start_ym=2022-05 returns data_unavailable.
-    - CME_MINI:MES1! 1m with start_ym=2026-06 returns 16,000+ candles.
-    - CME_MINI:MES1! 3m with start_ym=2026-06 returns 5,000+ candles.
-    - CME_MINI:MES1! 5m/10m direct history returns thousands of candles.
 
-    Use one recent verified month for MES preload/direct history so every boot
-    timeframe can fetch 300+ real provider candles without 1m resampling.
-    """
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
 
-    if normalized_symbol == "MES1!":
-        return "2026-06"
 
-    # Keep other symbols on a recent, safe default. Their provider routers can
-    # override this if needed.
+def ibkr_history_start_ym(symbol: str, timeframe: str) -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m")
 
 
-def build_insightsentry_urls(api_symbol: str, api_interval: str, limit: int) -> List[str]:
-    encoded_path_symbol = quote(api_symbol, safe="")
-    bar_type, bar_interval = insightsentry_bar_type_interval(api_interval)
-    safe_limit = max(1, min(candle_cache_limit_value(limit) or 5000, 5000))
-
-    # InsightSentry Historical Time Series OHLCV uses /history with start_ym.
-    # We intentionally do not rely on /series dp for MES preload because it was
-    # returning short windows like 120 x 5m / 70 x 10m. RapidAPI confirmed that
-    # /history + start_ym=2026-06 returns thousands of direct 1m/3m/5m/10m bars.
-    history_params = {
-        "bar_type": bar_type,
-        "bar_interval": bar_interval,
-        "extended": "true",
-        "badj": "true",
-        "dadj": "false",
-        "start_ym": insightsentry_history_start_ym(api_symbol, api_interval),
-    }
-
-    # Keep /series as a last fallback only. Some older paths used this route;
-    # the /history route should win for MES.
-    series_params = {
-        "bar_type": bar_type,
-        "bar_interval": bar_interval,
-        "extended": "true",
-        "badj": "true",
-        "dadj": "false",
-        "dp": safe_limit,
-        "long_poll": "false",
-    }
-
-    return [
-        f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_path_symbol}/history?{urlencode(history_params)}",
-        f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_path_symbol}/series?{urlencode(series_params)}",
-    ]
-
-def fetch_insightsentry_direct_candles(symbol: str, timeframe: str = "1m", limit: int = 0) -> List[Dict[str, Any]]:
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(1, min(candle_cache_limit_value(limit) or 5000, 5000))
-    headers = insightsentry_headers()
-
-    last_error: Optional[str] = None
-
-    # Important reliability fix:
-    # Try multiple futures symbol formats. InsightSentry/RapidAPI can accept different
-    # futures symbols depending on the route/vendor cache. This prevents MES from
-    # going blank when only one symbol alias temporarily fails.
-    for api_symbol in insightsentry_symbol_candidates(normalized_symbol):
-        for api_interval in insightsentry_interval_candidates(normalized_timeframe):
-            for url in build_insightsentry_urls(api_symbol, api_interval, safe_limit):
-                data = http_get_json_or_none(url, headers=headers, provider="InsightSentry")
-                if data is None:
-                    continue
-
-                bars = extract_insightsentry_bars(data)
-                candles = [
-                    candle
-                    for candle in (normalize_insightsentry_bar(bar, normalized_symbol, normalized_timeframe) for bar in bars)
-                    if candle is not None
-                ]
-
-                candles = filter_valid_candles_for_symbol(merge_candles_by_time(candles), normalized_symbol)
-
-                if candles:
-                    if not candles_match_requested_timeframe(candles, normalized_timeframe):
-                        last_error = (
-                            f"Rejected wrong spacing from {url}; "
-                            f"requested={normalized_timeframe}; count={len(candles)}"
-                        )
-                        print(f"[InsightSentry] {last_error}")
-                        continue
-
-                    print(
-                        f"[InsightSentry] frontend_symbol={symbol} normalized={normalized_symbol} "
-                        f"api_symbol={api_symbol} timeframe={normalized_timeframe} api_interval={api_interval} "
-                        f"count={len(candles)}"
-                    )
-                    return maybe_limit_candles(candles, normalized_symbol, safe_limit)
-
-                last_error = f"No bars parsed from {url}"
-
-    if last_error:
-        print(f"[InsightSentry] {last_error}")
-
-    return []
 
 
-def fetch_insightsentry_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 0) -> List[Dict[str, Any]]:
-    """
-    MES/ES futures candles use the verified InsightSentry Time Series OHLCV route.
 
-    Removed old fallback behavior:
-    - No interval=5min style requests.
-    - No fake relabeling.
-    - No resampling fallback unless the provider returns valid direct candles.
-    """
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(1, min(candle_cache_limit_value(limit) or 5000, 5000))
 
-    direct = fetch_insightsentry_direct_candles(normalized_symbol, normalized_timeframe, safe_limit)
-    return direct if direct else []
+def fetch_ibkr_direct_candles(symbol: str, timeframe: str = "1m", limit: int = 0) -> List[Dict[str, Any]]:
+    return get_historical_ohlcv(symbol=normalize_symbol(symbol), timeframe=normalize_timeframe(timeframe), limit=limit)["candles"]
+
+
+
+def fetch_ibkr_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 0) -> List[Dict[str, Any]]:
+    return fetch_ibkr_direct_candles(symbol, timeframe, limit)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CANDLE PROVIDERS
@@ -1764,8 +1465,20 @@ def maybe_limit_candles(candles: List[Dict[str, Any]], symbol: str, limit: Any) 
     return rows[-candle_cache_limit_value(limit):]
 
 
+def candle_cache_namespace(route: str, symbol: str) -> str:
+    if not is_futures_symbol(symbol):
+        return route
+    if use_databento_for_futures():
+        return f"databento::{route}"
+    try:
+        conid = str(ibkr_contract_id(symbol))
+    except HTTPException:
+        conid = "unconfigured"
+    return f"ibkr::{conid}::{route}"
+
+
 def candle_cache_key(route: str, symbol: str, timeframe: str, limit: int) -> str:
-    return f"{route}::{normalize_symbol(symbol)}::{normalize_timeframe(timeframe)}::{candle_cache_limit_value(limit)}"
+    return f"{candle_cache_namespace(route, symbol)}::{normalize_symbol(symbol)}::{normalize_timeframe(timeframe)}::{candle_cache_limit_value(limit)}"
 
 
 def candle_cache_get(route: str, symbol: str, timeframe: str, limit: int, max_age_seconds: int = CANDLE_SITE_CACHE_MAX_AGE_SECONDS) -> Optional[Dict[str, Any]]:
@@ -1803,7 +1516,7 @@ def find_existing_candle_cache_payload_for_merge(route: str, symbol: str, timefr
     if db_get_best_candle_payload:
         try:
             existing_db = db_get_best_candle_payload(
-                route=route,
+                route=candle_cache_namespace(route, symbol),
                 symbol=normalized_symbol,
                 timeframe=normalized_timeframe,
                 min_limit_value=1,
@@ -1815,7 +1528,7 @@ def find_existing_candle_cache_payload_for_merge(route: str, symbol: str, timefr
         except Exception as error:
             print(f"[Site DB Cache] merge lookup failed: {error}")
 
-    prefix = f"{route}::{normalized_symbol}::{normalized_timeframe}::"
+    prefix = f"{candle_cache_namespace(route, normalized_symbol)}::{normalized_symbol}::{normalized_timeframe}::"
     best: Optional[Dict[str, Any]] = None
     best_count = -1
 
@@ -1870,7 +1583,7 @@ def candle_cache_set(route: str, symbol: str, timeframe: str, limit: int, payloa
         try:
             return db_set_candle_payload(
                 cache_key=key,
-                route=route,
+                route=candle_cache_namespace(route, symbol),
                 symbol=normalize_symbol(symbol),
                 timeframe=normalize_timeframe(timeframe),
                 limit_value=max(candle_cache_limit_value(limit), len(stored.get("candles", [])) if isinstance(stored.get("candles"), list) else candle_cache_limit_value(limit)),
@@ -1909,7 +1622,7 @@ def candle_cache_best(route: str, symbol: str, timeframe: str, limit: int, max_a
     if db_get_best_candle_payload:
         try:
             cached_db = db_get_best_candle_payload(
-                route=route,
+                route=candle_cache_namespace(route, symbol),
                 symbol=normalize_symbol(symbol),
                 timeframe=normalize_timeframe(timeframe),
                 min_limit_value=int(limit or 500),
@@ -1922,7 +1635,7 @@ def candle_cache_best(route: str, symbol: str, timeframe: str, limit: int, max_a
             print(f"[Site DB Cache] best-match get failed: {error}")
 
     # Memory fallback: same route/symbol/timeframe with any saved limit.
-    prefix = f"{route}::{normalize_symbol(symbol)}::{normalize_timeframe(timeframe)}::"
+    prefix = f"{candle_cache_namespace(route, symbol)}::{normalize_symbol(symbol)}::{normalize_timeframe(timeframe)}::"
     best: Optional[Dict[str, Any]] = None
     best_count = -1
     for key, value in CANDLE_RESPONSE_CACHE.items():
@@ -1942,7 +1655,7 @@ def candle_cache_best(route: str, symbol: str, timeframe: str, limit: int, max_a
 
 
 def latest_candle_close(candles: List[Dict[str, Any]]) -> float:
-    for candle in reversed(safe_list(candles)):
+    for candle in reversed(candles if isinstance(candles, list) else []):
         if not isinstance(candle, dict):
             continue
         close = to_float(candle.get("close") or candle.get("c") or candle.get("price"), 0.0)
@@ -1996,14 +1709,7 @@ def futures_cached_payload_is_stale_against_live(cached: Any, symbol: str, timef
     return False
 
 def cached_futures_history_payload_for_rate_limit(symbol: str, timeframe: str, limit: int) -> Optional[Dict[str, Any]]:
-    """Return cached MES history when InsightSentry rate-limits fresh history.
-
-    This fallback intentionally does not merge a far-away live candle into stale
-    historical candles. The frontend live/history gap guard decides whether live
-    should be stitched onto the chart. The goal here is to keep the chart from
-    going blank during 429 windows while still showing the last usable MES
-    candle series.
-    """
+    """Dashboard candles use the configured provider; IBKR returns a bounded contract-specific window."""
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
 
@@ -2040,17 +1746,17 @@ def cached_futures_history_payload_for_rate_limit(symbol: str, timeframe: str, l
             continue
 
         payload = build_candle_route_payload(
-            route_source="insightsentry_history_rate_limit_cache",
+            route_source="ibkr_history_rate_limit_cache",
             symbol=normalized_symbol,
             timeframe=normalized_timeframe,
             candles=filtered,
-            provider=str(cached.get("provider") or "insightsentry"),
+            provider=str(cached.get("provider") or "ibkr"),
             cache_label="rate_limit_cached_history",
         )
         payload["siteCache"] = cached.get("siteCache", True)
         payload["siteCacheAgeSeconds"] = cached.get("siteCacheAgeSeconds")
         payload["rateLimitFallback"] = True
-        payload["warning"] = "InsightSentry returned 429; using cached MES historical candles."
+        payload["warning"] = "Interactive Brokers returned 429; using cached MES historical candles."
         return payload
 
     return None
@@ -2063,18 +1769,7 @@ def timeframe_to_1m_fetch_limit(timeframe: str, limit: int) -> int:
 
 
 def fetch_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 0) -> List[Dict[str, Any]]:
-    """
-    Clean provider router.
-
-    Current dashboard symbols:
-    - BTCUSD -> Alpaca crypto
-    - MES1!  -> InsightSentry Time Series OHLCV
-
-    MES rule:
-    - Every timeframe is fetched directly from InsightSentry.
-    - No 1m resampling/building for 3m/5m/10m.
-    - No artificial 300/700/5000 chart limit; whatever InsightSentry returns is saved and plotted.
-    """
+    """Dashboard candles use the configured provider; IBKR returns a bounded contract-specific window."""
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = max(1, min(candle_cache_limit_value(limit) or 500, 5000))
@@ -2096,7 +1791,7 @@ def fetch_historical_candles(symbol: str, timeframe: str = "1m", limit: int = 0)
                 print(f"[Databento] historical failed for {normalized_symbol} {normalized_timeframe}: {error}")
                 return []
 
-        candles = fetch_insightsentry_historical_candles(normalized_symbol, normalized_timeframe, 0)
+        candles = fetch_ibkr_historical_candles(normalized_symbol, normalized_timeframe, 0)
         return filter_valid_candles_for_symbol(merge_candles_by_time(candles), normalized_symbol)
 
     if is_crypto_symbol(normalized_symbol):
@@ -2146,7 +1841,6 @@ def get_dashboard_candles(symbol: str, timeframe: str = "1m", limit: int = 0, us
     if use_cache:
         # Critical rate-limit protection:
         # internal dashboard panels ask for different limits (500, 600, 1000, 4000).
-        # Use the best existing backend cache instead of hitting InsightSentry again.
         for route_name in ["dashboard", "historical"]:
             cached = candle_cache_get(route_name, normalized_symbol, normalized_timeframe, safe_limit, CANDLE_SITE_CACHE_MAX_AGE_SECONDS)
             if not cached:
@@ -2449,71 +2143,16 @@ def fetch_alpaca_crypto_live_price(symbol: str, timeframe: str = "1m") -> Option
     return None
 
 
-def build_insightsentry_live_quote_urls(api_symbol: str) -> List[str]:
-    # Emergency rate-limit guard: these quote endpoints are not valid for the
-    # RapidAPI InsightSentry plan currently in use and were producing repeated
-    # 404 + 429 loops. Leave disabled unless a verified working quote endpoint
-    # is added later. The SSE/live-feed path can still provide live updates.
-    if not INSIGHTSENTRY_LIVE_QUOTE_HTTP_ENABLED:
-        return []
-
-    encoded_path_symbol = quote(api_symbol, safe="")
-    encoded_query_symbol = quote(api_symbol, safe="")
-    return [
-        f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_path_symbol}/quotes/l1",
-        f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_path_symbol}/quote",
-        f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_path_symbol}/quotes",
-        f"{INSIGHTSENTRY_BASE_URL}/v3/quotes/l1?symbol={encoded_query_symbol}",
-    ]
 
 
-def fetch_insightsentry_live_price(symbol: str, timeframe: str = "1m") -> Optional[Dict[str, Any]]:
-    normalized_symbol = normalize_symbol(symbol)
-    if not is_futures_symbol(normalized_symbol):
+
+
+def fetch_ibkr_live_price(symbol: str, timeframe: str = "1m") -> Optional[Dict[str, Any]]:
+    quote_payload = get_ibkr_quote(symbol, timeframe)
+    if not quote_payload.get("isRealtime"):
         return None
+    return quote_payload
 
-    headers = insightsentry_headers()
-    api_symbol = to_insightsentry_symbol(normalized_symbol)
-
-    for url in build_insightsentry_live_quote_urls(api_symbol):
-        try:
-            data = http_get_json_or_none(url, headers=headers, provider="InsightSentry live quote")
-            if data is None:
-                continue
-
-            price = recursive_find_number(
-                data,
-                {
-                    "last",
-                    "lastprice",
-                    "price",
-                    "tradeprice",
-                    "close",
-                    "settlement",
-                    "bid",
-                    "ask",
-                    "bidprice",
-                    "askprice",
-                    "bp",
-                    "ap",
-                },
-            )
-            raw_time = recursive_find_time(data)
-
-            if price and is_price_valid_for_symbol(price, normalized_symbol):
-                return normalize_live_price_payload(
-                    normalized_symbol,
-                    timeframe,
-                    price,
-                    raw_time=raw_time,
-                    provider="insightsentry",
-                    source="insightsentry_live_quote",
-                    raw=None,
-                )
-        except Exception as error:
-            print(f"[InsightSentry live quote] failed for {normalized_symbol}: {error}")
-
-    return None
 
 
 def get_live_price_payload(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
@@ -2525,13 +2164,12 @@ def get_live_price_payload(symbol: str, timeframe: str = "1m") -> Dict[str, Any]
     if is_crypto_symbol(normalized_symbol):
         live = fetch_alpaca_crypto_live_price(normalized_symbol, normalized_timeframe)
     elif is_futures_symbol(normalized_symbol):
-        live = fetch_insightsentry_live_price(normalized_symbol, normalized_timeframe)
+        live = fetch_ibkr_live_price(normalized_symbol, normalized_timeframe)
 
     if live is not None:
         return live
 
     # Emergency guard: do not answer /api/live-price for MES by launching a fresh
-    # full historical fetch. That fallback caused repeated 17k-candle InsightSentry
     # pulls, 429s, and Render bandwidth usage. Return no_live_price instead and
     # let the chart use SSE/shared cached live price.
     if is_futures_symbol(normalized_symbol):
@@ -2546,7 +2184,7 @@ def get_live_price_payload(symbol: str, timeframe: str = "1m") -> Dict[str, Any]
             "bucketEpoch": floor_epoch_to_timeframe(current_epoch, normalized_timeframe),
             "timeframeSeconds": timeframe_seconds(normalized_timeframe),
             "provider": None,
-            "source": "no_live_price_insightsentry_http_disabled",
+            "source": "no_live_price_ibkr_unavailable",
             "createdAt": now_iso(),
         }
 
@@ -2596,6 +2234,9 @@ PERSISTENT_LIVE_BACKFILL_ENABLED = os.getenv("PERSISTENT_LIVE_BACKFILL_ENABLED",
 
 def live_price_payload_to_candle(live_payload: Any, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
     if not isinstance(live_payload, dict):
+        return None
+    if live_payload.get("provider") == "ibkr":
+        # Provider OHLCV comes through history; snapshots are only prices.
         return None
 
     normalized_symbol = normalize_symbol(str(live_payload.get("symbol") or symbol))
@@ -2787,16 +2428,7 @@ def build_persistent_live_backfill_candles(
     previous_candle: Optional[Dict[str, Any]],
     current_tick: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
-    """Return only real persisted live candles unless synthetic backfill is explicitly enabled.
-
-    The chart gap shown between historical provider data and resumed live data must
-    not be filled with invented candles. A linear bridge creates fake HA candles,
-    fake SMC/OB zones, fake NRTR movement and bad AI context. By default we store
-    only the actual live timeframe candle. Historical gaps are repaired only when
-    InsightSentry/provider history later returns real OHLCV for those buckets.
-
-    Set PERSISTENT_LIVE_BACKFILL_ENABLED=true only for visual testing.
-    """
+    """Dashboard candles use the configured provider; IBKR returns a bounded contract-specific window."""
     if not isinstance(current_tick, dict):
         return []
 
@@ -3048,7 +2680,7 @@ def rebuild_history_payload_with_saved_live_candles(
         symbol=normalized_symbol,
         timeframe=normalized_timeframe,
         candles=merged,
-        provider=str(payload.get("provider") or payload.get("source") or "insightsentry") if isinstance(payload, dict) else "insightsentry",
+        provider=str(payload.get("provider") or payload.get("source") or "ibkr") if isinstance(payload, dict) else "ibkr",
         cache_label=str(payload.get("cache") or "provider_plus_persistent_live") if isinstance(payload, dict) else "provider_plus_persistent_live",
     )
 
@@ -7937,8 +7569,8 @@ def health() -> Dict[str, Any]:
         "time": now_iso(),
         "alpacaKeyPresent": bool(ALPACA_API_KEY),
         "alpacaSecretPresent": bool(ALPACA_SECRET_KEY),
-        "insightsentryKeyPresent": bool(INSIGHTSENTRY_API_KEY),
-        "insightsentryHost": INSIGHTSENTRY_HOST,
+        "ibkrConfigured": bool(IBKR_BASE_URL),
+        "marketDataProvider": "ibkr",
         "databentoKeyPresent": bool(DATABENTO_API_KEY),
         "databentoDataset": DATABENTO_DATASET,
         "futuresProvider": futures_provider_name(),
@@ -8112,11 +7744,9 @@ CANDLE_WAREHOUSE_RECENT_DP = max(2, min(int(os.getenv("CANDLE_WAREHOUSE_RECENT_D
 # Tail repair prevents the exact gap you saw:
 # historical candles stop at one time, then the live candle appends much later.
 # Instead of accepting an old cached tail, the backend refreshes the SAME timeframe
-# directly from InsightSentry up to the current provider point, then merges/saves it.
 CANDLE_WAREHOUSE_TAIL_REPAIR_ENABLED = os.getenv("CANDLE_WAREHOUSE_TAIL_REPAIR_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 CANDLE_WAREHOUSE_TAIL_REPAIR_COOLDOWN_SECONDS = max(30, int(os.getenv("CANDLE_WAREHOUSE_TAIL_REPAIR_COOLDOWN_SECONDS", "300")))
 # MES/ES history can legally pause for the CME maintenance break and weekend close.
-# Do not hammer InsightSentry just because the saved provider tail is a few hours old.
 CANDLE_WAREHOUSE_TAIL_STALE_SECONDS = max(3600, int(os.getenv("CANDLE_WAREHOUSE_TAIL_STALE_SECONDS", "43200")))
 CANDLE_WAREHOUSE_MAX_GAP_MULTIPLIER = max(2.0, to_float(os.getenv("CANDLE_WAREHOUSE_MAX_GAP_MULTIPLIER", "2.5"), 2.5))
 CME_FUTURES_SESSION_GAP_FILTER_ENABLED = os.getenv("CME_FUTURES_SESSION_GAP_FILTER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -8156,11 +7786,15 @@ def _store_backend_warehouse_candles(symbol: str, timeframe: str, candles_list: 
         symbol=normalized_symbol,
         timeframe=normalized_timeframe,
         candles=clean,
-        provider="insightsentry" if is_futures_symbol(normalized_symbol) else (clean[-1].get("provider") if clean else None),
+        provider="ibkr" if is_futures_symbol(normalized_symbol) else (clean[-1].get("provider") if clean else None),
         cache_label="warehouse_saved",
     )
     payload["backendWarehouse"] = True
-    payload["noArtificialCandleLimit"] = is_futures_symbol(normalized_symbol)
+    payload["noArtificialCandleLimit"] = False
+    payload["providerWindowLimited"] = True
+    payload["continuousContract"] = False
+    if payload.get("provider") == "ibkr":
+        payload["conid"] = ibkr_contract_id(normalized_symbol)
     payload["savedAllReturnedCandles"] = True
 
     if clean:
@@ -8199,12 +7833,7 @@ def _utc_minutes_of_day(value: datetime) -> int:
 
 
 def _is_expected_cme_futures_session_gap(previous_epoch: Any, next_epoch: Any, expected_seconds: int) -> bool:
-    """Treat CME maintenance/weekend breaks as expected gaps, not bad missing data.
-
-    MES/ES commonly stop around 20:55-20:59 UTC and resume around 22:00 UTC.
-    The old gap detector treated those normal breaks as broken data and forced
-    repeated provider refreshes, which caused InsightSentry 429 loops.
-    """
+    """Dashboard candles use the configured provider; IBKR returns a bounded contract-specific window."""
     if not CME_FUTURES_SESSION_GAP_FILTER_ENABLED:
         return False
 
@@ -8387,7 +8016,7 @@ def refresh_futures_history_to_current(
     _mark_tail_repair(route, normalized_symbol, normalized_timeframe)
 
     try:
-        fetched = fetch_insightsentry_historical_candles(normalized_symbol, normalized_timeframe, 0)
+        fetched = fetch_ibkr_historical_candles(normalized_symbol, normalized_timeframe, 0)
         fetched = filter_valid_candles_for_symbol(merge_candles_by_time(fetched), normalized_symbol)
 
         if not fetched:
@@ -8424,7 +8053,7 @@ def refresh_futures_history_to_current(
             "candles": merged,
         }
         repaired["tailRepairAttempted"] = True
-        repaired["tailRepairStatus"] = "refreshed_from_insightsentry_same_timeframe"
+        repaired["tailRepairStatus"] = "refreshed_from_ibkr_same_timeframe"
         repaired["tailRepairReason"] = reason
         repaired["directTimeframeFetch"] = True
         repaired["noTimeframeBuildFrom1m"] = True
@@ -8459,43 +8088,9 @@ def refresh_futures_history_to_current(
         return cached_payload
 
 
-def fetch_insightsentry_recent_series_candles(symbol: str, timeframe: str, dp: int = CANDLE_WAREHOUSE_RECENT_DP) -> List[Dict[str, Any]]:
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-    if not is_futures_symbol(normalized_symbol):
-        return []
+def fetch_ibkr_recent_series_candles(symbol: str, timeframe: str, dp: int = CANDLE_WAREHOUSE_RECENT_DP) -> List[Dict[str, Any]]:
+    return fetch_ibkr_direct_candles(symbol, timeframe, dp)
 
-    headers = insightsentry_headers()
-    bar_type, bar_interval = insightsentry_bar_type_interval(normalized_timeframe)
-    safe_dp = max(2, min(int(dp or CANDLE_WAREHOUSE_RECENT_DP), 100))
-
-    for api_symbol in insightsentry_symbol_candidates(normalized_symbol):
-        encoded_path_symbol = quote(api_symbol, safe="")
-        params = urlencode({
-            "bar_type": bar_type,
-            "bar_interval": bar_interval,
-            "extended": "true",
-            "badj": "true",
-            "dadj": "false",
-            "dp": safe_dp,
-            "long_poll": "false",
-        })
-        url = f"{INSIGHTSENTRY_BASE_URL}/v3/symbols/{encoded_path_symbol}/series?{params}"
-        data = http_get_json_or_none(url, headers=headers, provider="InsightSentry live candle series")
-        if data is None:
-            continue
-
-        bars = extract_insightsentry_bars(data)
-        candles_list = [
-            candle
-            for candle in (normalize_insightsentry_bar(bar, normalized_symbol, normalized_timeframe) for bar in bars)
-            if candle is not None
-        ]
-        candles_list = filter_valid_candles_for_symbol(merge_candles_by_time(candles_list), normalized_symbol)
-        if candles_list and candles_match_requested_timeframe(candles_list, normalized_timeframe):
-            return candles_list
-
-    return []
 
 
 def warm_backend_candle_warehouse(symbols: Optional[List[str]] = None, timeframes: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -8510,7 +8105,7 @@ def warm_backend_candle_warehouse(symbols: Optional[List[str]] = None, timeframe
             try:
                 if is_futures_symbol(normalized_symbol):
                     # Direct historical pull per timeframe. No 1m building. No candle cap.
-                    fetched = fetch_insightsentry_historical_candles(normalized_symbol, tf, 0)
+                    fetched = fetch_ibkr_historical_candles(normalized_symbol, tf, 0)
                 else:
                     fetched = fetch_historical_candles(normalized_symbol, tf, 0)
 
@@ -8566,7 +8161,7 @@ def _update_backend_live_candles_once() -> Dict[str, Any]:
             try:
                 saved_count = 0
                 if is_futures_symbol(normalized_symbol):
-                    recent = fetch_insightsentry_recent_series_candles(normalized_symbol, normalized_timeframe)
+                    recent = fetch_ibkr_recent_series_candles(normalized_symbol, normalized_timeframe)
                     if recent:
                         stored = _store_backend_warehouse_candles(
                             normalized_symbol,
@@ -8792,7 +8387,7 @@ def recent_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 3
 CLEAN_CANDLE_ROUTE = "candles"
 CLEAN_CANDLE_SYMBOLS = [item.strip() for item in os.getenv("CLEAN_CANDLE_SYMBOLS", "MES1!").split(",") if item.strip()]
 CLEAN_CANDLE_TIMEFRAMES = [item.strip() for item in os.getenv("CLEAN_CANDLE_TIMEFRAMES", "1m,3m,5m,10m").split(",") if item.strip()]
-CLEAN_CANDLE_START_YM = os.getenv("CANDLE_CLEAN_START_YM", os.getenv("INSIGHTSENTRY_HISTORY_START_YM", "2026-06"))
+CLEAN_CANDLE_START_YM = os.getenv("CANDLE_CLEAN_START_YM", datetime.now(timezone.utc).strftime("%Y-%m"))
 
 
 def clean_candle_limit(symbol: str, limit: Any) -> int:
@@ -8850,8 +8445,9 @@ def normalize_provider_history_candles(candles: Any, symbol: str, timeframe: str
             "volume": round(volume, 8),
             "symbol": normalized_symbol,
             "timeframe": normalized_timeframe,
-            "provider": str(raw.get("provider") or "insightsentry"),
-            "source": str(raw.get("source") or "insightsentry_v3_historical_ohlcv"),
+            "provider": str(raw.get("provider") or "ibkr"),
+            "source": str(raw.get("source") or "ibkr_historical_ohlcv"),
+            "conid": raw.get("conid"),
             "createdAt": now_iso(),
         }
 
@@ -8922,7 +8518,7 @@ def clean_cache_payload(symbol: str, timeframe: str, limit: int = 0, allow_stale
         symbol=normalized_symbol,
         timeframe=normalized_timeframe,
         candles=returned,
-        provider=str(cached.get("provider") or "insightsentry"),
+        provider=str(cached.get("provider") or "ibkr"),
         cache_label=str(cached.get("cache") or "site_cached"),
     )
     payload["cleanCandleService"] = True
@@ -8930,7 +8526,11 @@ def clean_cache_payload(symbol: str, timeframe: str, limit: int = 0, allow_stale
     payload["siteCache"] = cached.get("siteCache", True)
     payload["siteCacheAgeSeconds"] = cached.get("siteCacheAgeSeconds")
     payload["siteCacheDbFile"] = cached.get("siteCacheDbFile")
-    payload["noArtificialCandleLimit"] = is_futures_symbol(normalized_symbol)
+    payload["noArtificialCandleLimit"] = False
+    payload["providerWindowLimited"] = True
+    payload["continuousContract"] = False
+    if payload.get("provider") == "ibkr":
+        payload["conid"] = ibkr_contract_id(normalized_symbol)
     payload["cacheRoute"] = CLEAN_CANDLE_ROUTE
     payload["gapInfo"] = _candle_gap_summary(returned, normalized_timeframe, normalized_symbol) if is_futures_symbol(normalized_symbol) else None
     payload["staleCacheGuard"] = {
@@ -8964,7 +8564,7 @@ def fetch_clean_provider_candles(symbol: str, timeframe: str, limit: int = 0, fo
             source = str(response.get("source") or "databento_glbx_mdp3_ohlcv") if isinstance(response, dict) else "databento_glbx_mdp3_ohlcv"
         else:
             if get_historical_ohlcv is None:
-                raise HTTPException(status_code=500, detail="api.insightsentry_history.get_historical_ohlcv is unavailable")
+                raise HTTPException(status_code=500, detail="api.ibkr_history.get_historical_ohlcv is unavailable")
 
             response = get_historical_ohlcv(
                 symbol=normalized_symbol,
@@ -8975,8 +8575,8 @@ def fetch_clean_provider_candles(symbol: str, timeframe: str, limit: int = 0, fo
             )
             raw_candles = response.get("candles") if isinstance(response, dict) else []
             candles_list = normalize_provider_history_candles(raw_candles, normalized_symbol, normalized_timeframe)
-            provider = "insightsentry"
-            source = str(response.get("source") or "insightsentry_v3_historical_ohlcv") if isinstance(response, dict) else "insightsentry_v3_historical_ohlcv"
+            provider = "ibkr"
+            source = str(response.get("source") or "ibkr_historical_ohlcv") if isinstance(response, dict) else "ibkr_historical_ohlcv"
     else:
         candles_list = fetch_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
         candles_list = normalize_provider_history_candles(candles_list, normalized_symbol, normalized_timeframe)
@@ -8999,7 +8599,11 @@ def fetch_clean_provider_candles(symbol: str, timeframe: str, limit: int = 0, fo
     payload["requestedProvider"] = futures_provider_name() if is_futures_symbol(normalized_symbol) else provider
     payload["databentoEnabledForFutures"] = use_databento_for_futures() if is_futures_symbol(normalized_symbol) else False
     payload["requestedLimit"] = safe_limit
-    payload["noArtificialCandleLimit"] = is_futures_symbol(normalized_symbol)
+    payload["noArtificialCandleLimit"] = False
+    payload["providerWindowLimited"] = True
+    payload["continuousContract"] = False
+    if payload.get("provider") == "ibkr":
+        payload["conid"] = ibkr_contract_id(normalized_symbol)
     payload["noTimeframeBuildFrom1m"] = is_futures_symbol(normalized_symbol)
     payload["startYm"] = CLEAN_CANDLE_START_YM if is_futures_symbol(normalized_symbol) else None
     payload["gapInfo"] = _candle_gap_summary(returned, normalized_timeframe, normalized_symbol) if is_futures_symbol(normalized_symbol) else None
@@ -9149,14 +8753,7 @@ def api_databento_candles(
 
 @app.get("/api/candles")
 def candles(symbol: str = "MES1!", timeframe: str = "5m", limit: int = 0, force: bool = False) -> Dict[str, Any]:
-    """Single clean chart candle route.
-
-    MES rules:
-    - default provider remains InsightSentry until CANDLE_FUTURES_PROVIDER=databento
-    - Databento test routes are available at /api/databento/*
-    - limit=0/no artificial cap
-    - one cache family: route='candles'
-    """
+    """Dashboard candles use the configured provider; IBKR returns a bounded contract-specific window."""
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = clean_candle_limit(normalized_symbol, limit)
@@ -9272,14 +8869,7 @@ def _store_preload_candle_payload(
 
 
 def _preload_mes_direct_history(timeframe_list: List[str], limit: int) -> List[Dict[str, Any]]:
-    """Preload MES using the exact direct InsightSentry intervals confirmed in RapidAPI.
-
-    No guessing and no 1m-resample shortcut for 5m/10m/3m during boot:
-    - Provider display in UI remains MES1!
-    - InsightSentry provider symbol is locked to CME_MINI:MES1!
-    - 1m/3m/5m/10m are fetched directly with bar_type=minute and matching bar_interval
-    - start_ym=2026-06 is used for MES because RapidAPI verified it returns real bars
-    """
+    """Dashboard candles use the configured provider; IBKR returns a bounded contract-specific window."""
     normalized_symbol = "MES1!"
     safe_limit = 0
     required_count = 1
@@ -9302,20 +8892,19 @@ def _preload_mes_direct_history(timeframe_list: List[str], limit: int) -> List[D
 
         if len(tf_candles) < required_count:
             try:
-                fetched = fetch_insightsentry_historical_candles(normalized_symbol, tf, safe_limit)
+                fetched = fetch_ibkr_historical_candles(normalized_symbol, tf, safe_limit)
                 fetched = filter_valid_candles_for_symbol(fetched, normalized_symbol)
                 if len(fetched) >= len(tf_candles):
                     tf_candles = fetched
-                    source = f"mes_preload_direct_{tf}_history_start_ym_{insightsentry_history_start_ym(normalized_symbol, tf)}"
+                    source = f"mes_preload_direct_{tf}_history_start_ym_{ibkr_history_start_ym(normalized_symbol, tf)}"
             except Exception as error:
                 print(f"[Preload candles] MES direct {tf} fetch failed: {error}")
 
-        # Only custom unsupported TFs should fall back to 1m resampling. RapidAPI
-        # confirmed 3m works with start_ym=2026-06, so this should rarely run.
+        # Only custom unsupported TFs should fall back to 1m resampling. provider
         if len(tf_candles) < required_count and tf not in {"1m", "3m", "5m", "10m", "15m", "30m"}:
             try:
                 one_min_limit = max(safe_limit * max(1, int(timeframe_seconds(tf) / 60)) + 300, 1000)
-                one_min = fetch_insightsentry_historical_candles(normalized_symbol, "1m", min(one_min_limit, 5000))
+                one_min = fetch_ibkr_historical_candles(normalized_symbol, "1m", min(one_min_limit, 5000))
                 resampled = resample_candles_to_timeframe(one_min, tf, safe_limit)
                 if len(resampled) > len(tf_candles):
                     tf_candles = resampled
@@ -9328,7 +8917,7 @@ def _preload_mes_direct_history(timeframe_list: List[str], limit: int) -> List[D
             timeframe=tf,
             limit=safe_limit,
             candles_list=tf_candles,
-            provider="insightsentry" if tf_candles else "unavailable",
+            provider="ibkr" if tf_candles else "unavailable",
             source=source if tf_candles else "mes_preload_direct_history_unavailable",
         )
 
@@ -9341,14 +8930,14 @@ def _preload_mes_direct_history(timeframe_list: List[str], limit: int) -> List[D
             "count": stored_count,
             "requiredCount": required_count,
             "cache": stored.get("cache") if isinstance(stored, dict) else None,
-            "provider": stored.get("provider") if isinstance(stored, dict) else "insightsentry",
+            "provider": stored.get("provider") if isinstance(stored, dict) else "ibkr",
             "source": stored.get("source") if isinstance(stored, dict) else source,
             "preloaded": stored_count >= required_count,
             "historicalOnly": True,
-            "insightSentrySymbol": "CME_MINI:MES1!",
+            "ibkrContractId": ibkr_contract_id(normalized_symbol),
             "barType": "minute",
-            "barInterval": insightsentry_bar_type_interval(tf)[1],
-            "startYm": insightsentry_history_start_ym(normalized_symbol, tf),
+            "barInterval": ibkr_bar_type_interval(tf)[1],
+            "startYm": ibkr_history_start_ym(normalized_symbol, tf),
         })
 
     return results
@@ -9368,9 +8957,6 @@ def preload_candles(
 
     for item_symbol in symbol_list:
         if is_futures_symbol(item_symbol):
-            # MES boot warmup uses exact direct InsightSentry intervals confirmed
-            # in RapidAPI: CME_MINI:MES1! with bar_interval 1/3/5/10 and
-            # start_ym=2026-06. This avoids the bad 700 x 1m -> short 5m/10m
             # resample path and lets preload require 300+ real candles per TF.
             results.extend(_preload_mes_direct_history(timeframe_list, safe_limit))
             continue
@@ -9790,7 +9376,6 @@ def engine_state(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 500
 # ─────────────────────────────────────────────────────────────────────────────
 # DASHBOARD SNAPSHOT ROUTES
 # One backend-for-frontend response so React does not coordinate 8-10 separate
-# polling calls and accidentally hammer InsightSentry.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _snapshot_bool(value: Any, fallback: bool = True) -> bool:
@@ -10023,50 +9608,14 @@ async def dashboard_snapshot_post(request: FastAPIRequest) -> Dict[str, Any]:
 
 
 @app.get("/api/provider-debug")
-def provider_debug(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 20) -> Dict[str, Any]:
-    normalized_symbol = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-    safe_limit = max(1, min(int(limit or 20), 100))
-    debug: Dict[str, Any] = {
-        "symbol": normalized_symbol,
-        "timeframe": normalized_timeframe,
-        "alpacaKeyPresent": bool(ALPACA_API_KEY),
-        "insightsentryKeyPresent": bool(INSIGHTSENTRY_API_KEY),
-        "insightsentryHost": INSIGHTSENTRY_HOST,
-        "tests": {},
-    }
+def provider_debug(symbol: str = "MES1!", timeframe: str = "1m", limit: int = 20) -> Dict[str, Any]:
+    status = ibkr_session_status()
+    if is_futures_symbol(symbol) and status.get("authenticated"):
+        payload = get_historical_ohlcv(symbol=normalize_symbol(symbol), timeframe=normalize_timeframe(timeframe), limit=max(1, min(limit, 100)))
+        status["historyCount"] = payload["count"]
+        status["sample"] = payload["candles"][-5:]
+    return status
 
-    if is_futures_symbol(normalized_symbol):
-        api_symbol = to_insightsentry_symbol(normalized_symbol)
-        urls = build_insightsentry_urls(api_symbol, normalized_timeframe, safe_limit)
-        data = http_get_json_or_none(urls[0], headers=insightsentry_headers(), provider="InsightSentry")
-        bars = extract_insightsentry_bars(data)
-        parsed = [
-            candle
-            for candle in (normalize_insightsentry_bar(bar, normalized_symbol, normalized_timeframe) for bar in bars)
-            if candle is not None
-        ]
-        parsed = merge_candles_by_time(parsed)
-        debug["tests"]["insightsentry"] = {
-            "apiSymbol": api_symbol,
-            "urlWithoutKey": urls[0],
-            "rawBarsCount": len(bars),
-            "parsedCount": len(parsed),
-            "spacingOk": candles_match_requested_timeframe(parsed, normalized_timeframe),
-            "sample": parsed[-5:],
-        }
-    else:
-        try:
-            parsed = fetch_alpaca_historical_candles(normalized_symbol, normalized_timeframe, safe_limit)
-        except Exception as error:
-            parsed = []
-            debug["tests"]["alpacaError"] = str(error)
-        debug["tests"]["alpaca"] = {
-            "parsedCount": len(parsed),
-            "sample": parsed[-5:],
-        }
-
-    return debug
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -10658,14 +10207,14 @@ if __name__ == "__main__":
     uvicorn.run("api.main:app", host="0.0.0.0", port=port, reload=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHASE 8 — INSIGHTSENTRY LIVE PRICE / CANDLE FEED ROUTES
+# PHASE 8 — IBKR LIVE PRICE / CANDLE FEED ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 @app.get("/api/live-feed/status")
 def api_live_feed_status() -> Dict[str, Any]:
     if live_feed_status is None:
-        raise HTTPException(status_code=503, detail="api.insightsentry_live_feed module unavailable")
+        raise HTTPException(status_code=503, detail="IBKR live feed unavailable")
     return live_feed_status()
 
 
@@ -10674,25 +10223,20 @@ def api_live_feed_status_alias() -> Dict[str, Any]:
     return api_live_feed_status()
 
 
-@app.get("/api/live-feed/refresh-key")
-def api_live_feed_refresh_key(force: bool = False) -> Dict[str, Any]:
-    if refresh_insightsentry_websocket_key is None:
-        raise HTTPException(status_code=503, detail="api.insightsentry_live_feed module unavailable")
-    try:
-        return refresh_insightsentry_websocket_key(force=force)
-    except Exception as error:
-        raise HTTPException(status_code=500, detail=str(error))
+@app.get("/api/ibkr/status")
+def api_ibkr_status() -> Dict[str, Any]:
+    return ibkr_session_status()
 
 
-@app.get("/live-feed/refresh-key")
-def api_live_feed_refresh_key_alias(force: bool = False) -> Dict[str, Any]:
-    return api_live_feed_refresh_key(force=force)
+
+
+
 
 
 @app.get("/api/live-feed/latest")
 def api_live_feed_latest(symbol: str = "MES1!", timeframe: str = "1m") -> Dict[str, Any]:
     if get_latest_live_snapshot is None:
-        raise HTTPException(status_code=503, detail="api.insightsentry_live_feed module unavailable")
+        raise HTTPException(status_code=503, detail="IBKR live feed unavailable")
     return get_latest_live_snapshot(symbol=symbol, timeframe=timeframe)
 
 
@@ -10709,7 +10253,7 @@ def api_live_feed_stream(
     pollSeconds: float = 1.0,
 ) -> StreamingResponse:
     if live_feed_event_generator is None:
-        raise HTTPException(status_code=503, detail="api.insightsentry_live_feed module unavailable")
+        raise HTTPException(status_code=503, detail="IBKR live feed unavailable")
 
     headers = {
         "Cache-Control": "no-cache",
@@ -10737,16 +10281,16 @@ def api_live_feed_stream_alias(
 @app.get("/api/live-feed/ping")
 def api_live_feed_ping() -> StreamingResponse:
     if live_feed_ping_generator is None:
-        raise HTTPException(status_code=503, detail="api.insightsentry_live_feed module unavailable")
+        raise HTTPException(status_code=503, detail="IBKR live feed unavailable")
     return StreamingResponse(live_feed_ping_generator(), media_type="text/event-stream")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# INSIGHTSENTRY HISTORICAL TIME SERIES OHLCV — PHASE 8.6
+# IBKR HISTORICAL TIME SERIES OHLCV — PHASE 8.6
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.get("/api/insightsentry/history")
-def api_insightsentry_history(
+@app.get("/api/ibkr/history")
+def api_ibkr_history(
     symbol: str = "MES1!",
     timeframe: str = "1m",
     start_ym: str | None = None,
@@ -10761,13 +10305,12 @@ def api_insightsentry_history(
     safe_limit = max(1, min(int(limit or 700), 5000))
 
     if get_historical_ohlcv is None:
-        raise HTTPException(status_code=503, detail="api.insightsentry_history module unavailable")
+        raise HTTPException(status_code=503, detail="IBKR history unavailable")
 
     provider_force = force and not is_futures_symbol(normalized_symbol)
 
     # MES/ES should not bypass cache on normal dashboard refreshes. The frontend can
     # request force=true after a live/history gap, but sending that directly to
-    # InsightSentry keeps causing 429 rate limits. For futures, prefer cached/stale
     # history fallback and only refresh through the bounded backend cache path.
     if force and is_futures_symbol(normalized_symbol):
         fallback = cached_futures_history_payload_for_rate_limit(
@@ -10792,7 +10335,7 @@ def api_insightsentry_history(
 
         if isinstance(provider_payload, dict):
             rebuilt = rebuild_history_payload_with_saved_live_candles(
-                route_source="insightsentry_history_plus_persistent_live",
+                route_source="ibkr_history_plus_persistent_live",
                 symbol=normalized_symbol,
                 timeframe=normalized_timeframe,
                 payload=provider_payload,
@@ -10812,7 +10355,7 @@ def api_insightsentry_history(
             )
             if fallback:
                 rebuilt = rebuild_history_payload_with_saved_live_candles(
-                    route_source="insightsentry_history_rate_limit_cache_plus_persistent_live",
+                    route_source="ibkr_history_rate_limit_cache_plus_persistent_live",
                     symbol=normalized_symbol,
                     timeframe=normalized_timeframe,
                     payload=fallback,
@@ -10830,7 +10373,7 @@ def api_insightsentry_history(
             )
             if fallback:
                 rebuilt = rebuild_history_payload_with_saved_live_candles(
-                    route_source="insightsentry_history_rate_limit_cache_plus_persistent_live",
+                    route_source="ibkr_history_rate_limit_cache_plus_persistent_live",
                     symbol=normalized_symbol,
                     timeframe=normalized_timeframe,
                     payload=fallback,
@@ -10840,8 +10383,8 @@ def api_insightsentry_history(
         raise
 
 
-@app.get("/insightsentry/history")
-def api_insightsentry_history_alias(
+@app.get("/ibkr/history")
+def api_ibkr_history_alias(
     symbol: str = "MES1!",
     timeframe: str = "1m",
     start_ym: str | None = None,
@@ -10851,7 +10394,7 @@ def api_insightsentry_history_alias(
     dadj: bool = False,
     force: bool = False,
 ) -> Dict[str, Any]:
-    return api_insightsentry_history(
+    return api_ibkr_history(
         symbol=symbol,
         timeframe=timeframe,
         start_ym=start_ym,
@@ -10863,50 +10406,50 @@ def api_insightsentry_history_alias(
     )
 
 
-@app.get("/api/insightsentry/history/status")
-def api_insightsentry_history_status() -> Dict[str, Any]:
+@app.get("/api/ibkr/history/status")
+def api_ibkr_history_status() -> Dict[str, Any]:
     if historical_ohlcv_status is None:
-        raise HTTPException(status_code=503, detail="api.insightsentry_history module unavailable")
+        raise HTTPException(status_code=503, detail="IBKR history unavailable")
     return historical_ohlcv_status()
 
 
-@app.get("/insightsentry/history/status")
-def api_insightsentry_history_status_alias() -> Dict[str, Any]:
-    return api_insightsentry_history_status()
+@app.get("/ibkr/history/status")
+def api_ibkr_history_status_alias() -> Dict[str, Any]:
+    return api_ibkr_history_status()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# INSIGHTSENTRY SESSION INFORMATION — PHASE 8.7
+# IBKR SESSION INFORMATION — PHASE 8.7
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.get("/api/insightsentry/session")
-def api_insightsentry_session(
+@app.get("/api/ibkr/session")
+def api_ibkr_session(
     symbol: str = "MES1!",
     force: bool = False,
 ) -> Dict[str, Any]:
-    if get_insightsentry_session is None:
-        raise HTTPException(status_code=503, detail="api.insightsentry_session module unavailable")
-    return get_insightsentry_session(symbol=symbol, force=force)
+    if get_ibkr_session is None:
+        raise HTTPException(status_code=503, detail="IBKR session unavailable")
+    return get_ibkr_session(symbol=symbol, force=force)
 
 
-@app.get("/insightsentry/session")
-def api_insightsentry_session_alias(
+@app.get("/ibkr/session")
+def api_ibkr_session_alias(
     symbol: str = "MES1!",
     force: bool = False,
 ) -> Dict[str, Any]:
-    return api_insightsentry_session(symbol=symbol, force=force)
+    return api_ibkr_session(symbol=symbol, force=force)
 
 
-@app.get("/api/insightsentry/session/status")
-def api_insightsentry_session_status() -> Dict[str, Any]:
-    if insightsentry_session_status is None:
-        raise HTTPException(status_code=503, detail="api.insightsentry_session module unavailable")
-    return insightsentry_session_status()
+@app.get("/api/ibkr/session/status")
+def api_ibkr_session_status() -> Dict[str, Any]:
+    if ibkr_session_status is None:
+        raise HTTPException(status_code=503, detail="IBKR session unavailable")
+    return ibkr_session_status()
 
 
-@app.get("/insightsentry/session/status")
-def api_insightsentry_session_status_alias() -> Dict[str, Any]:
-    return api_insightsentry_session_status()
+@app.get("/ibkr/session/status")
+def api_ibkr_session_status_alias() -> Dict[str, Any]:
+    return api_ibkr_session_status()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

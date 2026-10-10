@@ -813,7 +813,7 @@ async function fetchCandlesFromNetwork(
   signal?: AbortSignal
 ): Promise<Candle[]> {
   // Send only the dashboard symbol.
-  // api/main.py maps MES1! to the confirmed InsightSentry code CME_MINI:MES1!.
+  // The backend maps MES1! to the configured IBKR futures contract ID.
   const params = new URLSearchParams({
     symbol: normalizeDefaultSymbol(symbol),
     timeframe: normalizeTimeframe(timeframe),

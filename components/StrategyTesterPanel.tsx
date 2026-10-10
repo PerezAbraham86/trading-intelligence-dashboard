@@ -277,8 +277,8 @@ function getTesterCandleRoute(apiBaseUrl: string, symbol: string) {
 
   if (isTesterFuturesSymbol(normalized)) {
     return {
-      route: `${apiBaseUrl}/api/insightsentry/history`,
-      provider: "insightsentry",
+      route: `${apiBaseUrl}/api/ibkr/history`,
+      provider: "ibkr",
     };
   }
 
@@ -1514,7 +1514,7 @@ export default function StrategyTesterPanel({
           force: "false",
         });
 
-        if (routeConfig.provider === "insightsentry") {
+        if (routeConfig.provider === "ibkr") {
           params.set("start_ym", new Date().toISOString().slice(0, 7));
           params.set("extended", "true");
           params.set("badj", "true");

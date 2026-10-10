@@ -162,3 +162,46 @@ All signals follow this schema:
 | cot | string | COT (Commitments of Traders) analysis |
 | warnings | array | Any trading warnings |
 | createdAt | string | UTC ISO 8601 timestamp (auto-generated) |
+
+## Interactive Brokers market data
+
+Futures history and live quotes use the read-only Client Portal Gateway adapter in
+`api/ibkr_client.py`. The frontend calls the dashboard backend; gateway access and
+sessions stay server-side. No broker order placement has been added.
+
+1. Run Client Portal Gateway and sign in using IBKR's browser login/2FA. Keep its
+   brokerage session active and check market-data permissions/subscriptions.
+2. Set `IBKR_BASE_URL` to the authenticated gateway's HTTPS `/v1/api` URL reachable
+   **from the backend**. A gateway on your PC's `localhost` is not reachable from
+   Render. For hosted use, place the gateway and backend on the same private host
+   or establish a private authenticated connection. Do not expose the gateway
+   directly to the public internet.
+3. Set `IBKR_CONID_MAP` to a JSON map such as `{"MES1!": <actual integer conid>}`.
+   `IBKR_MES_CONID` is an optional shortcut. Futures IDs must identify the intended
+   expiry; this adapter does not silently choose or roll a contract.
+4. Trust the gateway certificate using `IBKR_CA_BUNDLE`. TLS verification is on by
+   default. `IBKR_VERIFY_TLS=false` is accepted only for a loopback development
+   gateway. Copy settings from `api/.env.example` into the backend environment.
+5. Restart and check `/api/ibkr/status`, `/api/ibkr/history?symbol=MES1!&timeframe=1m`,
+   `/api/live-feed/status`, and `/api/live-price?symbol=MES1!`.
+
+`IBKR_HISTORY_PERIOD` defaults to a recent window (1 day for intraday bars);
+`IBKR_HISTORY_CACHE_SECONDS` defaults to 60 seconds. IBKR's provider limits still
+apply. This is contract-specific history, not back-adjusted continuous futures
+history. Futures caches are isolated by IBKR contract ID so previous-provider
+history and different expiries cannot be merged into the new feed.
+
+Live quotes are shared/cached for five seconds and forwarded through the existing
+SSE route. Historical OHLCV refreshes are cached; the adapter does not create
+synthetic OHLCV or volume from price snapshots. Delayed/stale quotes are marked
+explicitly and do not feed the live candle stream. Futures options-flow and options
+open-interest analytics return unavailable until those IBKR data sources are
+implemented. Other independent data sources (crypto/stocks, macro and market
+analytics) keep their existing integrations.
+
+Remove the previous market-data provider's keys and host settings from the hosting
+dashboard separately, and cancel its subscription if no longer needed. Repository
+changes cannot delete deployed secrets or cancel external billing.
+
+Verification: `python -m unittest discover -s tests -v` and `npx tsc --noEmit`.
+IBKR reference: https://www.interactivebrokers.com/docs/web-api/api-reference/trading/trading-market-data/get-md-history

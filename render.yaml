@@ -15,12 +15,16 @@ services:
         value: "86400"
       - key: MAX_STORED_CANDLES_PER_CACHE_ENTRY
         value: "0"
-      - key: INSIGHTSENTRY_HISTORY_TIMEOUT_SECONDS
+      - key: IBKR_TIMEOUT_SECONDS
         value: "30"
-      - key: INSIGHTSENTRY_HISTORY_CACHE_SECONDS
-        value: "20"
-      - key: CANDLE_CLEAN_START_YM
-        value: "2026-06"
+      - key: IBKR_HISTORY_CACHE_SECONDS
+        value: "60"
+      - key: IBKR_BASE_URL
+        sync: false
+      - key: IBKR_CONID_MAP
+        sync: false
+      - key: CANDLE_FUTURES_PROVIDER
+        value: ibkr
 
   - type: worker
     name: trading-intelligence-dashboard-cache-worker

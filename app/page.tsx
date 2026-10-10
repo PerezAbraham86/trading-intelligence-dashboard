@@ -325,18 +325,18 @@ function isFuturesCandleSymbol(symbol: string) {
   return normalized === 'MES1!'
 }
 
-function isInsightSentryDirectHistoricalTimeframe(timeframe: string) {
+function isIBKRDirectHistoricalTimeframe(timeframe: string) {
   return ['1m', '3m', '5m', '10m', '15m', '30m'].includes(normalizeTimeframe(timeframe))
 }
 
 function getHistoricalCandleRouteForSymbol(apiBaseUrl: string, symbol: string) {
   const normalized = normalizeSymbol(symbol)
 
-  // Frontend must not call InsightSentry history directly for MES/futures.
+  // Frontend must not call IBKR history directly for MES/futures.
   // The backend snapshot/candle router is now the authority that merges:
   // historical candles + persistent live candles + provider-rate-limit cache.
   // Keeping all MES history behind /api/candles prevents the browser from
-  // spamming /api/insightsentry/history and triggering 429 rate limits.
+  // spamming /api/ibkr/history and triggering 429 rate limits.
   if (isFuturesCandleSymbol(normalized)) {
     return {
       route: `${apiBaseUrl}/api/candles`,
@@ -347,7 +347,7 @@ function getHistoricalCandleRouteForSymbol(apiBaseUrl: string, symbol: string) {
 
   // BTCUSD / ETHUSD / SPY should keep the original backend candle router.
   // api/main.py routes crypto through Alpaca crypto and SPY through Alpaca stock.
-  // This prevents BTCUSD from being incorrectly treated as an InsightSentry futures symbol.
+  // This prevents BTCUSD from being incorrectly treated as an IBKR futures symbol.
   return {
     route: `${apiBaseUrl}/api/candles`,
     provider: isCryptoCandleSymbol(normalized) ? 'alpaca_crypto' : 'dashboard_candles',
@@ -1086,15 +1086,15 @@ type SharedCandleCacheEntry = {
 
 const SHARED_CANDLE_CACHE = new Map<string, SharedCandleCacheEntry>()
 const SHARED_CANDLE_IN_FLIGHT = new Map<string, Promise<SharedCandleCacheEntry>>()
-const INSIGHTSENTRY_HISTORY_BACKOFF_UNTIL = new Map<string, number>()
-const INSIGHTSENTRY_HISTORY_BACKOFF_MS = 3 * 60 * 1000
+const IBKR_HISTORY_BACKOFF_UNTIL = new Map<string, number>()
+const IBKR_HISTORY_BACKOFF_MS = 3 * 60 * 1000
 
-function shouldUseInsightSentryBackoff(key: string) {
-  return (INSIGHTSENTRY_HISTORY_BACKOFF_UNTIL.get(key) ?? 0) > Date.now()
+function shouldUseIBKRBackoff(key: string) {
+  return (IBKR_HISTORY_BACKOFF_UNTIL.get(key) ?? 0) > Date.now()
 }
 
-function rememberInsightSentryBackoff(key: string) {
-  INSIGHTSENTRY_HISTORY_BACKOFF_UNTIL.set(key, Date.now() + INSIGHTSENTRY_HISTORY_BACKOFF_MS)
+function rememberIBKRBackoff(key: string) {
+  IBKR_HISTORY_BACKOFF_UNTIL.set(key, Date.now() + IBKR_HISTORY_BACKOFF_MS)
 }
 
 function sharedCandleKey(symbol: string, timeframe: string) {
@@ -1127,6 +1127,8 @@ function sharedLivePriceKey(symbol: string) {
 }
 
 function extractLiveFeedPriceFromPayload(payload: any, liveCandle?: any): LiveFeedSnapshot | null {
+  if (payload?.provider === 'ibkr' && (payload?.price?.isRealtime ?? payload?.isRealtime) !== true) return null
+
   const symbol = normalizeSymbol(
     payload?.symbol ??
       payload?.ticker ??
@@ -1137,6 +1139,7 @@ function extractLiveFeedPriceFromPayload(payload: any, liveCandle?: any): LiveFe
   )
 
   const candidates = [
+    payload?.price?.price,
     payload?.price,
     payload?.livePrice,
     payload?.currentPrice,
@@ -1162,8 +1165,8 @@ function extractLiveFeedPriceFromPayload(payload: any, liveCandle?: any): LiveFe
       return {
         symbol,
         price,
-        bid: toFiniteNumber(payload?.bid ?? payload?.quote?.bid ?? payload?.data?.bid, NaN),
-        ask: toFiniteNumber(payload?.ask ?? payload?.quote?.ask ?? payload?.data?.ask, NaN),
+        bid: toFiniteNumber(payload?.bid ?? payload?.price?.bid ?? payload?.quote?.bid ?? payload?.data?.bid, NaN),
+        ask: toFiniteNumber(payload?.ask ?? payload?.price?.ask ?? payload?.quote?.ask ?? payload?.data?.ask, NaN),
         last: toFiniteNumber(payload?.last ?? payload?.quote?.last ?? payload?.data?.last ?? price, price),
         source: String(payload?.source ?? payload?.provider ?? 'phase8_live_feed_sse'),
         updatedAt: Date.now(),
@@ -1175,6 +1178,7 @@ function extractLiveFeedPriceFromPayload(payload: any, liveCandle?: any): LiveFe
 }
 
 function extractLiveCandleFromStreamPayload(payload: any): any | null {
+  if (payload?.provider === 'ibkr' && (payload?.price?.isRealtime ?? payload?.isRealtime) !== true) return null
   if (!payload || typeof payload !== 'object') return null
 
   const direct =
@@ -1241,7 +1245,7 @@ function getLivePriceSourcePriority(source: any) {
   if (
     text.includes('api/live-price') ||
     text.includes('backend_live_price') ||
-    text.includes('insightsentry_live_quote') ||
+    text.includes('ibkr_live_quote') ||
     text.includes('alpaca_latest_trade') ||
     text.includes('alpaca_latest_quote') ||
     text.includes('live_quote') ||
@@ -1359,7 +1363,7 @@ async function fetchDashboardSnapshotPayload(
     symbol: normalizedSymbol,
     timeframe: normalizedTimeframe,
     // MES/futures rule: no frontend 300/700/5000 cap. Backend returns whatever
-    // InsightSentry saved for that independent timeframe.
+    // IBKR saved for that independent timeframe.
     limit: String(
       Math.max(
         1,
@@ -1703,7 +1707,7 @@ function writeLiveCandleToSharedCache(
     unifiedIntelligence: previous?.unifiedIntelligence ?? previousUnifiedIntelligence ?? null,
     updatedAt: Date.now(),
     limit: Math.max(limit, previous?.limit ?? 0, mergedCandles.length),
-    provider: 'insightsentry',
+    provider: 'ibkr',
     source: 'phase8_live_feed_sse',
   }
 
@@ -6859,7 +6863,7 @@ export default function Dashboard() {
     // Do not clear SHARED_CANDLE_CACHE here. Candle cache entries are already
     // keyed by symbol + timeframe, so clearing this cache when a mini chart
     // timeframe changes erases the main chart's growing history and causes the
-    // next poll to cold-start from InsightSentry again. Keep stored candles
+    // next poll to cold-start from IBKR again. Keep stored candles
     // available for fast reload/switchback; reset only the active chart state
     // and computed intelligence panels.
     setFactorTechnicalSentiment(null)

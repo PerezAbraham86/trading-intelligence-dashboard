@@ -5,32 +5,13 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+from api.ibkr_client import IBKR_BASE_URL, get_quote as get_ibkr_quote
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# EXTERNAL DATA ENGINE
-#
-# v8.3 update:
-# - Uses InsightSentry futures options chain first for MES/ES options-chain pressure.
-# - Keeps Massive options-chain probe for equities.
-# - Keeps OKX public SWAP data for BTCUSD/ETHUSD open interest + footprint.
-# - Keeps Binance Futures as secondary crypto fallback.
-# - Keeps FRED macro using DGS10, T10Y2Y, DFF, VIXCLS.
-# - Keeps FINRA daily CNMS short-sale volume for equities/ETFs.
-# - Fixes FINRA parser to support Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market rows.
-# - Adds Databento MBP-1 probe for MES/ES estimated footprint delta.
-# - Fixes missing Databento environment constants so candle routes do not 500.
-# - Keeps futures open interest honest: active only if InsightSentry returns an OI field.
-# - Adds InsightSentry Quotes (L1) for live MES/ES price, bid/ask, bid/ask size, spread, and status.
-# - Adds stale-safe last-good cache for InsightSentry futures options so temporary API misses do not flip active flow to inactive.
-# - Uses InsightSentry L1 quote pressure as a light footprint/top-of-book fallback when Databento MBP-1 is unavailable.
-#
-# This file intentionally does NOT fake unavailable data.
-# If a source cannot provide a real value, it returns not_applicable/unavailable.
-# ─────────────────────────────────────────────────────────────────────────────
+# Futures quotes use IBKR; unavailable options analytics remain explicitly unavailable.
 
 MASSIVE_API_KEY = os.getenv("MASSIVE_API_KEY", "").strip()
 MASSIVE_BASE_URL = os.getenv("MASSIVE_BASE_URL", "https://api.polygon.io").rstrip("/")
@@ -52,25 +33,7 @@ FINRA_BASE_URL = os.getenv("FINRA_BASE_URL", "https://cdn.finra.org").rstrip("/"
 FINRA_TIMEOUT_SECONDS = float(os.getenv("FINRA_TIMEOUT_SECONDS", "12"))
 FINRA_CACHE_TTL_SECONDS = int(os.getenv("FINRA_CACHE_TTL_SECONDS", "21600"))
 
-INSIGHTSENTRY_API_KEY = (
-    os.getenv("INSIGHTSENTRY_API_KEY", "")
-    or os.getenv("INSIGHTSENTRY_RAPIDAPI_KEY", "")
-    or os.getenv("RAPIDAPI_KEY", "")
-    or os.getenv("X_RAPIDAPI_KEY", "")
-).strip()
-INSIGHTSENTRY_HOST = (
-    os.getenv("INSIGHTSENTRY_HOST", "")
-    or os.getenv("INSIGHTSENTRY_RAPIDAPI_HOST", "")
-    or "insightsentry.p.rapidapi.com"
-).strip()
-INSIGHTSENTRY_BASE_URL = os.getenv("INSIGHTSENTRY_BASE_URL", f"https://{INSIGHTSENTRY_HOST}").rstrip("/")
-INSIGHTSENTRY_TIMEOUT_SECONDS = float(os.getenv("INSIGHTSENTRY_TIMEOUT_SECONDS", "12"))
-INSIGHTSENTRY_CACHE_TTL_SECONDS = int(os.getenv("INSIGHTSENTRY_CACHE_TTL_SECONDS", "60"))
-INSIGHTSENTRY_L1_QUOTE_CACHE_TTL_SECONDS = int(os.getenv("INSIGHTSENTRY_L1_QUOTE_CACHE_TTL_SECONDS", "10"))
-INSIGHTSENTRY_OPTIONS_LAST_GOOD_TTL_SECONDS = int(os.getenv("INSIGHTSENTRY_OPTIONS_LAST_GOOD_TTL_SECONDS", "1800"))
-INSIGHTSENTRY_MES_UNDERLYING = os.getenv("INSIGHTSENTRY_MES_UNDERLYING", "CME_MINI:MES1!").strip()
-INSIGHTSENTRY_ES_UNDERLYING = os.getenv("INSIGHTSENTRY_ES_UNDERLYING", "CME_MINI:ES1!").strip()
-INSIGHTSENTRY_OPTION_STRIKE_FALLBACK = os.getenv("INSIGHTSENTRY_OPTION_STRIKE_FALLBACK", "").strip()
+IBKR_OPTIONS_LAST_GOOD_TTL_SECONDS = 1800
 
 DATABENTO_API_KEY = os.getenv("DATABENTO_API_KEY", "").strip()
 DATABENTO_DATASET = os.getenv("DATABENTO_DATASET", "GLBX.MDP3").strip()
@@ -302,7 +265,7 @@ def remember_last_good_factor(key: str, payload: Dict[str, Any], ttl_seconds: Op
 
     stored = dict(payload)
     stored["_cacheEpoch"] = time.time()
-    stored["_cacheTtlSeconds"] = int(ttl_seconds or INSIGHTSENTRY_OPTIONS_LAST_GOOD_TTL_SECONDS)
+    stored["_cacheTtlSeconds"] = int(ttl_seconds or IBKR_OPTIONS_LAST_GOOD_TTL_SECONDS)
     stored["_lastGoodSourceKey"] = key
     _EXTERNAL_DATA_CACHE[last_good_key(key)] = stored
 
@@ -323,7 +286,7 @@ def get_last_good_factor(
     if created_epoch <= 0:
         return None
 
-    effective_ttl = int(ttl_seconds or cached.get("_cacheTtlSeconds", INSIGHTSENTRY_OPTIONS_LAST_GOOD_TTL_SECONDS))
+    effective_ttl = int(ttl_seconds or cached.get("_cacheTtlSeconds", IBKR_OPTIONS_LAST_GOOD_TTL_SECONDS))
     age = time.time() - created_epoch
 
     if age > effective_ttl:
@@ -348,7 +311,7 @@ def get_last_good_factor(
 
 def redact_key_from_text(value: str) -> str:
     redacted = str(value or "")
-    for secret in [MASSIVE_API_KEY, FRED_API_KEY, DATABENTO_API_KEY, INSIGHTSENTRY_API_KEY]:
+    for secret in [MASSIVE_API_KEY, FRED_API_KEY, DATABENTO_API_KEY]:
         if secret:
             redacted = redacted.replace(secret, "***")
     return redacted
@@ -590,53 +553,16 @@ def finra_daily_file_request(date_value: datetime) -> Dict[str, Any]:
 
 
 
-def insightsentry_headers() -> Dict[str, str]:
-    return {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": "trading-intelligence-dashboard/1.0",
-        "x-rapidapi-host": INSIGHTSENTRY_HOST,
-        "x-rapidapi-key": INSIGHTSENTRY_API_KEY,
-    }
 
 
-def insightsentry_request(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    if not INSIGHTSENTRY_API_KEY:
-        return {
-            "ok": False,
-            "status": 0,
-            "path": path,
-            "error": "INSIGHTSENTRY_API_KEY, INSIGHTSENTRY_RAPIDAPI_KEY, or RAPIDAPI_KEY missing",
-            "createdAt": utc_now_iso(),
-        }
-
-    safe_params = {
-        key: value
-        for key, value in (params or {}).items()
-        if value is not None and value != ""
-    }
-
-    query = urlencode(safe_params, doseq=True)
-    url = f"{INSIGHTSENTRY_BASE_URL}{path}"
-
-    if query:
-        url = f"{url}?{query}"
-
-    result = http_json_request(url, timeout=INSIGHTSENTRY_TIMEOUT_SECONDS, headers=insightsentry_headers())
-    result["path"] = path
-    return result
 
 
-def insightsentry_underlying_symbol(symbol: str) -> str:
-    normalized = normalize_symbol(symbol)
 
-    if normalized == "MES1!":
-        return INSIGHTSENTRY_MES_UNDERLYING
 
-    if normalized == "ES1!":
-        return INSIGHTSENTRY_ES_UNDERLYING
 
-    return normalized
+
+
+
 
 
 def recursive_find_list(payload: Any, keys: set[str]) -> List[Any]:
@@ -672,298 +598,38 @@ def recursive_find_number(payload: Any, keys: set[str]) -> Optional[float]:
     return None
 
 
-def extract_insightsentry_option_codes(payload: Dict[str, Any]) -> List[str]:
-    data = payload.get("data") if isinstance(payload, dict) else None
-    candidates: List[Any] = []
-
-    if isinstance(data, dict):
-        for key in ["codes", "items", "results", "data"]:
-            value = data.get(key)
-            if isinstance(value, list):
-                candidates = value
-                break
-    elif isinstance(data, list):
-        candidates = data
-
-    if not candidates and isinstance(payload, dict):
-        for key in ["codes", "items", "results"]:
-            value = payload.get(key)
-            if isinstance(value, list):
-                candidates = value
-                break
-
-    codes: List[str] = []
-    for item in candidates:
-        if isinstance(item, str):
-            codes.append(item)
-        elif isinstance(item, dict):
-            code = item.get("code") or item.get("symbol") or item.get("ticker")
-            if code:
-                codes.append(str(code))
-
-    return sorted(set(codes))
-
-
-def extract_insightsentry_option_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    data = payload.get("data") if isinstance(payload, dict) else None
-
-    if isinstance(data, list):
-        return [row for row in data if isinstance(row, dict)]
-
-    if isinstance(data, dict):
-        for key in ["data", "rows", "items", "results", "options"]:
-            value = data.get(key)
-            if isinstance(value, list):
-                return [row for row in value if isinstance(row, dict)]
-
-    for key in ["data", "rows", "items", "results", "options"]:
-        value = payload.get(key) if isinstance(payload, dict) else None
-        if isinstance(value, list):
-            return [row for row in value if isinstance(row, dict)]
-
-    return []
-
-
-def parse_insightsentry_option_code(code: str) -> Dict[str, Any]:
-    text = str(code or "").strip().upper()
-    compact = text.split(":")[-1]
-
-    # Examples observed from InsightSentry:
-    # CME_MINI:MES260618C7980, CME_MINI:MES260618P7980, CME:X2D260611C7980.
-    option_type = ""
-    strike_text = ""
-    marker_index = -1
-    for marker in ["C", "P"]:
-        idx = compact.rfind(marker)
-        if idx > marker_index and idx < len(compact) - 1 and compact[idx + 1 :].replace(".", "", 1).isdigit():
-            marker_index = idx
-            option_type = "CALL" if marker == "C" else "PUT"
-            strike_text = compact[idx + 1 :]
-
-    strike = to_float(strike_text, 0.0)
-    expiration = ""
-    if marker_index > 0:
-        prefix = compact[:marker_index]
-        digits = ""
-        for char in reversed(prefix):
-            if char.isdigit():
-                digits = char + digits
-            elif digits:
-                break
-        if len(digits) >= 6:
-            expiration = digits[-6:]
-
-    return {
-        "code": text,
-        "type": option_type,
-        "strike": strike,
-        "expiration": expiration,
-    }
-
-
-def fetch_insightsentry_underlying_last_price(symbol: str, timeframe: str = "1m") -> float:
-    normalized = normalize_symbol(symbol)
-    underlying = insightsentry_underlying_symbol(normalized)
-    encoded_symbol = underlying
-    bar_type = "minute"
-    bar_interval = 1
-    response = insightsentry_request(
-        f"/v3/symbols/{encoded_symbol}/series",
-        {
-            "bar_type": bar_type,
-            "bar_interval": bar_interval,
-            "extended": "true",
-            "badj": "true",
-            "dadj": "false",
-            "dp": 5,
-            "long_poll": "false",
-        },
-    )
-
-    if not response.get("ok"):
-        return 0.0
-
-    data = response.get("data")
-    rows = recursive_find_list(data, {"candles", "bars", "data", "results", "series", "ohlcv"})
-    latest_close = 0.0
-    for row in rows:
-        if isinstance(row, dict):
-            close_value = row.get("close") or row.get("c") or row.get("last") or row.get("price")
-        elif isinstance(row, list) and len(row) >= 5:
-            close_value = row[4]
-        else:
-            close_value = None
-        parsed = to_float(close_value, 0.0)
-        if parsed > 0:
-            latest_close = parsed
-
-    if latest_close > 0:
-        return latest_close
-
-    found = recursive_find_number(data, {"close", "last", "lastprice", "price"})
-    return to_float(found, 0.0) if found is not None else 0.0
 
 
 
 
-def extract_insightsentry_quote_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    data = payload.get("data") if isinstance(payload, dict) else None
-
-    if isinstance(data, list):
-        return [row for row in data if isinstance(row, dict)]
-
-    if isinstance(data, dict):
-        for key in ["data", "rows", "items", "results", "quotes"]:
-            value = data.get(key)
-            if isinstance(value, list):
-                return [row for row in value if isinstance(row, dict)]
-        if any(key in data for key in ["code", "last_price", "bid", "ask", "status"]):
-            return [data]
-
-    if isinstance(payload, dict):
-        for key in ["data", "rows", "items", "results", "quotes"]:
-            value = payload.get(key)
-            if isinstance(value, list):
-                return [row for row in value if isinstance(row, dict)]
-
-    return []
 
 
-def build_insightsentry_l1_quote_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
-    normalized = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-
-    if not is_futures_symbol(normalized):
-        return inactive_factor(
-            symbol=normalized,
-            timeframe=normalized_timeframe,
-            name="InsightSentry L1 Quote Not Applicable",
-            source="insightsentry_quotes_l1",
-            status="not_applicable",
-            reason=f"InsightSentry Quotes L1 is only used for MES/ES futures in this dashboard step, not {normalized}.",
-        )
-
-    underlying = insightsentry_underlying_symbol(normalized)
-    cache_key = f"insightsentry:l1-quote:{normalized}:{normalized_timeframe}"
-    cached = cache_get(cache_key, INSIGHTSENTRY_L1_QUOTE_CACHE_TTL_SECONDS)
-
-    if cached:
-        return cached
-
-    if not INSIGHTSENTRY_API_KEY:
-        payload = inactive_factor(
-            symbol=normalized,
-            timeframe=normalized_timeframe,
-            name="InsightSentry L1 Quote Missing Key",
-            source="insightsentry_quotes_l1",
-            status="missing_key",
-            reason="Add INSIGHTSENTRY_API_KEY, INSIGHTSENTRY_RAPIDAPI_KEY, or RAPIDAPI_KEY to enable live L1 quotes.",
-        )
-        payload["underlying"] = underlying
-        return cache_set(cache_key, payload, INSIGHTSENTRY_L1_QUOTE_CACHE_TTL_SECONDS)
-
-    response = insightsentry_request("/v3/quotes", {"codes": underlying})
-    rows = extract_insightsentry_quote_rows(response.get("data") if isinstance(response.get("data"), dict) else response)
-
-    if not response.get("ok") or not rows:
-        payload = {
-            "status": "unavailable",
-            "label": "InsightSentry L1 Quote Unavailable",
-            "source": "insightsentry_quotes_l1",
-            "symbol": normalized,
-            "timeframe": normalized_timeframe,
-            "underlying": underlying,
-            "direction": "neutral",
-            "strength": 0,
-            "reason": response.get("error") or response.get("body") or "no_l1_quote_rows_returned",
-            "probe": summarize_result("insightsentry_quotes_l1", response),
-            "createdAt": utc_now_iso(),
-        }
-        return cache_set(cache_key, payload, INSIGHTSENTRY_L1_QUOTE_CACHE_TTL_SECONDS)
-
-    row = rows[0]
-    last_price = to_float(row.get("last_price") or row.get("lastPrice") or row.get("last") or row.get("price"), 0.0)
-    bid = to_float(row.get("bid") or row.get("bid_price") or row.get("bidPrice"), 0.0)
-    ask = to_float(row.get("ask") or row.get("ask_price") or row.get("askPrice"), 0.0)
-    bid_size = to_float(row.get("bid_size") or row.get("bidSize") or row.get("bid_sz") or row.get("bidQty"), 0.0)
-    ask_size = to_float(row.get("ask_size") or row.get("askSize") or row.get("ask_sz") or row.get("askQty"), 0.0)
-    volume = to_float(row.get("volume") or row.get("vol"), 0.0)
-    delay_seconds = to_float(row.get("delay_seconds") or row.get("delaySeconds") or row.get("delay"), 0.0)
-    status_text = str(row.get("status") or row.get("market_status") or row.get("marketStatus") or "").upper()
-    change = to_float(row.get("change"), 0.0)
-    change_pct = to_float(row.get("change_percent") or row.get("changePercent") or row.get("change_pct"), 0.0)
-
-    spread = ask - bid if ask > 0 and bid > 0 else 0.0
-    mid = (bid + ask) / 2.0 if ask > 0 and bid > 0 else last_price
-    spread_pct = spread / max(mid, 1.0) * 100.0 if spread > 0 else 0.0
-
-    total_size = bid_size + ask_size
-    imbalance_pct = (bid_size - ask_size) / max(total_size, 1.0) * 100.0
-    pressure_strength = clamp(abs(imbalance_pct))
-
-    if bid <= 0 and ask <= 0 and last_price <= 0:
-        status = "unavailable"
-        direction = "neutral"
-        label = "InsightSentry L1 Quote Empty"
-        strength = 0
-        reason = "quote_missing_bid_ask_and_last"
-    elif delay_seconds > 60:
-        status = "active"
-        direction = "active"
-        label = "InsightSentry L1 Quote Delayed"
-        strength = 40
-        reason = "l1_quote_available_but_delay_seconds_high"
-    elif imbalance_pct > 10:
-        status = "active"
-        direction = "bullish"
-        label = "Bullish L1 Quote Pressure"
-        strength = max(pressure_strength, 45.0)
-        reason = "bid_size_above_ask_size"
-    elif imbalance_pct < -10:
-        status = "active"
-        direction = "bearish"
-        label = "Bearish L1 Quote Pressure"
-        strength = max(pressure_strength, 45.0)
-        reason = "ask_size_above_bid_size"
-    else:
-        status = "active"
-        direction = "active"
-        label = "Balanced L1 Quote Pressure"
-        strength = max(pressure_strength, 35.0)
-        reason = "bid_ask_size_balanced"
-
-    payload = {
-        "status": status,
-        "label": label,
-        "source": "insightsentry_quotes_l1",
-        "symbol": normalized,
-        "timeframe": normalized_timeframe,
-        "underlying": underlying,
-        "direction": direction,
-        "strength": round(strength, 2),
-        "quoteStatus": status_text,
-        "lastPrice": last_price,
-        "bid": bid,
-        "ask": ask,
-        "bidSize": bid_size,
-        "askSize": ask_size,
-        "volume": volume,
-        "delaySeconds": delay_seconds,
-        "change": change,
-        "changePercent": change_pct,
-        "spread": round(spread, 6),
-        "spreadPct": round(spread_pct, 6),
-        "imbalancePct": round(imbalance_pct, 2),
-        "lpTime": row.get("lp_time") or row.get("lastTime") or row.get("timestamp"),
-        "reason": reason,
-        "probe": summarize_result("insightsentry_quotes_l1", response),
-        "createdAt": utc_now_iso(),
-    }
-
-    return cache_set(cache_key, payload, INSIGHTSENTRY_L1_QUOTE_CACHE_TTL_SECONDS)
 
 
-def build_insightsentry_l1_footprint_proxy_context(
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def build_ibkr_l1_quote_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
+    try:
+        quote = get_ibkr_quote(symbol, timeframe)
+        return {**quote, "status": "active" if quote.get("isRealtime") else "unavailable", "label": "IBKR L1 Quote", "direction": "neutral", "strength": 0, "reason": "IBKR top-of-book snapshot", "createdAt": utc_now_iso()}
+    except Exception:
+        return inactive_factor(symbol=symbol, timeframe=timeframe, name="IBKR L1 Quote Unavailable", source="ibkr_live_quote", status="unavailable", reason="Configure and authenticate the IBKR gateway and contract mapping.")
+
+
+
+def build_ibkr_l1_footprint_proxy_context(
     symbol: str,
     timeframe: str = "1m",
     quote_factor: Optional[Dict[str, Any]] = None,
@@ -976,12 +642,12 @@ def build_insightsentry_l1_footprint_proxy_context(
             symbol=normalized,
             timeframe=normalized_timeframe,
             name="L1 Footprint Proxy Not Applicable",
-            source="insightsentry_quotes_l1_top_of_book_proxy",
+            source="ibkr_quotes_l1_top_of_book_proxy",
             status="not_applicable",
-            reason=f"InsightSentry L1 footprint proxy is only used for MES/ES futures, not {normalized}.",
+            reason=f"IBKR L1 footprint proxy is only used for MES/ES futures, not {normalized}.",
         )
 
-    quote = quote_factor if isinstance(quote_factor, dict) else build_insightsentry_l1_quote_context(normalized, normalized_timeframe)
+    quote = quote_factor if isinstance(quote_factor, dict) else build_ibkr_l1_quote_context(normalized, normalized_timeframe)
 
     if str(quote.get("status") or "").lower() not in {"active", "live"}:
         payload = dict(quote)
@@ -989,7 +655,7 @@ def build_insightsentry_l1_footprint_proxy_context(
             {
                 "status": "unavailable",
                 "label": "L1 Footprint Proxy Unavailable",
-                "source": "insightsentry_quotes_l1_top_of_book_proxy",
+                "source": "ibkr_quotes_l1_top_of_book_proxy",
                 "symbol": normalized,
                 "timeframe": normalized_timeframe,
                 "direction": "neutral",
@@ -1034,7 +700,7 @@ def build_insightsentry_l1_footprint_proxy_context(
     return {
         "status": "active",
         "label": label,
-        "source": "insightsentry_quotes_l1_top_of_book_proxy",
+        "source": "ibkr_quotes_l1_top_of_book_proxy",
         "symbol": normalized,
         "timeframe": normalized_timeframe,
         "underlying": quote.get("underlying"),
@@ -1057,378 +723,18 @@ def build_insightsentry_l1_footprint_proxy_context(
     }
 
 
-def choose_nearest_insightsentry_option_strike(symbol: str, codes: List[str], timeframe: str = "1m") -> Dict[str, Any]:
-    parsed = [parse_insightsentry_option_code(code) for code in codes]
-    strikes = sorted({to_float(item.get("strike"), 0.0) for item in parsed if to_float(item.get("strike"), 0.0) > 0})
-
-    fallback = to_float(INSIGHTSENTRY_OPTION_STRIKE_FALLBACK, 0.0)
-    quote_factor = build_insightsentry_l1_quote_context(symbol, timeframe)
-    underlying_price = to_float(quote_factor.get("lastPrice"), 0.0)
-    if underlying_price <= 0:
-        underlying_price = fetch_insightsentry_underlying_last_price(symbol, timeframe)
-
-    if strikes and underlying_price > 0:
-        selected = min(strikes, key=lambda strike: abs(strike - underlying_price))
-        return {
-            "strike": selected,
-            "underlyingPrice": underlying_price,
-            "method": "nearest_to_insightsentry_underlying_price",
-            "availableStrikes": len(strikes),
-        }
-
-    if strikes and fallback > 0:
-        selected = min(strikes, key=lambda strike: abs(strike - fallback))
-        return {
-            "strike": selected,
-            "underlyingPrice": underlying_price,
-            "method": "nearest_to_INSIGHTSENTRY_OPTION_STRIKE_FALLBACK",
-            "availableStrikes": len(strikes),
-        }
-
-    if strikes:
-        selected = strikes[len(strikes) // 2]
-        return {
-            "strike": selected,
-            "underlyingPrice": underlying_price,
-            "method": "median_available_strike_no_underlying_price",
-            "availableStrikes": len(strikes),
-        }
-
-    return {
-        "strike": fallback,
-        "underlyingPrice": underlying_price,
-        "method": "fallback_env_only",
-        "availableStrikes": 0,
-    }
 
 
-def build_insightsentry_futures_options_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
-    normalized = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
-
-    if not is_futures_symbol(normalized):
-        return inactive_factor(
-            symbol=normalized,
-            timeframe=normalized_timeframe,
-            name="Futures Options Not Applicable",
-            source="insightsentry_futures_options_chain",
-            status="not_applicable",
-            reason=f"InsightSentry futures options chain is only used for MES/ES, not {normalized}",
-        )
-
-    underlying = insightsentry_underlying_symbol(normalized)
-    cache_key = f"insightsentry:futures-options:{normalized}:{normalized_timeframe}"
-    cached = cache_get(cache_key, INSIGHTSENTRY_CACHE_TTL_SECONDS)
-    if cached:
-        return cached
-
-    if not INSIGHTSENTRY_API_KEY:
-        payload = inactive_factor(
-            symbol=normalized,
-            timeframe=normalized_timeframe,
-            name="Futures Options Missing Key",
-            source="insightsentry_futures_options_chain",
-            status="unavailable",
-            reason="Add INSIGHTSENTRY_API_KEY, INSIGHTSENTRY_RAPIDAPI_KEY, or RAPIDAPI_KEY to enable futures options chain pressure.",
-        )
-        payload["underlying"] = underlying
-        return cache_set(cache_key, payload)
-
-    list_response = insightsentry_request("/v3/options/list", {"code": underlying})
-    option_codes = extract_insightsentry_option_codes(list_response.get("data") if isinstance(list_response.get("data"), dict) else list_response)
-
-    if not list_response.get("ok") or not option_codes:
-        payload = {
-            "status": "unavailable",
-            "label": "MES Options Chain Unavailable" if normalized == "MES1!" else "Futures Options Chain Unavailable",
-            "source": "insightsentry_futures_options_list",
-            "symbol": normalized,
-            "timeframe": normalized_timeframe,
-            "underlying": underlying,
-            "direction": "neutral",
-            "strength": 0,
-            "reason": list_response.get("error") or list_response.get("body") or "no_option_codes_returned",
-            "probe": summarize_result("insightsentry_options_list", list_response),
-            "createdAt": utc_now_iso(),
-        }
-        stale = get_last_good_factor(
-            cache_key,
-            reason=str(payload.get("reason") or "options_list_unavailable"),
-            label_suffix="Stale-Safe",
-            ttl_seconds=INSIGHTSENTRY_OPTIONS_LAST_GOOD_TTL_SECONDS,
-        )
-        if stale:
-            stale["fallbackProbe"] = payload
-            return stale
-        return cache_set(cache_key, payload, INSIGHTSENTRY_CACHE_TTL_SECONDS)
-
-    selected = choose_nearest_insightsentry_option_strike(normalized, option_codes, normalized_timeframe)
-    strike = to_float(selected.get("strike"), 0.0)
-
-    if strike <= 0:
-        payload = {
-            "status": "unavailable",
-            "label": "Futures Options Strike Unavailable",
-            "source": "insightsentry_futures_options_list",
-            "symbol": normalized,
-            "timeframe": normalized_timeframe,
-            "underlying": underlying,
-            "direction": "neutral",
-            "strength": 0,
-            "contractsCount": len(option_codes),
-            "reason": "could_not_select_valid_option_strike",
-            "probe": summarize_result("insightsentry_options_list", list_response),
-            "createdAt": utc_now_iso(),
-        }
-        stale = get_last_good_factor(
-            cache_key,
-            reason=str(payload.get("reason") or "option_strike_selection_failed"),
-            label_suffix="Stale-Safe",
-            ttl_seconds=INSIGHTSENTRY_OPTIONS_LAST_GOOD_TTL_SECONDS,
-        )
-        if stale:
-            stale["fallbackProbe"] = payload
-            return stale
-        return cache_set(cache_key, payload, INSIGHTSENTRY_CACHE_TTL_SECONDS)
-
-    strike_response = insightsentry_request(
-        "/v3/options/strike",
-        {
-            "code": underlying,
-            "strike": int(strike) if float(strike).is_integer() else strike,
-            "sortBy": "type",
-            "sort": "asc",
-        },
-    )
-    rows = extract_insightsentry_option_rows(strike_response.get("data") if isinstance(strike_response.get("data"), dict) else strike_response)
-
-    if not strike_response.get("ok") or not rows:
-        payload = {
-            "status": "unavailable",
-            "label": "Futures Options Strike Chain Unavailable",
-            "source": "insightsentry_futures_options_strike",
-            "symbol": normalized,
-            "timeframe": normalized_timeframe,
-            "underlying": underlying,
-            "selectedStrike": strike,
-            "direction": "neutral",
-            "strength": 0,
-            "reason": strike_response.get("error") or strike_response.get("body") or "no_option_rows_returned_for_selected_strike",
-            "probe": summarize_result("insightsentry_options_strike", strike_response),
-            "createdAt": utc_now_iso(),
-        }
-        stale = get_last_good_factor(
-            cache_key,
-            reason=str(payload.get("reason") or "options_strike_chain_unavailable"),
-            label_suffix="Stale-Safe",
-            ttl_seconds=INSIGHTSENTRY_OPTIONS_LAST_GOOD_TTL_SECONDS,
-        )
-        if stale:
-            stale["fallbackProbe"] = payload
-            return stale
-        return cache_set(cache_key, payload, INSIGHTSENTRY_CACHE_TTL_SECONDS)
-
-    call_rows: List[Dict[str, Any]] = []
-    put_rows: List[Dict[str, Any]] = []
-    expiration_count = set()
-    call_mid_sum = 0.0
-    put_mid_sum = 0.0
-    call_iv_values: List[float] = []
-    put_iv_values: List[float] = []
-    call_delta_values: List[float] = []
-    put_delta_values: List[float] = []
-    total_call_oi = 0.0
-    total_put_oi = 0.0
-    oi_fields_seen = False
-
-    for row in rows:
-        row_type = str(row.get("type") or row.get("option_type") or row.get("contractType") or "").upper()
-        code_meta = parse_insightsentry_option_code(str(row.get("code") or row.get("symbol") or ""))
-        if not row_type and code_meta.get("type"):
-            row_type = str(code_meta.get("type"))
-
-        expiration = row.get("expiration") or code_meta.get("expiration")
-        if expiration:
-            expiration_count.add(str(expiration))
-
-        bid = to_float(row.get("bid_price") or row.get("bid") or row.get("bidPrice"), 0.0)
-        ask = to_float(row.get("ask_price") or row.get("ask") or row.get("askPrice"), 0.0)
-        mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else max(bid, ask, to_float(row.get("theoretical_price") or row.get("theoreticalPrice"), 0.0))
-        iv = to_float(row.get("implied_volatility") or row.get("impliedVolatility") or row.get("iv"), 0.0)
-        delta = to_float(row.get("delta"), 0.0)
-        oi_raw = row.get("open_interest") if "open_interest" in row else row.get("openInterest") if "openInterest" in row else row.get("oi") if "oi" in row else None
-        oi = max(to_float(oi_raw, 0.0), 0.0)
-        if oi_raw is not None:
-            oi_fields_seen = True
-
-        if row_type == "CALL":
-            call_rows.append(row)
-            call_mid_sum += mid
-            if iv > 0:
-                call_iv_values.append(iv)
-            if delta != 0:
-                call_delta_values.append(delta)
-            total_call_oi += oi
-        elif row_type == "PUT":
-            put_rows.append(row)
-            put_mid_sum += mid
-            if iv > 0:
-                put_iv_values.append(iv)
-            if delta != 0:
-                put_delta_values.append(abs(delta))
-            total_put_oi += oi
-
-    call_count = len(call_rows)
-    put_count = len(put_rows)
-    total = call_count + put_count
-    call_share = call_count / max(total, 1) * 100.0
-    put_share = put_count / max(total, 1) * 100.0
-    avg_call_iv = sum(call_iv_values) / len(call_iv_values) if call_iv_values else 0.0
-    avg_put_iv = sum(put_iv_values) / len(put_iv_values) if put_iv_values else 0.0
-    avg_call_delta = sum(call_delta_values) / len(call_delta_values) if call_delta_values else 0.0
-    avg_put_delta = sum(put_delta_values) / len(put_delta_values) if put_delta_values else 0.0
-
-    # This is chain pressure, not true flow. It uses ATM strike availability + IV skew + delta skew.
-    iv_skew = avg_put_iv - avg_call_iv
-    delta_skew = avg_call_delta - avg_put_delta
-    premium_skew = call_mid_sum - put_mid_sum
-    score = 50.0 + delta_skew * 18.0 - iv_skew * 120.0 + (1 if premium_skew > 0 else -1 if premium_skew < 0 else 0) * 5.0
-    bull_pressure = clamp(score)
-    bear_pressure = clamp(100.0 - score)
-
-    if bull_pressure > bear_pressure + 8:
-        direction = "bullish"
-        label = "MES Options Chain Bullish" if normalized == "MES1!" else "Futures Options Chain Bullish"
-        strength = bull_pressure
-        reason = "insightsentry_atm_options_delta_iv_skew_bullish"
-    elif bear_pressure > bull_pressure + 8:
-        direction = "bearish"
-        label = "MES Options Chain Bearish" if normalized == "MES1!" else "Futures Options Chain Bearish"
-        strength = bear_pressure
-        reason = "insightsentry_atm_options_delta_iv_skew_bearish"
-    else:
-        direction = "active"
-        label = "MES Options Chain Active" if normalized == "MES1!" else "Futures Options Chain Active"
-        strength = max(bull_pressure, bear_pressure, 45.0)
-        reason = "insightsentry_atm_options_chain_available"
-
-    payload = {
-        "status": "active" if total > 0 else "unavailable",
-        "label": label if total > 0 else "Futures Options Chain Empty",
-        "source": "insightsentry_futures_options_strike",
-        "symbol": normalized,
-        "timeframe": normalized_timeframe,
-        "underlying": underlying,
-        "direction": direction if total > 0 else "neutral",
-        "strength": round(strength if total > 0 else 0, 2),
-        "contractsCount": total,
-        "availableCodesCount": len(option_codes),
-        "callContracts": call_count,
-        "putContracts": put_count,
-        "callShare": round(call_share, 2),
-        "putShare": round(put_share, 2),
-        "selectedStrike": strike,
-        "underlyingPrice": round(to_float(selected.get("underlyingPrice"), 0.0), 5),
-        "strikeSelectionMethod": selected.get("method"),
-        "expirationCount": len(expiration_count),
-        "avgCallIv": round(avg_call_iv, 6),
-        "avgPutIv": round(avg_put_iv, 6),
-        "avgCallDelta": round(avg_call_delta, 6),
-        "avgPutDeltaAbs": round(avg_put_delta, 6),
-        "callMidSum": round(call_mid_sum, 5),
-        "putMidSum": round(put_mid_sum, 5),
-        "openInterest": round(total_call_oi + total_put_oi, 5) if oi_fields_seen else 0,
-        "callOpenInterest": round(total_call_oi, 5) if oi_fields_seen else 0,
-        "putOpenInterest": round(total_put_oi, 5) if oi_fields_seen else 0,
-        "openInterestFieldsSeen": oi_fields_seen,
-        "reason": reason if total > 0 else "no_call_put_rows_returned",
-        "note": "InsightSentry returns options chain/Greeks. This is options-chain pressure, not true order-flow volume.",
-        "probe": summarize_result("insightsentry_options_strike", strike_response),
-        "createdAt": utc_now_iso(),
-    }
-
-    if payload.get("status") == "active":
-        remember_last_good_factor(cache_key, payload, INSIGHTSENTRY_OPTIONS_LAST_GOOD_TTL_SECONDS)
-
-    return cache_set(cache_key, payload, INSIGHTSENTRY_CACHE_TTL_SECONDS)
 
 
-def build_insightsentry_futures_open_interest_context(
-    symbol: str,
-    timeframe: str = "1m",
-    options_factor: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    normalized = normalize_symbol(symbol)
-    normalized_timeframe = normalize_timeframe(timeframe)
+def build_ibkr_futures_options_context(symbol: str, timeframe: str = "1m", options_factor=None) -> Dict[str, Any]:
+    return inactive_factor(symbol=symbol, timeframe=timeframe, name="Futures Options Flow Unavailable", source="ibkr", status="unavailable", reason="IBKR options-chain analytics are not configured. No options pressure or OI is inferred from a futures quote.")
 
-    if not is_futures_symbol(normalized):
-        return inactive_factor(
-            symbol=normalized,
-            timeframe=normalized_timeframe,
-            name="Futures Open Interest Not Applicable",
-            source="insightsentry_futures_options_chain",
-            status="not_applicable",
-            reason=f"InsightSentry futures options open interest is only used for MES/ES, not {normalized}",
-        )
 
-    factor = options_factor if isinstance(options_factor, dict) else build_insightsentry_futures_options_context(normalized, normalized_timeframe)
-    oi = to_float(factor.get("openInterest"), 0.0)
-    oi_seen = bool(factor.get("openInterestFieldsSeen"))
 
-    if oi_seen and oi > 0:
-        call_oi = to_float(factor.get("callOpenInterest"), 0.0)
-        put_oi = to_float(factor.get("putOpenInterest"), 0.0)
-        put_share = put_oi / max(call_oi + put_oi, 1.0) * 100.0
-        call_share = call_oi / max(call_oi + put_oi, 1.0) * 100.0
-        if call_share > put_share + 8:
-            direction = "bullish"
-            label = "MES Options OI Bullish" if normalized == "MES1!" else "Futures Options OI Bullish"
-            strength = call_share
-            reason = "insightsentry_options_open_interest_call_heavy"
-        elif put_share > call_share + 8:
-            direction = "bearish"
-            label = "MES Options OI Bearish" if normalized == "MES1!" else "Futures Options OI Bearish"
-            strength = put_share
-            reason = "insightsentry_options_open_interest_put_heavy"
-        else:
-            direction = "active"
-            label = "MES Options OI Active" if normalized == "MES1!" else "Futures Options OI Active"
-            strength = 55
-            reason = "insightsentry_options_open_interest_balanced"
+def build_ibkr_futures_open_interest_context(symbol: str, timeframe: str = "1m", options_factor=None) -> Dict[str, Any]:
+    return inactive_factor(symbol=symbol, timeframe=timeframe, name="Futures Options Open Interest Unavailable", source="ibkr", status="unavailable", reason="IBKR options-chain analytics are not configured. No options pressure or OI is inferred from a futures quote.")
 
-        return {
-            "status": "active",
-            "label": label,
-            "source": "insightsentry_futures_options_open_interest",
-            "symbol": normalized,
-            "timeframe": normalized_timeframe,
-            "underlying": factor.get("underlying"),
-            "direction": direction,
-            "strength": round(strength, 2),
-            "openInterest": oi,
-            "callOpenInterest": call_oi,
-            "putOpenInterest": put_oi,
-            "callShare": round(call_share, 2),
-            "putShare": round(put_share, 2),
-            "selectedStrike": factor.get("selectedStrike"),
-            "reason": reason,
-            "createdAt": utc_now_iso(),
-        }
-
-    return {
-        "status": "unavailable",
-        "label": "MES Open Interest Unavailable" if normalized == "MES1!" else "Futures Open Interest Unavailable",
-        "source": "insightsentry_futures_options_open_interest",
-        "symbol": normalized,
-        "timeframe": normalized_timeframe,
-        "underlying": factor.get("underlying"),
-        "direction": "neutral",
-        "strength": 0,
-        "openInterest": 0,
-        "selectedStrike": factor.get("selectedStrike"),
-        "reason": "InsightSentry options strike response did not include openInterest/oi fields. Need a dedicated futures OI/statistics API for true OI.",
-        "createdAt": utc_now_iso(),
-    }
 
 def extract_results(result: Dict[str, Any]) -> List[Dict[str, Any]]:
     data = result.get("data") if isinstance(result, dict) else None
@@ -2707,8 +2013,8 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
     l1_quote: Optional[Dict[str, Any]] = None
 
     if is_futures_symbol(normalized):
-        l1_quote = build_insightsentry_l1_quote_context(normalized, normalized_timeframe)
-        options_chain = build_insightsentry_futures_options_context(normalized, normalized_timeframe)
+        l1_quote = build_ibkr_l1_quote_context(normalized, normalized_timeframe)
+        options_chain = build_ibkr_futures_options_context(normalized, normalized_timeframe)
     else:
         options_chain = build_massive_options_chain_context(normalized, normalized_timeframe)
 
@@ -2716,12 +2022,12 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
         open_interest = build_crypto_open_interest_context(normalized, normalized_timeframe)
         footprint = build_crypto_footprint_context(normalized, normalized_timeframe)
     elif is_futures_symbol(normalized):
-        open_interest = build_insightsentry_futures_open_interest_context(normalized, normalized_timeframe, options_chain)
+        open_interest = build_ibkr_futures_open_interest_context(normalized, normalized_timeframe, options_chain)
         databento_footprint = build_databento_mbp1_footprint_context(normalized, normalized_timeframe)
         if databento_footprint.get("status") == "active":
             footprint = databento_footprint
         else:
-            footprint = build_insightsentry_l1_footprint_proxy_context(normalized, normalized_timeframe, l1_quote)
+            footprint = build_ibkr_l1_footprint_proxy_context(normalized, normalized_timeframe, l1_quote)
             footprint["databentoFallbackProbe"] = databento_footprint
     else:
         open_interest = options_chain
@@ -2814,16 +2120,10 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
                 "cacheTtlSeconds": FINRA_CACHE_TTL_SECONDS,
                 "usedFor": ["SPY short volume", "QQQ short volume", "IWM short volume", "equity/ETF short volume"],
             },
-            "insightSentry": {
-                "configured": bool(INSIGHTSENTRY_API_KEY),
-                "enabled": bool(INSIGHTSENTRY_API_KEY),
-                "baseUrl": INSIGHTSENTRY_BASE_URL,
-                "host": INSIGHTSENTRY_HOST,
-                "cacheTtlSeconds": INSIGHTSENTRY_CACHE_TTL_SECONDS,
-                "l1QuoteCacheTtlSeconds": INSIGHTSENTRY_L1_QUOTE_CACHE_TTL_SECONDS,
-                "optionsLastGoodTtlSeconds": INSIGHTSENTRY_OPTIONS_LAST_GOOD_TTL_SECONDS,
-                "usedFor": ["MES1! Quotes L1 live quote", "ES1! Quotes L1 live quote", "MES1! options chain pressure", "ES1! options chain pressure", "futures OI only if fields exist", "L1 top-of-book footprint proxy when Databento unavailable"],
-                "symbols": {"MES1!": INSIGHTSENTRY_MES_UNDERLYING, "ES1!": INSIGHTSENTRY_ES_UNDERLYING},
+            "ibkr": {
+                "configured": bool(IBKR_BASE_URL),
+                "usedFor": ["Futures L1 snapshots", "L1 top-of-book pressure proxy"],
+                "optionsAnalyticsAvailable": False,
             },
             "databento": {
                 "configured": bool(DATABENTO_API_KEY),
@@ -2850,7 +2150,7 @@ def build_external_data_context(symbol: str = "BTCUSD", timeframe: str = "1m") -
         "factors": factors,
         "signalFields": signal_fields,
         "scalars": scalars,
-        "source": "external_data_engine_v8_3_insightsentry_l1_quotes_stable_options",
+        "source": "external_data_engine_ibkr_l1_quotes",
         "createdAt": utc_now_iso(),
     }
 
@@ -2863,7 +2163,7 @@ def build_external_data_status(symbol: str = "BTCUSD", timeframe: str = "1m") ->
     return {
         "eventType": "EXTERNAL_DATA_STATUS",
         "status": context.get("status", "unknown"),
-        "source": "external_data_engine_v8_3_insightsentry_l1_quotes_stable_options",
+        "source": "external_data_engine_ibkr_l1_quotes",
         "symbol": normalized,
         "timeframe": normalized_timeframe,
         "massiveKeyPresent": bool(MASSIVE_API_KEY),
