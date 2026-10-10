@@ -182,3 +182,29 @@ PerezAbraham86
 ---
 
 **Status**: ✅ Production Ready | **Last Updated**: 2026-05-16
+
+## Existing Render Static Site
+
+The frontend uses Next.js static export; all server-backed Neural Brain operations
+run on the existing FastAPI backend. No Node web service is required.
+
+In the existing Render Static Site settings, use repository branch `main`, repository
+root (blank Root Directory), Build Command `npm install && npm run build`, and
+Publish Directory `out`. Set the build-time environment variable
+`NEXT_PUBLIC_API_BASE_URL=https://trading-intelligence-dashboard-1.onrender.com`.
+Choose **Manual Deploy → Clear build cache & deploy** after changing these settings.
+Every dashboard route exports its own HTML file, including `/signals/`, whose client
+redirect preserves access to the dashboard Signal Center.
+
+On the existing Python service, retain `pip install -r api/requirements.txt` and
+`uvicorn api.main:app --host 0.0.0.0 --port $PORT` from the repository root. Set
+`CORS_ALLOWED_ORIGINS` to the exact frontend origin(s), comma-separated. The defaults
+include `https://trading-intelligence-dashboard.onrender.com`, the existing Vercel
+frontend, and `http://localhost:3000`; add your actual hostname if different.
+Redeploy the backend before using Neural Brain predictions from the static frontend.
+Do not add wildcard CORS origins or change IBKR credentials.
+
+Validation: `python -m unittest discover -s tests -v`, `npm run build`, and `npm test`.
+The Python suite compares predictions and feature weights with the original
+TypeScript logistic learner. `npm test` verifies the actual exported HTML and API
+boundary, so run it after the build.

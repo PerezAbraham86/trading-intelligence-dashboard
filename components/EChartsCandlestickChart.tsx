@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 
-const API_BASE_URL = 'https://trading-intelligence-dashboard-1.onrender.com'
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'https://trading-intelligence-dashboard-1.onrender.com'
 const DEFAULT_VISIBLE_CANDLES = 78
 const CACHE_TTL_MS = 1000 * 60 * 5
 const LOCAL_STORAGE_PREFIX = 'marketbos:v12:smart-fallback-fast-switch:'

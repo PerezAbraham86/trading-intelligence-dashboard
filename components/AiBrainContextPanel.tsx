@@ -3,47 +3,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 
-const RENDER_NEURAL_BRAIN_API_BASE = 'https://trading-intelligence-dashboard-1.onrender.com'
-
-function uniqueStrings(values: string[]) {
-  return Array.from(new Set(values.filter(Boolean)))
-}
-
-function neuralBrainSnapshotUrls() {
-  const envCandidates = [
-    process.env.NEXT_PUBLIC_FASTAPI_BASE_URL,
-    process.env.NEXT_PUBLIC_BACKEND_URL,
-    process.env.NEXT_PUBLIC_API_BASE_URL,
-    RENDER_NEURAL_BRAIN_API_BASE,
-  ]
-
-  const absoluteUrls = envCandidates
-    .filter((base): base is string => typeof base === 'string' && base.trim().length > 0)
-    .map((base) => `${base.replace(/\/$/, '')}/api/neural-brain/snapshots`)
-
-  // Important:
-  // Post to the Render FastAPI backend first. The previous version only posted to
-  // the relative Next.js route, so the Render route stayed at totalSnapshots: 0.
-  return uniqueStrings([
-    ...absoluteUrls,
-    '/api/neural-brain/snapshots',
-  ])
-}
+import { API_BASE_URL, backendApiUrl } from '@/lib/backendApi'
 
 async function postNeuralBrainSnapshot(payload: any, signal: AbortSignal) {
-  const urls = neuralBrainSnapshotUrls()
-
-  await Promise.allSettled(
-    urls.map((url) =>
-      fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal,
-        mode: url.startsWith('http') ? 'cors' : 'same-origin',
-      })
-    )
-  )
+  const response = await fetch(backendApiUrl('/api/neural-brain/snapshots'), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload), signal,
+  })
+  if (!response.ok) throw new Error(`Neural Brain memory unavailable (${response.status})`)
 }
 
 type AiBrainContextPanelProps = {
@@ -676,7 +643,7 @@ export default function AiBrainContextPanel({
       ...payload,
       id: snapshotId,
       snapshotId,
-      renderBackendTarget: RENDER_NEURAL_BRAIN_API_BASE,
+      renderBackendTarget: API_BASE_URL,
     }
 
     const controller = new AbortController()

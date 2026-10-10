@@ -274,10 +274,10 @@ app = FastAPI(title="Trading Intelligence Dashboard API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[origin.strip().rstrip("/") for origin in os.getenv("CORS_ALLOWED_ORIGINS", "https://trading-intelligence-dashboard.onrender.com,https://trading-intelligence-dashboard.vercel.app,http://localhost:3000").split(",") if origin.strip() and origin.strip() != "*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Webhook-Secret"],
 )
 
 
@@ -9195,10 +9195,10 @@ def api_ibkr_session_status_alias() -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/api/neural-brain/status")
-def api_neural_brain_status() -> Dict[str, Any]:
+def api_neural_brain_status(symbol: Optional[str] = None, timeframe: Optional[str] = None) -> Dict[str, Any]:
     if neural_brain_status is None:
         raise HTTPException(status_code=503, detail="api.neural_brain_fastapi module unavailable")
-    return neural_brain_status()
+    return neural_brain_status(symbol=symbol, timeframe=timeframe)
 
 
 @app.get("/neural-brain/status")
@@ -9207,10 +9207,10 @@ def api_neural_brain_status_alias() -> Dict[str, Any]:
 
 
 @app.get("/api/neural-brain/snapshots")
-def api_neural_brain_snapshots(limit: int = 25) -> Dict[str, Any]:
+def api_neural_brain_snapshots(limit: int = 100, symbol: Optional[str] = None, timeframe: Optional[str] = None) -> Dict[str, Any]:
     if list_neural_brain_snapshots is None:
         raise HTTPException(status_code=503, detail="api.neural_brain_fastapi module unavailable")
-    return list_neural_brain_snapshots(limit=limit)
+    return list_neural_brain_snapshots(limit=limit, symbol=symbol, timeframe=timeframe)
 
 
 @app.get("/neural-brain/snapshots")
@@ -9285,3 +9285,9 @@ async def api_neural_brain_outcome(request: FastAPIRequest) -> Dict[str, Any]:
 @app.post("/neural-brain/outcomes")
 async def api_neural_brain_outcome_alias(request: FastAPIRequest) -> Dict[str, Any]:
     return await api_neural_brain_outcome(request)
+
+
+@app.get("/api/neural-brain/export")
+def api_neural_brain_export() -> Dict[str, Any]:
+    from api.neural_brain_fastapi import export_neural_brain_memory
+    return export_neural_brain_memory()

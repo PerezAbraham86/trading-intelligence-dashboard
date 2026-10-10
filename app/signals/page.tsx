@@ -1,7 +1,11 @@
-import { redirect } from 'next/navigation'
+'use client'
+
+import { useEffect } from 'react'
+import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 
 export default function Page() {
-  // Signals are merged into the live dashboard / Signal Center.
-  // The current dashboard page remains untouched.
-  redirect('/')
+  const router = useRouter()
+  useEffect(() => { router.replace('/') }, [router])
+  return <p><Link href="/">Open the dashboard Signal Center</Link></p>
 }

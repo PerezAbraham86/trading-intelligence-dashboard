@@ -118,20 +118,18 @@ Returns an array of up to 50 most recent signals.
 
 ## CORS Configuration
 
-The API supports CORS requests from:
-- `https://trading-intelligence-dashboard.vercel.app`
-- `http://localhost:3000`
+`CORS_ALLOWED_ORIGINS` contains exact, comma-separated frontend origins. Defaults:
+`https://trading-intelligence-dashboard.onrender.com`,
+`https://trading-intelligence-dashboard.vercel.app`, and `http://localhost:3000`.
+Set the actual deployed frontend origin if different. Wildcards and credentialed
+cross-origin cookies are not enabled. JSON GET/POST requests and preflights work.
 
-## Deployment on Render
+## Deployment on the Existing Render Service
 
-1. Create a new Web Service on Render
-2. Connect your GitHub repository
-3. Set the **Start Command** to:
-   ```
-   uvicorn main:app --host 0.0.0.0 --port $PORT
-   ```
-4. Set the **Root Directory** to `api/`
-5. Add environment variables as needed (e.g., `WEBHOOK_SECRET`)
+Keep the existing Python web service and plan. From the repository root, use
+`pip install -r api/requirements.txt` as Build Command and
+`uvicorn api.main:app --host 0.0.0.0 --port $PORT` as Start Command.
+Deploy latest `main`; check `/health` and `/api/neural-brain/status`.
 
 ## Environment Variables
 
@@ -208,3 +206,35 @@ changes cannot delete deployed secrets or cancel external billing.
 
 Verification: `python -m unittest discover -s tests -v` and `npx tsc --noEmit`.
 IBKR reference: https://www.interactivebrokers.com/docs/web-api/api-reference/trading/trading-market-data/get-md-history
+
+## Neural Brain server ownership and memory
+
+The existing `/api/neural-brain/predict`, `/status`, `/snapshots` and `/outcomes`
+paths run on FastAPI. Prediction retains the weighted candle/SMC/AlphaX/Ghost
+scorecard and the original five-task feature-based logistic learner, its L2
+regularization, readiness threshold and 72/28 blend. This is observer/scorer
+functionality only. Outcomes update weights and retain excursion/result labels.
+Retrying an outcome does not train it twice. Snapshot filters support symbol and
+timeframe. Existing SQLite rows and symbol/timeframe outcome statistics remain.
+
+Snapshot/outcome memory and logistic weights share `NEURAL_BRAIN_DB_PATH`
+(default `.data/neural_brain_memory.sqlite3`). The old scope-statistics model
+location is unchanged. Free Render local storage is ephemeral: this change does
+not provide cross-deployment durability or add a paid disk/storage service.
+`GET /api/neural-brain/export` downloads snapshots, labels, exact logistic weights
+and scope statistics. Keep that backup before any restart/redeploy that discards
+local storage. Existing Next.js server files, when available, can be imported
+without changing IDs, dropping labels, or retraining already learned weights:
+
+```bash
+python -m api.migrate_neural_brain --snapshots /path/neural_brain_snapshots.jsonl --model /path/neural_brain_online_model.json
+# Restore a FastAPI export into an empty destination data directory:
+python -m api.migrate_neural_brain --snapshots /path/neural_brain_backup.json
+```
+
+Run imports in the backend environment with its existing data directory. Sources
+remain untouched; imports refuse to replace existing learned models. No automatic
+reset or reduced prediction fallback is used. Migration does not automatically
+retrieve files from an old hosting account. If durable automatic retention across
+free Render deployments is required, an existing durable storage destination must
+be supplied; none is provisioned by this change.

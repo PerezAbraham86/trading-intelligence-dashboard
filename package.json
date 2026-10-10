@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "node --test tests/frontend/*.test.cjs"
   },
   "dependencies": {
     "react": "^18.2.0",

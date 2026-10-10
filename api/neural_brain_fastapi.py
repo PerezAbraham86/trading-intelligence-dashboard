@@ -4,8 +4,11 @@ import json
 import math
 import os
 import sqlite3
-import time
-import uuid
+import hashlib
+import threading
+
+from api import neural_brain_online as logistic
+from api.neural_brain import build_neural_brain_scorecard
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -17,6 +20,8 @@ PHASE = "phase3_river_style_online_updates"
 DATA_DIR = Path(os.getenv("NEURAL_BRAIN_DATA_DIR", os.getenv("DATA_DIR", ".data")))
 DB_PATH = Path(os.getenv("NEURAL_BRAIN_DB_PATH", str(DATA_DIR / "neural_brain_memory.sqlite3")))
 ONLINE_MODEL_PATH = Path(os.getenv("NEURAL_BRAIN_ONLINE_MODEL_PATH", str(DATA_DIR / "neural_brain_online_model.json")))
+
+_MEMORY_LOCK = threading.RLock()
 
 TASK_NAMES = ("targetHit", "reversal", "chop", "buyWin", "sellWin")
 ONLINE_READY_MIN_EXAMPLES = int(os.getenv("NEURAL_BRAIN_ONLINE_READY_MIN_EXAMPLES", "25"))
@@ -257,7 +262,21 @@ def ensure_db() -> None:
             """
         )
 
+        connection.execute("CREATE TABLE IF NOT EXISTS neural_brain_models (name TEXT PRIMARY KEY, state_json TEXT NOT NULL)")
         connection.commit()
+
+
+def load_logistic_state(connection=None):
+    if connection is None:
+        ensure_db()
+        with sqlite3.connect(DB_PATH) as opened:
+            return load_logistic_state(opened)
+    row = connection.execute("SELECT state_json FROM neural_brain_models WHERE name = 'logistic'").fetchone()
+    return json.loads(row[0]) if row else logistic.initial_state()
+
+
+def save_logistic_state(connection, state):
+    connection.execute("INSERT OR REPLACE INTO neural_brain_models VALUES ('logistic', ?)", (safe_json(state),))
 
 
 def row_to_snapshot(row: sqlite3.Row) -> Dict[str, Any]:
@@ -633,7 +652,8 @@ def save_neural_brain_snapshot(payload: Dict[str, Any]) -> Dict[str, Any]:
         if key in payload
     })
 
-    snapshot_id = str(payload.get("id") or payload.get("snapshotId") or uuid.uuid4())
+    identity = {"symbol": payload.get("symbol", "MES1!"), "timeframe": payload.get("timeframe", "1m"), "timestamp": payload.get("timestamp") or scorecard.get("createdAt"), "buy": scorecard.get("buyConfidence"), "sell": scorecard.get("sellConfidence"), "target": scorecard.get("targetHitProbability"), "reversal": scorecard.get("reversalRisk"), "chop": scorecard.get("chopRisk"), "decision": str(scorecard.get("decision", "HOLD")).upper(), "direction": scorecard.get("bestDirection", "Neutral")}
+    snapshot_id = str(payload.get("id") or payload.get("snapshotId") or hashlib.sha1(safe_json(identity).encode()).hexdigest()[:16])
     created_at = str(payload.get("createdAt") or now_iso())
     timestamp = str(payload.get("timestamp") or created_at)
     symbol = normalize_symbol(payload.get("symbol") or scorecard.get("symbol"))
@@ -648,7 +668,7 @@ def save_neural_brain_snapshot(payload: Dict[str, Any]) -> Dict[str, Any]:
     with sqlite3.connect(DB_PATH) as connection:
         connection.execute(
             """
-            INSERT OR REPLACE INTO neural_brain_snapshots (
+            INSERT OR IGNORE INTO neural_brain_snapshots (
                 id,
                 created_at,
                 timestamp,
@@ -688,7 +708,7 @@ def save_neural_brain_snapshot(payload: Dict[str, Any]) -> Dict[str, Any]:
                 str(scorecard.get("riskStatus") or "Risk Watch"),
                 str(payload.get("source") or scorecard.get("source") or "fastapi_snapshot_route"),
                 safe_json(scorecard_inputs),
-                safe_json(payload),
+                safe_json(payload.get("rawPayload", payload)),
                 snapshot_id,
                 snapshot_id,
             ),
@@ -712,7 +732,7 @@ def save_neural_brain_snapshot(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def list_neural_brain_snapshots(limit: int = 25, symbol: Any = None, timeframe: Any = None) -> Dict[str, Any]:
     ensure_db()
-    safe_limit = max(1, min(250, int(limit or 25)))
+    safe_limit = max(1, min(1000, int(limit or 25)))
     symbol_norm = normalize_symbol(symbol) if symbol else None
     timeframe_norm = normalize_timeframe(timeframe) if timeframe else None
 
@@ -827,78 +847,49 @@ def get_memory_group_stats() -> Dict[str, Any]:
 
 def label_neural_brain_outcome(payload: Dict[str, Any]) -> Dict[str, Any]:
     ensure_db()
-
     snapshot_id = str(payload.get("id") or payload.get("snapshotId") or "").strip()
     if not snapshot_id:
-        return {
-            "eventType": "NEURAL_BRAIN_OUTCOME",
-            "status": "ERROR",
-            "error": "snapshot id is required",
-            "createdAt": now_iso(),
-        }
-
-    outcome = {
-        "targetHit": payload.get("targetHit"),
-        "reversalHappened": payload.get("reversalHappened"),
-        "chopHappened": payload.get("chopHappened"),
-        "buyWin": payload.get("buyWin"),
-        "sellWin": payload.get("sellWin"),
-        "candlesToResult": payload.get("candlesToResult"),
-        "maxDrawdownBeforeTarget": payload.get("maxDrawdownBeforeTarget"),
-        "raw": payload,
-    }
-
-    labeled_at = now_iso()
-    snapshot_symbol = None
-    snapshot_timeframe = None
-
-    with sqlite3.connect(DB_PATH) as connection:
+        from fastapi import HTTPException
+        raise HTTPException(400, "Missing snapshot id")
+    fields = ("targetHit", "reversalHappened", "chopHappened", "buyWin", "sellWin", "candlesToResult", "maxDrawdownBeforeTarget", "maxFavorableExcursion", "maxAdverseExcursion", "result", "labelSource")
+    outcome = {key: payload[key] for key in fields if key in payload}
+    stamp = now_iso()
+    with _MEMORY_LOCK, sqlite3.connect(DB_PATH) as connection:
         connection.row_factory = sqlite3.Row
-        existing = connection.execute(
-            """
-            SELECT symbol, timeframe
-            FROM neural_brain_snapshots
-            WHERE id = ?
-            """,
-            (snapshot_id,),
-        ).fetchone()
-
-        if existing:
-            snapshot_symbol = existing["symbol"]
-            snapshot_timeframe = existing["timeframe"]
-
-        cursor = connection.execute(
-            """
-            UPDATE neural_brain_snapshots
-            SET outcome_json = ?, labeled_at = ?
-            WHERE id = ?
-            """,
-            (safe_json(outcome), labeled_at, snapshot_id),
-        )
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute("SELECT * FROM neural_brain_snapshots WHERE id = ?", (snapshot_id,)).fetchone()
+        if not row:
+            return {"status": "NOT_FOUND", "updated": False, "id": snapshot_id}
+        # Retry identical labels once; explicit corrections keep the former update behavior.
+        if row["outcome_json"]:
+            previous = json.loads(row["outcome_json"])
+            if all(previous.get(key) == value for key, value in outcome.items()):
+                return {"status": "OK", "updated": False, "duplicate": True, "id": snapshot_id, "outcome": previous}
+            outcome = {**previous, **outcome}
+        outcome.update(labeledAt=stamp, labelSource=outcome.get("labelSource") or "manual")
+        snapshot = row_to_snapshot(row)
+        snapshot["outcome"] = outcome
+        state = logistic.learn(load_logistic_state(connection), snapshot)
+        connection.execute("UPDATE neural_brain_snapshots SET outcome_json = ?, labeled_at = ? WHERE id = ?", (safe_json(outcome), stamp, snapshot_id))
+        save_logistic_state(connection, state)
         connection.commit()
-        updated = cursor.rowcount
-
-    online = get_online_brain_status(snapshot_symbol, snapshot_timeframe)
-
-    if updated and snapshot_symbol and snapshot_timeframe:
-        online = update_online_learning_scopes(snapshot_symbol, snapshot_timeframe, outcome, labeled_at)
-
-    return {
-        "eventType": "NEURAL_BRAIN_OUTCOME",
-        "status": "OK" if updated else "NOT_FOUND",
-        "id": snapshot_id,
-        "updated": bool(updated),
-        "symbol": normalize_symbol(snapshot_symbol) if snapshot_symbol else None,
-        "timeframe": normalize_timeframe(snapshot_timeframe) if snapshot_timeframe else None,
-        "outcome": outcome,
-        "online": online,
-        "createdAt": labeled_at,
-    }
+        scopes = update_online_learning_scopes(row["symbol"], row["timeframe"], outcome, stamp)
+    return {"eventType": "NEURAL_BRAIN_OUTCOME", "status": "OK", "updated": True, "id": snapshot_id,
+            "symbol": row["symbol"], "timeframe": row["timeframe"], "outcome": outcome,
+            "online": scopes, "onlineLearning": {"status": "OK", "snapshotId": snapshot_id, "online": logistic.status(state)}, "createdAt": stamp}
 
 
 def predict_neural_brain(payload: Dict[str, Any]) -> Dict[str, Any]:
-    base = base_scorecard_from_payload(payload or {})
-    scorecard = apply_online_brain_prediction(base)
+    payload = payload or {}
+    if any(key in payload for key in ("buyConfidence", "sellConfidence", "targetHitProbability")):
+        base = base_scorecard_from_payload(payload)
+        base["modelType"] = "phase1_weighted_neural_scorecard"
+    else:
+        base = build_neural_brain_scorecard(symbol=normalize_symbol(payload.get("symbol")), timeframe=normalize_timeframe(payload.get("timeframe")),
+            candles=payload.get("candles"), scorecards=payload.get("scorecards"), ml_features=payload.get("mlFeatures"),
+            overlay_payload=payload.get("overlayPayload") or payload.get("chartOverlays"), unified_intelligence=payload.get("unifiedIntelligence"),
+            external_data=payload.get("externalData"), auto_record=False)
+    scorecard = logistic.apply_prediction(load_logistic_state(), base)
 
     memory = save_neural_brain_snapshot({
         **scorecard,
@@ -917,7 +908,8 @@ def predict_neural_brain(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         **scorecard,
         "memory": memory,
-        "onlineStatus": get_online_brain_status(scorecard.get("symbol"), scorecard.get("timeframe")),
+        "onlineStatus": logistic.status(load_logistic_state()),
+        "scopeStatistics": get_online_brain_status(scorecard.get("symbol"), scorecard.get("timeframe")),
     }
 
 
@@ -931,7 +923,8 @@ def neural_brain_status(symbol: Any = None, timeframe: Any = None) -> Dict[str, 
         total = connection.execute("SELECT COUNT(*) FROM neural_brain_snapshots").fetchone()[0]
         labeled = connection.execute("SELECT COUNT(*) FROM neural_brain_snapshots WHERE outcome_json IS NOT NULL").fetchone()[0]
 
-    online = get_online_brain_status(symbol_norm, timeframe_norm)
+    scopes = get_online_brain_status(symbol_norm, timeframe_norm)
+    online = logistic.status(load_logistic_state())
 
     return {
         "eventType": "NEURAL_BRAIN_STATUS",
@@ -956,6 +949,7 @@ def neural_brain_status(symbol: Any = None, timeframe: Any = None) -> Dict[str, 
             "groups": get_memory_group_stats(),
         },
         "online": online,
+        "scopeStatistics": scopes,
         "scopeBehavior": {
             "global": "Learns from every symbol and timeframe together.",
             "symbol": "Learns market-specific behavior such as BTCUSD vs MES1!.",
@@ -979,6 +973,18 @@ def neural_brain_status(symbol: Any = None, timeframe: Any = None) -> Dict[str, 
             "candlesToResult",
             "maxDrawdownBeforeTarget",
         ],
-        "note": "FastAPI Phase 3 route mirror. Saves Neural Brain snapshots by symbol/timeframe, accepts outcome labels, and runs global + symbol + symbol-timeframe online updates from labeled outcomes.",
+        "note": "Feature-based online logistic learning and snapshot/outcome memory run on FastAPI. Existing symbol/timeframe outcome statistics remain available.",
+        "storage": {"engine": "sqlite", "dbPath": str(DB_PATH), "durability": "Depends on the existing host volume; free Render local files are ephemeral. Export memory before redeploying if needed."},
         "createdAt": now_iso(),
     }
+
+
+def export_neural_brain_memory():
+    ensure_db()
+    with _MEMORY_LOCK, sqlite3.connect(DB_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("BEGIN")
+        rows = connection.execute("SELECT * FROM neural_brain_snapshots ORDER BY created_at").fetchall()
+        state = load_logistic_state(connection)
+    return {"eventType": "NEURAL_BRAIN_MEMORY_EXPORT", "snapshots": [row_to_snapshot(row) for row in rows],
+            "onlineModel": state, "scopeStatistics": get_online_brain_status(), "createdAt": now_iso()}

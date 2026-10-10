@@ -202,9 +202,12 @@ def build_neural_brain_scorecard(
     alphax_strength = first_number(scorecards, ["alphaxStrength", "alphaXStrength", "dlmStrength"], first_number(ml_features, ["alphaxStrength"], 50.0))
     ghost_strength = first_number(scorecards, ["ghostConfidence", "ghostStrength"], first_number(ml_features, ["ghostConfidence"], 50.0))
 
-    smc_dir = direction_to_value(scorecards.get("smcDirection") or scorecards.get("smc") or ml_features.get("smcDirection"))
-    alphax_dir = direction_to_value(scorecards.get("alphaxDirection") or scorecards.get("alphax") or ml_features.get("alphaxDirection"))
-    ghost_dir = direction_to_value(scorecards.get("ghostDirection") or scorecards.get("ghost") or ml_features.get("ghostDirection"))
+    def first_non_null(*values):
+        return next((value for value in values if value is not None), None)
+
+    smc_dir = direction_to_value(first_non_null(scorecards.get("smcDirection"), scorecards.get("smc"), ml_features.get("smcDirection")))
+    alphax_dir = direction_to_value(first_non_null(scorecards.get("alphaxDirection"), scorecards.get("alphax"), ml_features.get("alphaxDirection")))
+    ghost_dir = direction_to_value(first_non_null(scorecards.get("ghostDirection"), scorecards.get("ghost"), ml_features.get("ghostDirection")))
 
     bull_pressure = first_number(scorecards, ["alphaxBullPressure", "bullPressurePct", "buyPressurePct"], first_number(overlay_payload, ["bullPressurePct", "buyPressurePct"], 50.0))
     bear_pressure = first_number(scorecards, ["alphaxBearPressure", "bearPressurePct", "sellPressurePct"], first_number(overlay_payload, ["bearPressurePct", "sellPressurePct"], 50.0))

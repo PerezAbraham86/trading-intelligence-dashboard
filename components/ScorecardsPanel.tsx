@@ -1,7 +1,8 @@
 import React, { useMemo } from 'react'
-import { buildNeuralBrainScorecard } from '@/lib/neuralBrain'
+import { useNeuralBrain } from '@/hooks/useNeuralBrain'
 
 type AnyRecord = Record<string, any>
+const EMPTY_OVERLAY_SOURCES: any[] = []
 
 type ScorecardBundle = {
   version?: string
@@ -433,7 +434,7 @@ export default function ScorecardsPanel({
   scorecards,
   mlFeatures,
   overlayPayload,
-  overlaySources = [],
+  overlaySources = EMPTY_OVERLAY_SOURCES,
   compact = false,
 }: ScorecardsPanelProps) {
   const fallbackScorecards = useMemo(() => {
@@ -441,9 +442,12 @@ export default function ScorecardsPanel({
   }, [mlFeatures, overlayPayload, overlaySources])
 
   const activeScorecards = hasUsefulScorecards(scorecards) ? scorecards : fallbackScorecards
-  const activeMlFeatures = buildFallbackMlFeatures(activeScorecards, mlFeatures)
+  const activeMlFeatures = useMemo(
+    () => buildFallbackMlFeatures(activeScorecards, mlFeatures),
+    [activeScorecards, mlFeatures],
+  )
 
-  const neuralBrain = useMemo(() => {
+  const neuralInput = useMemo(() => {
     if (!activeScorecards) return null
 
     const sources = normalizePayloadSources(overlayPayload, ...overlaySources)
@@ -451,7 +455,7 @@ export default function ScorecardsPanel({
     const sourceWithUnified = sources.find((source) => source.unifiedIntelligence || source.eventType === 'UNIFIED_INTELLIGENCE') ?? {}
     const sourceWithExternal = sources.find((source) => source.externalData || source.externalTables) ?? {}
 
-    return buildNeuralBrainScorecard({
+    return {
       symbol: String(sourceWithSymbol.symbol ?? overlayPayload?.symbol ?? 'MES1!'),
       timeframe: String(sourceWithSymbol.timeframe ?? overlayPayload?.timeframe ?? '1m'),
       scorecards: activeScorecards as AnyRecord,
@@ -459,8 +463,9 @@ export default function ScorecardsPanel({
       overlayPayload: overlayPayload ?? {},
       unifiedIntelligence: (sourceWithUnified.unifiedIntelligence ?? sourceWithUnified) as AnyRecord,
       externalData: (sourceWithExternal.externalData ?? sourceWithExternal.externalTables ?? {}) as AnyRecord,
-    })
+    }
   }, [activeMlFeatures, activeScorecards, overlayPayload, overlaySources])
+  const { prediction: neuralBrain, error: neuralError } = useNeuralBrain(neuralInput)
 
   if (!activeScorecards) {
     return (
@@ -497,6 +502,7 @@ export default function ScorecardsPanel({
         </div>
       </div>
 
+      {neuralError && <p role="status" className="text-xs text-amber-400">{neuralError}</p>}
       {neuralBrain && (
         <div className="mt-4 rounded-xl border border-cyan-400/25 bg-cyan-950/10 p-3">
           <div className="flex items-start justify-between gap-3">
