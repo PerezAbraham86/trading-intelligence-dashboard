@@ -67,11 +67,12 @@ export function resetIncompatibleCandleCache(
   cache: { get(key: string): { source?: unknown } | undefined; delete(key: string): boolean },
   inFlight: { delete(key: string): boolean },
   key: string,
-  transport: string
+  transport: string,
+  transportChanged = false
 ): boolean {
   const cached = cache.get(key)
-  if (!cached || candleTransportMatches(cached.source, transport)) return false
-  cache.delete(key)
+  if (!transportChanged && (!cached || candleTransportMatches(cached.source, transport))) return false
+  if (cached && !candleTransportMatches(cached.source, transport)) cache.delete(key)
   inFlight.delete(key)
   return true
 }
