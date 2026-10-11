@@ -36,3 +36,22 @@ test('Messages distinguish mapping, entitlement, network and HTTP errors', async
   assert.match(api.marketDataMessage(new TypeError('Failed to fetch')), /Browser\/network/)
   await assert.rejects(api.readableApiResponse({ ok: false, status: 503, json: async () => ({}) }), /Backend unavailable/)
 })
+
+
+test('TWS states remain explicit and never label stale/closed data connected-live', () => {
+  const api = load()
+  for (const status of ['Live market data', 'Market closed', 'Waiting for data', 'Stale market data', 'Authentication required', 'Market-data subscription required', 'Gateway disconnected', 'Connector offline']) {
+    const payload = { transport: 'tws_relay', status, ready: true }
+    assert.equal(api.connectionLabel(payload), status)
+    assert.ok(api.marketDataMessage(payload).startsWith(status))
+  }
+  assert.equal(api.connectionLabel({ ready: true }), 'Connected')
+})
+
+test('TWS chart keeps provider timestamps and warms the selected symbol', () => {
+  const page = fs.readFileSync('app/page.tsx', 'utf8')
+  assert.ok(page.includes("if (String(liveCandle?.source ?? '').startsWith('ibkr_tws')) return liveCandle"))
+  assert.ok(page.includes('providerStatus(bootApiBaseUrl, selectedSymbol)'))
+  assert.ok(page.includes("process.env.NEXT_PUBLIC_DEFAULT_SYMBOL === 'SPY'"))
+  assert.ok(fs.readFileSync('api/main.py', 'utf8').includes('if is_tws():\n        return get_historical_ohlcv(normalized_symbol, normalized_timeframe, limit=safe_limit)'))
+})

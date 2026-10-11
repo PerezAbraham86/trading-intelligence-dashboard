@@ -6,7 +6,16 @@ export function reconnectDelay(attempt: number, retrySeconds = 0): number {
   return Math.max(Number(retrySeconds || 0) * 1000, Math.min(300000, 60000 * 2 ** Math.min(attempt, 3)))
 }
 
+export type ConnectionStatus = 'Connected' | 'Waiting' | 'Error' | 'IBKR Not Connected' | 'IBKR connected' | 'Live market data' | 'Market closed' | 'Waiting for data' | 'Stale market data' | 'Authentication required' | 'Market-data subscription required' | 'Gateway disconnected' | 'Connector offline'
+
+export function connectionLabel(payload: any): ConnectionStatus {
+  const states: ConnectionStatus[] = ['IBKR connected', 'Live market data', 'Market closed', 'Waiting for data', 'Stale market data', 'Authentication required', 'Market-data subscription required', 'Gateway disconnected', 'Connector offline']
+  if (payload?.transport === 'tws_relay' && states.includes(payload.status)) return payload.status
+  return payload?.ready ? 'Connected' : 'IBKR Not Connected'
+}
+
 export function marketDataMessage(payload: any, fallback = 'IBKR Not Connected'): string {
+  if (payload?.transport === 'tws_relay') return `${connectionLabel(payload)}${payload.reason ? ` — ${payload.reason}` : ''}`
   const reason = String(payload?.reason ?? payload?.connection?.reason ?? payload?.detail ?? payload?.message ?? '')
   if (/Failed to fetch|NetworkError|fetch failed/i.test(reason)) return 'Browser/network error: cannot read the backend response. Check connectivity and CORS.'
   if (/timeout|abort/i.test(reason)) return 'Backend unavailable: request timed out.'

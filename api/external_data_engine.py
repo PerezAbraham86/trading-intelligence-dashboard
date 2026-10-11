@@ -1,7 +1,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
-from api.ibkr_client import get_quote as get_ibkr_quote, connection_status
+from api.market_data import get_quote as get_ibkr_quote, connection_status
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -109,6 +109,8 @@ def is_futures_symbol(symbol: str) -> bool:
 def build_ibkr_l1_quote_context(symbol: str, timeframe: str = "1m") -> Dict[str, Any]:
     try:
         quote = get_ibkr_quote(symbol, timeframe)
+        if quote.get("priceType") == "forming_trade_bar_close":
+            return inactive_factor(symbol=symbol, timeframe=timeframe, name="IBKR L1 Quote Unavailable", source="ibkr_tws", status="unavailable", reason="The TWS candle subscription provides trade bars; a bid/ask quote subscription is not active.")
         return {**quote, "status": "active" if quote.get("isRealtime") else "unavailable", "label": "IBKR L1 Quote", "direction": "neutral", "strength": 0, "reason": "IBKR top-of-book snapshot", "createdAt": utc_now_iso()}
     except Exception:
         return inactive_factor(symbol=symbol, timeframe=timeframe, name="IBKR L1 Quote Unavailable", source="ibkr_live_quote", status="unavailable", reason="Configure and authenticate the IBKR gateway and contract mapping.")

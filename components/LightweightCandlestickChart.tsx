@@ -51,6 +51,9 @@ export type DashboardCandle = {
   low: number;
   close: number;
   volume?: number;
+  completed?: boolean;
+  source?: string;
+  updatedAt?: number;
 };
 
 export type ChartMode = "regular" | "heikinAshi";

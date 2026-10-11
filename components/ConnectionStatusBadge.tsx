@@ -1,7 +1,9 @@
 'use client'
 
+import type { ConnectionStatus } from '@/lib/marketDataConnection'
+
 type ConnectionStatusBadgeProps = {
-  status: 'Connected' | 'Waiting' | 'Error' | 'IBKR Not Connected'
+  status: ConnectionStatus
   lastUpdateTime?: string | Date | null
 }
 
@@ -10,16 +12,16 @@ export default function ConnectionStatusBadge({
   lastUpdateTime,
 }: ConnectionStatusBadgeProps) {
   const dotColor =
-    status === 'Connected'
+    ['Connected', 'IBKR connected', 'Live market data'].includes(status)
       ? 'bg-green-400'
-      : status === 'Waiting'
+      : ['Waiting', 'Waiting for data', 'Market closed', 'Stale market data'].includes(status)
         ? 'bg-yellow-400'
         : 'bg-red-400'
 
   const textColor =
-    status === 'Connected'
+    ['Connected', 'IBKR connected', 'Live market data'].includes(status)
       ? 'text-green-400'
-      : status === 'Waiting'
+      : ['Waiting', 'Waiting for data', 'Market closed', 'Stale market data'].includes(status)
         ? 'text-yellow-400'
         : 'text-red-400'
 

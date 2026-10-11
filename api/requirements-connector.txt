@@ -1,0 +1,6 @@
+# Independent connector machine; never required to open a brokerage socket on Render.
+ib_async==2.1.0
+pydantic==2.10.4
+requests==2.32.3
+python-dotenv==1.0.1
+tzdata==2025.2
