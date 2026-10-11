@@ -17,6 +17,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from ib_async import BarData, BarDataList, StartupFetchNONE
 from pydantic import ValidationError
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from api import ibkr_client as rest, main, market_data, ibkr_tws_relay as relay, external_data_engine
 from api.ibkr_tws_client import Config, Connector, MarketDataIB, classify_error, convert_bar, exchange_schedule, private_host
@@ -143,6 +144,51 @@ class RelayTests(unittest.TestCase):
             self.assertEqual(oversized.status_code, 413)
         with TestClient(main.app) as client:
             self.assertEqual(client.post(relay.PATH, content=body, headers=headers).status_code, 400)
+
+    def test_forwarded_https_requires_a_trusted_socket_peer(self):
+        async def proxy_scope(scope, receive, send, trusted):
+            if scope["type"] == "http":
+                scope = {**scope, "client": ("10.0.0.8", 12345)}
+            await ProxyHeadersMiddleware(main.app, trusted_hosts=trusted)(scope, receive, send)
+
+        async def trusted_app(scope, receive, send):
+            await proxy_scope(scope, receive, send, "10.0.0.8")
+
+        async def untrusted_app(scope, receive, send):
+            await proxy_scope(scope, receive, send, "127.0.0.1")
+
+        body, headers = envelope(payload())
+        headers["X-Forwarded-Proto"] = "https"
+        with TestClient(untrusted_app) as client:
+            self.assertEqual(client.post(relay.PATH, content=body, headers=headers).status_code, 400)
+            self.assertFalse(client.get("/api/ibkr/tws/status", headers=headers).json()["httpsVerified"])
+        with TestClient(trusted_app) as client:
+            self.assertEqual(client.post(relay.PATH, content=body, headers=headers).status_code, 200)
+            self.assertTrue(client.get("/api/ibkr/tws/status", headers=headers).json()["httpsVerified"])
+
+    def test_production_defaults_install_without_enabling_tws(self):
+        with patch.dict(os.environ, {}, clear=True), TestClient(main.app, base_url="https://backend.test") as client:
+            self.assertEqual(market_data.selected_source(), "client_portal")
+            self.assertFalse(relay.enabled())
+            state = client.get("/api/ibkr/tws/status").json()
+            self.assertEqual(state["status"], "IBKR Not Connected")
+            self.assertFalse(state["configured"])
+            self.assertFalse(state["ready"])
+            self.assertFalse(state["isLive"])
+            self.assertTrue(state["httpsVerified"])
+            self.assertEqual(client.post(relay.PATH, content=b"{}").status_code, 503)
+
+    def test_render_wildcard_proxy_default_cannot_enable_relay(self):
+        for value in ["", "*", "0.0.0.0/0", "::/0", "invalid"]:
+            with patch.dict(os.environ, {"RENDER": "true", "FORWARDED_ALLOW_IPS": value}):
+                self.assertFalse(relay.proxy_trust_ready())
+                self.assertFalse(relay.status()["configured"])
+                with self.assertRaises(HTTPException) as error:
+                    self.send(payload())
+                self.assertEqual(error.exception.status_code, 503)
+        with patch.dict(os.environ, {"RENDER": "true", "FORWARDED_ALLOW_IPS": "10.0.0.8,127.0.0.1"}):
+            self.assertTrue(relay.proxy_trust_ready())
+            self.assertEqual(self.send(payload())["changed"], 1)
 
     def test_live_closed_stale_offline_and_permission_statuses(self):
         value = payload()

@@ -54,3 +54,5 @@ __pycache__/
 api/projection_engine_memory.json
 
 .venv-tws/
+
+/public/build-info.json

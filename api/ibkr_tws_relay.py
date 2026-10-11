@@ -6,6 +6,7 @@ No brokerage credentials, socket requests or trading functions live on Render.
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -32,10 +33,24 @@ def enabled():
     return os.getenv("IBKR_RELAY_ENABLED", "false").lower() == "true"
 
 
+def proxy_trust_ready():
+    if os.getenv("RENDER", "").lower() != "true":
+        return True
+    values = [value.strip() for value in os.getenv("FORWARDED_ALLOW_IPS", "").split(",") if value.strip()]
+    if not values:
+        return False
+    try:
+        return all(ipaddress.ip_network(value, strict=False).prefixlen > 0 for value in values)
+    except ValueError:
+        return False
+
+
 def secret():
     value = os.getenv("IBKR_RELAY_SECRET", "")
     if not enabled() or len(value) < 32:
         raise HTTPException(503, "TWS relay disabled or dedicated relay secret not configured.")
+    if not proxy_trust_ready():
+        raise HTTPException(503, "TWS relay requires explicit trusted ingress proxy addresses in FORWARDED_ALLOW_IPS on Render.")
     return value
 
 
@@ -153,7 +168,7 @@ def market_closed(schedule, now):
 
 def status(symbol="SPY", metadata=None, bars=None, now=None):
     now = time.time() if now is None else now
-    base = {"provider": "ibkr", "source": SOURCE, "transport": "tws_relay", "readOnly": True, "ready": False, "isRealtime": False, "isLive": False, "configured": enabled() and len(os.getenv("IBKR_RELAY_SECRET", "")) >= 32, "retryAfterSeconds": 60, "symbol": symbol}
+    base = {"provider": "ibkr", "source": SOURCE, "transport": "tws_relay", "readOnly": True, "ready": False, "isRealtime": False, "isLive": False, "configured": enabled() and len(os.getenv("IBKR_RELAY_SECRET", "")) >= 32 and proxy_trust_ready(), "retryAfterSeconds": 60, "symbol": symbol}
     if symbol != "SPY":
         return {**base, "status": "Waiting for data", "reason": "TWS connector currently subscribes to SPY only; no REST substitution."}
     if not base["configured"]:
@@ -237,5 +252,7 @@ def latest(symbol="SPY", timeframe="1m"):
 
 
 @router.get("/api/ibkr/tws/status")
-def tws_status(symbol: str = "SPY"):
-    return status(symbol.upper())
+def tws_status(request: Request, symbol: str = "SPY"):
+    # Observe the ASGI scheme after trusted proxy processing. Never trust raw
+    # forwarding headers here; this is safe to inspect before enabling the relay.
+    return {**status(symbol.upper()), "httpsVerified": request.url.scheme == "https", "proxyTrustReady": proxy_trust_ready()}

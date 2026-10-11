@@ -1,7 +1,7 @@
 # MarketBOS read-only SPY TWS relay
 
-Development branch: `ibkr-tws-integration`. These changes are not enabled by default.
-No production deployment or environment changes are part of this implementation.
+Development branch: `ibkr-tws-integration`. The integration remains disabled by default.
+Installing this code does not activate the relay or change the selected data source.
 
 ## Architecture and explicit source ownership
 
@@ -149,7 +149,18 @@ The receiver requires FastAPI's request scheme to be HTTPS. In a reverse proxy s
 configure Uvicorn to trust forwarded-protocol headers only from the actual ingress
 proxy. Do not trust arbitrary incoming `X-Forwarded-Proto` headers. Render terminates
 TLS at its ingress; verify this trusted-proxy configuration during the authorized
-rollout before starting the relay. Do not create another Render service or change plans.
+rollout before starting the relay. Inspect `/api/ibkr/tws/status`: `httpsVerified`
+reports the scheme seen by FastAPI after trusted proxy processing. It must be true
+for a request through the existing HTTPS backend origin before enabling submissions.
+Render supplies `FORWARDED_ALLOW_IPS=*` by default. The relay fails closed on Render
+with wildcard, unrestricted, invalid or missing proxy trust settings;
+`proxyTrustReady` must also be true. Configure only verified ingress IPs/CIDRs before
+enabling the relay. This guard does not change the existing Client Portal integration.
+An untrusted caller supplying `X-Forwarded-Proto: https` does not satisfy the relay
+HTTPS requirement. If the diagnostic is false, restrict Uvicorn `FORWARDED_ALLOW_IPS`
+to the actual verified ingress proxy addresses; do not set wildcard trust or guess
+address ranges. Leave the relay disabled until that configuration is verified.
+Do not create another Render service or change plans.
 
 ## Security and recovery
 
@@ -224,8 +235,11 @@ Official references:
 - https://interactivebrokers.github.io/tws-api/message_codes.html
 - https://www.interactivebrokers.com/docs/tws-api/doc/market-data-historical/historical-bars/receiving-historical-bars
 
-The development implementation passed 53 backend tests, eight frontend tests and a
+The development implementation passed 56 backend tests, ten frontend tests and a
 production static export build with the optional SPY default. New Python modules pass
 Pyflakes. The existing `npm run lint` command requires an ESLint configuration that
 the repository does not currently contain; it opens an interactive setup prompt.
 Production build TypeScript checks pass. These checks do not verify live entitlements.
+
+The static frontend publishes `/build-info.json` with only its Git commit and build
+time. Use this alongside backend `/health` to verify the deployed commit.
