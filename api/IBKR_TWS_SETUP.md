@@ -152,6 +152,18 @@ TLS at its ingress; verify this trusted-proxy configuration during the authorize
 rollout before starting the relay. Inspect `/api/ibkr/tws/status`: `httpsVerified`
 reports the scheme seen by FastAPI after trusted proxy processing. It must be true
 for a request through the existing HTTPS backend origin before enabling submissions.
+For the existing Render web service, an alternative **explicit opt-in** is
+`IBKR_RELAY_RENDER_EDGE_TLS=true`. It requires `RENDER=true` and an
+`https://` `RENDER_EXTERNAL_URL`. This trusts Render's managed HTTPS edge
+termination as a deployment boundary rather than trusting any client-supplied
+`X-Forwarded-Proto` header. Only use it when the service is reachable solely
+through Render's managed ingress; it is not suitable for a directly exposed
+application port or arbitrary self-hosting. The status endpoint separately
+reports `httpsVerified` (ASGI scheme), `renderEdgeTlsPolicy`, and
+`relayTransportReady`. HMAC authentication, timestamp, nonce, and replay
+checks still apply. Keep the relay disabled until deployment policy and
+security tests are reviewed.
+
 Render supplies `FORWARDED_ALLOW_IPS=*` by default. The relay fails closed on Render
 with wildcard, unrestricted, invalid or missing proxy trust settings;
 `proxyTrustReady` must also be true. Configure only verified ingress IPs/CIDRs before
