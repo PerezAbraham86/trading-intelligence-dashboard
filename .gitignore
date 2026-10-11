@@ -43,3 +43,16 @@ Thumbs.db
 __pycache__/
 *.pyc
 *.tsbuildinfo
+
+# Local relay/learning databases and private connector configuration
+.data/
+.env.connector
+.env.backend
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+api/projection_engine_memory.json
+
+.venv-tws/
+
+/public/build-info.json

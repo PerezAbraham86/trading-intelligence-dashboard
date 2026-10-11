@@ -934,6 +934,9 @@ function normalizeCandlePayloadItem(item: any): DashboardCandle | null {
     low,
     close,
     volume: toFiniteNumber(item.volume ?? item.v, 0),
+    ...(typeof item.completed === "boolean" ? { completed: item.completed } : {}),
+    ...(typeof item.source === "string" ? { source: item.source } : {}),
+    ...(Number.isFinite(item.updatedAt) ? { updatedAt: item.updatedAt } : {}),
   }
 }
 
@@ -4422,6 +4425,10 @@ function useChartCandles(
         reconnectAt = 0
         reconnectAttempts = 0
         disconnectedCacheRead = false
+        const selectedCache = getFullSharedCacheEntry()
+        if (provider.transport === 'tws_relay' && selectedCache && !String(selectedCache.source).includes('ibkr_tws')) {
+          SHARED_CANDLE_CACHE.delete(sharedCandleKey(symbol, timeframe))
+        }
         startLiveStream()
         const cacheReason = force ? `before-force-fetch:${reason}` : `before-fetch:${reason}`
         const cachedWasApplied = applyCachedPayload(cacheReason)
@@ -4432,7 +4439,7 @@ function useChartCandles(
         }
 
         setIsLoading(!cachedWasApplied)
-        setErrorText('')
+        setErrorText(provider.transport === 'tws_relay' && !provider.isLive ? marketDataMessage(provider) : '')
 
         lastHistoricalFetchStartedAt = Date.now()
         const fullCacheBeforeFetch = getFullSharedCacheEntry()
@@ -4466,6 +4473,7 @@ function useChartCandles(
             storedCacheCount: fullCacheAfterFetch?.candles?.length ?? nextPayload.candles.length,
           }, 'success')
           setCandles(nextPayload.candles)
+          if (provider.transport === 'tws_relay' && !provider.isLive) setErrorText(marketDataMessage(provider))
 
           // Keep overlay/intelligence stable during polling/history refresh.
           // Historical OHLCV usually returns candles only, so never replace a
@@ -4579,6 +4587,7 @@ function useChartCandles(
     }
 
     function buildDisplayOnlyLiveGapCandle(previousCandles: DashboardCandle[], liveCandle: any) {
+      if (String(liveCandle?.source ?? '').startsWith('ibkr_tws')) return liveCandle
       const lastHistorical = previousCandles[previousCandles.length - 1]
       const lastEpoch = liveCandleEpoch(lastHistorical)
       const timeframeSeconds = timeframeToSeconds(timeframe)
@@ -4648,6 +4657,17 @@ function useChartCandles(
 
         try {
           const payload = JSON.parse(event.data)
+          if (payload?.connection?.transport === 'tws_relay') {
+            const provider = payload.connection
+            setErrorText(provider.isLive ? '' : marketDataMessage(provider))
+            if (!provider.ready) {
+              liveEventSource?.close()
+              liveEventSource = null
+              liveSourceConnected = false
+              reconnectAt = Date.now() + reconnectDelay(reconnectAttempts++, provider.retryAfterSeconds)
+              startPolling()
+            }
+          }
           const liveCandle = extractLiveCandleFromStreamPayload(payload)
           if (!liveCandle) return
 
@@ -6211,7 +6231,7 @@ export default function Dashboard() {
   )
 
   const [mainChartSelection, setMainChartSelection] = useState<ChartSelection>({
-    symbol: 'MES1!',
+    symbol: process.env.NEXT_PUBLIC_DEFAULT_SYMBOL === 'SPY' ? 'SPY' : 'MES1!',
     timeframe: '1m',
     candleMode: 'Heikin Ashi',
   })
@@ -6746,7 +6766,7 @@ export default function Dashboard() {
 
       try {
         try {
-          const provider = await providerStatus(bootApiBaseUrl, 'MES1!')
+          const provider = await providerStatus(bootApiBaseUrl, selectedSymbol)
           if (!provider.ready) {
             const message = marketDataMessage(provider)
             setDashboardBootError(message)
@@ -6767,13 +6787,13 @@ export default function Dashboard() {
 
         const requiredCoreHistory = MULTI_TIMEFRAME_BOOT_WARM_DISABLED
           ? [
-              { key: 'hist1', symbol: 'MES1!', timeframe: selectedTimeframe, limit: SHARED_CANDLE_CACHE_MAX_BARS, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+              { key: 'hist1', symbol: selectedSymbol, timeframe: selectedTimeframe, limit: SHARED_CANDLE_CACHE_MAX_BARS, minimum: CORE_MES_HISTORY_MIN_CANDLES },
             ]
           : [
-              { key: 'hist5', symbol: 'MES1!', timeframe: '5m', limit: SHARED_CANDLE_CACHE_MAX_BARS, minimum: CORE_MES_HISTORY_MIN_CANDLES },
-              { key: 'hist10', symbol: 'MES1!', timeframe: '10m', limit: SHARED_CANDLE_CACHE_MAX_BARS, minimum: CORE_MES_HISTORY_MIN_CANDLES },
-              { key: 'hist3', symbol: 'MES1!', timeframe: '3m', limit: SHARED_CANDLE_CACHE_MAX_BARS, minimum: CORE_MES_HISTORY_MIN_CANDLES },
-              { key: 'hist1', symbol: 'MES1!', timeframe: '1m', limit: SHARED_CANDLE_CACHE_MAX_BARS, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+              { key: 'hist5', symbol: selectedSymbol, timeframe: '5m', limit: SHARED_CANDLE_CACHE_MAX_BARS, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+              { key: 'hist10', symbol: selectedSymbol, timeframe: '10m', limit: SHARED_CANDLE_CACHE_MAX_BARS, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+              { key: 'hist3', symbol: selectedSymbol, timeframe: '3m', limit: SHARED_CANDLE_CACHE_MAX_BARS, minimum: CORE_MES_HISTORY_MIN_CANDLES },
+              { key: 'hist1', symbol: selectedSymbol, timeframe: '1m', limit: SHARED_CANDLE_CACHE_MAX_BARS, minimum: CORE_MES_HISTORY_MIN_CANDLES },
             ]
 
         if (MULTI_TIMEFRAME_BOOT_WARM_DISABLED) {

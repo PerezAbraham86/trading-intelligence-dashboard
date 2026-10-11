@@ -14,8 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from api.ibkr_client import (
-    IBKR_BASE_URL, get_historical_ohlcv, historical_ohlcv_status,
+from api.market_data import (
+    get_historical_ohlcv, historical_ohlcv_status, is_tws,
     get_latest_live_snapshot, live_feed_event_generator, live_feed_ping_generator,
     live_feed_status, get_quote as get_ibkr_quote, get_ibkr_session,
     session_status as ibkr_session_status, contract_id as ibkr_contract_id,
@@ -270,7 +270,10 @@ except Exception:
 # APP SETUP
 # ─────────────────────────────────────────────────────────────────────────────
 
+from api.ibkr_tws_relay import router as tws_relay_router
+
 app = FastAPI(title="Trading Intelligence Dashboard API")
+app.include_router(tws_relay_router)
 
 CORS_ORIGINS = sorted({"https://trading-intelligence-dashboard-2.onrender.com", *[origin.strip().rstrip("/") for origin in os.getenv("CORS_ALLOWED_ORIGINS", "https://trading-intelligence-dashboard.onrender.com,https://trading-intelligence-dashboard.vercel.app,http://localhost:3000").split(",") if origin.strip() and origin.strip() != "*"]})
 
@@ -1214,7 +1217,7 @@ def candle_cache_namespace(route: str, symbol: str) -> str:
         conid = str(ibkr_contract_id(symbol))
     except HTTPException:
         conid = "unconfigured"
-    return f"ibkr::{conid}::{route}"
+    return f"ibkr::tws_relay::{conid}::{route}" if is_tws() else f"ibkr::{conid}::{route}"
 
 
 def candle_cache_key(route: str, symbol: str, timeframe: str, limit: int) -> str:
@@ -1528,6 +1531,9 @@ def get_dashboard_candles(symbol: str, timeframe: str = "1m", limit: int = 0, us
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = 0 if is_futures_symbol(normalized_symbol) else max(1, min(candle_cache_limit_value(limit) or 500, 5000))
 
+    if is_tws():
+        return get_historical_ohlcv(normalized_symbol, normalized_timeframe, limit=safe_limit).get("candles", [])
+
     if not ibkr_connection_status(normalized_symbol).get("ready"):
         return disconnected_candle_payload(normalized_symbol, normalized_timeframe, safe_limit).get("candles", [])
 
@@ -1649,7 +1655,7 @@ def get_sentiment_candles(symbol: str, timeframe: str = "1m", limit: int = 500) 
     # Last fallback: build higher timeframes from working 1m candles.
     # This prevents the technical meter from defaulting to 50% when one provider
     # returns thin higher-timeframe data but the 1m route is working.
-    if len(candles) < 80 and normalized_timeframe != "1m":
+    if len(candles) < 80 and normalized_timeframe != "1m" and not is_tws():
         one_minute = get_dashboard_candles(normalized_symbol, "1m", max(safe_limit * 8, 1500))
         resampled = resample_candles_to_timeframe(one_minute, normalized_timeframe, safe_limit)
         if len(resampled) > len(candles):
@@ -2103,6 +2109,8 @@ def upsert_recent_live_candle(candle: Dict[str, Any]) -> None:
 
 
 def persist_live_candle_to_history_cache(symbol: str, timeframe: str, live_payload: Any) -> Optional[Dict[str, Any]]:
+    if is_tws():
+        return get_latest_live_snapshot(symbol, timeframe).get("candle")
     tick = live_price_payload_to_candle(live_payload, symbol, timeframe)
     if not tick:
         return None
@@ -6574,7 +6582,7 @@ def root() -> Dict[str, Any]:
 @app.get("/health")
 def health() -> Dict[str, Any]:
     connection = ibkr_connection_status()
-    return {"status": "ok", "time": now_iso(), "marketDataProvider": "ibkr", "ibkrConfigured": bool(IBKR_BASE_URL), "ibkr": connection, "readOnly": True, "commit": os.getenv("RENDER_GIT_COMMIT", "unknown")}
+    return {"status": "ok", "time": now_iso(), "marketDataProvider": "ibkr", "ibkrConfigured": bool(connection.get("configured")), "marketDataSource": "tws_relay" if is_tws() else "client_portal", "ibkr": connection, "readOnly": True, "commit": os.getenv("RENDER_GIT_COMMIT", "unknown")}
 
 
 @app.get("/api/backend-version")
@@ -7600,6 +7608,8 @@ def store_clean_candles(symbol: str, timeframe: str, limit: int, payload: Dict[s
 
 
 def disconnected_candle_payload(symbol: str, timeframe: str, limit: int = 0) -> Dict[str, Any]:
+    if is_tws():
+        return get_historical_ohlcv(symbol, timeframe, limit=limit)
     cached = None
     for route in ("candles", "dashboard", "historical"):
         candidate = candle_cache_best(route, symbol, timeframe, 1)
@@ -7621,6 +7631,9 @@ def candles(symbol: str = "MES1!", timeframe: str = "5m", limit: int = 0, force:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = clean_candle_limit(normalized_symbol, limit)
+
+    if is_tws():
+        return get_historical_ohlcv(normalized_symbol, normalized_timeframe, limit=safe_limit)
 
     if not ibkr_connection_status(normalized_symbol).get("ready"):
         return disconnected_candle_payload(normalized_symbol, normalized_timeframe, safe_limit)

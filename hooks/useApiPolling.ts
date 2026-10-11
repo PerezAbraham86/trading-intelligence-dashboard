@@ -1,6 +1,6 @@
 'use client'
 
-import { marketDataMessage, providerStatus, reconnectDelay } from '@/lib/marketDataConnection'
+import { marketDataMessage, providerStatus, reconnectDelay, connectionLabel, type ConnectionStatus } from '@/lib/marketDataConnection'
 
 import { useCallback, useRef, useEffect, useState } from 'react'
 
@@ -8,7 +8,7 @@ const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ||
   'https://trading-intelligence-dashboard-1.onrender.com'
 
-export type ConnectionStatus = 'Connected' | 'Waiting' | 'Error' | 'IBKR Not Connected'
+export type { ConnectionStatus } from '@/lib/marketDataConnection'
 
 type ChartOverlayToggles = {
   smc?: boolean
@@ -449,7 +449,7 @@ export function useApiPolling(options: UseApiPollingOptions = {}) {
       const provider = await providerStatus(API_BASE_URL, normalizedSymbol)
       if (!provider.ready) {
         retryState.current.at = Date.now() + reconnectDelay(retryState.current.attempts++, provider.retryAfterSeconds)
-        setConnectionStatus('IBKR Not Connected')
+        setConnectionStatus(connectionLabel(provider))
         setErrorMessage(marketDataMessage(provider))
         return
       }
@@ -497,9 +497,9 @@ export function useApiPolling(options: UseApiPollingOptions = {}) {
       )
 
       const ibkr = connectionRes.ok ? await connectionRes.json() : null
-      setConnectionStatus(ibkr?.ready === true ? 'Connected' : 'IBKR Not Connected')
+      setConnectionStatus(connectionLabel(ibkr))
       setLastUpdateTime(new Date().toLocaleTimeString())
-      setErrorMessage(null)
+      setErrorMessage(ibkr?.transport === 'tws_relay' && !ibkr.isLive ? marketDataMessage(ibkr) : null)
     } catch (error) {
       console.error('API polling error:', error)
       setConnectionStatus('Error')

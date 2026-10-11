@@ -238,3 +238,10 @@ reset or reduced prediction fallback is used. Migration does not automatically
 retrieve files from an old hosting account. If durable automatic retention across
 free Render deployments is required, an existing durable storage destination must
 be supplied; none is provisioned by this change.
+
+## Independent read-only TWS connector
+
+See [IBKR_TWS_SETUP.md](IBKR_TWS_SETUP.md) for the branch-only SPY integration,
+signed relay, setup commands, configuration, security model and live verification
+requirements. Render never opens the brokerage socket and never receives brokerage
+credentials. The existing market-data routes retain their interface.

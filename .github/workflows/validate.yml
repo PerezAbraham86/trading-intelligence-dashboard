@@ -13,6 +13,7 @@ jobs:
           node-version: '20'
       - run: pip install -r api/requirements-dev.txt
       - run: npm install --no-audit --no-fund
+      - run: python -m pyflakes api/ibkr_relay_auth.py api/ibkr_tws_schema.py api/ibkr_tws_client.py api/ibkr_tws_relay.py api/market_data.py tests/test_ibkr_tws.py
       - run: python -m unittest discover -s tests -v
       - run: npm run build
       - run: npm test

@@ -208,3 +208,10 @@ Validation: `python -m unittest discover -s tests -v`, `npm run build`, and `npm
 The Python suite compares predictions and feature weights with the original
 TypeScript logistic learner. `npm test` verifies the actual exported HTML and API
 boundary, so run it after the build.
+
+### Read-only TWS migration branch
+
+The independent SPY socket connector and signed HTTPS relay are documented in
+[api/IBKR_TWS_SETUP.md](api/IBKR_TWS_SETUP.md). Source selection is explicit and opt-in;
+the existing Client Portal integration remains available. Merge/deployment and private
+production configuration require separate authorization.

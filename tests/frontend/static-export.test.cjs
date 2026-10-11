@@ -27,3 +27,27 @@ test('Neural Brain requests use the configured FastAPI backend', () => {
   assert.ok(context.includes("fetch(backendApiUrl('/api/neural-brain/snapshots')"))
   assert.equal(context.includes('Promise.allSettled'), false)
 })
+
+test('Static deployment identity exposes only commit and build time', () => {
+  const value = JSON.parse(fs.readFileSync('out/build-info.json', 'utf8'))
+  assert.deepEqual(Object.keys(value).sort(), ['builtAt', 'commit'])
+  assert.match(value.commit, /^[a-f0-9]{40}$/)
+  assert.ok(Number.isFinite(Date.parse(value.builtAt)))
+})
+
+test('Render commit identity is read at build time without exporting secrets', () => {
+  const os = require('node:os')
+  const { execFileSync } = require('node:child_process')
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'marketbos-build-info-'))
+  try {
+    execFileSync(process.execPath, [path.resolve('scripts/write-build-info.cjs')], {
+      cwd: directory,
+      env: { ...process.env, RENDER_GIT_COMMIT: 'a'.repeat(40), IBKR_RELAY_SECRET: 'test-only-secret' },
+    })
+    const value = JSON.parse(fs.readFileSync(path.join(directory, 'public/build-info.json'), 'utf8'))
+    assert.equal(value.commit, 'a'.repeat(40))
+    assert.deepEqual(Object.keys(value).sort(), ['builtAt', 'commit'])
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true })
+  }
+})
