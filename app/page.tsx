@@ -1,6 +1,6 @@
 'use client'
 
-import { marketDataMessage, providerStatus, reconnectDelay, readableApiResponse } from '@/lib/marketDataConnection'
+import { marketDataMessage, providerStatus, reconnectDelay, readableApiResponse, candleTransportMatches, resetIncompatibleCandleCache } from '@/lib/marketDataConnection'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import SignalCard from '@/components/SignalCard'
 import LightweightCandlestickChart, { ChartMode, DashboardCandle, NrtrOverlayMode } from '@/components/LightweightCandlestickChart'
@@ -1089,6 +1089,7 @@ type SharedCandleCacheEntry = {
 
 const SHARED_CANDLE_CACHE = new Map<string, SharedCandleCacheEntry>()
 const SHARED_CANDLE_IN_FLIGHT = new Map<string, Promise<SharedCandleCacheEntry>>()
+const SHARED_CANDLE_TRANSPORT = new Map<string, string>()
 const IBKR_HISTORY_BACKOFF_UNTIL = new Map<string, number>()
 const IBKR_HISTORY_BACKOFF_MS = 3 * 60 * 1000
 
@@ -1683,6 +1684,8 @@ function writeLiveCandleToSharedCache(
   options?: { allowLargeGapAppend?: boolean }
 ) {
   const key = sharedCandleKey(symbol, timeframe)
+  const transport = SHARED_CANDLE_TRANSPORT.get(key)
+  if (transport && !candleTransportMatches(rawCandle?.source, transport)) return null
   const previous = SHARED_CANDLE_CACHE.get(key)
 
   if (
@@ -1710,7 +1713,7 @@ function writeLiveCandleToSharedCache(
     updatedAt: Date.now(),
     limit: Math.max(limit, previous?.limit ?? 0, mergedCandles.length),
     provider: 'ibkr',
-    source: 'phase8_live_feed_sse',
+    source: typeof rawCandle?.source === 'string' ? rawCandle.source : 'phase8_live_feed_sse',
   }
 
   SHARED_CANDLE_CACHE.set(key, entry)
@@ -1749,7 +1752,7 @@ async function fetchSharedCandlePayload(
   }
 
   const request = (async () => {
-    const previous = SHARED_CANDLE_CACHE.get(key)
+    let previous = SHARED_CANDLE_CACHE.get(key)
     const apiLimit = noFrontendLimit
       ? 0
       : Math.min(
@@ -1772,6 +1775,13 @@ async function fetchSharedCandlePayload(
     } catch (error) {
       throw error
     }
+
+    const selectedTransport = SHARED_CANDLE_TRANSPORT.get(key)
+    if (selectedTransport && !candleTransportMatches(json?.source, selectedTransport)) {
+      throw new Error('Candle response belongs to a different selected IBKR transport.')
+    }
+    const responseTransport = String(json?.source ?? '').startsWith('ibkr_tws') ? 'tws_relay' : 'client_portal'
+    if (previous && !candleTransportMatches(previous.source, responseTransport)) previous = undefined
 
     if (candles.length === 0) {
       if (previous?.candles?.length) {
@@ -1816,7 +1826,7 @@ async function fetchSharedCandlePayload(
       candles: noFrontendLimit ? result.candles : result.candles.slice(-requestedLimit),
     }
   } finally {
-    SHARED_CANDLE_IN_FLIGHT.delete(key)
+    if (SHARED_CANDLE_IN_FLIGHT.get(key) === request) SHARED_CANDLE_IN_FLIGHT.delete(key)
   }
 }
 
@@ -4179,6 +4189,7 @@ function useChartCandles(
     let intervalId: ReturnType<typeof setInterval> | null = null
     let liveEventSource: EventSource | null = null
     let liveSourceConnected = false
+    let activeTransport: string | null = null
     let lastHistoricalFetchStartedAt = 0
     let lastHistoricalFetchSucceededAt = 0
     let lastLiveGapRepairFetchAt = 0
@@ -4405,11 +4416,30 @@ function useChartCandles(
       try {
         const provider = await providerStatus(activeApiBaseUrl, symbol)
         if (cancelled) return
+        const cacheKey = sharedCandleKey(symbol, timeframe)
+        const transport = provider.transport ?? 'client_portal'
+        const transportChanged = (activeTransport ?? SHARED_CANDLE_TRANSPORT.get(cacheKey) ?? 'client_portal') !== transport
+        if (transportChanged) {
+          liveEventSource?.close()
+          liveEventSource = null
+          liveSourceConnected = false
+          initialHistoricalReady = false
+          disconnectedCacheRead = false
+        }
+        activeTransport = transport
+        SHARED_CANDLE_TRANSPORT.set(cacheKey, transport)
+        if (resetIncompatibleCandleCache(SHARED_CANDLE_CACHE, SHARED_CANDLE_IN_FLIGHT, cacheKey, transport, transportChanged)) {
+          setCandles([])
+          setOverlayPayload(null)
+          setUnifiedIntelligence(null)
+          disconnectedCacheRead = false
+        }
         if (!provider.ready) {
           reconnectAt = Date.now() + reconnectDelay(reconnectAttempts++, provider.retryAfterSeconds)
           liveEventSource?.close()
           liveEventSource = null
           liveSourceConnected = false
+          startPolling()
           const message = marketDataMessage(provider)
           // One cache-only backend read per disconnected period preserves saved history.
           if (!disconnectedCacheRead) {
@@ -4425,10 +4455,6 @@ function useChartCandles(
         reconnectAt = 0
         reconnectAttempts = 0
         disconnectedCacheRead = false
-        const selectedCache = getFullSharedCacheEntry()
-        if (provider.transport === 'tws_relay' && selectedCache && !String(selectedCache.source).includes('ibkr_tws')) {
-          SHARED_CANDLE_CACHE.delete(sharedCandleKey(symbol, timeframe))
-        }
         startLiveStream()
         const cacheReason = force ? `before-force-fetch:${reason}` : `before-fetch:${reason}`
         const cachedWasApplied = applyCachedPayload(cacheReason)
@@ -4632,7 +4658,12 @@ function useChartCandles(
 
       liveEventSource = new EventSource(`${activeApiBaseUrl}/api/live-feed/stream?${params.toString()}`)
 
+      const stream = liveEventSource
+      const streamTransport = activeTransport
+      const isCurrentStream = () => !cancelled && liveEventSource === stream && activeTransport === streamTransport
+
       liveEventSource.onopen = () => {
+        if (!isCurrentStream()) return
         liveSourceConnected = true
         if (fullSharedCacheHasHistorical()) {
           initialHistoricalReady = true
@@ -4653,7 +4684,7 @@ function useChartCandles(
       }
 
       liveEventSource.onmessage = (event) => {
-        if (cancelled || !event.data) return
+        if (!isCurrentStream() || !event.data) return
 
         try {
           const payload = JSON.parse(event.data)
@@ -4669,7 +4700,7 @@ function useChartCandles(
             }
           }
           const liveCandle = extractLiveCandleFromStreamPayload(payload)
-          if (!liveCandle) return
+          if (!liveCandle || !isCurrentStream() || !candleTransportMatches(liveCandle.source, activeTransport ?? 'client_portal')) return
 
           const livePriceSnapshot = writeSharedLivePriceCache(
             extractLiveFeedPriceFromPayload(payload, liveCandle)
@@ -4679,6 +4710,7 @@ function useChartCandles(
           }
 
           setCandles((previousCandles) => {
+            if (!isCurrentStream()) return previousCandles
             const timeframeSeconds = timeframeToSeconds(timeframe)
 
             if (!initialHistoricalReady && previousCandles.length < minimumHistoricalCandles()) {
@@ -4729,12 +4761,12 @@ function useChartCandles(
       }
 
       liveEventSource.addEventListener('candle', (event: MessageEvent) => {
-        if (cancelled || !event.data) return
+        if (!isCurrentStream() || !event.data) return
 
         try {
           const payload = JSON.parse(event.data)
           const liveCandle = extractLiveCandleFromStreamPayload(payload)
-          if (!liveCandle) return
+          if (!liveCandle || !isCurrentStream() || !candleTransportMatches(liveCandle.source, activeTransport ?? 'client_portal')) return
 
           const livePriceSnapshot = writeSharedLivePriceCache(
             extractLiveFeedPriceFromPayload(payload, liveCandle)
@@ -4744,6 +4776,7 @@ function useChartCandles(
           }
 
           setCandles((previousCandles) => {
+            if (!isCurrentStream()) return previousCandles
             const timeframeSeconds = timeframeToSeconds(timeframe)
 
             if (!initialHistoricalReady && previousCandles.length < minimumHistoricalCandles()) {
@@ -4794,7 +4827,7 @@ function useChartCandles(
       })
 
       liveEventSource.addEventListener('status', (event: MessageEvent) => {
-        if (cancelled) return
+        if (!isCurrentStream()) return
         try {
           const payload = JSON.parse(event.data)
           if (payload.ready === false || /unavailable|Not Connected/i.test(payload.status ?? '')) {
@@ -4809,6 +4842,7 @@ function useChartCandles(
       })
 
       liveEventSource.onerror = () => {
+        if (!isCurrentStream()) return
         // Restart historical polling only when the live stream disconnects.
         liveSourceConnected = false
         liveEventSource?.close()

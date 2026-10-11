@@ -57,3 +57,22 @@ export function providerStatus(base: string, symbol: string): Promise<any> {
   checks.set(key, { until: Date.now() + 15000, promise })
   return promise
 }
+
+export function candleTransportMatches(source: unknown, transport: string): boolean {
+  const isTws = String(source ?? '').startsWith('ibkr_tws')
+  return transport === 'tws_relay' ? isTws : !isTws
+}
+
+export function resetIncompatibleCandleCache(
+  cache: { get(key: string): { source?: unknown } | undefined; delete(key: string): boolean },
+  inFlight: { delete(key: string): boolean },
+  key: string,
+  transport: string,
+  transportChanged = false
+): boolean {
+  const cached = cache.get(key)
+  if (!transportChanged && (!cached || candleTransportMatches(cached.source, transport))) return false
+  if (cached && !candleTransportMatches(cached.source, transport)) cache.delete(key)
+  inFlight.delete(key)
+  return true
+}
