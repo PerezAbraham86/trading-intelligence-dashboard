@@ -33,17 +33,26 @@ def enabled():
     return os.getenv("IBKR_RELAY_ENABLED", "false").lower() == "true"
 
 
+def proxy_trust_configuration():
+    """Classify proxy trust without accepting a wildcard as verified ingress."""
+    values = [value.strip() for value in os.getenv("FORWARDED_ALLOW_IPS", "").split(",") if value.strip()]
+    if not values:
+        return "missing"
+    if "*" in values:
+        return "wildcard"
+    try:
+        networks = [ipaddress.ip_network(value, strict=False) for value in values]
+    except ValueError:
+        return "invalid"
+    if any(network.prefixlen == 0 for network in networks):
+        return "unrestricted"
+    return "explicit"
+
+
 def proxy_trust_ready():
     if os.getenv("RENDER", "").lower() != "true":
         return True
-    values = [value.strip() for value in os.getenv("FORWARDED_ALLOW_IPS", "").split(",") if value.strip()]
-    if not values:
-        return False
-    try:
-        return all(ipaddress.ip_network(value, strict=False).prefixlen > 0 for value in values)
-    except ValueError:
-        return False
-
+    return proxy_trust_configuration() == "explicit"
 
 def secret():
     value = os.getenv("IBKR_RELAY_SECRET", "")
