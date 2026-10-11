@@ -211,6 +211,28 @@ class RelayTests(unittest.TestCase):
                 self.assertEqual(relay.proxy_trust_configuration(), expected)
                 self.assertEqual(relay.proxy_trust_ready(), expected == "explicit")
 
+    def test_render_edge_policy_is_explicit_and_never_header_driven(self):
+        base = {"RENDER": "true", "FORWARDED_ALLOW_IPS": "*",
+                "RENDER_EXTERNAL_URL": "https://backend.example",
+                "IBKR_RELAY_RENDER_EDGE_TLS": "true"}
+        with patch.dict(os.environ, base):
+            self.assertTrue(relay.render_edge_tls_policy())
+            self.assertFalse(relay.proxy_trust_ready())
+            self.assertTrue(relay.status()["configured"])
+            body, headers = envelope(payload())
+            with TestClient(main.app, base_url="http://backend.test") as client:
+                self.assertEqual(client.post(relay.PATH, content=body, headers={**headers, "X-Forwarded-Proto": "http"}).status_code, 200)
+                self.assertEqual(client.post(relay.PATH, content=b"{}", headers={"X-Forwarded-Proto": "https"}).status_code, 401)
+                state = client.get("/api/ibkr/tws/status").json()
+                self.assertFalse(state["httpsVerified"])
+                self.assertTrue(state["renderEdgeTlsPolicy"])
+                self.assertTrue(state["relayTransportReady"])
+        for override in [{"IBKR_RELAY_RENDER_EDGE_TLS": "false"},
+                         {"RENDER_EXTERNAL_URL": "http://backend.example"},
+                         {"RENDER": "false"}]:
+            with patch.dict(os.environ, {**base, **override}):
+                self.assertFalse(relay.render_edge_tls_policy())
+
     def test_render_wildcard_proxy_default_cannot_enable_relay(self):
         for value in ["", "*", "0.0.0.0/0", "::/0", "invalid"]:
             with patch.dict(os.environ, {"RENDER": "true", "FORWARDED_ALLOW_IPS": value}):
