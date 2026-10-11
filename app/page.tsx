@@ -1,6 +1,6 @@
 'use client'
 
-import { marketDataMessage, providerStatus, reconnectDelay, readableApiResponse } from '@/lib/marketDataConnection'
+import { marketDataMessage, providerStatus, reconnectDelay, readableApiResponse, candleTransportMatches, resetIncompatibleCandleCache } from '@/lib/marketDataConnection'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import SignalCard from '@/components/SignalCard'
 import LightweightCandlestickChart, { ChartMode, DashboardCandle, NrtrOverlayMode } from '@/components/LightweightCandlestickChart'
@@ -1089,6 +1089,7 @@ type SharedCandleCacheEntry = {
 
 const SHARED_CANDLE_CACHE = new Map<string, SharedCandleCacheEntry>()
 const SHARED_CANDLE_IN_FLIGHT = new Map<string, Promise<SharedCandleCacheEntry>>()
+const SHARED_CANDLE_TRANSPORT = new Map<string, string>()
 const IBKR_HISTORY_BACKOFF_UNTIL = new Map<string, number>()
 const IBKR_HISTORY_BACKOFF_MS = 3 * 60 * 1000
 
@@ -1683,6 +1684,8 @@ function writeLiveCandleToSharedCache(
   options?: { allowLargeGapAppend?: boolean }
 ) {
   const key = sharedCandleKey(symbol, timeframe)
+  const transport = SHARED_CANDLE_TRANSPORT.get(key)
+  if (transport && !candleTransportMatches(rawCandle?.source, transport)) return null
   const previous = SHARED_CANDLE_CACHE.get(key)
 
   if (
@@ -1710,7 +1713,7 @@ function writeLiveCandleToSharedCache(
     updatedAt: Date.now(),
     limit: Math.max(limit, previous?.limit ?? 0, mergedCandles.length),
     provider: 'ibkr',
-    source: 'phase8_live_feed_sse',
+    source: typeof rawCandle?.source === 'string' ? rawCandle.source : 'phase8_live_feed_sse',
   }
 
   SHARED_CANDLE_CACHE.set(key, entry)
@@ -1749,7 +1752,7 @@ async function fetchSharedCandlePayload(
   }
 
   const request = (async () => {
-    const previous = SHARED_CANDLE_CACHE.get(key)
+    let previous = SHARED_CANDLE_CACHE.get(key)
     const apiLimit = noFrontendLimit
       ? 0
       : Math.min(
@@ -1772,6 +1775,13 @@ async function fetchSharedCandlePayload(
     } catch (error) {
       throw error
     }
+
+    const selectedTransport = SHARED_CANDLE_TRANSPORT.get(key)
+    if (selectedTransport && !candleTransportMatches(json?.source, selectedTransport)) {
+      throw new Error('Candle response belongs to a different selected IBKR transport.')
+    }
+    const responseTransport = String(json?.source ?? '').startsWith('ibkr_tws') ? 'tws_relay' : 'client_portal'
+    if (previous && !candleTransportMatches(previous.source, responseTransport)) previous = undefined
 
     if (candles.length === 0) {
       if (previous?.candles?.length) {
@@ -1816,7 +1826,7 @@ async function fetchSharedCandlePayload(
       candles: noFrontendLimit ? result.candles : result.candles.slice(-requestedLimit),
     }
   } finally {
-    SHARED_CANDLE_IN_FLIGHT.delete(key)
+    if (SHARED_CANDLE_IN_FLIGHT.get(key) === request) SHARED_CANDLE_IN_FLIGHT.delete(key)
   }
 }
 
@@ -4405,6 +4415,15 @@ function useChartCandles(
       try {
         const provider = await providerStatus(activeApiBaseUrl, symbol)
         if (cancelled) return
+        const cacheKey = sharedCandleKey(symbol, timeframe)
+        const transport = provider.transport ?? 'client_portal'
+        SHARED_CANDLE_TRANSPORT.set(cacheKey, transport)
+        if (resetIncompatibleCandleCache(SHARED_CANDLE_CACHE, SHARED_CANDLE_IN_FLIGHT, cacheKey, transport)) {
+          setCandles([])
+          setOverlayPayload(null)
+          setUnifiedIntelligence(null)
+          disconnectedCacheRead = false
+        }
         if (!provider.ready) {
           reconnectAt = Date.now() + reconnectDelay(reconnectAttempts++, provider.retryAfterSeconds)
           liveEventSource?.close()
@@ -4425,10 +4444,6 @@ function useChartCandles(
         reconnectAt = 0
         reconnectAttempts = 0
         disconnectedCacheRead = false
-        const selectedCache = getFullSharedCacheEntry()
-        if (provider.transport === 'tws_relay' && selectedCache && !String(selectedCache.source).includes('ibkr_tws')) {
-          SHARED_CANDLE_CACHE.delete(sharedCandleKey(symbol, timeframe))
-        }
         startLiveStream()
         const cacheReason = force ? `before-force-fetch:${reason}` : `before-fetch:${reason}`
         const cachedWasApplied = applyCachedPayload(cacheReason)

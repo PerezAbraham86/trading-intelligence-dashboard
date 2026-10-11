@@ -235,7 +235,7 @@ Official references:
 - https://interactivebrokers.github.io/tws-api/message_codes.html
 - https://www.interactivebrokers.com/docs/tws-api/doc/market-data-historical/historical-bars/receiving-historical-bars
 
-The development implementation passed 56 backend tests, ten frontend tests and a
+The development implementation passed 57 backend tests, twelve frontend tests and a
 production static export build with the optional SPY default. New Python modules pass
 Pyflakes. The existing `npm run lint` command requires an ESLint configuration that
 the repository does not currently contain; it opens an interactive setup prompt.

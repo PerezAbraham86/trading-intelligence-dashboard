@@ -103,6 +103,8 @@ def ingest(body: bytes, headers, now=None):
                 raise HTTPException(409, "Retired connector session.")
         db.execute("INSERT INTO nonces VALUES (?,?)", (nonce, now))
         db.execute("INSERT OR IGNORE INTO boots VALUES (?,?)", (payload.connectorId, payload.bootId))
+        partition = (payload.symbol, payload.conid, payload.environment, int(payload.useRTH))
+        needs_backfill = db.execute("SELECT 1 FROM bars WHERE symbol=? AND conid=? AND environment=? AND rth=? LIMIT 1", partition).fetchone() is None
         changed = 0
         for bar in payload.candles:
             normalized = bar.normalized(payload.conid)
@@ -118,9 +120,8 @@ def ingest(body: bytes, headers, now=None):
             changed += 1
         db.execute("INSERT OR REPLACE INTO state VALUES (?,?,?,?,?,?,?)", (payload.symbol, payload.connectorId, payload.bootId, payload.sequence, int(stamp), now, json.dumps({**payload.model_dump(exclude={"candles"}), "conid": payload.conid or (json.loads(previous["payload"])["conid"] if previous else 0)})))
         db.execute("DELETE FROM bars WHERE rowid IN (SELECT rowid FROM bars WHERE symbol=? AND conid=? AND environment=? AND rth=? ORDER BY epoch DESC LIMIT -1 OFFSET 20000)", (payload.symbol, payload.conid, payload.environment, int(payload.useRTH)))
-        count = db.execute("SELECT COUNT(*) FROM bars WHERE symbol=? AND conid=? AND environment=? AND rth=?", (payload.symbol, payload.conid, payload.environment, int(payload.useRTH))).fetchone()[0]
         db.commit()
-    return {"needsBackfill": count == 0, "accepted": True, "changed": changed, "sequence": payload.sequence, "source": SOURCE}
+    return {"needsBackfill": needs_backfill, "accepted": True, "changed": changed, "sequence": payload.sequence, "source": SOURCE}
 
 
 @router.post(PATH)

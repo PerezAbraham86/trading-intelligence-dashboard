@@ -81,6 +81,24 @@ class RelayTests(unittest.TestCase):
             self.send({**value, 'sequence': 4, 'candles': [{**updated, 'completed': False}]})
         self.assertEqual(error.exception.status_code, 409)
 
+    def test_lost_warehouse_requests_backfill_even_with_a_pending_candle(self):
+        old = bar(epoch=int(time.time()) // 60 * 60 - 120, completed=True)
+        latest = bar()
+        first = payload(candles=[old, latest])
+        self.send(first)
+        relay.DB_PATH.unlink()
+        acknowledgement = self.send({**first, 'sequence': 2, 'candles': [latest]})
+        self.assertTrue(acknowledgement['needsBackfill'])
+        connector = Connector(config(), FakeIB())
+        self.addCleanup(connector.session.close)
+        connector.known = {item['epoch']: item for item in [old, latest]}
+        connector.pending = {latest['epoch']: latest}
+        connector.acknowledge([latest], acknowledgement)
+        self.assertEqual(len(connector.pending), 2)
+        response = self.send({**first, 'sequence': 3, 'candles': list(connector.pending.values())})
+        self.assertFalse(response['needsBackfill'])
+        self.assertEqual(len(relay.snapshot()[1]), 2)
+
     def test_security_signature_expiry_replay_and_sequence(self):
         value = payload()
         body, headers = envelope(value)
