@@ -196,6 +196,21 @@ class RelayTests(unittest.TestCase):
             self.assertTrue(state["httpsVerified"])
             self.assertEqual(client.post(relay.PATH, content=b"{}").status_code, 503)
 
+    def test_proxy_trust_classification_is_fail_closed(self):
+        cases = {
+            "": "missing",
+            "*": "wildcard",
+            "127.0.0.1,*": "wildcard",
+            "0.0.0.0/0": "unrestricted",
+            "::/0": "unrestricted",
+            "not-an-ip": "invalid",
+            "10.0.0.8,127.0.0.1": "explicit",
+        }
+        for value, expected in cases.items():
+            with self.subTest(value=value), patch.dict(os.environ, {"RENDER": "true", "FORWARDED_ALLOW_IPS": value}):
+                self.assertEqual(relay.proxy_trust_configuration(), expected)
+                self.assertEqual(relay.proxy_trust_ready(), expected == "explicit")
+
     def test_render_wildcard_proxy_default_cannot_enable_relay(self):
         for value in ["", "*", "0.0.0.0/0", "::/0", "invalid"]:
             with patch.dict(os.environ, {"RENDER": "true", "FORWARDED_ALLOW_IPS": value}):
