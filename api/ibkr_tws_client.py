@@ -193,7 +193,8 @@ class Connector:
         self.last_disconnect = None
         self.gap_limited = False
         self.bars = None
-        self.realtime_bars = None
+        self.realtime_ticker = None
+        self.tick_cursor = 0
         self.realtime_minutes = {}
         self.last_history_request = None
         self.subscription_failures = 0
@@ -260,51 +261,45 @@ class Connector:
             self.state = "data_error"
             LOG.error("Invalid provider candle rejected; no synthetic replacement")
 
-    def on_realtime_bars(self, bars, has_new_bar):
-        # Aggregate only genuine IBKR five-second TRADES bars.
-        if not has_new_bar or not bars or self.paused:
-            return
-        try:
-            bar = bars[-1]
-            if not isinstance(bar.time, datetime) or bar.time.tzinfo is None:
-                raise ValueError("Realtime bar timestamp must be timezone-aware")
-            stamp = int(bar.time.timestamp())
-            epoch = stamp - stamp % 60
-            now = time.time()
-            if epoch > now + 5 or epoch < now - 180:
-                return
-            opening, high, low, close, volume = map(
-                float, (bar.open, bar.high, bar.low, bar.close, bar.volume)
-            )
-            if not all(map(math.isfinite, (opening, high, low, close, volume))):
-                raise ValueError("Non-finite realtime bar")
-            if low <= 0 or high < max(opening, close) or low > min(opening, close) or volume < 0:
-                raise ValueError("Invalid realtime OHLCV")
-            previous = self.realtime_minutes.get(epoch)
-            if previous and stamp <= previous["last_stamp"]:
-                return
-            if previous:
-                candle = dict(previous["candle"])
-                candle.update(high=max(candle["high"], high), low=min(candle["low"], low),
-                              close=close, volume=candle["volume"] + volume)
-            else:
-                # A mid-minute subscription produces a partial candle until
-                # historical keepUpToDate provides the complete minute.
-                candle = dict(epoch=epoch, open=opening, high=high, low=low,
-                              close=close, volume=volume, completed=False)
-            candle["updatedAt"] = now
-            candle = Candle.model_validate(candle).model_dump()
-            self.realtime_minutes[epoch] = {"last_stamp": stamp, "candle": candle}
-            for old_epoch in list(self.realtime_minutes):
-                if old_epoch < epoch - 60:
-                    self.realtime_minutes.pop(old_epoch, None)
-            self.known[epoch] = candle
-            self.pending[epoch] = candle
-            self.last_data_update = now
-            self.data_changed.set()
-            self.state = "connected"
-        except (ValueError, TypeError):
-            LOG.warning("Invalid IBKR five-second bar rejected")
+    def on_trade_ticks(self, ticker):
+        # IBKR tick-by-tick Last trades; never synthesize missing trades.
+        ticks = ticker.tickByTicks
+        if len(ticks) < self.tick_cursor:
+            self.tick_cursor = 0
+        for tick in ticks[self.tick_cursor:]:
+            try:
+                stamp = int(tick.time.timestamp())
+                epoch = stamp - stamp % 60
+                now = time.time()
+                price, size = float(tick.price), float(tick.size)
+                if not (math.isfinite(price) and math.isfinite(size) and price > 0 and size >= 0):
+                    continue
+                if epoch > now + 5 or epoch < now - 180:
+                    continue
+                prior = self.realtime_minutes.get(epoch)
+                if prior and stamp < prior["last_stamp"]:
+                    continue
+                if prior:
+                    candle = dict(prior["candle"])
+                    candle.update(high=max(candle["high"], price), low=min(candle["low"], price),
+                                  close=price, volume=candle["volume"] + size)
+                else:
+                    candle = dict(epoch=epoch, open=price, high=price, low=price,
+                                  close=price, volume=size, completed=False)
+                candle["updatedAt"] = now
+                candle = Candle.model_validate(candle).model_dump()
+                self.realtime_minutes[epoch] = {"last_stamp": stamp, "candle": candle}
+                for old_epoch in list(self.realtime_minutes):
+                    if old_epoch < epoch - 60:
+                        self.realtime_minutes.pop(old_epoch, None)
+                self.known[epoch] = candle
+                self.pending[epoch] = candle
+                self.last_data_update = now
+                self.data_changed.set()
+                self.state = "connected"
+            except (ValueError, TypeError, AttributeError):
+                LOG.warning("Invalid IBKR trade tick rejected")
+        self.tick_cursor = len(ticks)
 
     def finalize(self):
         # Completion is metadata only: never invent/alter OHLCV or refresh data age.
@@ -333,11 +328,12 @@ class Connector:
         await self.subscribe()
 
     async def subscribe(self):
-        if self.realtime_bars is not None:
-            self.realtime_bars.updateEvent -= self.on_realtime_bars
+        if self.realtime_ticker is not None:
+            self.realtime_ticker.updateEvent -= self.on_trade_ticks
             if self.ib.isConnected():
-                self.ib.cancelRealTimeBars(self.realtime_bars)
-            self.realtime_bars = None
+                self.ib.cancelTickByTickData(self.realtime_ticker.contract, "Last")
+            self.realtime_ticker = None
+        self.tick_cursor = 0
         self.realtime_minutes.clear()
         if self.bars is not None:
             self.bars.updateEvent -= self.on_bars
@@ -371,8 +367,8 @@ class Connector:
         self.subscribed = True
         self.state = "connected" if bars else "waiting_for_data"
         self.capture(bars, initial=True)
-        self.realtime_bars = self.ib.reqRealTimeBars(self.contract, 5, "TRADES", self.config.use_rth)
-        self.realtime_bars.updateEvent += self.on_realtime_bars
+        self.realtime_ticker = self.ib.reqTickByTickData(self.contract, "Last", 0, False)
+        self.realtime_ticker.updateEvent += self.on_trade_ticks
         self.last_disconnect = None
         self.resubscribe = False
 
