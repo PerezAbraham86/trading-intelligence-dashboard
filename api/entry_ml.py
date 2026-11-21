@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from api.ml_engine_memory import load_engine_memory, save_engine_memory
 import math
 import os
 from datetime import datetime, timezone
@@ -222,12 +223,11 @@ def load_entry_ml_memory() -> Dict[str, Any]:
     global ENTRY_ML_MEMORY
 
     try:
-        if not ENTRY_ML_STORE_FILE.exists():
+        payload = load_engine_memory("entry_ml", ENTRY_ML_STORE_FILE, None)
+        if payload is None:
             ENTRY_ML_MEMORY = []
             return {"status": "empty", "loaded": 0, "path": str(ENTRY_ML_STORE_FILE)}
 
-        with ENTRY_ML_STORE_FILE.open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
 
         records = payload.get("records") if isinstance(payload, dict) else payload
         if not isinstance(records, list):
@@ -241,6 +241,8 @@ def load_entry_ml_memory() -> Dict[str, Any]:
 
         return {"status": "loaded", "loaded": len(ENTRY_ML_MEMORY), "path": str(ENTRY_ML_STORE_FILE)}
     except Exception as error:
+        if os.getenv("DATABASE_URL", "").strip():
+            raise
         print(f"[Entry ML] memory load failed: {error}")
         ENTRY_ML_MEMORY = []
         return {"status": "error", "loaded": 0, "path": str(ENTRY_ML_STORE_FILE), "error": str(error)}
@@ -257,11 +259,7 @@ def save_entry_ml_memory() -> Dict[str, Any]:
             "records": ENTRY_ML_MEMORY[-ENTRY_ML_MAX_RECORDS:],
         }
 
-        temp_path = ENTRY_ML_STORE_FILE.with_suffix(ENTRY_ML_STORE_FILE.suffix + ".tmp")
-        with temp_path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, separators=(",", ":"), ensure_ascii=False)
-
-        temp_path.replace(ENTRY_ML_STORE_FILE)
+        save_engine_memory("entry_ml", ENTRY_ML_STORE_FILE, payload)
 
         return {"status": "saved", "saved": len(ENTRY_ML_MEMORY), "path": str(ENTRY_ML_STORE_FILE)}
     except Exception as error:
