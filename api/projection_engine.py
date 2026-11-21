@@ -1106,6 +1106,43 @@ def determine_projection_mode(market_state: Dict[str, Any], target: Dict[str, An
     }
 
 
+def learned_ghost_path_calibration(symbol: str, timeframe: str, horizon: int) -> Dict[str, Any]:
+    """Use completed Ghost ML outcomes only; never fit on pending forecasts."""
+    fallback = {"ready": False, "samples": 0, "multipliers": [1.0] * horizon, "reason": "insufficient_evaluated_ghost_outcomes"}
+    try:
+        from api.ghost_ml import _evaluated_records, GHOST_ML_MIN_EVALUATED_FOR_ADJUSTMENT
+        rows = _evaluated_records(symbol, timeframe)
+        minimum = max(12, GHOST_ML_MIN_EVALUATED_FOR_ADJUSTMENT)
+        # Only outcomes with matching horizon and actual per-candle closes qualify.
+        eligible = [row for row in rows if len(safe_list(safe_dict(row.get("evaluation")).get("perCandleErrors"))) >= horizon]
+        fallback["samples"] = len(eligible)
+        if len(eligible) < minimum:
+            return fallback
+        multipliers = []
+        for index in range(horizon):
+            ratios = []
+            for row in eligible[-250:]:
+                step = safe_dict(safe_list(row["evaluation"]["perCandleErrors"])[index])
+                predicted = to_float(step.get("predictedMove"), 0.0)
+                actual = to_float(step.get("actualMove"), 0.0)
+                if abs(predicted) < max(to_float(row.get("entryClose"), 0.0) * 0.00005, 0.01):
+                    continue
+                # Signed ratio permits the model to reduce or reverse a consistently
+                # wrong forecast, but clamps each sample against outliers.
+                ratios.append(clamp(actual / predicted, -1.0, 2.5))
+            if len(ratios) < minimum:
+                return {**fallback, "reason": "insufficient_nonzero_step_samples"}
+            ratios.sort()
+            middle = len(ratios) // 2
+            median = ratios[middle] if len(ratios) % 2 else (ratios[middle - 1] + ratios[middle]) / 2
+            # Conservative shrinkage: learning changes amplitude, not the trade side.
+            strength = min(0.75, len(ratios) / (len(ratios) + 24.0))
+            multipliers.append(round(clamp(1.0 + (median - 1.0) * strength, 0.35, 1.65), 4))
+        return {"ready": True, "samples": len(eligible), "multipliers": multipliers, "reason": "evaluated_per_candle_ghost_outcomes"}
+    except Exception as exc:
+        return {**fallback, "reason": "ghost_calibration_unavailable", "error": type(exc).__name__}
+
+
 def build_target_guided_ghost_path(
     *,
     candles: List[Any],
@@ -1115,6 +1152,7 @@ def build_target_guided_ghost_path(
     market_state: Dict[str, Any],
     mode: Dict[str, Any],
     ghost_count: int = DEFAULT_GHOST_CANDLES,
+    calibration: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     ghost_count = max(1, min(10, to_int(ghost_count, DEFAULT_GHOST_CANDLES)))
 
@@ -1173,21 +1211,20 @@ def build_target_guided_ghost_path(
     )
 
     candles_out: List[Dict[str, Any]] = []
+    calibration = safe_dict(calibration)
+    multipliers = safe_list(calibration.get('multipliers'))
     previous_close = current_price
 
     for index in range(1, ghost_count + 1):
         t1 = index / ghost_count
         eased1 = t1 * t1 * (3 - 2 * t1)
 
-        desired_close = current_price + total_move * eased1 * route_strength
-
-        if index == ghost_count and confidence >= 45:
-            desired_close = current_price + total_move * min(1.0, route_strength + 0.12)
-
-        if total_move > 0:
-            desired_close = min(desired_close, target_price + atr * 0.15)
-        else:
-            desired_close = max(desired_close, target_price - atr * 0.15)
+        # The target is a reference destination, not a guaranteed last close.
+        # Each horizon is calibrated independently using completed outcomes.
+        learned_multiplier = to_float(multipliers[index - 1], 1.0) if index <= len(multipliers) else 1.0
+        desired_close = current_price + total_move * eased1 * route_strength * learned_multiplier
+        max_move = abs(total_move) * 1.65 + max(atr, 0.0) * 0.25
+        desired_close = clamp(desired_close, current_price - max_move, current_price + max_move)
 
         open_ = previous_close
         close = desired_close
@@ -1222,6 +1259,8 @@ def build_target_guided_ghost_path(
             "direction": direction,
             "confidence": round(confidence, 4),
             "targetGuided": True,
+            "learnedMovementMultiplier": round(learned_multiplier, 4),
+            "calibrationReady": bool(calibration.get("ready")),
             "targetPrice": round(target_price, 8),
             "finalTargetPrice": round(target_price, 8),
             "overallTargetPrice": round(target_price, 8),
@@ -1247,6 +1286,7 @@ def build_target_guided_ghost_path(
         "confidence": round(confidence, 4),
         "candles": candles_out,
         "endPrice": round(ghost_end, 8),
+        "calibration": calibration,
         "targetPrice": round(target_price, 8),
         "targetDistancePoints": round(abs(target_price - current_price), 4),
         "endErrorPoints": round(end_error, 4),
@@ -1525,6 +1565,7 @@ def build_unified_projection_engine(
     )
     mode = determine_projection_mode(market_state, target)
 
+    calibration = learned_ghost_path_calibration(normalized_symbol, normalized_timeframe, max(1, min(10, to_int(ghostCount, DEFAULT_GHOST_CANDLES))))
     ghost_path = build_target_guided_ghost_path(
         candles=candles,
         current_price=current_price,
@@ -1533,6 +1574,7 @@ def build_unified_projection_engine(
         market_state=market_state,
         mode=mode,
         ghost_count=ghostCount,
+        calibration=calibration,
     )
 
     alignment = calculate_alignment(target, ghost_path, market_state, mode)
@@ -1565,6 +1607,7 @@ def build_unified_projection_engine(
         "marketState": market_state,
         "target": target,
         "ghostPath": ghost_path,
+        "ghostCalibration": calibration,
         "alignment": alignment,
         "mode": mode,
         "learning": memory_summary,
