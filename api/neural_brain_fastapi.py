@@ -6,6 +6,7 @@ import os
 import sqlite3
 import hashlib
 import threading
+from api.ml_feature_store import PostgresConnection
 
 from api import neural_brain_online as logistic
 from api.neural_brain import build_neural_brain_scorecard
@@ -218,10 +219,19 @@ def normalize_online_model(model: Any) -> Dict[str, Any]:
     return normalized
 
 
+def connect_brain():
+    url = os.getenv("DATABASE_URL", "").strip()
+    if url:
+        return PostgresConnection(url)
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
 def ensure_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    with sqlite3.connect(DB_PATH) as connection:
+    with connect_brain() as connection:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS neural_brain_snapshots (
@@ -269,14 +279,14 @@ def ensure_db() -> None:
 def load_logistic_state(connection=None):
     if connection is None:
         ensure_db()
-        with sqlite3.connect(DB_PATH) as opened:
+        with connect_brain() as opened:
             return load_logistic_state(opened)
     row = connection.execute("SELECT state_json FROM neural_brain_models WHERE name = 'logistic'").fetchone()
-    return json.loads(row[0]) if row else logistic.initial_state()
+    return json.loads(row["state_json"]) if row else logistic.initial_state()
 
 
 def save_logistic_state(connection, state):
-    connection.execute("INSERT OR REPLACE INTO neural_brain_models VALUES ('logistic', ?)", (safe_json(state),))
+    connection.execute("INSERT INTO neural_brain_models VALUES ('logistic', ?) ON CONFLICT(name) DO UPDATE SET state_json = excluded.state_json", (safe_json(state),))
 
 
 def row_to_snapshot(row: sqlite3.Row) -> Dict[str, Any]:
@@ -416,6 +426,11 @@ def base_scorecard_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _load_online_model() -> Dict[str, Any]:
+    if os.getenv('DATABASE_URL', '').strip():
+        ensure_db()
+        with connect_brain() as connection:
+            row = connection.execute("SELECT state_json FROM neural_brain_models WHERE name = 'scoped_online'").fetchone()
+            return normalize_online_model(json.loads(row['state_json'])) if row else new_online_model()
     if ONLINE_MODEL_PATH.exists():
         try:
             return normalize_online_model(json.loads(ONLINE_MODEL_PATH.read_text(encoding="utf-8")))
@@ -426,8 +441,13 @@ def _load_online_model() -> Dict[str, Any]:
 
 
 def _save_online_model(model: Dict[str, Any]) -> None:
-    ONLINE_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     _model = normalize_online_model(model)
+    if os.getenv('DATABASE_URL', '').strip():
+        ensure_db()
+        with connect_brain() as connection:
+            connection.execute("INSERT INTO neural_brain_models VALUES ('scoped_online', ?) ON CONFLICT(name) DO UPDATE SET state_json = excluded.state_json", (safe_json(_model),))
+        return
+    ONLINE_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     ONLINE_MODEL_PATH.write_text(json.dumps(_model, indent=2, sort_keys=True), encoding="utf-8")
 
 
@@ -665,10 +685,10 @@ def save_neural_brain_snapshot(payload: Dict[str, Any]) -> Dict[str, Any]:
         "request": payload,
     }
 
-    with sqlite3.connect(DB_PATH) as connection:
+    with connect_brain() as connection:
         connection.execute(
             """
-            INSERT OR IGNORE INTO neural_brain_snapshots (
+            INSERT INTO neural_brain_snapshots (
                 id,
                 created_at,
                 timestamp,
@@ -689,7 +709,7 @@ def save_neural_brain_snapshot(payload: Dict[str, Any]) -> Dict[str, Any]:
                 outcome_json,
                 labeled_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT outcome_json FROM neural_brain_snapshots WHERE id = ?), NULL), COALESCE((SELECT labeled_at FROM neural_brain_snapshots WHERE id = ?), NULL))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT outcome_json FROM neural_brain_snapshots WHERE id = ?), NULL), COALESCE((SELECT labeled_at FROM neural_brain_snapshots WHERE id = ?), NULL)) ON CONFLICT(id) DO NOTHING
             """,
             (
                 snapshot_id,
@@ -749,8 +769,7 @@ def list_neural_brain_snapshots(limit: int = 25, symbol: Any = None, timeframe: 
 
     where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
 
-    with sqlite3.connect(DB_PATH) as connection:
-        connection.row_factory = sqlite3.Row
+    with connect_brain() as connection:
         rows = connection.execute(
             f"""
             SELECT *
@@ -763,14 +782,14 @@ def list_neural_brain_snapshots(limit: int = 25, symbol: Any = None, timeframe: 
         ).fetchall()
 
         total = connection.execute(
-            f"SELECT COUNT(*) FROM neural_brain_snapshots {where_sql}",
+            f"SELECT COUNT(*) AS count FROM neural_brain_snapshots {where_sql}",
             tuple(params),
-        ).fetchone()[0]
+        ).fetchone()["count"]
 
         labeled = connection.execute(
-            f"SELECT COUNT(*) FROM neural_brain_snapshots {where_sql} {'AND' if where_sql else 'WHERE'} outcome_json IS NOT NULL",
+            f"SELECT COUNT(*) AS count FROM neural_brain_snapshots {where_sql} {'AND' if where_sql else 'WHERE'} outcome_json IS NOT NULL",
             tuple(params),
-        ).fetchone()[0]
+        ).fetchone()["count"]
 
     return {
         "eventType": "NEURAL_BRAIN_SNAPSHOTS",
@@ -790,8 +809,7 @@ def list_neural_brain_snapshots(limit: int = 25, symbol: Any = None, timeframe: 
 def get_memory_group_stats() -> Dict[str, Any]:
     ensure_db()
 
-    with sqlite3.connect(DB_PATH) as connection:
-        connection.row_factory = sqlite3.Row
+    with connect_brain() as connection:
 
         by_symbol_rows = connection.execute(
             """
@@ -854,9 +872,8 @@ def label_neural_brain_outcome(payload: Dict[str, Any]) -> Dict[str, Any]:
     fields = ("targetHit", "reversalHappened", "chopHappened", "buyWin", "sellWin", "candlesToResult", "maxDrawdownBeforeTarget", "maxFavorableExcursion", "maxAdverseExcursion", "result", "labelSource")
     outcome = {key: payload[key] for key in fields if key in payload}
     stamp = now_iso()
-    with _MEMORY_LOCK, sqlite3.connect(DB_PATH) as connection:
-        connection.row_factory = sqlite3.Row
-        connection.execute("BEGIN IMMEDIATE")
+    with _MEMORY_LOCK, connect_brain() as connection:
+        connection.execute("LOCK TABLE neural_brain_models IN EXCLUSIVE MODE" if os.getenv("DATABASE_URL", "").strip() else "BEGIN IMMEDIATE")
         row = connection.execute("SELECT * FROM neural_brain_snapshots WHERE id = ?", (snapshot_id,)).fetchone()
         if not row:
             return {"status": "NOT_FOUND", "updated": False, "id": snapshot_id}
@@ -919,9 +936,9 @@ def neural_brain_status(symbol: Any = None, timeframe: Any = None) -> Dict[str, 
     symbol_norm = normalize_symbol(symbol) if symbol else None
     timeframe_norm = normalize_timeframe(timeframe) if timeframe else None
 
-    with sqlite3.connect(DB_PATH) as connection:
-        total = connection.execute("SELECT COUNT(*) FROM neural_brain_snapshots").fetchone()[0]
-        labeled = connection.execute("SELECT COUNT(*) FROM neural_brain_snapshots WHERE outcome_json IS NOT NULL").fetchone()[0]
+    with connect_brain() as connection:
+        total = connection.execute("SELECT COUNT(*) AS count FROM neural_brain_snapshots").fetchone()["count"]
+        labeled = connection.execute("SELECT COUNT(*) AS count FROM neural_brain_snapshots WHERE outcome_json IS NOT NULL").fetchone()["count"]
 
     scopes = get_online_brain_status(symbol_norm, timeframe_norm)
     online = logistic.status(load_logistic_state())
@@ -981,8 +998,7 @@ def neural_brain_status(symbol: Any = None, timeframe: Any = None) -> Dict[str, 
 
 def export_neural_brain_memory():
     ensure_db()
-    with _MEMORY_LOCK, sqlite3.connect(DB_PATH) as connection:
-        connection.row_factory = sqlite3.Row
+    with _MEMORY_LOCK, connect_brain() as connection:
         connection.execute("BEGIN")
         rows = connection.execute("SELECT * FROM neural_brain_snapshots ORDER BY created_at").fetchall()
         state = load_logistic_state(connection)
