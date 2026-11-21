@@ -2944,6 +2944,38 @@ def close_trade_record_from_settlement(trade: Dict[str, Any], settlement: Dict[s
     })
     return closed
 
+def sync_paper_entry_ml(trade: Dict[str, Any], *, closed: bool = False) -> None:
+    """Record backend paper trades only; never import rolling tester history."""
+    try:
+        from api.entry_ml import record_entry_ml_trade, close_entry_ml_trade
+        if normalize_symbol(trade.get("symbol")) != "BTCUSD":
+            return
+        entry_time = str(trade.get("entryTime") or "")
+        entry_dt = datetime.fromisoformat(entry_time.replace("Z", "+00:00"))
+        if entry_dt.tzinfo is None:
+            return
+        entry = to_float(trade.get("entryPrice") or trade.get("entry"), 0)
+        side = normalize_side(trade.get("side"))
+        if entry <= 0 or side not in {"BUY", "SELL"}:
+            return
+        keys = dict(symbol="BTCUSD", timeframe=trade.get("timeframe"),
+                    entry_time=entry_time, side=side, mode="AI")
+        exit_time = str(trade.get("exitTime") or "")
+        exit_price = to_float(trade.get("exitPrice"), 0)
+        if closed:
+            exit_dt = datetime.fromisoformat(exit_time.replace("Z", "+00:00"))
+            if exit_dt.tzinfo is None or exit_dt < entry_dt or exit_price <= 0:
+                return
+        record = record_entry_ml_trade(**keys, entry_price=entry,
+            target_price=trade.get("targetPrice"), stop_price=trade.get("stopPrice"),
+            risk_reward=trade.get("riskReward"))
+        if closed and record.get("status") != "closed":
+            close_entry_ml_trade(**keys, exit_time=exit_time, exit_price=exit_price,
+                bars_held=trade.get("barsOpen"), exit_reason=trade.get("exitReason"))
+    except Exception as error:
+        print(f"Entry ML paper trade sync failed: {error}")
+
+
 def open_ai_trade(**payload: Any) -> Dict[str, Any]:
     with MEMORY_LOCK:
         decision = get_ai_trader_decision(**payload)
@@ -3094,6 +3126,7 @@ def open_ai_trade(**payload: Any) -> Dict[str, Any]:
         open_trades.append(trade)
         memory["openTrades"] = dedupe_open_trades(open_trades)
         saved = save_memory(memory)
+        sync_paper_entry_ml(trade)
 
         return {
             "eventType": "AI_TRADER_OPEN",
@@ -3205,6 +3238,7 @@ def close_ai_trade(
         memory["openTrades"] = open_trades
         memory["closedTrades"] = safe_list(memory.get("closedTrades")) + [trade]
         saved = save_memory(memory)
+        sync_paper_entry_ml(trade, closed=True)
 
         return {
             "eventType": "AI_TRADER_CLOSE",
@@ -3401,6 +3435,10 @@ def evaluate_ai_trades(
         memory["virtualOpenTrades"] = virtual_still_open
         memory["virtualClosedTrades"] = safe_list(memory.get("virtualClosedTrades")) + virtual_closed
         saved = save_memory(memory)
+        for trade in still_open:
+            sync_paper_entry_ml(trade)
+        for trade in closed:
+            sync_paper_entry_ml(trade, closed=True)
 
         summary = ai_trader_summary(symbol=symbol, timeframe=timeframe)
 
