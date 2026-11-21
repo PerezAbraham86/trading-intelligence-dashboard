@@ -5,6 +5,7 @@ import json
 import math
 import os
 import threading
+from api.ml_feature_store import PostgresConnection
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -788,7 +789,7 @@ def default_ai_trader_control_state(symbol: Any = "BTCUSD", timeframe: Any = "1m
         },
         "controlledBy": "backend",
         "source": "default_control_state",
-        "storage": "supabase" if supabase_enabled() else "json",
+        "storage": "supabase" if supabase_enabled() else "postgresql" if postgres_memory_enabled() else "json",
         "updatedAt": now_iso(),
         "createdAt": now_iso(),
     }
@@ -839,7 +840,7 @@ def normalize_ai_trader_control_state(value: Any, symbol: Any = "BTCUSD", timefr
             "trailingStopR": round(trailing, 4),
         },
         "controlledBy": str(raw.get("controlledBy") or raw.get("source") or "dashboard"),
-        "storage": "supabase" if supabase_enabled() else "json",
+        "storage": "supabase" if supabase_enabled() else "postgresql" if postgres_memory_enabled() else "json",
         "updatedAt": str(raw.get("updatedAt") or now_iso()),
         "createdAt": str(raw.get("createdAt") or raw.get("updatedAt") or now_iso()),
     }
@@ -1201,6 +1202,20 @@ def DateParseSafe(value: Any) -> float:
         return 0.0
 
 
+def postgres_memory_enabled():
+    return bool(os.getenv("DATABASE_URL", "").strip()) and AI_TRADER_STORAGE != "supabase"
+
+
+def postgres_memory_connection():
+    return PostgresConnection(os.environ["DATABASE_URL"])
+
+
+def ensure_postgres_memory(connection):
+    connection.execute("""CREATE TABLE IF NOT EXISTS ai_trader_memory (
+        user_key TEXT PRIMARY KEY, state_json TEXT NOT NULL, updated_at TEXT NOT NULL
+    )""")
+
+
 def load_memory() -> Dict[str, Any]:
     """Load AI Trader memory.
 
@@ -1209,6 +1224,18 @@ def load_memory() -> Dict[str, Any]:
     We intentionally do NOT fall back to ai_trader_memory.json for open trades,
     because old JSON fallback files were recreating duplicate open trades.
     """
+    if postgres_memory_enabled():
+        with postgres_memory_connection() as connection:
+            ensure_postgres_memory(connection)
+            row = connection.execute("SELECT state_json FROM ai_trader_memory WHERE user_key = ?", (AI_TRADER_USER_KEY,)).fetchone()
+        if not row:
+            return empty_memory(storage="postgresql")
+        data = json.loads(row["state_json"])
+        data = purge_closed_open_trade_conflicts(data)
+        data["openTrades"] = dedupe_open_trades(data.get("openTrades", []))
+        data["storage"] = "postgresql"
+        return data
+
     if supabase_enabled():
         try:
             memory = load_memory_from_supabase()
@@ -1266,6 +1293,16 @@ def save_memory(memory: Dict[str, Any]) -> Dict[str, Any]:
     memory = purge_closed_open_trade_conflicts(memory)
     memory["openTrades"] = dedupe_open_trades(memory.get("openTrades", []))
     memory["virtualOpenTrades"] = safe_list(memory.get("virtualOpenTrades"))[-250:]
+
+    if postgres_memory_enabled():
+        memory["storage"] = "postgresql"
+        with postgres_memory_connection() as connection:
+            ensure_postgres_memory(connection)
+            connection.execute("""INSERT INTO ai_trader_memory(user_key, state_json, updated_at)
+                VALUES (?, ?, ?) ON CONFLICT(user_key) DO UPDATE
+                SET state_json = excluded.state_json, updated_at = excluded.updated_at""",
+                (AI_TRADER_USER_KEY, json.dumps(memory, default=str), memory["updatedAt"]))
+        return memory
 
     if supabase_enabled():
         try:
@@ -3471,7 +3508,7 @@ def ai_trader_summary(symbol: Any = "", timeframe: Any = "") -> Dict[str, Any]:
         "decisionStats": memory_status["overallDecisionStats"],
         "memoryStatus": memory_status,
         "memoryPath": str(MEMORY_PATH),
-        "storage": "supabase" if supabase_enabled() else "json",
+        "storage": "supabase" if supabase_enabled() else "postgresql" if postgres_memory_enabled() else "json",
         "supabaseEnabled": supabase_enabled(),
         "userKey": AI_TRADER_USER_KEY,
         "memoryLoadLimits": {
@@ -3615,7 +3652,7 @@ def ai_trader_diagnostics(
         "brokerConnected": False,
         "symbol": normalized_symbol or "ALL",
         "timeframe": normalized_timeframe or "ALL",
-        "storage": "supabase" if supabase_enabled() else "json",
+        "storage": "supabase" if supabase_enabled() else "postgresql" if postgres_memory_enabled() else "json",
         "supabaseEnabled": supabase_enabled(),
         "userKey": AI_TRADER_USER_KEY,
         "memoryPath": str(MEMORY_PATH),
