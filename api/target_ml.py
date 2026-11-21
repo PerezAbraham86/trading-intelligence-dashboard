@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from api.ml_engine_memory import load_engine_memory, save_engine_memory
 import math
 import os
 from threading import RLock, get_ident
@@ -192,14 +193,13 @@ def load_target_ml_memory() -> Dict[str, Any]:
 
     with TARGET_ML_MEMORY_LOCK:
         try:
-            if not TARGET_ML_STORE_FILE.exists():
+            payload = load_engine_memory("target_ml", TARGET_ML_STORE_FILE, None)
+            if payload is None:
                 TARGET_ML_MEMORY = []
                 TARGET_ML_STATE = {}
                 print(f"[Target ML] memory load: empty path={TARGET_ML_STORE_FILE}")
                 return {"status": "empty", "loaded": 0, "path": str(TARGET_ML_STORE_FILE)}
 
-            with TARGET_ML_STORE_FILE.open("r", encoding="utf-8") as handle:
-                payload = json.load(handle)
 
             records = payload.get("records") if isinstance(payload, dict) else payload
             if not isinstance(records, list):
@@ -216,6 +216,8 @@ def load_target_ml_memory() -> Dict[str, Any]:
             print(f"[Target ML] memory load: loaded={len(TARGET_ML_MEMORY)} path={TARGET_ML_STORE_FILE}")
             return {"status": "loaded", "loaded": len(TARGET_ML_MEMORY), "path": str(TARGET_ML_STORE_FILE)}
         except Exception as error:
+            if os.getenv("DATABASE_URL", "").strip():
+                raise
             print(f"[Target ML] memory load failed: path={TARGET_ML_STORE_FILE} error={error}")
             TARGET_ML_MEMORY = []
             TARGET_ML_STATE = {}
@@ -240,16 +242,7 @@ def save_target_ml_memory() -> Dict[str, Any]:
                 "records": records_snapshot,
             }
 
-            temp_path = TARGET_ML_STORE_FILE.with_name(
-                f"{TARGET_ML_STORE_FILE.name}.{os.getpid()}.{get_ident()}.tmp"
-            )
-
-            with temp_path.open("w", encoding="utf-8") as handle:
-                json.dump(payload, handle, separators=(",", ":"), ensure_ascii=False)
-                handle.flush()
-                os.fsync(handle.fileno())
-
-            os.replace(temp_path, TARGET_ML_STORE_FILE)
+            save_engine_memory("target_ml", TARGET_ML_STORE_FILE, payload)
 
             return {"status": "saved", "saved": len(records_snapshot), "path": str(TARGET_ML_STORE_FILE)}
         except Exception as error:
