@@ -943,9 +943,9 @@ const CHART_CANDLE_DEBUG_MAX_ROWS = 250
 // payload is loaded, keep the chart alive from cache + live candles and only
 // refetch full history when the cache is stale, the symbol/timeframe changes,
 // or a live/history gap needs repair.
-const MAIN_HISTORICAL_REFRESH_MS = 15 * 60 * 1000
-const MINI_HISTORICAL_REFRESH_MS = 20 * 60 * 1000
-const LIVE_GAP_REPAIR_COOLDOWN_MS = 10 * 60 * 1000
+const MAIN_HISTORICAL_REFRESH_MS = 60 * 1000
+const MINI_HISTORICAL_REFRESH_MS = 60 * 1000
+const LIVE_GAP_REPAIR_COOLDOWN_MS = 60 * 1000
 const LIVE_GAP_REPAIR_LOG_THROTTLE_MS = 5 * 1000
 
 type ChartCandleDebugLogEntry = {
@@ -4351,15 +4351,12 @@ function useChartCandles(
         return false
       }
 
-      if (priority === 'mini') {
-        addCandleDebugLog('fetch-skip-mini-cache-good', {
-          reason,
-          cacheCount: fullCache.candles.length,
-          cacheAgeMs,
-          source: fullCache.source,
-        })
-        return true
-      }
+      // Mini charts also need periodic fresh BTCUSD history; do not freeze on cache.
+
+      const lastCandle = fullCache.candles[fullCache.candles.length - 1]
+      const lastCandleAgeMs = Date.now() - liveCandleEpoch(lastCandle) * 1000
+      // Cached timestamps, not just cache write times, determine freshness.
+      if (lastCandleAgeMs > Math.max(120000, timeframeToSeconds(timeframe) * 2000)) return false
 
       if (historicalAgeMs < refreshMs) {
         addCandleDebugLog('fetch-skip-cache-fresh', {
@@ -4443,6 +4440,9 @@ function useChartCandles(
         startLiveStream()
         const cacheReason = force ? `before-force-fetch:${reason}` : `before-fetch:${reason}`
         const cachedWasApplied = applyCachedPayload(cacheReason)
+        if (provider.isFresh === false) {
+          setErrorText('Alpaca connected, but its latest BTCUSD trade is stale. Showing historical candles while waiting for fresh trades.')
+        }
 
         if (shouldSkipHistoricalFetchAfterCache(reason, cachedWasApplied, force)) {
           setIsLoading(false)
