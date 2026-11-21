@@ -506,8 +506,7 @@ def record_ml_feature_snapshot(
             f"""
             INSERT INTO ml_feature_snapshots({",".join(columns)})
             VALUES({placeholders})
-            ON CONFLICT(feature_key) DO UPDATE SET
-                {update_clause}
+            ON CONFLICT(feature_key) DO NOTHING
             """,
             [snapshot.get(column) for column in columns],
         )
@@ -527,7 +526,7 @@ def find_future_candle(candles: List[Dict[str, Any]], target_epoch: float) -> Op
     for candle in candles:
         epoch = to_epoch_seconds(candle.get("epoch") or candle.get("time") or candle.get("timestamp"))
 
-        if epoch >= target_epoch:
+        if epoch == target_epoch:
             return candle
 
     return None
@@ -573,7 +572,7 @@ def update_ml_feature_outcomes(
             target_epoch = float(row["bar_epoch"]) + seconds * horizon_bars
             future_candle = find_future_candle(candles, target_epoch)
 
-            if not future_candle:
+            if not future_candle or target_epoch + seconds > time.time():
                 continue
 
             entry_close = to_float(row["close"])
@@ -612,7 +611,7 @@ def update_ml_feature_outcomes(
                     future_direction = ?,
                     direction_correct = ?,
                     resolved_at = ?
-                WHERE id = ?
+                WHERE id = ? AND outcome_status = 'pending'
                 """,
                 (
                     future_time,
