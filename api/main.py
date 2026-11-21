@@ -9018,7 +9018,7 @@ if __name__ == "__main__":
 @app.get("/api/live-feed/status")
 def api_live_feed_status() -> Dict[str, Any]:
     if live_feed_status is None:
-        raise HTTPException(status_code=503, detail="IBKR live feed unavailable")
+        raise HTTPException(status_code=503, detail="Alpaca BTCUSD live feed unavailable")
     return live_feed_status()
 
 
@@ -9033,31 +9033,31 @@ def api_alpaca_status(symbol: str = "BTCUSD") -> Dict[str, Any]:
 
 
 @app.get("/api/ibkr/status")
-def api_ibkr_status(symbol: str = "MES1!") -> Dict[str, Any]:
+def api_ibkr_status(symbol: str = "BTCUSD") -> Dict[str, Any]:
     return ibkr_connection_status(normalize_symbol(symbol))
 
 
 @app.get("/api/live-feed/latest")
-def api_live_feed_latest(symbol: str = "MES1!", timeframe: str = "1m") -> Dict[str, Any]:
+def api_live_feed_latest(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]:
     if get_latest_live_snapshot is None:
-        raise HTTPException(status_code=503, detail="IBKR live feed unavailable")
+        raise HTTPException(status_code=503, detail="Alpaca BTCUSD live feed unavailable")
     return get_latest_live_snapshot(symbol=symbol, timeframe=timeframe)
 
 
 @app.get("/live-feed/latest")
-def api_live_feed_latest_alias(symbol: str = "MES1!", timeframe: str = "1m") -> Dict[str, Any]:
+def api_live_feed_latest_alias(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]:
     return api_live_feed_latest(symbol=symbol, timeframe=timeframe)
 
 
 @app.get("/api/live-feed/stream")
 def api_live_feed_stream(
-    symbol: str = "MES1!",
+    symbol: str = "BTCUSD",
     timeframe: str = "1m",
     limit: int = 700,
     pollSeconds: float = 1.0,
 ) -> StreamingResponse:
     if live_feed_event_generator is None:
-        raise HTTPException(status_code=503, detail="IBKR live feed unavailable")
+        raise HTTPException(status_code=503, detail="Alpaca BTCUSD live feed unavailable")
 
     headers = {
         "Cache-Control": "no-cache",
@@ -9074,7 +9074,7 @@ def api_live_feed_stream(
 
 @app.get("/live-feed/stream")
 def api_live_feed_stream_alias(
-    symbol: str = "MES1!",
+    symbol: str = "BTCUSD",
     timeframe: str = "1m",
     limit: int = 700,
     pollSeconds: float = 1.0,
