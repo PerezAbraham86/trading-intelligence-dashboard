@@ -6718,6 +6718,14 @@ def build_candle_route_payload(
                 }
             )
 
+    # Only verified Alpaca candle responses may label Neural Brain outcomes.
+    if candles and str(provider or "").lower() in ("alpaca", "alpaca_crypto") and str(symbol).upper() in ("BTCUSD", "BTC/USD"):
+        try:
+            from api.neural_brain_fastapi import evaluate_neural_brain_direction
+            ml_feature_store_status["neuralBrainOutcomes"] = evaluate_neural_brain_direction(symbol, timeframe, candles)
+        except Exception as error:
+            ml_feature_store_status["neuralBrainOutcomes"] = {"error": str(error)[:300]}
+
     payload["mlFeatureStore"] = ml_feature_store_status
 
     if build_unified_intelligence_object:
