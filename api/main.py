@@ -6175,6 +6175,15 @@ def ai_trader_decision_route(payload: AiTraderDecisionPayload) -> Dict[str, Any]
         return cached
 
     result = get_ai_trader_decision(**data)
+    # Attach read-only model research to the existing AI Trader response.
+    # The model is never allowed to override the established risk engine.
+    if isinstance(result, dict) and os.getenv("BTCUSD_AI_RESEARCH_IN_DECISION", "true").lower() in {"true", "1", "yes"}:
+        try:
+            from api.btcusd_ai_research import predict_btcusd
+            research = predict_btcusd(timeframe=str(data.get("timeframe") or "5m"))
+            result = {**result, "aiResearch": research}
+        except Exception:
+            result = {**result, "aiResearch": {"status": "Unavailable", "researchOnly": True}}
     return ai_trader_store_cached_response(cache_key, result if isinstance(result, dict) else {})
 
 @app.post("/api/ai-trader/validate-plan")
