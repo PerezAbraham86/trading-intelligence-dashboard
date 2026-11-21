@@ -298,6 +298,8 @@ async def readable_server_error(request, exc):
 
 @app.on_event("startup")
 def load_site_candle_cache_on_startup() -> None:
+    from api.ml_engine_memory import initialize_ml_engine_memory
+    initialize_ml_engine_memory()
     load_persistent_candle_cache()
     start_backend_candle_warehouse()
 
