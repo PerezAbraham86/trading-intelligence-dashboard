@@ -13,6 +13,29 @@ class Phase2BTCUSDGuards(unittest.TestCase):
         self.assertEqual(main.ai_trader_btcusd_guard({"symbol": "MES1!"})["errorCode"], "BTCUSD_ONLY")
         self.assertEqual(main.ai_trader_btcusd_guard({"symbol": "ETHUSD"})["errorCode"], "BTCUSD_ONLY")
 
+    def test_stale_feed_rejects_open_without_creating_trade(self):
+        with patch.object(main, "live_feed_status", return_value={"stream": {"status": "reconnecting"}}):
+            with patch.object(main, "open_ai_trade") as open_trade:
+                result = main.ai_trader_open_route(main.AiTraderOpenPayload(symbol="BTCUSD"))
+                self.assertFalse(result["opened"])
+                self.assertEqual(result["errorCode"], "LIVE_FEED_NOT_LIVE")
+                open_trade.assert_not_called()
+
+    def test_unsupported_symbol_rejects_open_without_creating_trade(self):
+        with patch.object(main, "open_ai_trade") as open_trade:
+            result = main.ai_trader_open_route(main.AiTraderOpenPayload(symbol="MES1!"))
+            self.assertFalse(result["opened"])
+            self.assertEqual(result["errorCode"], "BTCUSD_ONLY")
+            open_trade.assert_not_called()
+
+    def test_stale_feed_defers_evaluation_without_settling_trade(self):
+        with patch.object(main, "live_feed_status", return_value={"stream": {"status": "reconnecting"}}):
+            with patch.object(main, "evaluate_ai_trades") as evaluate:
+                result = main.ai_trader_evaluate_route(main.AiTraderEvaluatePayload(symbol="BTCUSD"))
+                self.assertFalse(result["evaluated"])
+                self.assertEqual(result["errorCode"], "LIVE_FEED_NOT_LIVE")
+                evaluate.assert_not_called()
+
     def test_missing_stream_blocks_new_entries(self):
         with patch.object(main, "live_feed_status", return_value={"stream": {"status": "connecting"}}):
             self.assertEqual(main.ai_trader_live_feed_guard()["errorCode"], "LIVE_FEED_NOT_LIVE")
