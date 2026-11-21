@@ -9357,3 +9357,45 @@ def btcusd_ai_research_explain_route(timeframe: str = "5m") -> Dict[str, Any]:
         return {"status": "Unavailable", "reason": "A current trained prediction is required", "researchOnly": True}
     return explain_btcusd(prediction)
 
+
+# Opt-in background research trainer; never authorizes orders.
+import threading as _research_threading
+_research_stop = _research_threading.Event()
+_research_worker = None
+
+def _research_training_loop():
+    from api.btcusd_ai_research import model_status, train_btcusd_model
+    while not _research_stop.wait(60):
+        for tf in ("1m", "3m", "5m", "10m", "15m", "30m", "1h"):
+            if _research_stop.is_set():
+                return
+            try:
+                state = model_status(tf)
+                if not state.get("minimumRowsReached"):
+                    continue
+                prior = state.get("trainedAt")
+                if prior:
+                    from datetime import datetime, timezone
+                    if (datetime.now(timezone.utc) - datetime.fromisoformat(prior)).total_seconds() < 3600:
+                        continue
+                result = train_btcusd_model(tf)
+                print("[Research training]", tf, result.get("status"), flush=True)
+            except Exception as exc:
+                print("[Research training]", tf, type(exc).__name__, flush=True)
+        if _research_stop.wait(1800):
+            return
+
+@app.on_event("startup")
+def start_research_training():
+    global _research_worker
+    if os.getenv("BTCUSD_XGB_AUTO_TRAIN", "false").lower() != "true" or os.getenv("BTCUSD_XGB_TRAINING_ENABLED", "false").lower() != "true":
+        return
+    if _research_worker and _research_worker.is_alive():
+        return
+    _research_stop.clear()
+    _research_worker = _research_threading.Thread(target=_research_training_loop, daemon=True, name="btc-research-training")
+    _research_worker.start()
+
+@app.on_event("shutdown")
+def stop_research_training():
+    _research_stop.set()
