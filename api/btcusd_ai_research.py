@@ -120,6 +120,12 @@ def _artifact_table(db):
     db.execute("""CREATE TABLE IF NOT EXISTS btcusd_xgb_models (
         timeframe TEXT PRIMARY KEY, model_json TEXT NOT NULL, metadata_json TEXT NOT NULL
     )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS btcusd_xgb_model_versions (
+        id TEXT PRIMARY KEY, timeframe TEXT NOT NULL, trained_at TEXT NOT NULL,
+        model_json TEXT NOT NULL, metadata_json TEXT NOT NULL
+    )""")
+    db.execute("""CREATE INDEX IF NOT EXISTS idx_btcusd_xgb_versions_time
+        ON btcusd_xgb_model_versions(timeframe, trained_at)""")
 
 
 def _save_artifact(timeframe, model, metadata):
@@ -129,6 +135,13 @@ def _save_artifact(timeframe, model, metadata):
         artifact = path.read_text()
     with connect_ml_feature_store() as db:
         _artifact_table(db)
+        # Archive every promoted research model in the same transaction as the
+        # current-model upsert. Never overwrite historical model versions.
+        import uuid
+        db.execute("""INSERT INTO btcusd_xgb_model_versions
+            (id, timeframe, trained_at, model_json, metadata_json)
+            VALUES (?, ?, ?, ?, ?)""",
+            (str(uuid.uuid4()), timeframe, metadata["trainedAt"], artifact, json.dumps(metadata)))
         db.execute("""INSERT INTO btcusd_xgb_models (timeframe, model_json, metadata_json)
             VALUES (?, ?, ?) ON CONFLICT(timeframe) DO UPDATE SET
             model_json=excluded.model_json, metadata_json=excluded.metadata_json""",
@@ -142,6 +155,20 @@ def _load_artifact(timeframe):
         row = db.execute("SELECT model_json, metadata_json FROM btcusd_xgb_models WHERE timeframe=?", (timeframe,)).fetchone()
         db.commit()
     return dict(row) if row else None
+
+
+def model_versions(timeframe="1m", limit=20):
+    """Read-only, metadata-only history; never expose full serialized models."""
+    if timeframe not in ("1m", "3m", "5m", "10m", "15m", "30m", "1h"):
+        return {"status": "Rejected", "reason": "Unsupported timeframe"}
+    with connect_ml_feature_store() as db:
+        _artifact_table(db)
+        rows = db.execute("""SELECT metadata_json FROM btcusd_xgb_model_versions
+            WHERE timeframe=? ORDER BY trained_at DESC LIMIT ?""",
+            (timeframe, max(1, min(int(limit), 100)))).fetchall()
+        db.commit()
+    return {"timeframe": timeframe, "versions": [json.loads(row["metadata_json"]) for row in rows],
+            "researchOnly": True}
 
 
 def model_status(timeframe="5m"):
