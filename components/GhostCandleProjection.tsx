@@ -832,6 +832,31 @@ export default function GhostCandleProjection({
 
   const [fetchedOverlayPayload, setFetchedOverlayPayload] = useState<OverlayPayload | null>(null)
   const [engineStatus, setEngineStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle')
+  const [frozenRecords, setFrozenRecords] = useState<any[]>([])
+  const [frozenStatus, setFrozenStatus] = useState<'loading' | 'ready' | 'error'>('loading')
+
+  useEffect(() => {
+    let cancelled = false
+    const loadFrozen = async () => {
+      try {
+        const params = new URLSearchParams({ symbol, timeframe })
+        const response = await fetch(`${API_BASE_URL}/api/ghost-ml-status?${params.toString()}`, { cache: 'no-store' })
+        if (!response.ok) throw new Error('Forecast history unavailable')
+        const result = await response.json()
+        if (!cancelled) {
+          setFrozenRecords(Array.isArray(result?.recent) ? result.recent.slice().reverse() : [])
+          setFrozenStatus('ready')
+        }
+      } catch {
+        if (!cancelled) setFrozenStatus('error')
+      }
+    }
+    setFrozenRecords([])
+    setFrozenStatus('loading')
+    void loadFrozen()
+    const interval = setInterval(loadFrozen, 15000)
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [symbol, timeframe])
 
   useEffect(() => {
     if (overlayPayload) {
@@ -901,6 +926,9 @@ export default function GhostCandleProjection({
     [activePayload, symbol, timeframe, activePrice, signal, scorecards, unifiedIntelligence]
   )
 
+  const latestFrozen = frozenRecords.find((record) => Array.isArray(record?.projectedCloses) && record.projectedCloses.length > 0)
+  const frozenSteps = latestFrozen?.evaluation?.perCandleErrors ?? []
+
   const projectionText = getProjectionText(candles, signal)
   const isProjectionPowered = candles.some((candle) => candle.source === 'projection')
   const isUnifiedPowered = candles.some((candle) => candle.source === 'unified')
@@ -918,6 +946,53 @@ export default function GhostCandleProjection({
       transition={{ duration: 0.35 }}
       className="rounded-xl border border-dark-700 bg-dark-800/70 p-6 shadow-lg"
     >
+      <details className="mb-5 rounded-lg border border-cyan-700/40 bg-dark-900/50 p-3">
+        <summary className="cursor-pointer text-sm font-semibold text-cyan-200">
+          Frozen Ghost Forecast vs. Actual · {frozenStatus === 'loading' ? 'Loading' : latestFrozen?.status === 'evaluated' ? 'Evaluated' : latestFrozen ? 'Awaiting completed candles' : 'No recorded forecast'}
+        </summary>
+        <p className="mt-2 text-xs text-gray-400">
+          Original backend Ghost ML forecast is frozen at its candle timestamp. Actual closes appear only after all forecast candles finish.
+          This record is from the Python Ghost ML overlay, which may differ from the unified target-guided chart projection.
+        </p>
+        {frozenStatus === 'error' ? (
+          <p className="mt-3 text-xs text-amber-300">Forecast history could not be loaded. No accuracy claim is available.</p>
+        ) : latestFrozen ? (
+          <div className="mt-3 space-y-3">
+            <div className="text-xs text-gray-400">
+              Forecast: {String(latestFrozen.projectionTime ?? 'Unknown time')} · Starting close: {formatPrice(Number(latestFrozen.entryClose))}
+              {' · '}Status: {latestFrozen.status === 'evaluated' ? 'Completed' : 'Pending'}
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[420px] text-left text-xs">
+                <thead><tr className="border-b border-dark-600 text-gray-400"><th className="py-2">Candle</th><th>Frozen predicted close</th><th>Actual close</th><th>Absolute error</th></tr></thead>
+                <tbody>
+                  {(latestFrozen.projectedCloses as number[]).map((predicted: number, index: number) => {
+                    const actual = frozenSteps[index]
+                    return (
+                      <tr key={index} className="border-b border-dark-700/60">
+                        <td className="py-2 text-white">#{index + 1}</td>
+                        <td className="text-white">{formatPrice(Number(predicted))}</td>
+                        <td className="text-white">{actual ? formatPrice(Number(actual.actualClose)) : 'Pending'}</td>
+                        <td className="text-white">{actual ? formatPrice(Number(actual.absoluteError)) : '—'}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {latestFrozen.status === 'evaluated' && (
+              <div className="text-xs text-gray-300">
+                Direction: {latestFrozen.evaluation?.directionCorrect ? 'Correct' : 'Incorrect'}
+                {' · '}Final close error: {formatPrice(Number(latestFrozen.evaluation?.closeError))}
+                {' · '}Evaluated: {String(latestFrozen.evaluatedAt ?? 'Unknown')}
+              </div>
+            )}
+            <p className="text-[11px] text-gray-500">Forecasts are matched to future candle timestamps by the backend, not updated to fit later prices.</p>
+          </div>
+        ) : (
+          <p className="mt-3 text-xs text-gray-400">No frozen backend Ghost ML records for this symbol/timeframe yet.</p>
+        )}
+      </details>
       <div className="mb-4 flex items-center justify-between gap-3">
         <div>
           <h2 className="text-xl font-bold text-white">Ghost Candle Projections</h2>
