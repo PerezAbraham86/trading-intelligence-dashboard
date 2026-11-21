@@ -52,7 +52,7 @@ def _bars(timeframe, limit):
     token = None
     while len(rows) < requested:
         params = {"symbols": "BTC/USD", "timeframe": source_tf, "start": start,
-                  "limit": min(1000, requested - len(rows)), "sort": "asc"}
+                  "limit": min(1000, requested - len(rows)), "sort": "desc"}
         if token:
             params["page_token"] = token
         payload = _request("/v1beta3/crypto/us/bars", params)
@@ -62,7 +62,8 @@ def _bars(timeframe, limit):
         if not token or not batch:
             break
     groups = {}
-    for bar in rows:
+    # Alpaca returns newest first; aggregate oldest to newest for correct OHLC.
+    for bar in reversed(rows):
         try:
             epoch = int(datetime.fromisoformat(bar["t"].replace("Z", "+00:00")).timestamp())
             bucket = epoch // seconds * seconds
