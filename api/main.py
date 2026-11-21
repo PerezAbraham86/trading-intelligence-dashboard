@@ -6232,7 +6232,7 @@ def ai_trader_evaluate_open_route(payload: AiTraderEvaluatePayload) -> Dict[str,
 
 @app.post("/api/ai-trader/diagnostics")
 @app.get("/api/ai-trader/diagnostics")
-def ai_trader_diagnostics_route(payload: Optional[AiTraderDiagnosticsPayload] = None, symbol: str = "", timeframe: str = "") -> Dict[str, Any]:
+def ai_trader_diagnostics_route(payload: Optional[AiTraderDiagnosticsPayload] = None, symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]:
     if ai_trader_diagnostics is None:
         return {
             "eventType": "AI_TRADER_DIAGNOSTICS",
@@ -6258,7 +6258,7 @@ def ai_trader_diagnostics_route(payload: Optional[AiTraderDiagnosticsPayload] = 
 
 @app.get("/api/ai-trader/control")
 @app.get("/api/ai-trader-control")
-def ai_trader_control_get_route(symbol: str = "MES1!", timeframe: str = "1m") -> Dict[str, Any]:
+def ai_trader_control_get_route(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]:
     if get_ai_trader_control_state is None:
         raise HTTPException(status_code=503, detail="AI Trader control module unavailable")
 
@@ -6281,7 +6281,7 @@ def ai_trader_control_post_route(payload: AiTraderControlPayload) -> Dict[str, A
 @app.get("/api/ai-trader/summary")
 @app.get("/api/ai-trader/status")
 @app.get("/api/ai-trader-summary")
-def ai_trader_summary_route(symbol: str = "", timeframe: str = "") -> Dict[str, Any]:
+def ai_trader_summary_route(symbol: str = "BTCUSD", timeframe: str = "1m") -> Dict[str, Any]:
     if ai_trader_summary is None:
         return {
             "eventType": "AI_TRADER_SUMMARY",
