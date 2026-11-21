@@ -74,7 +74,7 @@ def clamp(value: float, low: float, high: float) -> float:
 
 
 def normalize_symbol(symbol: Any) -> str:
-    raw = str(symbol or "MES1!").upper().strip()
+    raw = str(symbol or "BTCUSD").upper().strip()
     raw = raw.replace("CME_MINI:", "").replace("CME:", "").replace("BINANCE:", "").replace("COINBASE:", "")
 
     if raw in {"MES", "MES1", "MES1!", "/MES"}:
@@ -86,7 +86,7 @@ def normalize_symbol(symbol: Any) -> str:
     if "ETH" in raw:
         return "ETHUSD"
 
-    return raw or "MES1!"
+    return raw or "BTCUSD"
 
 
 def normalize_timeframe(timeframe: Any) -> str:
@@ -764,7 +764,7 @@ def decision_to_row(decision: Dict[str, Any]) -> Dict[str, Any]:
 
 
 
-def default_ai_trader_control_state(symbol: Any = "MES1!", timeframe: Any = "1m") -> Dict[str, Any]:
+def default_ai_trader_control_state(symbol: Any = "BTCUSD", timeframe: Any = "1m") -> Dict[str, Any]:
     """Shared AI Trader ON/OFF + settings state for every browser."""
     return {
         "eventType": "AI_TRADER_CONTROL_STATE",
@@ -794,7 +794,7 @@ def default_ai_trader_control_state(symbol: Any = "MES1!", timeframe: Any = "1m"
     }
 
 
-def normalize_ai_trader_control_state(value: Any, symbol: Any = "MES1!", timeframe: Any = "1m") -> Dict[str, Any]:
+def normalize_ai_trader_control_state(value: Any, symbol: Any = "BTCUSD", timeframe: Any = "1m") -> Dict[str, Any]:
     base = default_ai_trader_control_state(symbol=symbol, timeframe=timeframe)
     raw = value if isinstance(value, dict) else {}
     raw_settings = raw.get("settings") if isinstance(raw.get("settings"), dict) else {}
@@ -846,7 +846,7 @@ def normalize_ai_trader_control_state(value: Any, symbol: Any = "MES1!", timefra
     return normalized
 
 
-def load_ai_trader_control_from_supabase(symbol: Any = "MES1!", timeframe: Any = "1m") -> Dict[str, Any]:
+def load_ai_trader_control_from_supabase(symbol: Any = "BTCUSD", timeframe: Any = "1m") -> Dict[str, Any]:
     if not supabase_enabled():
         return default_ai_trader_control_state(symbol=symbol, timeframe=timeframe)
     query = urllib.parse.urlencode({
@@ -891,7 +891,7 @@ def save_ai_trader_control_to_supabase(control: Dict[str, Any]) -> None:
     supabase_upsert_rows("ai_trader_decision_log", [row])
 
 
-def get_ai_trader_control_state(symbol: Any = "MES1!", timeframe: Any = "1m") -> Dict[str, Any]:
+def get_ai_trader_control_state(symbol: Any = "BTCUSD", timeframe: Any = "1m") -> Dict[str, Any]:
     if supabase_enabled():
         try:
             return load_ai_trader_control_from_supabase(symbol=symbol, timeframe=timeframe)
@@ -2198,7 +2198,7 @@ def build_learning_entry_permission(
 
 def get_ai_trader_decision(
     *,
-    symbol: Any = "MES1!",
+    symbol: Any = "BTCUSD",
     timeframe: Any = "1m",
     currentPrice: Any = None,
     entryPrice: Any = None,
@@ -3076,7 +3076,7 @@ def open_ai_trade(**payload: Any) -> Dict[str, Any]:
 def close_ai_trade(
     *,
     tradeId: Optional[str] = None,
-    symbol: Any = "MES1!",
+    symbol: Any = "BTCUSD",
     timeframe: Any = "1m",
     side: Any = None,
     exitPrice: Any = None,
@@ -3295,7 +3295,7 @@ def refresh_open_trades_with_live_price(memory: Dict[str, Any], symbol: Any = ""
 
 def evaluate_ai_trades(
     *,
-    symbol: Any = "MES1!",
+    symbol: Any = "BTCUSD",
     timeframe: Any = "1m",
     currentPrice: Any = None,
     livePrice: Any = None,
@@ -3563,7 +3563,7 @@ def clear_ai_trader_open_trades(symbol: Optional[Any] = None, timeframe: Optiona
 
 def ai_trader_diagnostics(
     *,
-    symbol: Any = "MES1!",
+    symbol: Any = "BTCUSD",
     timeframe: Any = "1m",
     currentPrice: Any = None,
     candles: Optional[List[Any]] = None,
