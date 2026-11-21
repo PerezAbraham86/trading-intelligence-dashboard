@@ -532,6 +532,38 @@ def record_ghost_ml_projection(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _timestamp_seconds(value: Any) -> Optional[float]:
+    """Normalize ISO strings, seconds, and millisecond candle timestamps."""
+    if value is None or value == "":
+        return None
+    try:
+        numeric = float(value)
+        if math.isfinite(numeric):
+            return numeric / 1000.0 if abs(numeric) > 1e11 else numeric
+    except (TypeError, ValueError):
+        pass
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _timeframe_seconds(timeframe: str) -> int:
+    tf = normalize_timeframe(timeframe)
+    if tf.endswith("m"):
+        return max(1, int(tf[:-1])) * 60
+    if tf.endswith("h"):
+        return max(1, int(tf[:-1])) * 3600
+    if tf.endswith("d"):
+        return max(1, int(tf[:-1])) * 86400
+    if tf.endswith("w"):
+        return max(1, int(tf[:-1])) * 604800
+    return 60
+
+
 def _index_candles_by_time(candles: List[Dict[str, Any]]) -> Dict[str, int]:
     time_to_index: Dict[str, int] = {}
 
@@ -585,12 +617,54 @@ def evaluate_ghost_ml_records(symbol: str, timeframe: str, candles: List[Dict[st
         projection_time = str(record.get("projectionTime", ""))
         start_index = time_to_index.get(projection_time)
         horizon = max(1, int(record.get("horizon") or 3))
-
-        if start_index is None:
+        interval = _timeframe_seconds(normalized_timeframe)
+        projection_ts = _timestamp_seconds(projection_time)
+        if projection_ts is None:
             continue
 
-        future = candles[start_index + 1:start_index + 1 + horizon]
+        # Historical feeds may encode the same timestamp as ISO, seconds, or
+        # milliseconds. Anchor by the candle interval rather than string equality.
+        if start_index is None:
+            for idx, candle in enumerate(candles):
+                candle_ts = _timestamp_seconds(_candle_time(candle))
+                if candle_ts is not None and abs(candle_ts - projection_ts) < min(interval * 0.1, 2):
+                    start_index = idx
+                    break
+
+        if start_index is not None:
+            future = candles[start_index + 1:start_index + 1 + horizon]
+        else:
+            # Recover forecasts whose origin candle fell out of the fetched
+            # window, provided all subsequent candle slots are still present.
+            future = []
+            for offset in range(1, horizon + 1):
+                expected = projection_ts + offset * interval
+                matched = next(
+                    (c for c in candles
+                     if (ts := _timestamp_seconds(_candle_time(c))) is not None
+                     and abs(ts - expected) < min(interval * 0.1, 2)),
+                    None,
+                )
+                if matched is None:
+                    break
+                future.append(matched)
+
         if len(future) < horizon:
+            continue
+
+        # Never score a still-forming candle. Alpaca candle timestamps mark
+        # the start of the interval, not the completion time.
+        last_ts = _timestamp_seconds(_candle_time(future[-1]))
+        if last_ts is None or last_ts + interval > datetime.now(timezone.utc).timestamp():
+            continue
+        # Do not silently evaluate against nonconsecutive candles if a feed
+        # skipped a bar or returned records in an unexpected order.
+        if any(
+            (left := _timestamp_seconds(_candle_time(future[i]))) is None
+            or (right := _timestamp_seconds(_candle_time(future[i + 1]))) is None
+            or abs((right - left) - interval) > min(interval * 0.1, 2)
+            for i in range(horizon - 1)
+        ):
             continue
 
         entry_close = to_float(record.get("entryClose"))
