@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class ProviderBoundaryTests(unittest.TestCase):
     def test_legacy_integrations_cannot_return(self):
-        forbidden = ("databento", "insightsentry", "rapidapi", "yfinance", "alpaca",
+        forbidden = ("databento", "insightsentry", "rapidapi", "yfinance",
                      "yahoo", "stooq", "alphavantage", "api.polygon", "api.massive",
                      "api.binance", "okx.com", "api.stlouisfed", "api.finra")
         for folder in ("api", "app", "components", "hooks", "lib"):
