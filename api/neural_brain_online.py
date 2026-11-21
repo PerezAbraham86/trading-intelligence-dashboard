@@ -108,13 +108,12 @@ def learn(state, snapshot):
     if not outcome:
         return state
     features = feature_vector(snapshot)
-    target, reversal, chop = (bool(outcome.get(key)) for key in ("targetHit", "reversalHappened", "chopHappened"))
-    labels = {"targetHit": target, "reversal": reversal, "chop": chop}
-    direction = str(snapshot.get("bestDirection", "")).lower()
-    if "bull" in direction:
-        labels["buyWin"] = target and not reversal and not chop
-    if "bear" in direction:
-        labels["sellWin"] = target and not reversal and not chop
+    labels = {task: outcome[key] for task, key in (
+        ("targetHit", "targetHit"), ("reversal", "reversalHappened"),
+        ("chop", "chopHappened"), ("buyWin", "buyWin"), ("sellWin", "sellWin")
+    ) if isinstance(outcome.get(key), bool)}
+    if not labels:
+        return state
     for name, label in labels.items():
         task = state["tasks"][name]
         predicted = probability(task, features)
