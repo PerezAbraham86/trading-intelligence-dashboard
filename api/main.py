@@ -6123,6 +6123,13 @@ def entry_ml_reset_route(symbol: Optional[str] = None, timeframe: Optional[str] 
     return reset_entry_ml_memory(symbol=symbol, timeframe=timeframe)
 
 
+def ai_trader_btcusd_guard(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    raw = str(data.get("symbol") or "BTCUSD").upper().strip()
+    if raw not in {"BTCUSD", "BTC/USD", "BTC-USD"}:
+        return {"errorCode": "BTCUSD_ONLY", "message": "Only BTCUSD simulated trading is enabled."}
+    return None
+
+
 def ai_trader_live_feed_guard() -> Optional[Dict[str, Any]]:
     """Fail closed for new BTCUSD paper entries when upstream trades are stale."""
     if live_feed_status is None:
@@ -6159,7 +6166,7 @@ def ai_trader_decision_route(payload: AiTraderDecisionPayload) -> Dict[str, Any]
         }
 
     data = model_to_dict(payload)
-    freshness = ai_trader_live_feed_guard()
+    freshness = ai_trader_btcusd_guard(data) or ai_trader_live_feed_guard()
     if freshness:
         return {"eventType": "AI_TRADER_DECISION", "status": "WaitingForLiveData", "dashboardOnly": True, "brokerConnected": False, "allowedToTrade": False, "decision": "HOLD", "confidence": 0, **freshness, "createdAt": now_iso()}
     cache_key = ai_trader_cache_key("decision", data)
@@ -6208,10 +6215,11 @@ def ai_trader_open_route(payload: AiTraderOpenPayload) -> Dict[str, Any]:
             "createdAt": now_iso(),
         }
 
-    freshness = ai_trader_live_feed_guard()
+    data = model_to_dict(payload)
+    freshness = ai_trader_btcusd_guard(data) or ai_trader_live_feed_guard()
     if freshness:
         return {"eventType": "AI_TRADER_OPEN", "status": "Rejected", "opened": False, "dashboardOnly": True, "brokerConnected": False, **freshness, "createdAt": now_iso()}
-    return open_ai_trade(**model_to_dict(payload))
+    return open_ai_trade(**data)
 
 
 @app.post("/api/ai-trader/close")
@@ -6244,10 +6252,11 @@ def ai_trader_evaluate_route(payload: AiTraderEvaluatePayload) -> Dict[str, Any]
             "createdAt": now_iso(),
         }
 
-    freshness = ai_trader_live_feed_guard()
+    data = model_to_dict(payload)
+    freshness = ai_trader_btcusd_guard(data) or ai_trader_live_feed_guard()
     if freshness:
         return {"eventType": "AI_TRADER_EVALUATE", "status": "Deferred", "dashboardOnly": True, "brokerConnected": False, "evaluated": False, **freshness, "createdAt": now_iso()}
-    return evaluate_ai_trades(**model_to_dict(payload))
+    return evaluate_ai_trades(**data)
 
 
 @app.post("/api/ai-trader/evaluate-open")
