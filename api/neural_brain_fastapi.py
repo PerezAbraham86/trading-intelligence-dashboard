@@ -63,7 +63,7 @@ def parse_json(value: Any, fallback: Any = None) -> Any:
 
 
 def normalize_symbol(value: Any) -> str:
-    text = str(value or "MES1!").strip().upper()
+    text = str(value or "BTCUSD").strip().upper()
 
     if text in {"MES", "MES1", "MES1!"}:
         return "MES1!"
@@ -76,7 +76,7 @@ def normalize_symbol(value: Any) -> str:
     if "SPY" in text:
         return "SPY"
 
-    return text or "MES1!"
+    return text or "BTCUSD"
 
 
 def normalize_timeframe(value: Any) -> str:
@@ -672,12 +672,14 @@ def save_neural_brain_snapshot(payload: Dict[str, Any]) -> Dict[str, Any]:
         if key in payload
     })
 
-    identity = {"symbol": payload.get("symbol", "MES1!"), "timeframe": payload.get("timeframe", "1m"), "timestamp": payload.get("timestamp") or scorecard.get("createdAt"), "buy": scorecard.get("buyConfidence"), "sell": scorecard.get("sellConfidence"), "target": scorecard.get("targetHitProbability"), "reversal": scorecard.get("reversalRisk"), "chop": scorecard.get("chopRisk"), "decision": str(scorecard.get("decision", "HOLD")).upper(), "direction": scorecard.get("bestDirection", "Neutral")}
+    identity = {"symbol": payload.get("symbol", "BTCUSD"), "timeframe": payload.get("timeframe", "1m"), "timestamp": payload.get("timestamp") or scorecard.get("createdAt"), "buy": scorecard.get("buyConfidence"), "sell": scorecard.get("sellConfidence"), "target": scorecard.get("targetHitProbability"), "reversal": scorecard.get("reversalRisk"), "chop": scorecard.get("chopRisk"), "decision": str(scorecard.get("decision", "HOLD")).upper(), "direction": scorecard.get("bestDirection", "Neutral")}
     snapshot_id = str(payload.get("id") or payload.get("snapshotId") or hashlib.sha1(safe_json(identity).encode()).hexdigest()[:16])
     created_at = str(payload.get("createdAt") or now_iso())
     timestamp = str(payload.get("timestamp") or created_at)
     symbol = normalize_symbol(payload.get("symbol") or scorecard.get("symbol"))
     timeframe = normalize_timeframe(payload.get("timeframe") or scorecard.get("timeframe"))
+    if symbol != "BTCUSD":
+        return {"status": "SKIPPED", "reason": "BTCUSD_ONLY", "symbol": symbol}
 
     scorecard_inputs = payload.get("scorecardInputs") or {
         "inputs": scorecard.get("inputs"),
@@ -877,6 +879,10 @@ def label_neural_brain_outcome(payload: Dict[str, Any]) -> Dict[str, Any]:
         row = connection.execute("SELECT * FROM neural_brain_snapshots WHERE id = ?", (snapshot_id,)).fetchone()
         if not row:
             return {"status": "NOT_FOUND", "updated": False, "id": snapshot_id}
+        if row["symbol"] != "BTCUSD":
+            return {"status": "SKIPPED", "updated": False, "reason": "BTCUSD_ONLY", "id": snapshot_id}
+        if not any(key in outcome for key in ("targetHit", "reversalHappened", "chopHappened", "buyWin", "sellWin")):
+            return {"status": "SKIPPED", "updated": False, "reason": "NO_LEARNING_LABELS", "id": snapshot_id}
         # Retry identical labels once; explicit corrections keep the former update behavior.
         if row["outcome_json"]:
             previous = json.loads(row["outcome_json"])
