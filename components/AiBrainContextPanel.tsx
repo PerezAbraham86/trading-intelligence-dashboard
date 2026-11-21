@@ -679,6 +679,17 @@ export default function AiBrainContextPanel({
       transition={{ duration: 0.35 }}
       className="rounded-2xl border border-cyan-400/30 bg-dark-900/80 p-4 shadow-xl"
     >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-lg font-black text-white">Neural Brain</h2>
+        <span className="text-xs text-slate-400">{symbol} • {timeframe}</span>
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
+        <NeuralMetricCard label="Direction" value={neuralBrain.bestDirection} />
+        <NeuralMetricCard label="Strength" value={formatConfidence(neuralBrain.decisionStrengthPct)} />
+        <NeuralMetricCard label="Target Hit Score" value={formatConfidence(neuralBrain.targetHitPct)} />
+        <NeuralMetricCard label="Risk" value={neuralBrain.riskStatus} tone={riskTone as any} />
+      </div>
+      <div className={showDetails ? "mt-4" : "hidden"}>
       <div className="mb-4 flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
         <div>
           <div className="flex flex-wrap items-center gap-2">
@@ -733,9 +744,10 @@ export default function AiBrainContextPanel({
         </div>
       </div>
 
+      </div>
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
         <div className="text-xs text-slate-400">
-          Phase 2 memory posts snapshots to the Render FastAPI backend first, then the local Next.js route as fallback.
+          Background processing continues when details are collapsed.
         </div>
         <button
           type="button"
