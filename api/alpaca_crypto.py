@@ -118,9 +118,9 @@ def connection_status(symbol=SYMBOL):
     normalize_symbol(symbol)
     try:
         quote = get_quote(symbol)
-        ready = quote["price"] is not None and quote["isFresh"]
+        ready = quote["price"] is not None
         return {"provider": "alpaca", "symbol": SYMBOL, "configured": True,
-                "ready": ready, "status": "Connected" if ready else quote["status"],\n                "tradeAgeSeconds": quote.get("tradeAgeSeconds"),
+                "ready": ready, "status": "Connected" if quote["isFresh"] else quote["status"],\n                "isFresh": quote["isFresh"],\n                "tradeAgeSeconds": quote.get("tradeAgeSeconds"),
                 "readOnly": True, "retryAfterSeconds": 15}
     except HTTPException:
         return {"provider": "alpaca", "symbol": SYMBOL, "configured": True,
