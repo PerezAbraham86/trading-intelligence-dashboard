@@ -501,7 +501,7 @@ class AiTraderDecisionPayload(BaseModel):
     # strings, numbers, arrays, nested UI objects, or partial snapshots. The AI trader
     # brain normalizes everything in api/ai_trader.py, so FastAPI should not reject
     # dashboard-only data with 422 before it reaches that normalizer.
-    symbol: Optional[Any] = "MES1!"
+    symbol: Optional[Any] = "BTCUSD"
     timeframe: Optional[Any] = "1m"
 
     currentPrice: Optional[Any] = None
@@ -540,7 +540,7 @@ class AiTraderOpenPayload(AiTraderDecisionPayload):
 
 class AiTraderClosePayload(BaseModel):
     tradeId: Optional[Any] = None
-    symbol: Optional[Any] = "MES1!"
+    symbol: Optional[Any] = "BTCUSD"
     timeframe: Optional[Any] = "1m"
     side: Optional[Any] = None
     exitPrice: Optional[Any] = None
@@ -550,7 +550,7 @@ class AiTraderClosePayload(BaseModel):
 
 
 class AiTraderEvaluatePayload(BaseModel):
-    symbol: Optional[Any] = "MES1!"
+    symbol: Optional[Any] = "BTCUSD"
     timeframe: Optional[Any] = "1m"
     currentPrice: Optional[Any] = None
     livePrice: Optional[Any] = None
@@ -561,7 +561,7 @@ class AiTraderEvaluatePayload(BaseModel):
 
 
 class AiTraderDiagnosticsPayload(BaseModel):
-    symbol: Optional[Any] = "MES1!"
+    symbol: Optional[Any] = "BTCUSD"
     timeframe: Optional[Any] = "1m"
     currentPrice: Optional[Any] = None
     candles: Optional[Any] = None
@@ -6123,6 +6123,25 @@ def entry_ml_reset_route(symbol: Optional[str] = None, timeframe: Optional[str] 
     return reset_entry_ml_memory(symbol=symbol, timeframe=timeframe)
 
 
+def ai_trader_live_feed_guard() -> Optional[Dict[str, Any]]:
+    """Fail closed for new BTCUSD paper entries when upstream trades are stale."""
+    if live_feed_status is None:
+        return {"errorCode": "LIVE_FEED_UNAVAILABLE", "message": "Alpaca live feed unavailable."}
+    try:
+        status = live_feed_status()
+        stream = status.get("stream") or {}
+        stamp = stream.get("lastTradeAt")
+        if not stamp or stream.get("status") != "live":
+            return {"errorCode": "LIVE_FEED_NOT_LIVE", "message": "Waiting for live Alpaca BTCUSD trades.", "feed": stream.get("status")}
+        trade_time = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+        age = datetime.now(timezone.utc).timestamp() - trade_time.timestamp()
+        if age < -5 or age > 15:
+            return {"errorCode": "STALE_LIVE_TRADE", "message": "BTCUSD trade feed is stale; new simulated entries are blocked.", "tradeAgeSeconds": round(age, 2)}
+        return None
+    except Exception:
+        return {"errorCode": "LIVE_FEED_CHECK_FAILED", "message": "Could not verify BTCUSD trade freshness."}
+
+
 @app.post("/api/ai-trader/decision")
 @app.post("/api/ai-trader-decision")
 def ai_trader_decision_route(payload: AiTraderDecisionPayload) -> Dict[str, Any]:
@@ -6140,6 +6159,9 @@ def ai_trader_decision_route(payload: AiTraderDecisionPayload) -> Dict[str, Any]
         }
 
     data = model_to_dict(payload)
+    freshness = ai_trader_live_feed_guard()
+    if freshness:
+        return {"eventType": "AI_TRADER_DECISION", "status": "WaitingForLiveData", "dashboardOnly": True, "brokerConnected": False, "allowedToTrade": False, "decision": "HOLD", "confidence": 0, **freshness, "createdAt": now_iso()}
     cache_key = ai_trader_cache_key("decision", data)
     cached = ai_trader_cached_response(cache_key, AI_TRADER_DECISION_MIN_SECONDS)
     if cached is not None:
@@ -6186,6 +6208,9 @@ def ai_trader_open_route(payload: AiTraderOpenPayload) -> Dict[str, Any]:
             "createdAt": now_iso(),
         }
 
+    freshness = ai_trader_live_feed_guard()
+    if freshness:
+        return {"eventType": "AI_TRADER_OPEN", "status": "Rejected", "opened": False, "dashboardOnly": True, "brokerConnected": False, **freshness, "createdAt": now_iso()}
     return open_ai_trade(**model_to_dict(payload))
 
 
