@@ -667,9 +667,26 @@ def evaluate_ghost_ml_records(symbol: str, timeframe: str, candles: List[Dict[st
             2,
         )
 
+        # Per-horizon forecast errors are measured against the corresponding
+        # completed future candle, never against the latest live price.
+        step_errors = []
+        for step, actual_candle in enumerate(future):
+            predicted = to_float((record.get("projectedCloses") or [])[step], entry_close) if step < len(record.get("projectedCloses") or []) else entry_close
+            actual = to_float(actual_candle.get("close"), entry_close)
+            step_errors.append({
+                "horizon": step + 1,
+                "predictedClose": round(predicted, 5),
+                "actualClose": round(actual, 5),
+                "signedError": round(actual - predicted, 5),
+                "absoluteError": round(abs(actual - predicted), 5),
+                "predictedMove": round(predicted - entry_close, 5),
+                "actualMove": round(actual - entry_close, 5),
+            })
+
         record["status"] = "evaluated"
         record["evaluatedAt"] = now_iso()
         record["evaluation"] = {
+            "perCandleErrors": step_errors,
             "actualDirection": actual_direction,
             "directionCorrect": bool(direction_correct),
             "targetHit": bool(target_hit),
