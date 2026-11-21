@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from api.ml_engine_memory import load_engine_memory, save_engine_memory
 import math
 import os
 from datetime import datetime, timezone
@@ -278,24 +279,9 @@ def calculate_atr(candles: List[Any], length: int = 14) -> float:
 
 
 def load_memory() -> Dict[str, Any]:
-    if not MEMORY_PATH.exists():
-        return {
-            "version": 1,
-            "createdAt": now_iso(),
-            "updatedAt": now_iso(),
-            "openProjections": [],
-            "closedProjections": [],
-            "corrections": [],
-            "sourceStats": {},
-            "targetLocks": {},
-        }
-
-    try:
-        data = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError("projection memory root must be object")
-    except Exception:
-        data = {}
+    data = load_engine_memory("projection_engine", MEMORY_PATH, {})
+    if not isinstance(data, dict):
+        raise ValueError("projection memory root must be object")
 
     data.setdefault("version", 1)
     data.setdefault("createdAt", now_iso())
@@ -326,7 +312,7 @@ def save_memory(memory: Dict[str, Any]) -> Dict[str, Any]:
     memory["openProjections"] = safe_list(memory.get("openProjections"))[-MAX_MEMORY_ROWS:]
     memory["closedProjections"] = safe_list(memory.get("closedProjections"))[-MAX_MEMORY_ROWS:]
     memory["corrections"] = safe_list(memory.get("corrections"))[-MAX_MEMORY_ROWS:]
-    MEMORY_PATH.write_text(json.dumps(memory, indent=2, sort_keys=True), encoding="utf-8")
+    save_engine_memory("projection_engine", MEMORY_PATH, memory)
     return memory
 
 
