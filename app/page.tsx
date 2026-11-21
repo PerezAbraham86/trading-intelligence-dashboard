@@ -278,23 +278,8 @@ function getSafeDashboardStatus({
   }
 }
 
-function normalizeSymbol(value: unknown) {
-  const raw = String(value ?? 'MES1!')
-    .trim()
-    .toUpperCase()
-    .replace('BINANCE:', '')
-    .replace('COINBASE:', '')
-    .replace('CRYPTO:', '')
-    .replace('CME_MINI:', '')
-    .replace('CME:', '')
-
-  if (raw === 'MES1' || raw === 'MES1!') return 'MES1!'
-  if (raw.includes('MES')) return 'MES1!'
-  if (raw.includes('BTC')) return 'BTCUSD'
-  if (raw.includes('ETH')) return 'ETHUSD'
-  if (raw.includes('SPY')) return 'SPY'
-
-  return raw || 'MES1!'
+function normalizeSymbol(_value: unknown) {
+  return 'BTCUSD'
 }
 
 function normalizeTimeframe(value: unknown) {
@@ -350,8 +335,8 @@ function getHistoricalCandleRouteForSymbol(apiBaseUrl: string, symbol: string) {
   // This prevents BTCUSD from being incorrectly treated as an IBKR futures symbol.
   return {
     route: `${apiBaseUrl}/api/candles`,
-    provider: 'ibkr',
-    source: 'ibkr_historical_ohlcv',
+    provider: 'alpaca',
+    source: 'alpaca_crypto_bars',
   }
 }
 
@@ -673,7 +658,7 @@ function getOverallGhostText(engineStates: Record<string, PythonEngineState | nu
 
 type CandleModeLabel = 'Regular' | 'Heikin Ashi'
 
-const chartSymbols = ['MES1!', 'BTCUSD', 'ETHUSD', 'SPY']
+const chartSymbols = ['BTCUSD']
 const chartTimeframes = ['1m', '3m', '5m', '10m', '15m', '30m', '1h', '2h', '4h', '1d']
 const MINI_CHARTS_TEMPORARILY_DISABLED = true
 const MULTI_TIMEFRAME_BOOT_WARM_DISABLED = true
@@ -6265,19 +6250,19 @@ export default function Dashboard() {
   )
 
   const [mainChartSelection, setMainChartSelection] = useState<ChartSelection>({
-    symbol: process.env.NEXT_PUBLIC_DEFAULT_SYMBOL === 'SPY' ? 'SPY' : 'MES1!',
+    symbol: 'BTCUSD',
     timeframe: '1m',
     candleMode: 'Heikin Ashi',
   })
 
   const [miniChartOneSelection, setMiniChartOneSelection] = useState<ChartSelection>({
-    symbol: 'MES1!',
+    symbol: 'BTCUSD',
     timeframe: '1m',
     candleMode: 'Heikin Ashi',
   })
 
   const [miniChartTwoSelection, setMiniChartTwoSelection] = useState<ChartSelection>({
-    symbol: 'MES1!',
+    symbol: 'BTCUSD',
     timeframe: '1m',
     candleMode: 'Heikin Ashi',
   })
@@ -6891,8 +6876,8 @@ export default function Dashboard() {
     if (!isClient || !dashboardBootReady) return
 
     const backgroundWarmItems = MULTI_TIMEFRAME_BOOT_WARM_DISABLED ? [] : [
-      { symbol: 'MES1!', timeframe: '15m', limit: 300 },
-      { symbol: 'MES1!', timeframe: '30m', limit: 300 },
+      { symbol: 'BTCUSD', timeframe: '15m', limit: 300 },
+      { symbol: 'BTCUSD', timeframe: '30m', limit: 300 },
       { symbol: 'BTCUSD', timeframe: '1m', limit: 300 },
       { symbol: 'BTCUSD', timeframe: '5m', limit: 300 },
       { symbol: 'ETHUSD', timeframe: '1m', limit: 300 },
