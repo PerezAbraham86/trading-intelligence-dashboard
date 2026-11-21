@@ -1059,9 +1059,9 @@ def rolling_ghost_performance(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         for index in range(3):
             values = []
             for row in rows:
-                details = safe_list(safe_dict(row.get("evaluation")).get("perCandleErrors"))
-                if index < len(details):
-                    value = safe_dict(details[index]).get("absoluteError")
+                details = row["evaluation"].get("perCandleErrors")
+                if isinstance(details, list) and index < len(details) and isinstance(details[index], dict):
+                    value = details[index].get("absoluteError")
                     if value is not None:
                         values.append(abs(to_float(value, 0)))
             steps.append(round(sum(values) / len(values), 4) if values else None)
