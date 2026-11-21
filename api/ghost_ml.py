@@ -1041,6 +1041,65 @@ def get_ghost_ml_projection_multiplier(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def rolling_ghost_performance(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Chronological, completed-only rolling performance; no pending data."""
+    evaluated = sorted(
+        (record for record in records if record.get("status") == "evaluated" and isinstance(record.get("evaluation"), dict)),
+        key=lambda record: (_timestamp_seconds(record.get("projectionTime")) or 0.0, str(record.get("key") or "")),
+    )
+
+    def window_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        count = len(rows)
+        if not count:
+            return {"samples": 0, "directionAccuracy": None, "avgAbsoluteCloseError": None,
+                    "avgCloseErrorPct": None, "perCandleAvgAbsoluteError": [None, None, None]}
+        errors = [abs(to_float(row["evaluation"].get("closeError"), 0)) for row in rows]
+        pct_errors = [abs(to_float(row["evaluation"].get("closeErrorPct"), 0)) for row in rows]
+        steps = []
+        for index in range(3):
+            values = []
+            for row in rows:
+                details = safe_list(safe_dict(row.get("evaluation")).get("perCandleErrors"))
+                if index < len(details):
+                    value = safe_dict(details[index]).get("absoluteError")
+                    if value is not None:
+                        values.append(abs(to_float(value, 0)))
+            steps.append(round(sum(values) / len(values), 4) if values else None)
+        return {
+            "samples": count,
+            "directionAccuracy": round(100 * sum(bool(row["evaluation"].get("directionCorrect")) for row in rows) / count, 2),
+            "avgAbsoluteCloseError": round(sum(errors) / count, 4),
+            "avgCloseErrorPct": round(sum(pct_errors) / count, 5),
+            "perCandleAvgAbsoluteError": steps,
+        }
+
+    recent20 = window_stats(evaluated[-20:])
+    recent50 = window_stats(evaluated[-50:])
+    previous20 = window_stats(evaluated[-40:-20]) if len(evaluated) >= 40 else window_stats([])
+    comparison_ready = recent20["samples"] == 20 and previous20["samples"] == 20
+    delta_error = (
+        round(recent20["avgAbsoluteCloseError"] - previous20["avgAbsoluteCloseError"], 4)
+        if comparison_ready else None
+    )
+    delta_accuracy = (
+        round(recent20["directionAccuracy"] - previous20["directionAccuracy"], 2)
+        if comparison_ready else None
+    )
+    return {
+        "source": "python_ghost_ml",
+        "evaluatedSamples": len(evaluated),
+        "recent20": recent20,
+        "recent50": recent50,
+        "previous20": previous20,
+        "comparisonReady": comparison_ready,
+        "avgAbsoluteCloseErrorChange": delta_error,
+        "directionAccuracyChange": delta_accuracy,
+        "errorTrend": ("improving" if delta_error < 0 else "worsening" if delta_error > 0 else "unchanged")
+            if delta_error is not None else "insufficient_data",
+        "note": "Improvement is descriptive, not proof of predictive learning; overlapping forecast windows may be correlated.",
+    }
+
+
 def ghost_ml_summary_from_candles(symbol: str, timeframe: str, candles: List[Dict[str, Any]]) -> Dict[str, Any]:
     normalized_symbol = normalize_symbol(symbol)
     normalized_timeframe = normalize_timeframe(timeframe)
@@ -1082,6 +1141,7 @@ def ghost_ml_summary_from_candles(symbol: str, timeframe: str, candles: List[Dic
         "smmaUsedForMl": 0,
         "storeFile": str(GHOST_ML_STORE_FILE),
         "bucketStats": buckets,
+        "rollingPerformance": rolling_ghost_performance(records),
         "recent": records[-20:],
         "createdAt": now_iso(),
     }
