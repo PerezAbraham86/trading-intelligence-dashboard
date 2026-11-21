@@ -6244,6 +6244,9 @@ def ai_trader_evaluate_route(payload: AiTraderEvaluatePayload) -> Dict[str, Any]
             "createdAt": now_iso(),
         }
 
+    freshness = ai_trader_live_feed_guard()
+    if freshness:
+        return {"eventType": "AI_TRADER_EVALUATE", "status": "Deferred", "dashboardOnly": True, "brokerConnected": False, "evaluated": False, **freshness, "createdAt": now_iso()}
     return evaluate_ai_trades(**model_to_dict(payload))
 
 
