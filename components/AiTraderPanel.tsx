@@ -4866,7 +4866,6 @@ export default function AiTraderPanel({
 
       <details
         className="mb-4 rounded-lg border border-blue-400/20 bg-blue-400/10 px-3 py-2 text-[10px] text-blue-100"
-        open
       >
         <summary className="flex cursor-pointer select-none items-center justify-between gap-3 font-black uppercase tracking-wide text-blue-300">
           <span>
@@ -5008,7 +5007,9 @@ export default function AiTraderPanel({
         />
       </div>
 
-      <div className="mt-4 rounded-xl border border-dark-700 bg-dark-900/60 p-4">
+      <details className="mt-4 rounded-xl border border-dark-700 bg-dark-900/60 p-4">
+        <summary className="cursor-pointer text-sm font-bold text-gray-300">ML System Diagnostics — expand</summary>
+        <div className="mt-3">
         <div className="mb-3 flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
           <div>
             <div className="text-sm font-black text-white">
@@ -5278,9 +5279,10 @@ export default function AiTraderPanel({
             }
           />
         </div>
-      </div>
+        </div>
+      </details>
 
-      <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-3">
+      <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-3 items-start">
         <div className="rounded-xl border border-dark-700 bg-dark-900/70 p-4 xl:col-span-2">
           <div className="mb-2 text-xs font-black uppercase tracking-wide text-gray-400">
             AI Reason
@@ -5363,6 +5365,15 @@ export default function AiTraderPanel({
             ) : null}
           </div>
 
+          <div className="mb-3 grid grid-cols-2 gap-2">
+            <StatBox label="Learning Progress" value={`${aiMemoryProgress.toFixed(1)}%`} />
+            <StatBox label="Closed" value={String(displayClosedCount)} />
+            <StatBox label="Win Rate" value={formatPercent(stats.winRate)} />
+            <StatBox label="Profit Factor" value={toFiniteNumber(stats.profitFactor, 0).toFixed(2)} />
+          </div>
+          <details>
+            <summary className="cursor-pointer text-xs font-bold text-gray-400">Detailed learning memory</summary>
+            <div className="mt-3">
           <div className="mb-3 grid grid-cols-2 gap-2">
             <StatBox
               label="Live Observations"
@@ -5488,6 +5499,8 @@ export default function AiTraderPanel({
               value={toFiniteNumber(stats.avgR, 0).toFixed(2)}
             />
           </div>
+            </div>
+          </details>
         </div>
       </div>
 
