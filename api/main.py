@@ -9306,3 +9306,32 @@ async def api_neural_brain_outcome_alias(request: FastAPIRequest) -> Dict[str, A
 def api_neural_brain_export() -> Dict[str, Any]:
     from api.neural_brain_fastapi import export_neural_brain_memory
     return export_neural_brain_memory()
+
+# Optional read-only BTCUSD research endpoints. No broker execution is exposed.
+@app.get("/api/ai-research/status")
+def btcusd_ai_research_status_route() -> Dict[str, Any]:
+    from api.btcusd_ai_research import model_status
+    return model_status()
+
+
+@app.get("/api/ai-research/predict")
+def btcusd_ai_research_predict_route(timeframe: str = "5m") -> Dict[str, Any]:
+    from api.btcusd_ai_research import predict_btcusd
+    return predict_btcusd(timeframe=timeframe)
+
+
+@app.post("/api/ai-research/train")
+def btcusd_ai_research_train_route() -> Dict[str, Any]:
+    # Explicit environment opt-in is enforced inside the trainer.
+    from api.btcusd_ai_research import train_btcusd_model
+    return train_btcusd_model(timeframe=os.getenv("BTCUSD_XGB_TIMEFRAME", "5m"))
+
+
+@app.get("/api/ai-research/explain")
+def btcusd_ai_research_explain_route(timeframe: str = "5m") -> Dict[str, Any]:
+    from api.btcusd_ai_research import predict_btcusd, explain_btcusd
+    prediction = predict_btcusd(timeframe=timeframe)
+    if prediction.get("status") != "ResearchPrediction":
+        return {"status": "Unavailable", "reason": "A current trained prediction is required", "researchOnly": True}
+    return explain_btcusd(prediction)
+
