@@ -116,6 +116,65 @@ def _train_btcusd_model(timeframe="5m"):
     return metadata
 
 
+def walk_forward_validation(timeframe="1m", folds=4, test_size=40):
+    """Research-only expanding-window validation with outcome-time purging."""
+    if timeframe not in ("1m", "3m", "5m", "10m", "15m", "30m", "1h"):
+        return {"status": "Rejected", "reason": "Unsupported timeframe", "researchOnly": True}
+    if os.getenv("BTCUSD_XGB_TRAINING_ENABLED", "false").lower() != "true":
+        return {"status": "Disabled", "researchOnly": True}
+    try:
+        from xgboost import XGBClassifier
+        from sklearn.metrics import accuracy_score, log_loss, brier_score_loss
+    except ImportError:
+        return {"status": "Unavailable", "reason": "Missing ML dependencies", "researchOnly": True}
+    folds = max(2, min(int(folds), 8))
+    test_size = max(30, min(int(test_size), 500))
+    rows = _rows(timeframe, limit=50000)
+    min_train = max(150, MIN_ROWS // 2)
+    if len(rows) < min_train + folds * test_size:
+        return {"status": "InsufficientData", "resolvedRows": len(rows),
+                "requiredRows": min_train + folds * test_size, "researchOnly": True}
+    results = []
+    # Use the most recent consecutive non-overlapping test windows.
+    start = len(rows) - folds * test_size
+    for fold in range(folds):
+        test_start = start + fold * test_size
+        test = rows[test_start:test_start + test_size]
+        cutoff = float(test[0]["bar_epoch"])
+        embargo = max(3, max(int(r.get("outcome_horizon_bars") or 3) for r in rows[:test_start + test_size]))
+        train = [r for r in rows[:max(0, test_start - embargo)]
+                 if r.get("future_epoch") is not None and float(r["future_epoch"]) < cutoff]
+        if len(train) < min_train:
+            return {"status": "InsufficientPurgedTrainingData", "fold": fold + 1,
+                    "trainRows": len(train), "researchOnly": True}
+        y_train = [int(r["future_direction"] == 1) for r in train]
+        y_test = [int(r["future_direction"] == 1) for r in test]
+        if len(set(y_train)) < 2 or len(set(y_test)) < 2:
+            return {"status": "InsufficientClasses", "fold": fold + 1, "researchOnly": True}
+        model = XGBClassifier(n_estimators=150, max_depth=3, learning_rate=.05,
+                              subsample=.8, colsample_bytree=.8, eval_metric="logloss",
+                              random_state=42, n_jobs=2)
+        model.fit([_vector(r) for r in train], y_train)
+        probs = model.predict_proba([_vector(r) for r in test])[:, 1]
+        baseline_probability = sum(y_train) / len(y_train)
+        baseline_prediction = int(baseline_probability >= .5)
+        results.append({"fold": fold + 1, "trainRows": len(train), "testRows": len(test),
+            "testStartEpoch": cutoff, "testEndEpoch": float(test[-1]["bar_epoch"]),
+            "embargoRows": embargo,
+            "accuracy": round(float(accuracy_score(y_test, probs >= .5)), 4),
+            "logLoss": round(float(log_loss(y_test, probs, labels=[0, 1])), 4),
+            "brier": round(float(brier_score_loss(y_test, probs)), 4),
+            "baselineAccuracy": round(float(accuracy_score(y_test, [baseline_prediction] * len(y_test))), 4),
+            "baselineLogLoss": round(float(log_loss(y_test, [baseline_probability] * len(y_test), labels=[0, 1])), 4)})
+    return {"status": "EvaluatedResearchOnly", "symbol": "BTCUSD", "timeframe": timeframe,
+        "folds": results, "meanAccuracy": round(sum(f["accuracy"] for f in results) / folds, 4),
+        "meanBaselineAccuracy": round(sum(f["baselineAccuracy"] for f in results) / folds, 4),
+        "meanLogLoss": round(sum(f["logLoss"] for f in results) / folds, 4),
+        "meanBaselineLogLoss": round(sum(f["baselineLogLoss"] for f in results) / folds, 4),
+        "researchOnly": True, "allowedToTrade": False,
+        "warning": "No model promotion or trading authorization. Overlapping test-label horizons may make fold estimates dependent."}
+
+
 def _artifact_table(db):
     db.execute("""CREATE TABLE IF NOT EXISTS btcusd_xgb_models (
         timeframe TEXT PRIMARY KEY, model_json TEXT NOT NULL, metadata_json TEXT NOT NULL
