@@ -685,6 +685,7 @@ type SavedChartConfig = {
   settings: ChartStrategySettings
   savedAt: string
   source?: 'backend' | 'local'
+  overlayToggles?: MainOverlayToggles
 }
 
 const chartConfigStorageKeys: Record<ChartConfigKey, string> = {
@@ -720,6 +721,21 @@ function normalizeChartSelectionPayload(value: unknown): ChartSelection | null {
   }
 }
 
+function normalizeMainOverlayToggles(value: unknown): MainOverlayToggles | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const raw = value as Record<string, unknown>
+  const keys: (keyof MainOverlayToggles)[] = ['canvas', 'smc', 'ghost', 'orderBlocks', 'liquidityProfile', 'volumeProfile']
+  if (!keys.every((key) => typeof raw[key] === 'boolean')) return undefined
+  return {
+    canvas: raw.canvas as boolean,
+    smc: raw.smc as boolean,
+    ghost: raw.ghost as boolean,
+    orderBlocks: raw.orderBlocks as boolean,
+    liquidityProfile: raw.liquidityProfile as boolean,
+    volumeProfile: raw.volumeProfile as boolean,
+  }
+}
+
 function normalizeSavedChartConfigPayload(value: unknown): SavedChartConfig | null {
   if (!value || typeof value !== 'object') return null
 
@@ -738,6 +754,7 @@ function normalizeSavedChartConfigPayload(value: unknown): SavedChartConfig | nu
   return {
     selection,
     settings,
+    overlayToggles: normalizeMainOverlayToggles(payload?.overlayToggles),
     savedAt: typeof payload?.savedAt === 'string'
       ? payload.savedAt
       : typeof raw?.updatedAt === 'string'
@@ -746,10 +763,11 @@ function normalizeSavedChartConfigPayload(value: unknown): SavedChartConfig | nu
   }
 }
 
-function buildChartConfigPayload(selection: ChartSelection, settings: ChartStrategySettings) {
+function buildChartConfigPayload(selection: ChartSelection, settings: ChartStrategySettings, overlayToggles?: MainOverlayToggles) {
   return {
     selection: normalizeChartSelectionPayload(selection) ?? selection,
     settings: normalizeChartSettings(settings) ?? settings,
+    ...(overlayToggles ? { overlayToggles } : {}),
     savedAt: new Date().toISOString(),
   }
 }
@@ -775,13 +793,13 @@ function readSavedChartConfig(key: ChartConfigKey): SavedChartConfig | null {
   }
 }
 
-function writeSavedChartConfig(key: ChartConfigKey, selection: ChartSelection, settings: ChartStrategySettings) {
+function writeSavedChartConfig(key: ChartConfigKey, selection: ChartSelection, settings: ChartStrategySettings, overlayToggles?: MainOverlayToggles) {
   if (typeof window === 'undefined') return false
 
   try {
     window.localStorage.setItem(
       chartConfigStorageKeys[key],
-      JSON.stringify(buildChartConfigPayload(selection, settings))
+      JSON.stringify(buildChartConfigPayload(selection, settings, overlayToggles))
     )
     return true
   } catch (error) {
@@ -820,9 +838,10 @@ async function fetchBackendChartConfigs(): Promise<Partial<Record<ChartConfigKey
 async function saveBackendChartConfig(
   key: ChartConfigKey,
   selection: ChartSelection,
-  settings: ChartStrategySettings
+  settings: ChartStrategySettings,
+  overlayToggles?: MainOverlayToggles
 ) {
-  const payload = buildChartConfigPayload(selection, settings)
+  const payload = buildChartConfigPayload(selection, settings, overlayToggles)
 
   const response = await fetch(`${DASHBOARD_API_BASE_URL}/api/chart-settings`, {
     method: 'POST',
@@ -5860,7 +5879,7 @@ function LightweightChartPanel({
       {debugLog.length > 0 && (
         <details
           className="mb-3 rounded-lg border border-blue-400/20 bg-blue-400/10 px-3 py-2 text-[10px] text-blue-100"
-          open={!compact}
+          open={undefined}
         >
           <summary className="flex cursor-pointer select-none items-center justify-between gap-3 font-black uppercase tracking-wide text-blue-300">
             <span>
@@ -6303,6 +6322,7 @@ export default function Dashboard() {
       if (key === 'main') {
         setMainChartSelection(config.selection)
         setMainChartIndicatorSettings(config.settings)
+        if (config.overlayToggles) setMainOverlayToggles(config.overlayToggles)
       }
 
       if (key === 'mini1') {
@@ -6337,7 +6357,7 @@ export default function Dashboard() {
 
           // Keep browser localStorage in sync so refresh still has an instant fallback.
           if (config) {
-            writeSavedChartConfig(key, config.selection, config.settings)
+            writeSavedChartConfig(key, config.selection, config.settings, config.overlayToggles)
           }
         })
       } catch (error) {
@@ -6367,12 +6387,13 @@ export default function Dashboard() {
     settings: ChartStrategySettings
   ) => {
     if (!isClient) return
+    const savedOverlays = key === 'main' ? mainOverlayToggles : undefined
 
     // Save locally immediately, then sync to backend database for all computers.
-    const localSaved = writeSavedChartConfig(key, selection, settings)
+    const localSaved = writeSavedChartConfig(key, selection, settings, savedOverlays)
 
     try {
-      await saveBackendChartConfig(key, selection, settings)
+      await saveBackendChartConfig(key, selection, settings, savedOverlays)
       setLastSavedChartKey(key)
       window.setTimeout(() => {
         setLastSavedChartKey((current) => current === key ? null : current)
@@ -6387,7 +6408,7 @@ export default function Dashboard() {
         }, 2200)
       }
     }
-  }, [isClient])
+  }, [isClient, mainOverlayToggles])
 
   const handleLivePriceUpdate = useCallback((snapshot: LiveFeedSnapshot) => {
     const normalizedSnapshot = writeSharedLivePriceCache(snapshot)
