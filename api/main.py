@@ -9321,8 +9321,13 @@ def btcusd_ai_research_predict_route(timeframe: str = "5m") -> Dict[str, Any]:
 
 
 @app.post("/api/ai-research/train")
-def btcusd_ai_research_train_route() -> Dict[str, Any]:
-    # Explicit environment opt-in is enforced inside the trainer.
+def btcusd_ai_research_train_route(request: FastAPIRequest) -> Dict[str, Any]:
+    # Training is disabled unless configured, and requires a separate admin token.
+    import hmac
+    configured = os.getenv("BTCUSD_AI_ADMIN_TOKEN", "")
+    supplied = request.headers.get("X-AI-Research-Token", "")
+    if not configured or not hmac.compare_digest(supplied, configured):
+        raise HTTPException(status_code=403, detail="AI research training requires an admin token")
     from api.btcusd_ai_research import train_btcusd_model
     return train_btcusd_model(timeframe=os.getenv("BTCUSD_XGB_TIMEFRAME", "5m"))
 
