@@ -157,6 +157,36 @@ def _load_artifact(timeframe):
     return dict(row) if row else None
 
 
+def backfill_current_model_version(timeframe="1m"):
+    """Idempotently archive the current research model without modifying it."""
+    if timeframe not in ("1m", "3m", "5m", "10m", "15m", "30m", "1h"):
+        return {"status": "Rejected", "reason": "Unsupported timeframe"}
+    import uuid
+    with connect_ml_feature_store() as db:
+        _artifact_table(db)
+        current = db.execute("""SELECT model_json, metadata_json
+            FROM btcusd_xgb_models WHERE timeframe=?""", (timeframe,)).fetchone()
+        if not current:
+            return {"status": "NoCurrentModel", "timeframe": timeframe}
+        metadata = json.loads(current["metadata_json"])
+        trained_at = metadata.get("trainedAt")
+        if not trained_at:
+            return {"status": "MissingTrainingTimestamp", "timeframe": timeframe}
+        existing = db.execute("""SELECT id FROM btcusd_xgb_model_versions
+            WHERE timeframe=? AND trained_at=? AND model_json=? LIMIT 1""",
+            (timeframe, trained_at, current["model_json"])).fetchone()
+        if existing:
+            return {"status": "AlreadyArchived", "timeframe": timeframe}
+        db.execute("""INSERT INTO btcusd_xgb_model_versions
+            (id, timeframe, trained_at, model_json, metadata_json)
+            VALUES (?, ?, ?, ?, ?)""",
+            (str(uuid.uuid4()), timeframe, trained_at,
+             current["model_json"], current["metadata_json"]))
+        db.commit()
+    return {"status": "Archived", "timeframe": timeframe, "trainedAt": trained_at,
+            "researchOnly": True}
+
+
 def model_versions(timeframe="1m", limit=20):
     """Read-only, metadata-only history; never expose full serialized models."""
     if timeframe not in ("1m", "3m", "5m", "10m", "15m", "30m", "1h"):
