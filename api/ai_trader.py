@@ -2968,7 +2968,9 @@ def sync_paper_entry_ml(trade: Dict[str, Any], *, closed: bool = False) -> None:
                 return
         record = record_entry_ml_trade(**keys, entry_price=entry,
             target_price=trade.get("targetPrice"), stop_price=trade.get("stopPrice"),
-            risk_reward=trade.get("riskReward"))
+            risk_reward=trade.get("riskReward"),
+            **{name: safe_dict(safe_dict(safe_dict(trade.get("sourceSnapshot")).get("entryMlContext")).get(name))
+               for name in ("scorecards", "ghost_ml", "target_ml", "context")})
         if closed and record.get("status") != "closed":
             close_entry_ml_trade(**keys, exit_time=exit_time, exit_price=exit_price,
                 bars_held=trade.get("barsOpen"), exit_reason=trade.get("exitReason"))
@@ -3119,6 +3121,12 @@ def open_ai_trade(**payload: Any) -> Dict[str, Any]:
                 "decision": decision,
                 "validation": validation,
                 "payloadContext": safe_dict(payload.get("context")),
+                "entryMlContext": {
+                    "scorecards": safe_dict(payload.get("scorecards")),
+                    "ghost_ml": safe_dict(payload.get("ghostMl")),
+                    "target_ml": safe_dict(payload.get("targetMl")),
+                    "context": safe_dict(payload.get("context")),
+                },
                 "setupKey": setup_key,
             },
         }
