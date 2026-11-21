@@ -926,7 +926,9 @@ export default function GhostCandleProjection({
     [activePayload, symbol, timeframe, activePrice, signal, scorecards, unifiedIntelligence]
   )
 
-  const latestFrozen = frozenRecords.find((record) => Array.isArray(record?.projectedCloses) && record.projectedCloses.length > 0)
+  const [selectedFrozenKey, setSelectedFrozenKey] = useState('')
+  const availableFrozen = frozenRecords.filter((record) => Array.isArray(record?.projectedCloses) && record.projectedCloses.length > 0)
+  const latestFrozen = availableFrozen.find((record) => record.key === selectedFrozenKey) ?? availableFrozen.find((record) => record.status === 'evaluated') ?? availableFrozen[0]
   const frozenSteps = latestFrozen?.evaluation?.perCandleErrors ?? []
 
   const projectionText = getProjectionText(candles, signal)
@@ -958,6 +960,14 @@ export default function GhostCandleProjection({
           <p className="mt-3 text-xs text-amber-300">Forecast history could not be loaded. No accuracy claim is available.</p>
         ) : latestFrozen ? (
           <div className="mt-3 space-y-3">
+            <label className="block text-xs text-gray-400">
+              Recorded forecast
+              <select value={latestFrozen.key ?? ''} onChange={(event) => setSelectedFrozenKey(event.target.value)} className="mt-1 w-full rounded border border-dark-600 bg-dark-800 p-2 text-white">
+                {availableFrozen.map((record) => (
+                  <option key={record.key} value={record.key}>{String(record.projectionTime)} · {record.status === 'evaluated' ? 'Evaluated' : 'Pending'}</option>
+                ))}
+              </select>
+            </label>
             <div className="text-xs text-gray-400">
               Forecast: {String(latestFrozen.projectionTime ?? 'Unknown time')} · Starting close: {formatPrice(Number(latestFrozen.entryClose))}
               {' · '}Status: {latestFrozen.status === 'evaluated' ? 'Completed' : 'Pending'}
