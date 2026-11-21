@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from api.ml_engine_memory import load_engine_memory, save_engine_memory
 import math
 import os
 from datetime import datetime, timezone
@@ -181,7 +182,8 @@ def load_ghost_ml_memory() -> Dict[str, Any]:
     global GHOST_ML_MEMORY
 
     try:
-        if not GHOST_ML_STORE_FILE.exists():
+        payload = load_engine_memory("ghost_ml", GHOST_ML_STORE_FILE, None)
+        if payload is None:
             GHOST_ML_MEMORY = []
             return {
                 "loaded": 0,
@@ -189,8 +191,6 @@ def load_ghost_ml_memory() -> Dict[str, Any]:
                 "status": "empty",
             }
 
-        with GHOST_ML_STORE_FILE.open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
 
         records = payload.get("records") if isinstance(payload, dict) else payload
         if not isinstance(records, list):
@@ -208,6 +208,8 @@ def load_ghost_ml_memory() -> Dict[str, Any]:
             "status": "loaded",
         }
     except Exception as error:
+        if os.getenv("DATABASE_URL", "").strip():
+            raise
         print(f"[Ghost ML] memory load failed: {error}")
         GHOST_ML_MEMORY = []
         return {
@@ -229,11 +231,7 @@ def save_ghost_ml_memory() -> Dict[str, Any]:
             "records": GHOST_ML_MEMORY[-GHOST_ML_MAX_RECORDS:],
         }
 
-        tmp_path = GHOST_ML_STORE_FILE.with_suffix(GHOST_ML_STORE_FILE.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, separators=(",", ":"), ensure_ascii=False)
-
-        tmp_path.replace(GHOST_ML_STORE_FILE)
+        save_engine_memory("ghost_ml", GHOST_ML_STORE_FILE, payload)
 
         return {
             "saved": len(GHOST_ML_MEMORY),
