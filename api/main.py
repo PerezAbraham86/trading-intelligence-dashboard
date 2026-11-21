@@ -9027,6 +9027,11 @@ def api_live_feed_status_alias() -> Dict[str, Any]:
     return api_live_feed_status()
 
 
+@app.get("/api/alpaca/status")
+def api_alpaca_status(symbol: str = "BTCUSD") -> Dict[str, Any]:
+    return ibkr_connection_status(normalize_symbol(symbol))
+
+
 @app.get("/api/ibkr/status")
 def api_ibkr_status(symbol: str = "MES1!") -> Dict[str, Any]:
     return ibkr_connection_status(normalize_symbol(symbol))
