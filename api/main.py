@@ -310,7 +310,7 @@ DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", os.getenv("WEBHOOK_SECRET", "my
 
 
 
-CANDLE_FUTURES_PROVIDER = "ibkr"
+CANDLE_FUTURES_PROVIDER = "alpaca"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -669,32 +669,8 @@ def clamp(value: float, low: float, high: float) -> float:
 
 
 def normalize_symbol(symbol: str) -> str:
-    raw = str(symbol or "").upper().strip()
-
-    for prefix in [
-        "BINANCE:",
-        "COINBASE:",
-        "CRYPTO:",
-        "CME_MINI:",
-        "CME:",
-        "AMEX:",
-        "NASDAQ:",
-        "NYSE:",
-    ]:
-        raw = raw.replace(prefix, "")
-
-    raw = raw.replace("-", "").replace("_", "")
-
-    if raw in {"BTCUSD", "BTC/USD", "XBTUSD", "BTCUSDT"}:
-        return "BTCUSD"
-    if raw in {"ETHUSD", "ETH/USD", "ETHUSDT"}:
-        return "ETHUSD"
-    if raw in {"SPY", "SPY.US"}:
-        return "SPY"
-    if raw in {"MES", "MES1", "MES1!", "/MES", "MES=F", "CME_MINI:MES1!"}:
-        return "MES1!"
-
-    return raw
+    """Single-market mode: all legacy internal defaults resolve to BTCUSD."""
+    return "BTCUSD"
 
 
 def normalize_timeframe(timeframe: str) -> str:
@@ -6582,15 +6558,15 @@ def root() -> Dict[str, Any]:
 @app.get("/health")
 def health() -> Dict[str, Any]:
     connection = ibkr_connection_status()
-    return {"status": "ok", "time": now_iso(), "marketDataProvider": "ibkr", "ibkrConfigured": bool(connection.get("configured")), "marketDataSource": "tws_relay" if is_tws() else "client_portal", "ibkr": connection, "readOnly": True, "commit": os.getenv("RENDER_GIT_COMMIT", "unknown")}
+    return {"status": "ok", "time": now_iso(), "marketDataProvider": "alpaca", "marketDataSource": "alpaca_crypto", "alpaca": connection, "readOnly": True, "commit": os.getenv("RENDER_GIT_COMMIT", "unknown")}
 
 
 @app.get("/api/backend-version")
 def backend_version() -> Dict[str, Any]:
     return {
-        "backendVersion": "ibkr-only-v2",
+        "backendVersion": "alpaca-btcusd-v1",
         "commit": os.getenv("RENDER_GIT_COMMIT", "unknown"),
-        "marketDataProviders": ["ibkr"],
+        "marketDataProviders": ["alpaca"],
         "readOnly": True,
         "hasMlFeatureStoreRoutes": True,
         "hasUnifiedIntelligenceRoute": True,
@@ -7632,35 +7608,7 @@ def candles(symbol: str = "MES1!", timeframe: str = "5m", limit: int = 0, force:
     normalized_timeframe = normalize_timeframe(timeframe)
     safe_limit = clean_candle_limit(normalized_symbol, limit)
 
-    if is_tws():
-        return get_historical_ohlcv(normalized_symbol, normalized_timeframe, limit=safe_limit)
-
-    if not ibkr_connection_status(normalized_symbol).get("ready"):
-        return disconnected_candle_payload(normalized_symbol, normalized_timeframe, safe_limit)
-
-    if not force:
-        cached = clean_cache_payload(normalized_symbol, normalized_timeframe, safe_limit)
-        if isinstance(cached, dict) and isinstance(cached.get("candles"), list) and cached.get("candles"):
-            return cached
-
-    try:
-        fresh = fetch_clean_provider_candles(normalized_symbol, normalized_timeframe, safe_limit, force=force)
-        return store_clean_candles(normalized_symbol, normalized_timeframe, safe_limit, fresh)
-    except HTTPException:
-        stale = clean_cache_payload(normalized_symbol, normalized_timeframe, safe_limit, allow_stale=True)
-        if isinstance(stale, dict) and stale.get("candles"):
-            stale["warning"] = "Provider refresh failed; returned last saved clean candle cache."
-            stale["cache"] = "clean_stale_after_provider_error"
-            return stale
-        raise
-    except Exception as error:
-        stale = clean_cache_payload(normalized_symbol, normalized_timeframe, safe_limit, allow_stale=True)
-        if isinstance(stale, dict) and stale.get("candles"):
-            stale["warning"] = "Provider refresh failed; returned last saved clean candle cache."
-            stale["error"] = str(error)
-            stale["cache"] = "clean_stale_after_provider_error"
-            return stale
-        raise HTTPException(status_code=502, detail=f"Clean candle service failed: {error}") from error
+    return get_historical_ohlcv(normalized_symbol, normalized_timeframe, limit=safe_limit or 300, force=force)
 
 
 @app.get("/api/historical-candles")
