@@ -188,6 +188,9 @@ async def live_feed_event_generator(symbol="BTCUSD", timeframe="1m", limit=700, 
                 continue
             kind, epoch, stamp = event["kind"], event["epoch"], event["time"]
             bucket = int(epoch) // seconds * seconds
+            if kind == "quote":
+                # Bid/ask midpoint is not an executed trade. Never mutate OHLCV with it.
+                continue
             if kind in ("bar", "updated_bar"):
                 # Alpaca minute bars are authoritative; only apply them directly on 1m.
                 # Other timeframes use the regular REST reconciliation path.
@@ -197,8 +200,7 @@ async def live_feed_event_generator(symbol="BTCUSD", timeframe="1m", limit=700, 
                           "timestamp": bucket, "t": bucket, "symbol": "BTCUSD",
                           "timeframe": timeframe, "provider": "alpaca",
                           "source": "alpaca_crypto_live_bar"}
-                if current is not None and current["epoch"] == bucket:
-                    current = {**candle}
+                current = {**candle}
                 quote_price = candle["close"]
             else:
                 if epoch < last_epoch:
