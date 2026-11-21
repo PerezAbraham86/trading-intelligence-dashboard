@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import tempfile
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,7 +28,7 @@ def _rows(timeframe="5m", limit=10000):
         rows = db.execute(
             """SELECT * FROM ml_feature_snapshots
                WHERE symbol = 'BTCUSD' AND timeframe = ?
-                 AND outcome_status != 'pending' AND future_direction IN (-1, 1)
+                 AND provider = 'alpaca' AND outcome_status = 'resolved' AND future_direction IN (-1, 1)
                ORDER BY bar_epoch ASC LIMIT ?""", (timeframe, min(int(limit), 50000))
         ).fetchall()
     return [dict(row) for row in rows]
@@ -54,7 +55,9 @@ def train_btcusd_model(timeframe="5m"):
         return {"status": "InsufficientData", "resolvedRows": len(rows), "requiredRows": MIN_ROWS}
     split = int(len(rows) * .8)
     gap = max(3, max(int(r.get("outcome_horizon_bars") or 3) for r in rows))
-    train_rows, test_rows = rows[:max(0, split-gap)], rows[split:]
+    test_rows = rows[split:]
+    cutoff = float(test_rows[0]["bar_epoch"])
+    train_rows = [r for r in rows[:max(0, split-gap)] if r.get("future_epoch") is not None and float(r["future_epoch"]) < cutoff]
     if len(train_rows) < 50 or len(test_rows) < 20:
         return {"status": "InsufficientData", "reason": "Not enough separated train/test examples"}
     x_train, y_train = [_vector(r) for r in train_rows], [int(r["future_direction"] == 1) for r in train_rows]
@@ -70,35 +73,67 @@ def train_btcusd_model(timeframe="5m"):
                "brier": round(float(brier_score_loss(y_test, probs)), 4),
                "logLoss": round(float(log_loss(y_test, probs)), 4),
                "majorityBaselineAccuracy": round(max(sum(y_test)/len(y_test), 1-sum(y_test)/len(y_test)), 4)}
-    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    model.save_model(str(MODEL_PATH))
     metadata = {"status": "TrainedResearchOnly", "symbol": "BTCUSD", "timeframe": timeframe,
                 "features": list(FEATURES), "trainRows": len(train_rows),
                 "holdoutRows": len(test_rows), "embargoRows": gap, "metrics": metrics,
                 "trainedAt": datetime.now(timezone.utc).isoformat(),
                 "warning": "Holdout metrics are not proof of profitable trading. No order authorization."}
-    METADATA_PATH.write_text(json.dumps(metadata))
+    _save_artifact(timeframe, model, metadata)
     return metadata
 
 
-def model_status():
-    if not MODEL_PATH.exists() or not METADATA_PATH.exists():
-        return {"status": "NotTrained", "symbol": "BTCUSD", "researchOnly": True}
+def _artifact_table(db):
+    db.execute("""CREATE TABLE IF NOT EXISTS btcusd_xgb_models (
+        timeframe TEXT PRIMARY KEY, model_json TEXT NOT NULL, metadata_json TEXT NOT NULL
+    )""")
+
+
+def _save_artifact(timeframe, model, metadata):
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "model.json"
+        model.save_model(str(path))
+        artifact = path.read_text()
+    with connect_ml_feature_store() as db:
+        _artifact_table(db)
+        db.execute("""INSERT INTO btcusd_xgb_models (timeframe, model_json, metadata_json)
+            VALUES (?, ?, ?) ON CONFLICT(timeframe) DO UPDATE SET
+            model_json=excluded.model_json, metadata_json=excluded.metadata_json""",
+            (timeframe, artifact, json.dumps(metadata)))
+        db.commit()
+
+
+def _load_artifact(timeframe):
+    with connect_ml_feature_store() as db:
+        _artifact_table(db)
+        row = db.execute("SELECT model_json, metadata_json FROM btcusd_xgb_models WHERE timeframe=?", (timeframe,)).fetchone()
+        db.commit()
+    return dict(row) if row else None
+
+
+def model_status(timeframe="5m"):
     try:
-        return {**json.loads(METADATA_PATH.read_text()), "researchOnly": True}
-    except (ValueError, OSError):
-        return {"status": "InvalidMetadata", "researchOnly": True}
+        artifact = _load_artifact(timeframe)
+        count = len(_rows(timeframe, limit=50000))
+        readiness = {"resolvedRows": count, "requiredRows": MIN_ROWS,
+                     "minimumRowsReached": count >= MIN_ROWS, "timeframe": timeframe,
+                     "storage": "neon_postgres" if os.getenv("DATABASE_URL") else "local_sqlite",
+                     "researchOnly": True}
+        if not artifact:
+            return {**readiness, "status": "NotTrained", "symbol": "BTCUSD"}
+        return {**json.loads(artifact["metadata_json"]), **readiness}
+    except Exception:
+        return {"status": "StorageUnavailable", "researchOnly": True}
 
 
 def predict_btcusd(timeframe="5m"):
-    metadata = model_status()
+    metadata = model_status(timeframe)
     if metadata.get("status") != "TrainedResearchOnly" or metadata.get("timeframe") != timeframe:
         return {"status": "Unavailable", "reason": "No trained model for requested timeframe", "researchOnly": True}
     try:
         from xgboost import XGBClassifier
         with connect_ml_feature_store() as db:
             row = db.execute("""SELECT * FROM ml_feature_snapshots
-                WHERE symbol='BTCUSD' AND timeframe=? ORDER BY bar_epoch DESC LIMIT 1""", (timeframe,)).fetchone()
+                WHERE symbol='BTCUSD' AND provider='alpaca' AND timeframe=? ORDER BY bar_epoch DESC LIMIT 1""", (timeframe,)).fetchone()
         if not row:
             return {"status": "NoFeatures", "researchOnly": True}
         data = dict(row)
@@ -107,7 +142,10 @@ def predict_btcusd(timeframe="5m"):
         if age < -5 or age > 3 * {"1m":60,"3m":180,"5m":300,"10m":600,"15m":900,"30m":1800,"1h":3600}[timeframe]:
             return {"status": "StaleFeatures", "ageSeconds": round(age), "researchOnly": True}
         model = XGBClassifier()
-        model.load_model(str(MODEL_PATH))
+        artifact = _load_artifact(timeframe)
+        if not artifact or json.loads(artifact["metadata_json"]).get("features") != list(FEATURES):
+            return {"status": "IncompatibleModel", "researchOnly": True}
+        model.load_model(bytearray(artifact["model_json"].encode("utf-8")))
         probability = float(model.predict_proba([_vector(data)])[0][1])
         return {"status": "ResearchPrediction", "symbol": "BTCUSD", "timeframe": timeframe,
                 "upProbability": round(probability, 4), "downProbability": round(1-probability, 4),
