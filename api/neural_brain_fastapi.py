@@ -526,8 +526,12 @@ def _update_scope(scope: Dict[str, Any], outcome: Dict[str, Any], updated_at: st
     return scope
 
 
-def update_online_learning_scopes(symbol: Any, timeframe: Any, outcome: Dict[str, Any], updated_at: str) -> Dict[str, Any]:
-    model = normalize_online_model(_load_online_model())
+def update_online_learning_scopes(symbol: Any, timeframe: Any, outcome: Dict[str, Any], updated_at: str, connection=None) -> Dict[str, Any]:
+    if connection is not None:
+        row = connection.execute("SELECT state_json FROM neural_brain_models WHERE name = 'scoped_online'").fetchone()
+        model = normalize_online_model(json.loads(row['state_json'])) if row else new_online_model()
+    else:
+        model = normalize_online_model(_load_online_model())
     symbol_norm = normalize_symbol(symbol)
     timeframe_norm = normalize_timeframe(timeframe)
 
@@ -549,6 +553,9 @@ def update_online_learning_scopes(symbol: Any, timeframe: Any, outcome: Dict[str
     model["onlineReady"] = bool(global_scope.get("onlineReady"))
     model["updatedAt"] = updated_at
 
+    if connection is not None:
+        connection.execute("INSERT INTO neural_brain_models VALUES ('scoped_online', ?) ON CONFLICT(name) DO UPDATE SET state_json = excluded.state_json", (safe_json(model),))
+        return model
     _save_online_model(model)
     return get_online_brain_status(symbol_norm, timeframe_norm)
 
@@ -881,12 +888,12 @@ def label_neural_brain_outcome(payload: Dict[str, Any]) -> Dict[str, Any]:
             return {"status": "NOT_FOUND", "updated": False, "id": snapshot_id}
         if row["symbol"] != "BTCUSD":
             return {"status": "SKIPPED", "updated": False, "reason": "BTCUSD_ONLY", "id": snapshot_id}
-        if not any(key in outcome for key in ("targetHit", "reversalHappened", "chopHappened", "buyWin", "sellWin")):
+        if not any(isinstance(outcome.get(key), bool) for key in ("targetHit", "reversalHappened", "chopHappened", "buyWin", "sellWin")):
             return {"status": "SKIPPED", "updated": False, "reason": "NO_LEARNING_LABELS", "id": snapshot_id}
         # Retry identical labels once; explicit corrections keep the former update behavior.
         if row["outcome_json"]:
             previous = json.loads(row["outcome_json"])
-            if all(previous.get(key) == value for key, value in outcome.items()):
+            if outcome.get("labelSource") == "alpaca_closed_bar_direction_v1" or all(previous.get(key) == value for key, value in outcome.items()):
                 return {"status": "OK", "updated": False, "duplicate": True, "id": snapshot_id, "outcome": previous}
             outcome = {**previous, **outcome}
         outcome.update(labeledAt=stamp, labelSource=outcome.get("labelSource") or "manual")
@@ -895,8 +902,12 @@ def label_neural_brain_outcome(payload: Dict[str, Any]) -> Dict[str, Any]:
         state = logistic.learn(load_logistic_state(connection), snapshot)
         connection.execute("UPDATE neural_brain_snapshots SET outcome_json = ?, labeled_at = ? WHERE id = ?", (safe_json(outcome), stamp, snapshot_id))
         save_logistic_state(connection, state)
-        connection.commit()
-        scopes = update_online_learning_scopes(row["symbol"], row["timeframe"], outcome, stamp)
+        if os.getenv("DATABASE_URL", "").strip():
+            scopes = update_online_learning_scopes(row["symbol"], row["timeframe"], outcome, stamp, connection=connection)
+            connection.commit()
+        else:
+            connection.commit()
+            scopes = update_online_learning_scopes(row["symbol"], row["timeframe"], outcome, stamp)
     return {"eventType": "NEURAL_BRAIN_OUTCOME", "status": "OK", "updated": True, "id": snapshot_id,
             "symbol": row["symbol"], "timeframe": row["timeframe"], "outcome": outcome,
             "online": scopes, "onlineLearning": {"status": "OK", "snapshotId": snapshot_id, "online": logistic.status(state)}, "createdAt": stamp}
@@ -1010,3 +1021,56 @@ def export_neural_brain_memory():
         state = load_logistic_state(connection)
     return {"eventType": "NEURAL_BRAIN_MEMORY_EXPORT", "snapshots": [row_to_snapshot(row) for row in rows],
             "onlineModel": state, "scopeStatistics": get_online_brain_status(), "createdAt": now_iso()}
+
+
+def evaluate_neural_brain_direction(symbol, timeframe, candles):
+    """Evaluate direction over three complete bars strictly after prediction creation.
+    buyWin/sellWin here refer to directional correctness, not executed trade P&L.
+    """
+    import time
+    from api.ml_feature_store import to_epoch_seconds, timeframe_seconds
+    if normalize_symbol(symbol) != "BTCUSD" or not os.getenv("DATABASE_URL", "").strip():
+        return {"checked": 0, "resolved": 0}
+    tf = normalize_timeframe(timeframe)
+    seconds = timeframe_seconds(tf)
+    if tf not in ("1m", "3m", "5m", "10m", "15m", "30m", "1h", "2h", "4h", "1d"):
+        return {"checked": 0, "resolved": 0}
+    bars = {}
+    for candle in candles:
+        epoch = to_epoch_seconds(candle.get("epoch") or candle.get("time") or candle.get("timestamp"))
+        if epoch > 0 and epoch + seconds <= time.time():
+            bars[epoch] = candle
+    if not bars:
+        return {"checked": 0, "resolved": 0}
+    ensure_db()
+    with connect_brain() as connection:
+        rows = connection.execute(
+            "SELECT id, created_at, timestamp, decision FROM neural_brain_snapshots WHERE symbol = ? AND timeframe = ? AND outcome_json IS NULL AND decision IN ('BUY','SELL') ORDER BY created_at DESC LIMIT 200",
+            ("BTCUSD", tf),
+        ).fetchall()
+    resolved = 0
+    for row in rows:
+        created = to_epoch_seconds(row["created_at"])
+        predicted = to_epoch_seconds(row["timestamp"])
+        if created <= 0 or predicted <= 0:
+            continue
+        start = (math.floor(max(created, predicted) / seconds) + 1) * seconds
+        window = [bars.get(start + i * seconds) for i in range(3)]
+        if not all(window):
+            continue
+        try:
+            entry = float(window[0]["open"])
+            exit_price = float(window[-1]["close"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if not (math.isfinite(entry) and math.isfinite(exit_price) and entry > 0 and exit_price > 0) or entry == exit_price:
+            continue
+        up = exit_price > entry
+        label = {"id": row["id"], "labelSource": "alpaca_closed_bar_direction_v1",
+                 "candlesToResult": 3, "result": {"evaluation": "direction_only", "entry": entry,
+                 "exit": exit_price, "startEpoch": start, "endEpoch": start + 3 * seconds,
+                 "directionCorrect": up if row["decision"] == "BUY" else not up}}
+        label["buyWin" if row["decision"] == "BUY" else "sellWin"] = up if row["decision"] == "BUY" else not up
+        result = label_neural_brain_outcome(label)
+        resolved += int(bool(result.get("updated")))
+    return {"checked": len(rows), "resolved": resolved}
