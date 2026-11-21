@@ -9326,9 +9326,9 @@ def api_neural_brain_export() -> Dict[str, Any]:
 
 # Optional read-only BTCUSD research endpoints. No broker execution is exposed.
 @app.get("/api/ai-research/status")
-def btcusd_ai_research_status_route() -> Dict[str, Any]:
+def btcusd_ai_research_status_route(timeframe: str = "5m") -> Dict[str, Any]:
     from api.btcusd_ai_research import model_status
-    return model_status()
+    return model_status(timeframe=timeframe)
 
 
 @app.get("/api/ai-research/predict")
