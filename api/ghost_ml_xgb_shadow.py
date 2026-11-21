@@ -10,12 +10,12 @@ from datetime import datetime, timezone
 
 FEATURES = (
     "smcCount", "liquidityCount", "zoneCount", "orderBlockCount",
-    "fvgCount", "pdZoneCount", "alphaBullPressure", "alphaBearPressure",
+    "fvgCount", "pdZoneCount", "alphaBullPressurePct", "alphaBearPressurePct", "alphaPressureNet",
     "bullishSmcCount", "bearishSmcCount", "bullishLiquidityCount",
-    "bearishLiquidityCount", "bullishObCount", "bearishObCount",
+    "bearishLiquidityCount", "bullishOrderBlockCount", "bearishOrderBlockCount",
     "bullishFvgCount", "bearishFvgCount",
 )
-CATEGORICAL = ("smcDirection", "liquidityDirection", "obDirection",
+CATEGORICAL = ("smcDirection", "liquidityDirection", "orderBlockDirection",
                "fvgDirection", "pdDirection", "dlmDirection", "alphaDirection")
 
 
