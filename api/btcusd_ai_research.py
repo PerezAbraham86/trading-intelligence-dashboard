@@ -8,7 +8,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from api.ml_feature_store import ML_FEATURE_STORE_FILE
+from api.ml_feature_store import connect_ml_feature_store, initialize_ml_feature_store
 
 FEATURES = ("open", "high", "low", "close", "volume", "signal_confidence",
             "bull_score", "bear_score", "net_bias", "overall_direction",
@@ -22,8 +22,8 @@ MIN_ROWS = max(100, int(os.getenv("BTCUSD_XGB_MIN_ROWS", "300")))
 
 
 def _rows(timeframe="5m", limit=10000):
-    with sqlite3.connect(str(ML_FEATURE_STORE_FILE)) as db:
-        db.row_factory = sqlite3.Row
+    initialize_ml_feature_store()
+    with connect_ml_feature_store() as db:
         rows = db.execute(
             """SELECT * FROM ml_feature_snapshots
                WHERE symbol = 'BTCUSD' AND timeframe = ?
@@ -96,8 +96,7 @@ def predict_btcusd(timeframe="5m"):
         return {"status": "Unavailable", "reason": "No trained model for requested timeframe", "researchOnly": True}
     try:
         from xgboost import XGBClassifier
-        with sqlite3.connect(str(ML_FEATURE_STORE_FILE)) as db:
-            db.row_factory = sqlite3.Row
+        with connect_ml_feature_store() as db:
             row = db.execute("""SELECT * FROM ml_feature_snapshots
                 WHERE symbol='BTCUSD' AND timeframe=? ORDER BY bar_epoch DESC LIMIT 1""", (timeframe,)).fetchone()
         if not row:
