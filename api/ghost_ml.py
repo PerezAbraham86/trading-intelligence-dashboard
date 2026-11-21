@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from api.ml_engine_memory import load_engine_memory, save_engine_memory
+from api.ghost_ml_archive import archive_ghost_forecasts_safely
 import math
 import os
 from datetime import datetime, timezone
@@ -201,6 +202,8 @@ def load_ghost_ml_memory() -> Dict[str, Any]:
             cleaned = cleaned[-GHOST_ML_MAX_RECORDS:]
 
         GHOST_ML_MEMORY = cleaned
+        # Backfill existing memory into the structured archive on startup.
+        archive_ghost_forecasts_safely(GHOST_ML_MEMORY)
 
         return {
             "loaded": len(GHOST_ML_MEMORY),
@@ -523,6 +526,7 @@ def record_ghost_ml_projection(
     GHOST_ML_MEMORY.append(record)
     trim_ghost_ml_memory()
     save_ghost_ml_memory()
+    archive_ghost_forecasts_safely([record])
 
     return record
 
@@ -606,6 +610,7 @@ def evaluate_ghost_ml_records(symbol: str, timeframe: str, candles: List[Dict[st
 
     time_to_index = _index_candles_by_time(candles)
     evaluated_now = 0
+    newly_evaluated = []
 
     for record in GHOST_ML_MEMORY:
         if record.get("symbol") != normalized_symbol or record.get("timeframe") != normalized_timeframe:
@@ -782,6 +787,7 @@ def evaluate_ghost_ml_records(symbol: str, timeframe: str, candles: List[Dict[st
         }
 
         evaluated_now += 1
+        newly_evaluated.append(record)
 
     pending = len([
         record for record in GHOST_ML_MEMORY
@@ -792,6 +798,7 @@ def evaluate_ghost_ml_records(symbol: str, timeframe: str, candles: List[Dict[st
 
     if evaluated_now > 0:
         save_ghost_ml_memory()
+        archive_ghost_forecasts_safely(newly_evaluated)
 
     return {
         "evaluatedNow": evaluated_now,
