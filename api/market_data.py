@@ -200,7 +200,10 @@ async def live_feed_event_generator(symbol="BTCUSD", timeframe="1m", limit=700, 
                           "timestamp": bucket, "t": bucket, "symbol": "BTCUSD",
                           "timeframe": timeframe, "provider": "alpaca",
                           "source": "alpaca_crypto_live_bar"}
-                current = {**candle}
+                # Official bars may arrive after newer trades. Publish the correction
+                # without replacing the active candle from a later minute.
+                if current is None or bucket >= current["epoch"]:
+                    current = {**candle}
                 quote_price = candle["close"]
             else:
                 if epoch < last_epoch:
