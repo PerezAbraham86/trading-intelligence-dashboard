@@ -13,6 +13,7 @@ import requests
 from fastapi import HTTPException
 
 BASE_URL = "https://data.alpaca.markets"
+CRYPTO_FEED = "us-1"  # Kraken US: match streaming and historical sources
 SYMBOL = "BTCUSD"
 SUPPORTED_TIMEFRAMES = {"1m": ("1Min", 60), "3m": ("1Min", 180), "5m": ("5Min", 300),
                         "10m": ("5Min", 600), "15m": ("15Min", 900), "30m": ("15Min", 1800),
@@ -57,7 +58,7 @@ def _bars(timeframe, limit):
                   "limit": min(1000, requested - len(rows)), "sort": "desc"}
         if token:
             params["page_token"] = token
-        payload = _request("/v1beta3/crypto/us/bars", params)
+        payload = _request(f"/v1beta3/crypto/{CRYPTO_FEED}/bars", params)
         batch = payload.get("bars", {}).get("BTC/USD", [])
         rows.extend(batch)
         token = payload.get("next_page_token")
@@ -100,7 +101,7 @@ def get_historical_ohlcv(symbol=SYMBOL, timeframe="1m", limit=300, force=False, 
         _CACHE[key] = (time.monotonic(), candles)
     latest_epoch = int(datetime.fromisoformat(candles[-1]["time"]).timestamp()) if candles else 0
     age_seconds = max(0, int(time.time()) - latest_epoch) if latest_epoch else None
-    return {"provider": "alpaca", "source": "alpaca_crypto_bars", "symbol": SYMBOL,
+    return {"provider": "alpaca", "source": "alpaca_crypto_bars", "feed": CRYPTO_FEED, "symbol": SYMBOL,
             "latestCandleTime": candles[-1]["time"] if candles else None,
             "dataAgeSeconds": age_seconds, "isFresh": age_seconds is not None and age_seconds <= max(180, SUPPORTED_TIMEFRAMES[timeframe][1] * 2),
             "timeframe": timeframe, "status": "available" if candles else "waiting",
@@ -110,7 +111,7 @@ def get_historical_ohlcv(symbol=SYMBOL, timeframe="1m", limit=300, force=False, 
 
 def get_quote(symbol=SYMBOL, timeframe="1m"):
     normalize_symbol(symbol)
-    payload = _request("/v1beta3/crypto/us/latest/trades", {"symbols": "BTC/USD"})
+    payload = _request(f"/v1beta3/crypto/{CRYPTO_FEED}/latest/trades", {"symbols": "BTC/USD"})
     trade = payload.get("trades", {}).get("BTC/USD") or {}
     price = float(trade["p"]) if trade.get("p") is not None else None
     stamp = trade.get("t")
@@ -120,8 +121,8 @@ def get_quote(symbol=SYMBOL, timeframe="1m"):
     return {"provider": "alpaca", "source": "alpaca_crypto_latest_trade", "symbol": SYMBOL,
             "tradeAgeSeconds": round(trade_age, 1) if trade_age is not None else None, "isFresh": fresh,
             "timeframe": timeframe, "price": price, "lastPrice": price, "close": price,
-            "time": stamp, "status": "Live" if price is not None else "Waiting",
-            "isRealtime": price is not None, "isLive": price is not None}
+            "time": stamp, "status": "Live" if fresh else ("Stale market data" if price is not None else "Waiting"),
+            "isRealtime": fresh, "isLive": fresh}
 
 
 def connection_status(symbol=SYMBOL):
