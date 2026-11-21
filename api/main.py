@@ -5868,6 +5868,36 @@ def build_fast_chart_overlay_payload(
                 overlays.get("ghostCandles", []),
             )
 
+        # Provide the learned adjustment separately from Python-generated ghosts,
+        # so the frontend can apply it to the preferred Unified projection path.
+        unified_ghost_adjustment = None
+        if ghost and ml_candles:
+            try:
+                projection_engine_data = raw_payload.get("projectionEngine") or {}
+                unified_data = raw_payload.get("unifiedIntelligence") or {}
+                candidates = []
+                if isinstance(projection_engine_data, dict):
+                    candidates.extend(projection_engine_data.get("ghostCandles") or [])
+                    candidates.extend(projection_engine_data.get("candles") or [])
+                if isinstance(unified_data, dict):
+                    candidates.extend(unified_data.get("ghostCandles") or [])
+                candidate = candidates[-1] if candidates and isinstance(candidates[-1], dict) else None
+                entry_price = to_float(ml_candles[-1].get("close"), 0)
+                final_price = to_float(candidate.get("close"), entry_price) if candidate else entry_price
+                direction = "bullish" if final_price > entry_price else "bearish" if final_price < entry_price else "neutral"
+                adjustment = get_ghost_ml_confidence_adjustment(normalized_symbol, normalized_timeframe, overlays, direction)
+                unified_ghost_adjustment = {
+                    "ready": bool(adjustment.get("ready")),
+                    "projectionMultiplier": adjustment.get("projectionMultiplier", 1.0),
+                    "confidenceMultiplier": adjustment.get("confidenceMultiplier", 1.0),
+                    "confidenceBonus": adjustment.get("confidenceBonus", 0),
+                    "reason": adjustment.get("reason"),
+                    "direction": direction,
+                    "entryClose": entry_price,
+                }
+            except Exception:
+                logger.exception("Unable to prepare unified Ghost ML adjustment")
+
         payload = {
             "eventType": "CHART_OVERLAYS",
             "status": "Live" if to_float(raw_payload.get("candlesCount"), 0) > 0 else "Waiting",
@@ -5877,6 +5907,7 @@ def build_fast_chart_overlay_payload(
             "chartOverlays": overlays,
             "ghostCandles": overlays.get("ghostCandles", []),
             "ghostMl": ghost_ml_summary_from_candles(normalized_symbol, normalized_timeframe, ml_candles) if ghost else None,
+            "unifiedGhostMlAdjustment": unified_ghost_adjustment,
             "targetMl": target_plan if isinstance(target_plan, dict) else None,
             "targetPlan": target_plan if isinstance(target_plan, dict) else None,
             "targetMlStatus": target_ml_status,
