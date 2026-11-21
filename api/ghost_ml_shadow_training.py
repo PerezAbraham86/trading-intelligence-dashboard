@@ -108,3 +108,7 @@ def evaluate_shadow_candidate(min_samples=60, validation_fraction=0.25):
             VALUES (%s, %s, %s::jsonb)
         """, (report["model"], "shadow_only", json.dumps(report)))
         return report
+
+
+if __name__ == "__main__":
+    print(json.dumps(evaluate_shadow_candidate(), indent=2))
