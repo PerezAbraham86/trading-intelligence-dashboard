@@ -2912,7 +2912,7 @@ def trade_settlement_from_live_context(
 
 
 def close_trade_record_from_settlement(trade: Dict[str, Any], settlement: Dict[str, Any], *, virtual: bool = False) -> Dict[str, Any]:
-    closed = dict(trade)
+    closed = track_observed_excursion(trade, settlement.get("closePrice"))
     symbol = normalize_symbol(closed.get("symbol"))
     side = normalize_side(closed.get("side"))
     entry = to_float(closed.get("entry") or closed.get("entryPrice"), 0.0)
@@ -2944,6 +2944,39 @@ def close_trade_record_from_settlement(trade: Dict[str, Any], settlement: Dict[s
     })
     return closed
 
+def entry_ml_market_context(payload: Dict[str, Any]) -> Dict[str, Any]:
+    context = dict(safe_dict(payload.get("context")))
+    nrtr = safe_dict(payload.get("nrtrContext"))
+    projection = safe_dict(payload.get("projectionEngine"))
+    state = safe_dict(projection.get("marketState"))
+    for key, paths in {
+        "mainDirection": ("main.direction", "nrtrMain.direction", "direction"),
+        "miniOneDirection": ("mini1.direction", "nrtrMini1.direction"),
+        "miniTwoDirection": ("mini2.direction", "nrtrMini2.direction"),
+    }.items():
+        value = read_path(nrtr, *paths, fallback=None)
+        if value is not None:
+            context[key] = value
+    regime = read_path(state, "regime", "state", "label", "type", fallback=None)
+    if isinstance(regime, str) and regime:
+        context["marketState"] = regime
+    return context
+
+
+def track_observed_excursion(trade: Dict[str, Any], price: Any) -> Dict[str, Any]:
+    """Signed percentage excursions from observed marks, not target estimates."""
+    updated = dict(trade)
+    entry = to_float(trade.get("entryPrice") or trade.get("entry"), 0)
+    mark = to_float(price, 0)
+    side = normalize_side(trade.get("side"))
+    if entry > 0 and mark > 0 and side in {"BUY", "SELL"}:
+        move = signed_move(side, entry, mark) / entry * 100
+        updated["mfe"] = round(max(0.0, to_float(trade.get("mfe"), 0), move), 8)
+        updated["mae"] = round(min(0.0, to_float(trade.get("mae"), 0), move), 8)
+        updated["excursionSource"] = "observed_marks_percent"
+    return updated
+
+
 def sync_paper_entry_ml(trade: Dict[str, Any], *, closed: bool = False) -> None:
     """Record backend paper trades only; never import rolling tester history."""
     try:
@@ -2973,6 +3006,7 @@ def sync_paper_entry_ml(trade: Dict[str, Any], *, closed: bool = False) -> None:
                for name in ("scorecards", "ghost_ml", "target_ml", "context")})
         if closed and record.get("status") != "closed":
             close_entry_ml_trade(**keys, exit_time=exit_time, exit_price=exit_price,
+                mfe=trade.get("mfe"), mae=trade.get("mae"),
                 bars_held=trade.get("barsOpen"), exit_reason=trade.get("exitReason"))
     except Exception as error:
         print(f"Entry ML paper trade sync failed: {error}")
@@ -3125,7 +3159,7 @@ def open_ai_trade(**payload: Any) -> Dict[str, Any]:
                     "scorecards": safe_dict(payload.get("scorecards")),
                     "ghost_ml": safe_dict(payload.get("ghostMl")),
                     "target_ml": safe_dict(payload.get("targetMl")),
-                    "context": safe_dict(payload.get("context")),
+                    "context": entry_ml_market_context(payload),
                 },
                 "setupKey": setup_key,
             },
@@ -3216,7 +3250,7 @@ def close_ai_trade(
                 summary=ai_trader_summary(symbol=symbol, timeframe=timeframe),
             )
 
-        trade = dict(open_trades.pop(match_index))
+        trade = track_observed_excursion(open_trades.pop(match_index), price)
         trade_side = normalize_side(trade.get("side"))
         entry = to_float(trade.get("entry"), 0.0)
         stop = to_float(trade.get("stop"), 0.0)
@@ -3333,7 +3367,7 @@ def calculate_open_trade_live_pnl(trade: Dict[str, Any], current_price: Any) -> 
             "livePnlSource": "chart_live_price",
         }
     )
-    return updated
+    return track_observed_excursion(updated, live_price)
 
 
 def refresh_open_trades_with_live_price(memory: Dict[str, Any], symbol: Any = "", timeframe: Any = "", current_price: Any = None) -> Dict[str, Any]:
@@ -3422,7 +3456,7 @@ def evaluate_ai_trades(
                     virtual=virtual,
                 )
 
-                live_refreshed = calculate_open_trade_live_pnl(trade, settlement.get("currentPrice") or current)
+                live_refreshed = calculate_open_trade_live_pnl(trade, settlement.get("closePrice") if settlement.get("shouldClose") else (settlement.get("currentPrice") or current))
                 live_refreshed["barsOpen"] = settlement.get("barsOpen")
                 live_refreshed["settlement"] = settlement
                 evaluated_rows.append(live_refreshed)
