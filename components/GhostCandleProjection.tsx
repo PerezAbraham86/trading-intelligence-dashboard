@@ -702,7 +702,38 @@ function getSyncedGhostCandles(
   const unifiedGhosts = projectionGhosts.length > 0
     ? projectionGhosts
     : readUnifiedGhostCandles(unifiedIntelligence ?? (payload as any)?.unifiedIntelligence)
-  const rawGhosts = unifiedGhosts.length > 0 ? unifiedGhosts : readRawGhostCandles(payload)
+  // Unified remains the source of the candle path; Ghost ML adjusts that path
+  // only when the backend has enough evaluated history. Do not mutate source data.
+  const learning = (payload as any)?.unifiedGhostMlAdjustment
+  const shouldAdjust = unifiedGhosts.length > 0 && learning?.ready === true &&
+    Number.isFinite(Number(learning.projectionMultiplier)) &&
+    Number(learning.projectionMultiplier) >= 0.5 && Number(learning.projectionMultiplier) <= 1.5 &&
+    Number.isFinite(Number(learning.entryClose)) && Number(learning.entryClose) > 0
+  const adjustedUnifiedGhosts = shouldAdjust ? unifiedGhosts.map((ghost: any) => {
+    if (!ghost || typeof ghost !== 'object' || ghost.mlAdjusted) return ghost
+    const anchor = Number(learning.entryClose)
+    const factor = Number(learning.projectionMultiplier)
+    const adjusted: any = { ...ghost }
+    for (const field of ['open', 'high', 'low', 'close']) {
+      if (Number.isFinite(Number(ghost[field]))) adjusted[field] = anchor + (Number(ghost[field]) - anchor) * factor
+    }
+    if (['open', 'high', 'low', 'close'].every((field) => Number.isFinite(adjusted[field]))) {
+      adjusted.high = Math.max(adjusted.open, adjusted.high, adjusted.low, adjusted.close)
+      adjusted.low = Math.min(adjusted.open, adjusted.high, adjusted.low, adjusted.close)
+    }
+    const rawConfidence = Number(ghost.confidence)
+    if (Number.isFinite(rawConfidence)) adjusted.confidence = Math.max(2, Math.min(96,
+      rawConfidence * Number(learning.confidenceMultiplier ?? 1) + Number(learning.confidenceBonus ?? 0)))
+    adjusted.mlAdjusted = true
+    adjusted.mlReady = true
+    adjusted.mlReason = String(learning.reason ?? 'historical_learning')
+    adjusted.mlProjectionMultiplier = factor
+    adjusted.mlConfidenceMultiplier = Number(learning.confidenceMultiplier ?? 1)
+    adjusted.mlConfidenceBonus = Number(learning.confidenceBonus ?? 0)
+    adjusted.originalUnifiedClose = ghost.close
+    return adjusted
+  }) : unifiedGhosts
+  const rawGhosts = adjustedUnifiedGhosts.length > 0 ? adjustedUnifiedGhosts : readRawGhostCandles(payload)
   const normalized = normalizeRawGhostCandles(
     rawGhosts,
     projectionGhosts.length > 0
