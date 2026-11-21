@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,16 +30,28 @@ def _rows(timeframe="5m", limit=10000):
             """SELECT * FROM ml_feature_snapshots
                WHERE symbol = 'BTCUSD' AND timeframe = ?
                  AND provider = 'alpaca' AND outcome_status = 'resolved' AND future_direction IN (-1, 1)
-               ORDER BY bar_epoch ASC LIMIT ?""", (timeframe, min(int(limit), 50000))
+               ORDER BY bar_epoch DESC LIMIT ?""", (timeframe, min(int(limit), 50000))
         ).fetchall()
-    return [dict(row) for row in rows]
+    return [dict(row) for row in reversed(rows)]
 
 
 def _vector(row):
     return [float(row.get(k) or 0) for k in FEATURES]
 
 
+_training_lock = threading.Lock()
+
+
 def train_btcusd_model(timeframe="5m"):
+    if not _training_lock.acquire(blocking=False):
+        return {"status": "Busy"}
+    try:
+        return _train_btcusd_model(timeframe)
+    finally:
+        _training_lock.release()
+
+
+def _train_btcusd_model(timeframe="5m"):
     """Chronological holdout, no future outcome columns in model features."""
     if timeframe not in ("1m", "3m", "5m", "10m", "15m", "30m", "1h"):
         return {"status": "Rejected", "reason": "Unsupported timeframe"}
@@ -53,6 +66,10 @@ def train_btcusd_model(timeframe="5m"):
     # Remove overlapping label horizons around the train/test boundary.
     if len(rows) < MIN_ROWS:
         return {"status": "InsufficientData", "resolvedRows": len(rows), "requiredRows": MIN_ROWS}
+    previous = _load_artifact(timeframe)
+    prior = json.loads(previous["metadata_json"]) if previous else {}
+    if prior.get("lastBarEpoch") is not None and float(rows[-1]["bar_epoch"]) <= float(prior["lastBarEpoch"]):
+        return {"status": "NoNewData"}
     split = int(len(rows) * .8)
     gap = max(3, max(int(r.get("outcome_horizon_bars") or 3) for r in rows))
     test_rows = rows[split:]
@@ -73,9 +90,26 @@ def train_btcusd_model(timeframe="5m"):
                "brier": round(float(brier_score_loss(y_test, probs)), 4),
                "logLoss": round(float(log_loss(y_test, probs)), 4),
                "majorityBaselineAccuracy": round(max(sum(y_test)/len(y_test), 1-sum(y_test)/len(y_test)), 4)}
+    if previous:
+        # Compare only on observations occurring after the previous model dataset.
+        if prior.get("lastBarEpoch") is None or prior.get("features") != list(FEATURES):
+            return {"status": "PriorModelNeedsReview"}
+        fresh = [i for i, r in enumerate(test_rows) if float(r["bar_epoch"]) > float(prior["lastBarEpoch"])]
+        if len(fresh) < 30 or len({y_test[i] for i in fresh}) < 2:
+            return {"status": "InsufficientFreshValidation"}
+        old = XGBClassifier()
+        old.load_model(bytearray(previous["model_json"].encode("utf-8")))
+        fresh_x = [x_test[i] for i in fresh]
+        fresh_y = [y_test[i] for i in fresh]
+        old_loss = float(log_loss(fresh_y, old.predict_proba(fresh_x)[:, 1]))
+        new_loss = float(log_loss(fresh_y, [probs[i] for i in fresh]))
+        if new_loss >= old_loss:
+            return {"status": "RetainedPriorModel", "oldLogLoss": old_loss, "newLogLoss": new_loss}
+        metrics.update({"comparisonRows": len(fresh), "priorLogLoss": old_loss, "candidateLogLoss": new_loss})
     metadata = {"status": "TrainedResearchOnly", "symbol": "BTCUSD", "timeframe": timeframe,
                 "features": list(FEATURES), "trainRows": len(train_rows),
                 "holdoutRows": len(test_rows), "embargoRows": gap, "metrics": metrics,
+                "lastBarEpoch": float(rows[-1]["bar_epoch"]),
                 "trainedAt": datetime.now(timezone.utc).isoformat(),
                 "warning": "Holdout metrics are not proof of profitable trading. No order authorization."}
     _save_artifact(timeframe, model, metadata)
