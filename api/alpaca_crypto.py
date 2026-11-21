@@ -47,7 +47,7 @@ def _bars(timeframe, limit):
     source_seconds = {"1Min": 60, "5Min": 300, "15Min": 900, "1Hour": 3600, "1Day": 86400}[source_tf]
     factor = seconds // source_seconds
     requested = min(10000, max(10, int(limit or 300) * factor + factor))
-    start = (datetime.now(timezone.utc) - timedelta(seconds=requested * source_seconds * 2)).isoformat()
+    # Bound the query to the most recent bars; avoid silently serving an old window.\n    end = datetime.now(timezone.utc)\n    start = (end - timedelta(seconds=requested * source_seconds * 3)).isoformat()
     rows = []
     token = None
     while len(rows) < requested:
@@ -96,7 +96,7 @@ def get_historical_ohlcv(symbol=SYMBOL, timeframe="1m", limit=300, force=False, 
     else:
         candles = _bars(timeframe, limit)
         _CACHE[key] = (time.monotonic(), candles)
-    return {"provider": "alpaca", "source": "alpaca_crypto_bars", "symbol": SYMBOL,
+    latest_epoch = int(datetime.fromisoformat(candles[-1]["time"]).timestamp()) if candles else 0\n    age_seconds = max(0, int(time.time()) - latest_epoch) if latest_epoch else None\n    return {"provider": "alpaca", "source": "alpaca_crypto_bars", "symbol": SYMBOL,\n            "latestCandleTime": candles[-1]["time"] if candles else None,\n            "dataAgeSeconds": age_seconds, "isFresh": age_seconds is not None and age_seconds <= max(180, SUPPORTED_TIMEFRAMES[timeframe][1] * 2),
             "timeframe": timeframe, "status": "available" if candles else "waiting",
             "candles": candles, "count": len(candles), "candleCount": len(candles),
             "isRealtime": False, "isLive": False}
@@ -108,7 +108,7 @@ def get_quote(symbol=SYMBOL, timeframe="1m"):
     trade = payload.get("trades", {}).get("BTC/USD") or {}
     price = float(trade["p"]) if trade.get("p") is not None else None
     stamp = trade.get("t")
-    return {"provider": "alpaca", "source": "alpaca_crypto_latest_trade", "symbol": SYMBOL,
+    trade_epoch = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp() if stamp else None\n    trade_age = max(0, time.time() - trade_epoch) if trade_epoch is not None else None\n    fresh = price is not None and trade_age is not None and trade_age <= 120\n    return {"provider": "alpaca", "source": "alpaca_crypto_latest_trade", "symbol": SYMBOL,\n            "tradeAgeSeconds": round(trade_age, 1) if trade_age is not None else None, "isFresh": fresh,
             "timeframe": timeframe, "price": price, "lastPrice": price, "close": price,
             "time": stamp, "status": "Live" if price is not None else "Waiting",
             "isRealtime": price is not None, "isLive": price is not None}
@@ -118,9 +118,9 @@ def connection_status(symbol=SYMBOL):
     normalize_symbol(symbol)
     try:
         quote = get_quote(symbol)
-        ready = quote["price"] is not None
+        ready = quote["price"] is not None and quote["isFresh"]
         return {"provider": "alpaca", "symbol": SYMBOL, "configured": True,
-                "ready": ready, "status": "Connected" if ready else "Waiting for data",
+                "ready": ready, "status": "Connected" if ready else quote["status"],\n                "tradeAgeSeconds": quote.get("tradeAgeSeconds"),
                 "readOnly": True, "retryAfterSeconds": 15}
     except HTTPException:
         return {"provider": "alpaca", "symbol": SYMBOL, "configured": True,
