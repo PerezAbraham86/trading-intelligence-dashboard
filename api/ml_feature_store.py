@@ -494,15 +494,8 @@ def record_ml_feature_snapshot(
     ]
 
     placeholders = ",".join("?" for _ in columns)
-    update_columns = [
-        column for column in columns
-        if column not in {"feature_key", "outcome_horizon_bars"}
-    ]
-
-    update_clause = ",".join(f"{column}=excluded.{column}" for column in update_columns)
-
     with connect_ml_feature_store() as connection:
-        connection.execute(
+        cursor = connection.execute(
             f"""
             INSERT INTO ml_feature_snapshots({",".join(columns)})
             VALUES({placeholders})
@@ -513,7 +506,7 @@ def record_ml_feature_snapshot(
         connection.commit()
 
     return {
-        "recorded": True,
+        "recorded": cursor.rowcount > 0,
         "featureKey": snapshot["feature_key"],
         "symbol": snapshot["symbol"],
         "timeframe": snapshot["timeframe"],
