@@ -7428,7 +7428,7 @@ def recent_candles(symbol: str = "BTCUSD", timeframe: str = "1m", limit: int = 3
         symbol=normalized_symbol,
         timeframe=normalized_timeframe,
         candles=candles,
-        provider="tradingview_webhook",
+        provider=(str(candles[-1].get("provider") or "unknown") if candles else "unknown"),
         cache_label="live",
     )
 
