@@ -4652,10 +4652,10 @@ function useChartCandles(
         liveSourceConnected = true
         if (fullSharedCacheHasHistorical()) {
           initialHistoricalReady = true
-          // Once WebSocket/SSE live candles are active AND real history is loaded,
-          // stop the historical polling loop so old refreshes do not fight live
-          // candles or overlays.
-          stopPolling()
+          // A connected SSE socket is not proof of fresh market data.
+          // Keep periodic history reconciliation running until live trade freshness is verified.
+          liveSourceConnected = false
+          startPolling()
         } else {
           // Keep historical polling alive on fresh mini timeframe changes.
           // Otherwise the live stream can connect first, stop polling, and leave
@@ -4686,6 +4686,13 @@ function useChartCandles(
           }
           const liveCandle = extractLiveCandleFromStreamPayload(payload)
           if (!liveCandle || !isCurrentStream() || !candleTransportMatches(liveCandle.source, activeTransport ?? 'client_portal')) return
+          // Do not present an old trade as live or let it overwrite fresher bars.
+          const liveAgeMs = Date.now() - liveCandleEpoch(liveCandle) * 1000
+          if (liveAgeMs > Math.max(120000, timeframeToSeconds(timeframe) * 2000) || liveAgeMs < -60000) {
+            setErrorText('BTCUSD market data is stale; waiting for fresh Alpaca trades.')
+            return
+          }
+          setErrorText('')
 
           const livePriceSnapshot = writeSharedLivePriceCache(
             extractLiveFeedPriceFromPayload(payload, liveCandle)
@@ -4752,6 +4759,13 @@ function useChartCandles(
           const payload = JSON.parse(event.data)
           const liveCandle = extractLiveCandleFromStreamPayload(payload)
           if (!liveCandle || !isCurrentStream() || !candleTransportMatches(liveCandle.source, activeTransport ?? 'client_portal')) return
+          // Do not present an old trade as live or let it overwrite fresher bars.
+          const liveAgeMs = Date.now() - liveCandleEpoch(liveCandle) * 1000
+          if (liveAgeMs > Math.max(120000, timeframeToSeconds(timeframe) * 2000) || liveAgeMs < -60000) {
+            setErrorText('BTCUSD market data is stale; waiting for fresh Alpaca trades.')
+            return
+          }
+          setErrorText('')
 
           const livePriceSnapshot = writeSharedLivePriceCache(
             extractLiveFeedPriceFromPayload(payload, liveCandle)
