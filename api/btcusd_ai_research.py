@@ -330,3 +330,94 @@ def explain_btcusd(snapshot):
                 "model": model, "researchOnly": True, "allowedToTrade": False}
     except Exception:
         return {"status": "Unavailable", "reason": "LLM request failed", "researchOnly": True}
+
+
+def indicator_contribution_analysis(timeframe="1m", folds=4, test_size=40):
+    """Research-only chronological feature-group ablation; no model persistence."""
+    if timeframe not in ("1m", "3m", "5m", "10m", "15m", "30m", "1h"):
+        return {"status": "Rejected", "reason": "Unsupported timeframe", "researchOnly": True}
+    if os.getenv("BTCUSD_XGB_TRAINING_ENABLED", "false").lower() != "true":
+        return {"status": "Disabled", "researchOnly": True}
+    try:
+        from xgboost import XGBClassifier
+        from sklearn.metrics import accuracy_score, log_loss, brier_score_loss
+    except ImportError:
+        return {"status": "Unavailable", "reason": "Missing ML dependencies", "researchOnly": True}
+
+    folds = max(2, min(int(folds), 8))
+    test_size = max(30, min(int(test_size), 500))
+    rows = _rows(timeframe, limit=50000)  # one database read for every variant
+    min_train = max(150, MIN_ROWS // 2)
+    if len(rows) < min_train + folds * test_size:
+        return {"status": "InsufficientData", "resolvedRows": len(rows),
+                "requiredRows": min_train + folds * test_size, "researchOnly": True}
+
+    groups = {
+        "Price and volume": ("open", "high", "low", "close", "volume"),
+        "Directional sentiment": ("bull_score", "bear_score", "net_bias", "overall_direction"),
+        "Signal confirmation": ("signal_confidence", "overall_confirmation_score", "overall_conflict_score"),
+        "Smart money and liquidity": ("smc_quality_score", "order_block_quality_score",
+                                       "pd_quality_score", "liquidity_profile_quality_score"),
+        "NRTR direction": ("nrtr_direction",),
+        "Ghost forecast": ("ghost_direction", "ghost_confidence"),
+    }
+    variants = {"All existing features": tuple(FEATURES)}
+    for name, removed in groups.items():
+        variants["Without " + name] = tuple(f for f in FEATURES if f not in removed)
+    for name, included in groups.items():
+        variants["Only " + name] = tuple(included)
+
+    start = len(rows) - folds * test_size
+    windows = []
+    for fold in range(folds):
+        test_start = start + fold * test_size
+        test = rows[test_start:test_start + test_size]
+        cutoff = float(test[0]["bar_epoch"])
+        embargo = max(3, max(int(r.get("outcome_horizon_bars") or 3)
+                             for r in rows[:test_start + test_size]))
+        train = [r for r in rows[:max(0, test_start - embargo)]
+                 if r.get("future_epoch") is not None and float(r["future_epoch"]) < cutoff]
+        if len(train) < min_train:
+            return {"status": "InsufficientPurgedTrainingData", "fold": fold + 1,
+                    "trainRows": len(train), "researchOnly": True}
+        y_train = [int(r["future_direction"] == 1) for r in train]
+        y_test = [int(r["future_direction"] == 1) for r in test]
+        if len(set(y_train)) < 2 or len(set(y_test)) < 2:
+            return {"status": "InsufficientClasses", "fold": fold + 1, "researchOnly": True}
+        windows.append((train, test, y_train, y_test))
+
+    results = []
+    for name, selected in variants.items():
+        metrics = []
+        for train, test, y_train, y_test in windows:
+            model = XGBClassifier(n_estimators=150, max_depth=3, learning_rate=.05,
+                                  subsample=.8, colsample_bytree=.8, eval_metric="logloss",
+                                  random_state=42, n_jobs=2)
+            model.fit([[float(r.get(k) or 0) for k in selected] for r in train], y_train)
+            probabilities = model.predict_proba(
+                [[float(r.get(k) or 0) for k in selected] for r in test])[:, 1]
+            metrics.append({
+                "accuracy": float(accuracy_score(y_test, probabilities >= .5)),
+                "logLoss": float(log_loss(y_test, probabilities, labels=[0, 1])),
+                "brier": float(brier_score_loss(y_test, probabilities)),
+            })
+        results.append({
+            "variant": name, "featureCount": len(selected),
+            "meanAccuracy": round(sum(m["accuracy"] for m in metrics) / folds, 4),
+            "meanLogLoss": round(sum(m["logLoss"] for m in metrics) / folds, 4),
+            "meanBrier": round(sum(m["brier"] for m in metrics) / folds, 4),
+            "folds": [{k: round(v, 4) for k, v in m.items()} for m in metrics],
+        })
+    reference = results[0]
+    for result in results:
+        result["accuracyDifferencePp"] = round(
+            (result["meanAccuracy"] - reference["meanAccuracy"]) * 100, 2)
+    return {
+        "status": "EvaluatedResearchOnly", "symbol": "BTCUSD", "timeframe": timeframe,
+        "resolvedRows": len(rows), "foldCount": folds, "testRowsPerFold": test_size,
+        "featureGroups": {name: list(keys) for name, keys in groups.items()},
+        "results": results, "researchOnly": True, "allowedToTrade": False,
+        "warning": "Exploratory comparisons only. Test periods overlap across variants; "
+                   "repeated selection on the same folds risks overfitting. "
+                   "No model promotion, saved-model replacement, or trading authorization.",
+    }
