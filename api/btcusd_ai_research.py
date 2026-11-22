@@ -421,3 +421,109 @@ def indicator_contribution_analysis(timeframe="1m", folds=4, test_size=40):
                    "repeated selection on the same folds risks overfitting. "
                    "No model promotion, saved-model replacement, or trading authorization.",
     }
+
+
+def feature_data_quality_audit(timeframe="1m", limit=5000):
+    """Read-only audit of stored XGBoost feature completeness and variation.
+
+    One bounded snapshot read. Does not train, modify, or promote any model.
+    """
+    import math
+    from collections import Counter
+
+    if timeframe not in ("1m", "3m", "5m", "10m", "15m", "30m", "1h"):
+        return {"status": "Rejected", "reason": "Unsupported timeframe", "researchOnly": True}
+    limit = max(100, min(int(limit), 50000))
+    rows = _rows(timeframe, limit=limit)
+    if not rows:
+        return {"status": "NoData", "symbol": "BTCUSD", "timeframe": timeframe,
+                "researchOnly": True, "allowedToTrade": False}
+
+    stats = []
+    total = len(rows)
+    for key in FEATURES:
+        missing = invalid = zeros = 0
+        values = []
+        distinct = set()
+        transitions = 0
+        last = None
+        for row in rows:
+            raw = row.get(key)
+            if raw is None or (isinstance(raw, str) and not raw.strip()):
+                missing += 1
+                last = None
+                continue
+            try:
+                number = float(raw)
+            except (TypeError, ValueError, OverflowError):
+                invalid += 1
+                last = None
+                continue
+            if not math.isfinite(number):
+                invalid += 1
+                last = None
+                continue
+            values.append(number)
+            distinct.add(number)
+            if number == 0:
+                zeros += 1
+            if last is not None and number != last:
+                transitions += 1
+            last = number
+        valid = len(values)
+        if valid == 0:
+            assessment = "NO_VALID_VALUES"
+        elif len(distinct) == 1:
+            assessment = "CONSTANT_ZERO" if values[0] == 0 else "CONSTANT"
+        elif missing + invalid > total * .25:
+            assessment = "HIGH_MISSING_RATE"
+        elif zeros > valid * .95:
+            assessment = "MOSTLY_ZERO"
+        elif len(distinct) <= 3:
+            assessment = "LOW_CARDINALITY_CHECK_ENCODING"
+        else:
+            assessment = "VARIABLE"
+        stats.append({
+            "feature": key,
+            "assessment": assessment,
+            "totalRows": total,
+            "validRows": valid,
+            "missingRows": missing,
+            "invalidRows": invalid,
+            "zeroRows": zeros,
+            "zeroPctOfValid": round(100 * zeros / valid, 2) if valid else None,
+            "distinctValues": len(distinct),
+            "consecutiveChanges": transitions,
+            "min": round(min(values), 6) if valid else None,
+            "max": round(max(values), 6) if valid else None,
+            "mean": round(sum(values) / valid, 6) if valid else None,
+        })
+
+    epochs = [float(r["bar_epoch"]) for r in rows if r.get("bar_epoch") is not None]
+    duplicate_epochs = sum(count - 1 for count in Counter(epochs).values() if count > 1)
+    future_before_bar = sum(
+        1 for r in rows
+        if r.get("future_epoch") is not None and r.get("bar_epoch") is not None
+        and float(r["future_epoch"]) <= float(r["bar_epoch"])
+    )
+    return {
+        "status": "AuditedResearchOnly",
+        "symbol": "BTCUSD", "timeframe": timeframe, "resolvedRows": total,
+        "requestedLimit": limit,
+        "firstBarEpoch": min(epochs) if epochs else None,
+        "lastBarEpoch": max(epochs) if epochs else None,
+        "duplicateBarEpochRows": duplicate_epochs,
+        "invalidFutureEpochRows": future_before_bar,
+        "features": stats,
+        "summary": {
+            "featureCount": len(stats),
+            "variableFeatures": sum(s["assessment"] == "VARIABLE" for s in stats),
+            "constantOrEmptyFeatures": [s["feature"] for s in stats
+                if s["assessment"] in ("NO_VALID_VALUES", "CONSTANT_ZERO", "CONSTANT")],
+            "featuresNeedingReview": [s["feature"] for s in stats if s["assessment"] != "VARIABLE"],
+        },
+        "researchOnly": True, "allowedToTrade": False,
+        "warning": "Descriptive quality audit only. VARIABLE does not prove predictive value "
+                   "or correct point-in-time capture; inspect feature-generation timestamps "
+                   "and leakage separately. No database writes or model changes.",
+    }
