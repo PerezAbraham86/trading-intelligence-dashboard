@@ -6725,6 +6725,35 @@ def build_candle_route_payload(
         "createdAt": now_iso(),
     }
 
+    # Persist the same 12-indicator technical meter used by the dashboard at
+    # snapshot creation time. Keep it nested in the existing JSON feature column:
+    # no schema migration, no historical backfill, no model promotion.
+    if candles and str(symbol).upper() == "BTCUSD":
+        try:
+            from api.trading_engine import build_technical_sentiment
+            technical = build_technical_sentiment(
+                candles, symbol=symbol, timeframe=timeframe
+            )
+            items = technical.get("indicators", [])
+            if (len(items) == 12 and technical.get("activeCount") == 12
+                    and abs(float(technical.get("time", 0)) -
+                            float(technical.get("time", 0))) <= 1):
+                features = dict(payload.get("mlFeatures") or {})
+                features["technicalMeter12"] = {
+                    "source": "python_technical_sentiment",
+                    "barEpoch": technical["time"],
+                    "indicators": items,
+                    "sentiment": technical["sentiment"],
+                    "bullCount": technical["bullCount"],
+                    "bearCount": technical["bearCount"],
+                    "neutralCount": technical["neutralCount"],
+                }
+                payload["mlFeatures"] = features
+            else:
+                print("[ML Feature Store] technical meter capture skipped: incomplete or misaligned")
+        except Exception as error:
+            print(f"[ML Feature Store] technical meter capture skipped: {type(error).__name__}: {error}")
+
     ml_feature_store_status: Dict[str, Any] = {
         "enabled": bool(record_ml_feature_snapshot and update_ml_feature_outcomes),
         "recorded": False,
