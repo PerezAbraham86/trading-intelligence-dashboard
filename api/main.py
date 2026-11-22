@@ -6736,8 +6736,7 @@ def build_candle_route_payload(
             )
             items = technical.get("indicators", [])
             if (len(items) == 12 and technical.get("activeCount") == 12
-                    and abs(float(technical.get("time", 0)) -
-                            float(technical.get("time", 0))) <= 1):
+                    and float(technical.get("time") or 0) > 0):
                 features = dict(payload.get("mlFeatures") or {})
                 features["technicalMeter12"] = {
                     "source": "python_technical_sentiment",
